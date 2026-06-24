@@ -9,6 +9,8 @@ import {
   FileText,
   FolderOpen,
   FolderOutput,
+  Grid2X2,
+  HelpCircle,
   LockKeyhole,
   RotateCw,
   Settings2,
@@ -16,7 +18,7 @@ import {
   Trash2,
   UploadCloud,
 } from "lucide-react";
-import { type ElementType, useEffect, useMemo, useState } from "react";
+import { type DragEvent, type ElementType, useEffect, useMemo, useState } from "react";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
 import { Badge } from "@/components/ui/badge";
@@ -85,6 +87,11 @@ export default function App() {
     queue.find((item) => item.id === selectedId) ??
     [...queue].reverse().find((item) => item.status === "done") ??
     queue[0];
+  const today = new Intl.DateTimeFormat(undefined, {
+    month: "long",
+    day: "numeric",
+    weekday: "long",
+  }).format(new Date());
 
   useEffect(() => {
     loadStatus();
@@ -210,97 +217,83 @@ export default function App() {
   }
 
   return (
-    <main className="min-h-screen overflow-x-hidden bg-background p-4 text-foreground sm:p-5">
-      <div className="mx-auto flex max-w-7xl flex-col gap-4">
-        <header className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-              <FileAudio2 className="size-5" />
-            </div>
+    <main className="min-h-screen overflow-x-hidden bg-background p-3 text-foreground sm:p-4">
+      <div className="mx-auto flex w-full max-w-[1480px] min-w-0 gap-4">
+        <ProductRail auth={auth} model={model} status={status} />
+
+        <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
+          <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <div className="min-w-0">
-              <h1 className="truncate text-xl font-semibold tracking-tight">Yapx3</h1>
-              <p className="truncate text-sm text-muted-foreground">Private local transcription</p>
+              <div className="mb-4 flex items-center gap-3 lg:hidden">
+                <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+                  <FileAudio2 className="size-5" />
+                </div>
+                <div>
+                  <div className="text-lg font-semibold">Yapx3</div>
+                  <div className="text-sm text-muted-foreground">Private local transcription</div>
+                </div>
+              </div>
+              <p className="text-sm font-medium text-muted-foreground">{today}</p>
+              <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">Ready when you are.</h1>
             </div>
-          </div>
 
-          <div className="flex min-w-0 shrink-0 items-center gap-2">
-            <Badge
-              className="min-w-0 max-w-[132px] shrink"
-              variant={status === "Ready" || status === "Copied" ? "default" : "outline"}
-            >
-              <BadgeCheck />
-              <span className="truncate">{status}</span>
-            </Badge>
-            <DetailsSheet auth={auth} model={model} status={status} />
-          </div>
-        </header>
+            <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
+              <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
+              <Metric icon={FileText} label={`${completed} done`} />
+              <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
+              <DetailsSheet auth={auth} model={model} status={status} />
+            </div>
+          </header>
 
-        <section className="grid gap-4 xl:grid-cols-[minmax(0,1.08fr)_minmax(360px,0.92fr)]">
-          <div className="flex min-w-0 flex-col gap-4">
-            <Card
-              className={cn(
-                "relative min-h-[282px] overflow-hidden border-dashed py-0 transition duration-200",
-                dragging && "border-primary shadow-lg shadow-primary/10",
-              )}
-              onDragLeave={() => setDragging(false)}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragging(true);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragging(false);
-                if (!isTauri()) setStatus("Preview only");
-              }}
-            >
-              <div
-                aria-hidden="true"
-                className="absolute inset-0 bg-[radial-gradient(circle_at_top,var(--primary-soft),transparent_38%)]"
-              />
-              <CardContent className="relative flex min-h-[282px] flex-col items-center justify-center gap-5 p-6 text-center sm:p-10">
-                <div className="grid size-16 place-items-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/20">
-                  <UploadCloud className="size-8" />
-                </div>
-                <div className="flex flex-col gap-2">
-                  <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">Drop recordings</h2>
-                  <p className="text-sm text-muted-foreground">{acceptedFormats}</p>
-                </div>
-                <Badge variant="outline">
-                  <LockKeyhole />
-                  Files stay on this machine
-                </Badge>
-              </CardContent>
-            </Card>
+          <DropHero
+            dragging={dragging}
+            onDragLeave={() => setDragging(false)}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+              if (!isTauri()) setStatus("Preview only");
+            }}
+          />
 
-            <Card className="py-0">
+          <section className="mt-7 grid w-full min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]">
+            <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
               <CardHeader className="p-4 sm:p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <CardTitle className="flex items-center gap-2 text-base">
+                    <p className="text-xs font-semibold uppercase text-muted-foreground">Today</p>
+                    <CardTitle className="mt-2 flex items-center gap-2 text-xl">
                       Queue
                       <Badge variant="secondary">{queue.length}</Badge>
                     </CardTitle>
                     <CardDescription>
                       {completed
                         ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
-                        : "Ready for audio files"}
+                        : "Drop recordings and transcribe them in place"}
                     </CardDescription>
                   </div>
                   <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
-                  <Button
-                    disabled={running || !queue.length}
-                    onClick={clearQueue}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    <Trash2 data-icon="inline-start" />
-                    Clear
-                  </Button>
-                  <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
-                    {running ? <RotateCw data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}
-                    Transcribe
-                  </Button>
+                    <Button
+                      disabled={running || !queue.length}
+                      onClick={clearQueue}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      <Trash2 data-icon="inline-start" />
+                      Clear
+                    </Button>
+                    <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
+                      {running ? (
+                        <RotateCw data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <Sparkles data-icon="inline-start" />
+                      )}
+                      Transcribe
+                    </Button>
                   </div>
                 </div>
               </CardHeader>
@@ -315,17 +308,115 @@ export default function App() {
                 />
               </CardContent>
             </Card>
-          </div>
 
-          <TranscriptPanel
-            item={selectedItem}
-            onCopy={copyPath}
-            onReveal={(path) => void revealItemInDir(path)}
-            running={running}
-          />
+            <TranscriptPanel
+              item={selectedItem}
+              onCopy={copyPath}
+              onReveal={(path) => void revealItemInDir(path)}
+              running={running}
+            />
+          </section>
         </section>
       </div>
     </main>
+  );
+}
+
+function ProductRail({ auth, model, status }: { auth: string; model: string; status: string }) {
+  return (
+    <aside className="hidden min-h-[calc(100vh-32px)] w-[238px] shrink-0 flex-col rounded-[28px] bg-background p-3 lg:flex">
+      <div className="flex items-center gap-3 px-3 py-4">
+        <div className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground">
+          <FileAudio2 className="size-5" />
+        </div>
+        <div className="text-2xl font-semibold tracking-tight">Yapx3</div>
+      </div>
+
+      <nav className="mt-8 flex flex-col gap-1">
+        <RailItem active icon={Grid2X2} label="Home" />
+        <RailItem icon={FileAudio2} label="Recordings" />
+        <RailItem icon={FileText} label="Transcripts" />
+        <RailItem icon={Sparkles} label="Polish" />
+      </nav>
+
+      <div className="mt-auto flex flex-col gap-1">
+        <RailItem icon={LockKeyhole} label={auth === "Authorized" ? "Local mode" : status} />
+        <RailItem icon={Settings2} label={model} />
+        <RailItem icon={HelpCircle} label="Help" />
+      </div>
+    </aside>
+  );
+}
+
+function RailItem({ active, icon: Icon, label }: { active?: boolean; icon: ElementType; label: string }) {
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-3 rounded-lg px-3 py-3 text-sm font-semibold text-muted-foreground",
+        active && "bg-secondary text-foreground",
+      )}
+    >
+      <Icon className="size-5 shrink-0" />
+      <span className="truncate">{label}</span>
+    </div>
+  );
+}
+
+function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
+  return (
+    <div className="inline-flex min-w-0 max-w-full items-center justify-center gap-2 rounded-full px-2 py-2 text-sm font-semibold text-muted-foreground sm:px-3">
+      <Icon className="size-4 shrink-0" />
+      <span className="whitespace-nowrap max-[359px]:sr-only">{label}</span>
+    </div>
+  );
+}
+
+function DropHero({
+  dragging,
+  onDragLeave,
+  onDragOver,
+  onDrop,
+}: {
+  dragging: boolean;
+  onDragLeave: () => void;
+  onDragOver: (event: DragEvent<HTMLElement>) => void;
+  onDrop: (event: DragEvent<HTMLElement>) => void;
+}) {
+  return (
+    <section
+      className={cn(
+        "mt-7 w-full max-w-full overflow-hidden rounded-[28px] border bg-[#17120e] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] transition duration-200",
+        dragging && "border-primary shadow-lg shadow-primary/15",
+      )}
+      onDragLeave={onDragLeave}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
+      <div className="relative min-h-[260px] w-full max-w-full bg-[linear-gradient(110deg,#17120e_0%,#6f3c24_42%,#034f46_100%)] p-6 sm:p-10">
+        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.2),transparent_65%)]" />
+        <div className="relative flex w-full min-w-0 max-w-3xl flex-col gap-5">
+          <Badge className="w-fit border-white/20 bg-white/12 text-white hover:bg-white/12" variant="outline">
+            <LockKeyhole />
+            Private on this device
+          </Badge>
+          <div>
+            <h2 className="max-w-full break-words font-serif text-3xl leading-tight tracking-normal sm:text-5xl">
+              Drop recordings. Get polished text.
+            </h2>
+            <p className="mt-4 max-w-full text-base leading-7 text-white/82 sm:max-w-xl">
+              Bring in audio or video files and Yapx3 will write transcripts beside the source, ready to review.
+            </p>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <div className="inline-flex max-w-full items-center gap-2 rounded-lg bg-white px-4 py-3 text-sm font-semibold text-[#221d18]">
+              <UploadCloud className="size-4" />
+              Drop files here
+            </div>
+            <span className="max-w-full break-words text-sm font-medium text-white/72">{acceptedFormats}</span>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -344,7 +435,7 @@ function TranscriptPanel({
   const output = item?.output;
 
   return (
-    <Card className="min-h-[420px] py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-112px)]">
+    <Card className="min-h-[420px] min-w-0 border-[#eee8de] bg-card py-0 shadow-none xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
       <CardHeader className="p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -381,7 +472,7 @@ function TranscriptPanel({
           </div>
         </div>
 
-        <ScrollArea className="min-h-[240px] flex-1 rounded-lg border bg-card">
+        <ScrollArea className="min-h-[240px] flex-1 rounded-lg border bg-[#fffdf8]">
           <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
             {item?.status === "done" ? (
               <>

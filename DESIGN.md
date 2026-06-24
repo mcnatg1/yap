@@ -1,28 +1,28 @@
 ---
 version: alpha
-name: Yapx3 Drop & Done
+name: Yapx3 Warm Workbench
 description: A local-first consumer transcription design system for Yapx3.
 colors:
-  ink: "#0F172A"
-  muted-ink: "#475569"
-  quiet-ink: "#64748B"
-  canvas: "#EEF3F2"
-  surface: "#FFFFFF"
-  surface-muted: "#F8FAFC"
-  border: "#CBD5E1"
-  border-soft: "#E2E8F0"
-  primary: "#0F766E"
-  primary-hover: "#115E59"
-  primary-soft: "#CCFBF1"
-  accent: "#4F46E5"
-  success: "#0F766E"
+  ink: "#201D19"
+  muted-ink: "#756F66"
+  quiet-ink: "#8A8278"
+  canvas: "#F3F0EA"
+  surface: "#FFFEFA"
+  surface-muted: "#F8F6F1"
+  border: "#E6DFD4"
+  border-soft: "#EEE8DE"
+  primary: "#034F46"
+  primary-hover: "#013F38"
+  primary-soft: "#DFF7ED"
+  accent: "#F0D7FF"
+  success: "#034F46"
   warning: "#B45309"
   danger: "#B91C1C"
 typography:
   headline-lg:
     fontFamily: Inter
-    fontSize: 32px
-    fontWeight: 700
+    fontSize: 36px
+    fontWeight: 650
     lineHeight: 1.15
     letterSpacing: 0
   headline-md:
@@ -56,9 +56,9 @@ typography:
     lineHeight: 1.35
     letterSpacing: 0
 rounded:
-  sm: 6px
-  md: 8px
-  lg: 12px
+  sm: 8px
+  md: 12px
+  lg: 28px
   full: 9999px
 spacing:
   xs: 4px
@@ -103,8 +103,10 @@ components:
 
 Yapx3 is a local-first transcription app for people with recordings, meetings,
 voice memos, interviews, and video files sitting on their machine. It should
-feel like a polished consumer utility: calm, direct, private, and fast to
-understand.
+feel like a polished consumer utility: calm, direct, private, warm, and fast to
+understand. The product language borrows practical strategies from Wispr Flow
+and Figma-style tools: sparse navigation, a soft canvas, one generous work
+surface, compact status pills, and document-like transcript surfaces.
 
 The core product promise is "drop audio, get text." The interface should make
 the current file and transcript feel more important than the model, auth state,
@@ -116,21 +118,23 @@ files stay on this device without the app sounding like infrastructure tooling.
 
 ## Colors
 
-The palette is quiet and work-focused, with enough contrast to keep the app from
-feeling like a generic slate dashboard.
+The palette is warm and quiet, with enough contrast to keep the app from feeling
+like a generic beige utility.
 
-- **Ink (`#0F172A`):** Primary text, transcript text, and important labels.
-- **Canvas (`#EEF3F2`):** App background. It should feel softer than pure gray.
-- **Surface (`#FFFFFF`):** Primary panels, cards, transcript editor, and sheets.
-- **Primary Teal (`#0F766E`):** Main action, local/privacy confidence, success.
-- **Accent Indigo (`#4F46E5`):** Rare highlight for transcript intelligence,
-  search matches, or selection; never compete with the primary action.
+- **Ink (`#201D19`):** Primary text, transcript text, and important labels.
+- **Canvas (`#F3F0EA`):** App background. It should feel soft without turning
+  into a decorative landing page.
+- **Surface (`#FFFEFA`):** Primary panels, cards, transcript editor, and sheets.
+- **Primary Green (`#034F46`):** Main action, local/privacy confidence, success.
+- **Accent Lilac (`#F0D7FF`):** Rare highlight for polish or review affordances;
+  never compete with the primary action.
 - **Warning and Danger:** Reserved for setup, auth, or failed transcription.
 
 ## Typography
 
-Use Inter throughout. The product should read as a native desktop utility, not a
-marketing page.
+Use Inter for the app shell and operational UI. A serif display treatment is
+allowed only for the large drop hero headline, where it gives the product a
+friendlier editorial moment without spreading into controls or dense surfaces.
 
 - **Headlines:** Short, concrete labels such as "Drop recordings" or
   "Transcript ready."
@@ -142,10 +146,10 @@ marketing page.
 
 ## Layout
 
-The primary layout is a workbench with one obvious action at a time.
+The primary layout is a warm workbench with one obvious action at a time.
 
-- Empty state: a large tactile drop zone, recent files below or beside it, and a
-  small privacy badge.
+- Empty state: a sparse left rail on desktop, a large tactile drop hero, the
+  queue below it, and a compact transcript workspace beside it on wide screens.
 - Running state: the active file card should show progress, elapsed time, and a
   clear cancel/remove path.
 - Done state: the transcript preview becomes the hero; export actions sit close
@@ -155,7 +159,7 @@ The primary layout is a workbench with one obvious action at a time.
 
 Use an 8px rhythm. Keep desktop widths readable, and collapse to one column
 below tablet width. Nothing in the main flow should require horizontal scrolling
-at the 360px minimum window width.
+at the 390px mobile check or the 360px minimum window width.
 
 ## Elevation & Depth
 
@@ -168,11 +172,11 @@ or effects that make the app feel like a landing page.
 
 ## Shapes
 
-Use restrained rounded corners.
+Use soft but disciplined rounded corners.
 
-- Core cards and panels: 8px.
-- Larger drop zones or transcript sheets: 12px when the surface is spacious.
-- Icon buttons and compact controls: 6px to 8px.
+- App workspace and drop hero: 28px.
+- Core cards and transcript surfaces: 12px.
+- Icon buttons and compact controls: 8px.
 - Pills: full radius only for tiny status or privacy badges.
 
 Do not mix sharp and heavily rounded components in the same view.
