@@ -166,7 +166,7 @@ export default function App() {
               <FileAudio2 className="size-5" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold tracking-tight">Yap^3</h1>
+              <h1 className="text-xl font-semibold tracking-tight">Yapx3</h1>
               <p className="text-sm text-slate-500">Files stay on this machine.</p>
             </div>
           </div>

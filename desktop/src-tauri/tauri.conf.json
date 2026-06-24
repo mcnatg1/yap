@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Yap^3",
+  "productName": "Yapx3",
   "version": "0.1.0",
   "identifier": "com.localtranscribe.app",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Yap^3",
+        "title": "Yapx3",
         "width": 1060,
         "height": 760,
         "minWidth": 360,
