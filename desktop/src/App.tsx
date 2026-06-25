@@ -19,7 +19,7 @@ import {
   Trash2,
   UploadCloud,
 } from "lucide-react";
-import { type DragEvent, type ElementType, type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type ElementType, useEffect, useMemo, useState } from "react";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
 import { Badge } from "@/components/ui/badge";
@@ -56,6 +56,30 @@ type TranscriptResult = {
 };
 
 type RailAction = "home" | "recordings" | "transcripts" | "polish" | "details" | "help";
+type WorkspaceView = "home" | "recordings" | "transcripts" | "polish";
+
+const workspaceCopy: Record<WorkspaceView, { eyebrow: string; title: string; description: string }> = {
+  home: {
+    eyebrow: "Today",
+    title: "Ready when you are.",
+    description: "Drop recordings, transcribe them locally, and review the latest result in one place.",
+  },
+  recordings: {
+    eyebrow: "Recordings",
+    title: "Your recording queue.",
+    description: "Manage the files waiting for transcription and restart anything that needs another pass.",
+  },
+  transcripts: {
+    eyebrow: "Transcripts",
+    title: "Review the finished text.",
+    description: "Open, copy, or reveal the saved transcript for the selected recording.",
+  },
+  polish: {
+    eyebrow: "Polish",
+    title: "Clean up the selected transcript.",
+    description: "Use the selected result as the working draft before adding richer rewrite tools.",
+  },
+};
 
 const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
@@ -81,12 +105,10 @@ export default function App() {
   const [auth, setAuth] = useState("Checking");
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
-  const heroRef = useRef<HTMLElement>(null);
-  const queueRef = useRef<HTMLElement>(null);
-  const transcriptRef = useRef<HTMLDivElement>(null);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -102,6 +124,10 @@ export default function App() {
     day: "numeric",
     weekday: "long",
   }).format(new Date());
+  const workspace = workspaceCopy[workspaceView];
+  const showQueue = workspaceView === "home" || workspaceView === "recordings";
+  const showTranscript = workspaceView === "home" || workspaceView === "transcripts" || workspaceView === "polish";
+  const showPolish = workspaceView === "polish";
 
   useEffect(() => {
     loadStatus();
@@ -201,14 +227,12 @@ export default function App() {
       setHelpOpen(true);
       return;
     }
-    if (action === "polish") {
-      transcriptRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      setStatus(selectedItem?.status === "done" ? "Transcript ready" : "Transcribe a file first");
-      return;
-    }
 
-    const target = action === "home" ? heroRef.current : action === "recordings" ? queueRef.current : transcriptRef.current;
-    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setWorkspaceView(action);
+
+    if (action === "polish") {
+      setStatus(selectedItem?.status === "done" ? "Transcript ready" : "Transcribe a file first");
+    }
   }
 
   async function runQueue() {
@@ -331,104 +355,133 @@ export default function App() {
                   <div className="text-sm text-muted-foreground">Private local transcription</div>
                 </div>
               </div>
-              <p className="text-sm font-medium text-muted-foreground">{today}</p>
-              <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">Ready when you are.</h1>
+              <p className="text-sm font-medium text-muted-foreground">
+                {workspace.eyebrow} · {today}
+              </p>
+              <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">{workspace.title}</h1>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
             </div>
 
             <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
               <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
               <Metric icon={FileText} label={`${completed} done`} />
               <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
-              <Button aria-label="Open setup details" onClick={() => setDetailsOpen(true)} size="icon-sm" type="button" variant="outline">
+              <Button aria-label="Open setup details" onClick={() => handleRailAction("details")} size="icon-sm" type="button" variant="outline">
                 <Settings2 />
               </Button>
             </div>
           </header>
 
-          <DropHero
-            dragging={dragging}
-            heroRef={heroRef}
-            onDragLeave={() => setDragging(false)}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setDragging(true);
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDragging(false);
-              if (!isTauri()) setStatus("Preview only");
-            }}
-            onPickFiles={() => void pickFiles()}
-          />
+          {workspaceView === "home" ? (
+            <DropHero
+              dragging={dragging}
+              onDragLeave={() => setDragging(false)}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragging(true);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragging(false);
+                if (!isTauri()) setStatus("Preview only");
+              }}
+              onPickFiles={() => void pickFiles()}
+            />
+          ) : null}
 
           <section
-            className="mt-7 grid w-full min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
-            ref={queueRef}
+            className={cn(
+              "mt-7 grid w-full min-w-0 gap-5",
+              workspaceView === "home" || workspaceView === "polish"
+                ? "xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
+                : "xl:grid-cols-1",
+            )}
           >
-            <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
-              <CardHeader className="p-4 sm:p-5">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold uppercase text-muted-foreground">Today</p>
-                    <CardTitle className="mt-2 flex items-center gap-2 text-xl">
-                      Queue
-                      <Badge variant="secondary">{queue.length}</Badge>
-                    </CardTitle>
-                    <CardDescription>
-                      {completed
-                        ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
-                        : "Drop recordings and transcribe them in place"}
-                    </CardDescription>
+            {showQueue ? (
+              <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+                <CardHeader className="p-4 sm:p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase text-muted-foreground">Today</p>
+                      <CardTitle className="mt-2 flex items-center gap-2 text-xl">
+                        Queue
+                        <Badge variant="secondary">{queue.length}</Badge>
+                      </CardTitle>
+                      <CardDescription>
+                        {completed
+                          ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
+                          : "Drop recordings and transcribe them in place"}
+                      </CardDescription>
+                    </div>
+                    <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
+                      <Button
+                        disabled={running || !queue.length}
+                        onClick={clearQueue}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Trash2 data-icon="inline-start" />
+                        Clear
+                      </Button>
+                      <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
+                        {running ? (
+                          <RotateCw data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <Sparkles data-icon="inline-start" />
+                        )}
+                        Transcribe
+                      </Button>
+                    </div>
                   </div>
-                  <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
-                    <Button
-                      disabled={running || !queue.length}
-                      onClick={clearQueue}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      <Trash2 data-icon="inline-start" />
-                      Clear
-                    </Button>
-                    <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
-                      {running ? (
-                        <RotateCw data-icon="inline-start" className="animate-spin" />
-                      ) : (
-                        <Sparkles data-icon="inline-start" />
-                      )}
-                      Transcribe
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <Separator />
-              <CardContent className="p-4 sm:p-5">
-                <StackedUpload
-                  items={queue}
-                  onRemove={removeItem}
-                  onReveal={(path) => void revealPath(path)}
-                  onSelect={setSelectedId}
-                  selectedId={selectedId}
-                />
-              </CardContent>
-            </Card>
+                </CardHeader>
+                <Separator />
+                <CardContent className="p-4 sm:p-5">
+                  <StackedUpload
+                    items={queue}
+                    onRemove={removeItem}
+                    onReveal={(path) => void revealPath(path)}
+                    onSelect={setSelectedId}
+                    selectedId={selectedId}
+                  />
+                </CardContent>
+              </Card>
+            ) : null}
 
-            <div className="min-w-0" ref={transcriptRef}>
-              <TranscriptPanel
-                item={selectedItem}
-                onCopy={copyTranscript}
-                onOpen={(path) => void openTranscript(path)}
-                onReveal={(path) => void revealPath(path)}
-                running={running}
-                text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
-              />
-            </div>
+            {showPolish ? <PolishPanel item={selectedItem} /> : null}
+
+            {showTranscript ? (
+              <div className="min-w-0">
+                <TranscriptPanel
+                  item={selectedItem}
+                  onCopy={copyTranscript}
+                  onOpen={(path) => void openTranscript(path)}
+                  onReveal={(path) => void revealPath(path)}
+                  running={running}
+                  text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
+                />
+              </div>
+            ) : null}
           </section>
         </section>
       </div>
-      <DetailsSheet auth={auth} model={model} onOpenChange={setDetailsOpen} open={detailsOpen} status={status} />
-      <HelpSheet onOpenChange={setHelpOpen} open={helpOpen} />
+      <DetailsSheet
+        auth={auth}
+        model={model}
+        onOpenChange={(open) => {
+          setDetailsOpen(open);
+          if (!open && activeRail === "details") setActiveRail(workspaceView);
+        }}
+        open={detailsOpen}
+        status={status}
+      />
+      <HelpSheet
+        onOpenChange={(open) => {
+          setHelpOpen(open);
+          if (!open && activeRail === "help") setActiveRail(workspaceView);
+        }}
+        open={helpOpen}
+      />
     </main>
   );
 }
@@ -524,14 +577,12 @@ function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
 
 function DropHero({
   dragging,
-  heroRef,
   onDragLeave,
   onDragOver,
   onDrop,
   onPickFiles,
 }: {
   dragging: boolean;
-  heroRef: RefObject<HTMLElement | null>;
   onDragLeave: () => void;
   onDragOver: (event: DragEvent<HTMLElement>) => void;
   onDrop: (event: DragEvent<HTMLElement>) => void;
@@ -546,7 +597,6 @@ function DropHero({
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      ref={heroRef}
     >
       <div className="relative min-h-[260px] w-full max-w-full bg-[linear-gradient(110deg,#17120e_0%,#6f3c24_42%,#034f46_100%)] p-6 sm:p-10">
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.2),transparent_65%)]" />
@@ -578,6 +628,44 @@ function DropHero({
         </div>
       </div>
     </section>
+  );
+}
+
+function PolishPanel({ item }: { item?: UploadItem }) {
+  const ready = item?.status === "done";
+
+  return (
+    <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+      <CardHeader className="p-4 sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Badge className="w-fit" variant={ready ? "default" : "secondary"}>
+              <Sparkles />
+              Polish
+            </Badge>
+            <CardTitle className="mt-3 text-2xl">{ready ? "Ready to refine" : "Waiting on a transcript"}</CardTitle>
+            <CardDescription className="break-words">
+              {item ? item.name : "Select or transcribe a recording to start from real text."}
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <Separator />
+      <CardContent className="grid gap-3 p-4 sm:p-5">
+        <StatusRow
+          icon={FileText}
+          label="Selected draft"
+          value={ready ? "Transcript is ready below" : "Transcribe a recording first"}
+          wrap
+        />
+        <StatusRow
+          icon={Sparkles}
+          label="Draft state"
+          value={ready ? "Ready for cleanup" : "No finished transcript selected"}
+          wrap
+        />
+      </CardContent>
+    </Card>
   );
 }
 
