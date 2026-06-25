@@ -1,7 +1,7 @@
 ---
 version: alpha
-name: Yapx3 Warm Workbench
-description: A local-first consumer transcription design system for Yapx3.
+name: Yap Warm Workbench
+description: A local-first consumer transcription design system for Yap.
 colors:
   ink: "#201D19"
   muted-ink: "#756F66"
@@ -97,11 +97,11 @@ components:
     typography: "{typography.label-md}"
 ---
 
-# Yapx3 Design System
+# Yap Design System
 
 ## Overview
 
-Yapx3 is a local-first transcription app for people with recordings, meetings,
+Yap is a local-first transcription app for people with recordings, meetings,
 voice memos, interviews, and video files sitting on their machine. It should
 feel like a polished consumer utility: calm, direct, private, warm, and fast to
 understand. The product language borrows practical strategies from Wispr Flow

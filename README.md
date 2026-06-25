@@ -1,4 +1,4 @@
-# Yapx3
+# Yap
 
 Local MP3 transcription with `CohereLabs/cohere-transcribe-03-2026`.
 

@@ -1,4 +1,4 @@
-# Yapx3 Desktop
+# Yap Desktop
 
 Tauri drag-and-drop UI for `..\transcribe.py`.
 

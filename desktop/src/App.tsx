@@ -327,7 +327,7 @@ export default function App() {
                   <FileAudio2 className="size-5" />
                 </div>
                 <div>
-                  <div className="text-lg font-semibold">Yapx3</div>
+                  <div className="text-lg font-semibold">Yap</div>
                   <div className="text-sm text-muted-foreground">Private local transcription</div>
                 </div>
               </div>
@@ -452,7 +452,7 @@ function ProductRail({
         <div className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground">
           <FileAudio2 className="size-5" />
         </div>
-        <div className="text-2xl font-semibold tracking-tight">Yapx3</div>
+        <div className="text-2xl font-semibold tracking-tight">Yap</div>
       </div>
 
       <nav className="mt-8 flex flex-col gap-1">
@@ -560,7 +560,7 @@ function DropHero({
               Drop recordings. Get polished text.
             </h2>
             <p className="mt-4 max-w-full text-base leading-7 text-white/82 sm:max-w-xl">
-              Bring in audio or video files and Yapx3 will write transcripts beside the source, ready to review.
+              Bring in audio or video files and Yap will write transcripts beside the source, ready to review.
             </p>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -681,7 +681,7 @@ function TranscriptPanel({
                 </div>
                 <div>
                   <div className="text-sm font-semibold">Drop audio to create a transcript</div>
-                  <div className="mt-1 text-xs text-muted-foreground">Yapx3 writes the text file next to the source.</div>
+                  <div className="mt-1 text-xs text-muted-foreground">Yap writes the text file next to the source.</div>
                 </div>
               </div>
             )}
