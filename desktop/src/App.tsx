@@ -560,7 +560,7 @@ function DropHero({
               Drop recordings. Get polished text.
             </h2>
             <p className="mt-4 max-w-full text-base leading-7 text-white/82 sm:max-w-xl">
-              Bring in audio or video files and Yap will write transcripts beside the source, ready to review.
+              Bring in audio or video files and Yap will save transcripts locally, ready to review.
             </p>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -681,7 +681,7 @@ function TranscriptPanel({
                 </div>
                 <div>
                   <div className="text-sm font-semibold">Drop audio to create a transcript</div>
-                  <div className="mt-1 text-xs text-muted-foreground">Yap writes the text file next to the source.</div>
+                  <div className="mt-1 text-xs text-muted-foreground">Yap saves the transcript locally when the source is protected.</div>
                 </div>
               </div>
             )}
@@ -717,7 +717,7 @@ function DetailsSheet({
           <StatusRow icon={Sparkles} label="Model" value={model} />
           <StatusRow icon={Cpu} label="Runner" value="RTX local runner" />
           <StatusRow icon={LockKeyhole} label="Auth" value={auth} />
-          <StatusRow icon={FolderOutput} label="Output" value="Same folder as source" />
+          <StatusRow icon={FolderOutput} label="Output" value="Source folder, local fallback" />
         </div>
       </SheetContent>
     </Sheet>
@@ -734,7 +734,7 @@ function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean) => vo
         </SheetHeader>
         <div className="mt-6 flex flex-col gap-3">
           <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />
-          <StatusRow icon={Sparkles} label="Transcribe" value="Runs queued audio locally and saves .txt files beside the sources." wrap />
+          <StatusRow icon={Sparkles} label="Transcribe" value="Saves beside the source when allowed, otherwise to local Yap transcripts." wrap />
           <StatusRow icon={Copy} label="Copy" value="Copies transcript text after a file finishes." wrap />
           <StatusRow icon={FolderOpen} label="Reveal" value="Shows the saved transcript in File Explorer." wrap />
         </div>

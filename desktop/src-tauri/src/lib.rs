@@ -53,13 +53,14 @@ fn transcribe_files(paths: Vec<String>) -> Result<Vec<TranscriptResult>, String>
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let message = command_failure_message(&stderr, &stdout);
         log_line(&format!(
             "transcription failed status={:?} stderr={} stdout={}",
             output.status.code(),
             stderr,
             stdout
         ));
-        return Err(if stderr.is_empty() { stdout } else { stderr });
+        return Err(message);
     }
 
     let outputs: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -148,6 +149,28 @@ fn log_line(message: &str) {
     }
 }
 
+fn command_failure_message(stderr: &str, stdout: &str) -> String {
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    if let Some(index) = message.rfind("Traceback") {
+        return message[index..].trim().to_string();
+    }
+
+    const MAX_CHARS: usize = 4000;
+    if message.chars().count() <= MAX_CHARS {
+        return message.to_string();
+    }
+
+    let tail: String = message
+        .chars()
+        .rev()
+        .take(MAX_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail}")
+}
+
 #[cfg(windows)]
 fn hide_child_console(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
@@ -180,6 +203,12 @@ mod tests {
     #[test]
     fn read_text_file_rejects_non_transcripts() {
         assert!(read_text_file("recording.mp3".into()).is_err());
+    }
+
+    #[test]
+    fn command_failure_message_uses_traceback_tail() {
+        let message = command_failure_message("Loading weights: 100%\nTraceback sad", "");
+        assert_eq!(message, "Traceback sad");
     }
 }
 

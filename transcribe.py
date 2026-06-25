@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 
@@ -43,6 +44,49 @@ def transcribe(path: Path, language: str, punctuation: bool, processor, model) -
     return text[0] if isinstance(text, list) else text
 
 
+def local_transcripts_dir() -> Path:
+    override = os.environ.get("YAP_TRANSCRIPTS_DIR")
+    if override:
+        return Path(override)
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "Yap" / "Transcripts"
+
+    return Path.home() / ".yap" / "transcripts"
+
+
+def unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+
+    raise RuntimeError(f"Could not find an unused output name for {path}")
+
+
+def write_transcript(audio_path: Path, text: str, out_dir: Path | None) -> Path:
+    preferred = (out_dir or audio_path.parent) / f"{audio_path.stem}.txt"
+    if out_dir:
+        preferred.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        preferred.write_text(text + "\n", encoding="utf-8")
+        return preferred
+    except OSError:
+        if out_dir:
+            raise
+
+    fallback_dir = local_transcripts_dir()
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    fallback = unique_path(fallback_dir / f"{audio_path.stem}.txt")
+    fallback.write_text(text + "\n", encoding="utf-8")
+    return fallback
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Transcribe audio locally with CohereLabs Transcribe.")
     parser.add_argument("audio", nargs="+", type=Path)
@@ -78,8 +122,7 @@ def main() -> None:
                     r".\.venv\Scripts\hf auth login"
                 ) from exc
             raise
-        out_path = (out_dir or audio_path.parent) / f"{audio_path.stem}.txt"
-        out_path.write_text(text + "\n", encoding="utf-8")
+        out_path = write_transcript(audio_path, text, out_dir)
         print(out_path)
 
 

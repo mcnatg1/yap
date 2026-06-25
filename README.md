@@ -1,6 +1,7 @@
 # Yap
 
 Local MP3 transcription with `CohereLabs/cohere-transcribe-03-2026`.
+Transcripts save beside the source when allowed, otherwise to `%LOCALAPPDATA%\Yap\Transcripts`.
 
 ```powershell
 cd C:\dev\cohere-transcribe-local
