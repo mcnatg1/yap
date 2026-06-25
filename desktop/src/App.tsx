@@ -41,12 +41,12 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   readTranscriptHistory,
@@ -1306,12 +1306,12 @@ function DetailsSheet({
   status: string;
 }) {
   return (
-    <Sheet onOpenChange={onOpenChange} open={open}>
-      <SheetContent className="w-[min(420px,calc(100vw-24px))]">
-        <SheetHeader>
-          <SheetTitle>Setup Details</SheetTitle>
-          <SheetDescription>Local runner and output settings.</SheetDescription>
-        </SheetHeader>
+    <Drawer onOpenChange={onOpenChange} open={open}>
+      <DrawerContent>
+        <DrawerHeader>
+          <DrawerTitle>Setup Details</DrawerTitle>
+          <DrawerDescription>Local runner and output settings.</DrawerDescription>
+        </DrawerHeader>
         <div className="mt-6 flex flex-col gap-3">
           <StatusRow icon={BadgeCheck} label="Status" value={status} />
           <StatusRow icon={Sparkles} label="Model" value={model} />
@@ -1319,27 +1319,27 @@ function DetailsSheet({
           <StatusRow icon={LockKeyhole} label="Auth" value={auth} />
           <StatusRow icon={FolderOutput} label="Output" value="Source folder, local fallback" />
         </div>
-      </SheetContent>
-    </Sheet>
+      </DrawerContent>
+    </Drawer>
   );
 }
 
 function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean) => void; open: boolean }) {
   return (
-    <Sheet onOpenChange={onOpenChange} open={open}>
-      <SheetContent className="w-[min(420px,calc(100vw-24px))]">
-        <SheetHeader>
-          <SheetTitle>Help</SheetTitle>
-          <SheetDescription>Quick map of the working controls.</SheetDescription>
-        </SheetHeader>
+    <Drawer onOpenChange={onOpenChange} open={open}>
+      <DrawerContent>
+        <DrawerHeader>
+          <DrawerTitle>Help</DrawerTitle>
+          <DrawerDescription>Quick map of the working controls.</DrawerDescription>
+        </DrawerHeader>
         <div className="mt-6 flex flex-col gap-3">
           <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />
           <StatusRow icon={Sparkles} label="Transcribe" value="Saves beside the source when allowed, otherwise to local Yap transcripts." wrap />
           <StatusRow icon={Copy} label="Copy" value="Copies transcript text after a file finishes." wrap />
           <StatusRow icon={FolderOpen} label="Reveal" value="Shows the saved transcript in File Explorer." wrap />
         </div>
-      </SheetContent>
-    </Sheet>
+      </DrawerContent>
+    </Drawer>
   );
 }
 
