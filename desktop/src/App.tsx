@@ -23,7 +23,7 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
-import { type DragEvent, type ElementType, useEffect, useMemo, useState } from "react";
+import { type DragEvent, type ElementType, type KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +44,13 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import {
+  readTranscriptHistory,
+  recordTranscriptHistory,
+  removeTranscriptHistory,
+  writeTranscriptHistory,
+  type TranscriptHistoryEntry,
+} from "@/history";
 import { cn } from "@/lib/utils";
 
 type SetupStatus = {
@@ -99,6 +106,16 @@ function extension(path: string) {
   return dot === -1 ? "" : name.slice(dot).toLowerCase();
 }
 
+function historyEntryToUploadItem(entry: TranscriptHistoryEntry): UploadItem {
+  return {
+    id: 0,
+    name: entry.name,
+    output: entry.outputPath,
+    path: entry.sourcePath,
+    status: "done",
+  };
+}
+
 export default function App() {
   const [queue, setQueue] = useState<UploadItem[]>([]);
   const [nextId, setNextId] = useState(1);
@@ -113,15 +130,21 @@ export default function App() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
+  const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
+  const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
     [queue],
   );
   const completed = queue.filter((item) => item.status === "done").length;
+  const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
+  const selectedHistoryItem = selectedHistoryEntry ? historyEntryToUploadItem(selectedHistoryEntry) : undefined;
   const selectedItem =
     queue.find((item) => item.id === selectedId) ??
+    selectedHistoryItem ??
     [...queue].reverse().find((item) => item.status === "done") ??
+    (history[0] ? historyEntryToUploadItem(history[0]) : undefined) ??
     queue[0];
   const today = new Intl.DateTimeFormat(undefined, {
     month: "long",
@@ -130,6 +153,7 @@ export default function App() {
   }).format(new Date());
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "home" || workspaceView === "recordings";
+  const showHistory = workspaceView === "transcripts";
   const showTranscript = workspaceView === "home" || workspaceView === "transcripts" || workspaceView === "polish";
   const showPolish = workspaceView === "polish";
 
@@ -150,6 +174,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (selectedHistoryOutput) return;
+
     if (!queue.length) {
       setSelectedId(undefined);
       return;
@@ -158,7 +184,13 @@ export default function App() {
     if (!selectedId || !queue.some((item) => item.id === selectedId)) {
       setSelectedId(queue[queue.length - 1].id);
     }
-  }, [queue, selectedId]);
+  }, [queue, selectedId, selectedHistoryOutput]);
+
+  useEffect(() => {
+    if (selectedHistoryOutput && !history.some((entry) => entry.outputPath === selectedHistoryOutput)) {
+      setSelectedHistoryOutput(undefined);
+    }
+  }, [history, selectedHistoryOutput]);
 
   useEffect(() => {
     if (selectedItem?.output && !transcriptText[selectedItem.output]) {
@@ -196,7 +228,10 @@ export default function App() {
         status: "queued" as const,
       }));
       setNextId((id) => id + newItems.length);
-      if (newItems.length) setSelectedId(newItems[newItems.length - 1].id);
+      if (newItems.length) {
+        setSelectedHistoryOutput(undefined);
+        setSelectedId(newItems[newItems.length - 1].id);
+      }
       return [...current, ...newItems];
     });
   }
@@ -274,6 +309,21 @@ export default function App() {
           outputs.has(item.path) ? { ...item, output: outputs.get(item.path), status: "done" } : item,
         ),
       );
+      recordHistoryEntries(
+        pending.flatMap((item) => {
+          const output = outputs.get(item.path);
+          return output
+            ? [
+                {
+                  createdAt: new Date().toISOString(),
+                  name: item.name,
+                  outputPath: output,
+                  sourcePath: item.path,
+                },
+              ]
+            : [];
+        }),
+      );
       setTranscriptText((current) => ({ ...current, ...texts }));
       setStatus("Ready");
       setAuth("Authorized");
@@ -295,6 +345,11 @@ export default function App() {
 
   function removeItem(id: number) {
     setQueue((items) => items.filter((item) => item.id !== id));
+  }
+
+  function selectQueueItem(id: number) {
+    setSelectedHistoryOutput(undefined);
+    setSelectedId(id);
   }
 
   function clearQueue() {
@@ -342,6 +397,41 @@ export default function App() {
     }
   }
 
+  function recordHistoryEntries(entries: TranscriptHistoryEntry[]) {
+    if (!entries.length) return;
+
+    setHistory((current) => {
+      const next = entries.reduce(recordTranscriptHistory, current);
+      try {
+        writeTranscriptHistory(next);
+      } catch {
+        // ponytail: transcripts are already saved; history can be rebuilt manually if localStorage is full.
+      }
+      return next;
+    });
+  }
+
+  function removeHistoryEntry(outputPath: string) {
+    setHistory((current) => {
+      const next = removeTranscriptHistory(current, outputPath);
+      try {
+        writeTranscriptHistory(next);
+      } catch {
+        // ponytail: removal is UI-only if localStorage refuses the write.
+      }
+      return next;
+    });
+    if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
+    setStatus("Removed from history");
+  }
+
+  function selectHistoryEntry(entry: TranscriptHistoryEntry) {
+    setSelectedId(undefined);
+    setSelectedHistoryOutput(entry.outputPath);
+    setActiveRail("transcripts");
+    setWorkspaceView("transcripts");
+  }
+
   return (
     <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
       <AppChrome />
@@ -367,7 +457,7 @@ export default function App() {
 
             <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
               <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
-              <Metric icon={FileText} label={`${completed} done`} />
+              <Metric icon={FileText} label={`${history.length} saved`} />
               <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
               <Button aria-label="Open setup details" onClick={() => handleRailAction("details")} size="icon-sm" type="button" variant="outline">
                 <Settings2 />
@@ -395,7 +485,7 @@ export default function App() {
           <section
             className={cn(
               "mt-7 grid w-full min-w-0 gap-5",
-              workspaceView === "home" || workspaceView === "polish"
+              workspaceView === "home" || workspaceView === "polish" || workspaceView === "transcripts"
                 ? "xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
                 : "xl:grid-cols-1",
             )}
@@ -446,11 +536,23 @@ export default function App() {
                     items={queue}
                     onRemove={removeItem}
                     onReveal={(path) => void revealPath(path)}
-                    onSelect={setSelectedId}
+                    onSelect={selectQueueItem}
                     selectedId={selectedId}
                   />
                 </CardContent>
               </Card>
+            ) : null}
+
+            {showHistory ? (
+              <HistoryList
+                entries={history}
+                onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
+                onOpen={(entry) => void openTranscript(entry.outputPath)}
+                onRemove={removeHistoryEntry}
+                onReveal={(entry) => void revealPath(entry.outputPath)}
+                onSelect={selectHistoryEntry}
+                selectedOutputPath={selectedHistoryOutput ?? selectedItem?.output}
+              />
             ) : null}
 
             {showPolish ? <PolishPanel item={selectedItem} /> : null}
@@ -693,6 +795,163 @@ function DropHero({
         </div>
       </div>
     </section>
+  );
+}
+
+function formatHistoryDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Saved";
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+  }).format(date);
+}
+
+function HistoryList({
+  entries,
+  onCopy,
+  onOpen,
+  onRemove,
+  onReveal,
+  onSelect,
+  selectedOutputPath,
+}: {
+  entries: TranscriptHistoryEntry[];
+  onCopy: (entry: TranscriptHistoryEntry) => void;
+  onOpen: (entry: TranscriptHistoryEntry) => void;
+  onRemove: (outputPath: string) => void;
+  onReveal: (entry: TranscriptHistoryEntry) => void;
+  onSelect: (entry: TranscriptHistoryEntry) => void;
+  selectedOutputPath?: string;
+}) {
+  return (
+    <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+      <CardHeader className="p-4 sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">Local library</p>
+            <CardTitle className="mt-2 flex items-center gap-2 text-xl">
+              History
+              <Badge className="tabular-nums" variant="secondary">
+                {entries.length}
+              </Badge>
+            </CardTitle>
+            <CardDescription>Saved transcripts stay on this computer.</CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <Separator />
+      <CardContent className="p-4 sm:p-5">
+        {entries.length ? (
+          <ScrollArea className="h-[420px] pr-3">
+            <ul className="flex flex-col gap-2">
+              {entries.map((entry) => {
+                const selected = entry.outputPath === selectedOutputPath;
+
+                function selectFromKeyboard(event: KeyboardEvent<HTMLLIElement>) {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(entry);
+                  }
+                }
+
+                return (
+                  <li
+                    className={cn(
+                      "list-none rounded-lg border bg-card p-3 outline-none transition-[border-color,box-shadow,background-color]",
+                      "focus-visible:ring-2 focus-visible:ring-ring/50",
+                      selected && "border-primary ring-2 ring-primary/15",
+                    )}
+                    key={entry.outputPath}
+                    onClick={() => onSelect(entry)}
+                    onKeyDown={selectFromKeyboard}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <div className="flex min-w-0 items-start gap-3">
+                      <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
+                        <FileText className="size-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-semibold">{entry.name}</div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">Source: {entry.sourcePath}</div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">Transcript: {entry.outputPath}</div>
+                        <div className="mt-2 text-xs font-medium text-muted-foreground">{formatHistoryDate(entry.createdAt)}</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCopy(entry);
+                        }}
+                        size="xs"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Copy data-icon="inline-start" />
+                        Copy
+                      </Button>
+                      <Button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpen(entry);
+                        }}
+                        size="xs"
+                        type="button"
+                        variant="outline"
+                      >
+                        <FileText data-icon="inline-start" />
+                        Open
+                      </Button>
+                      <Button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onReveal(entry);
+                        }}
+                        size="xs"
+                        type="button"
+                        variant="outline"
+                      >
+                        <FolderOpen data-icon="inline-start" />
+                        Reveal
+                      </Button>
+                      <Button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onRemove(entry.outputPath);
+                        }}
+                        size="xs"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <Trash2 data-icon="inline-start" />
+                        Remove
+                      </Button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </ScrollArea>
+        ) : (
+          <div className="grid min-h-[260px] place-items-center rounded-lg border border-dashed bg-muted">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <div className="grid size-12 place-items-center rounded-lg border bg-card text-muted-foreground">
+                <FileText className="size-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold">No saved transcripts yet</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Finished transcriptions will appear here.</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
