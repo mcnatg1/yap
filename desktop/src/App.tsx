@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   BadgeCheck,
@@ -13,11 +14,14 @@ import {
   Grid2X2,
   HelpCircle,
   LockKeyhole,
+  Minus,
   RotateCw,
   Settings2,
   Sparkles,
+  Square,
   Trash2,
   UploadCloud,
+  X,
 } from "lucide-react";
 import { type DragEvent, type ElementType, useEffect, useMemo, useState } from "react";
 
@@ -339,17 +343,16 @@ export default function App() {
   }
 
   return (
-    <main className="min-h-screen overflow-x-hidden bg-background p-3 text-foreground sm:p-4">
-      <div className="mx-auto flex w-full max-w-[1480px] min-w-0 gap-4">
+    <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
+      <AppChrome />
+      <div className="mx-auto flex w-full max-w-[1480px] min-w-0 gap-4 p-3 pt-0 sm:p-4 sm:pt-0">
         <ProductRail active={activeRail} auth={auth} model={model} onAction={handleRailAction} status={status} />
 
         <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
           <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <div className="min-w-0">
               <div className="mb-4 flex items-center gap-3 lg:hidden">
-                <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-                  <FileAudio2 className="size-5" />
-                </div>
+                <AppIcon className="size-10 rounded-xl shadow-sm" />
                 <div>
                   <div className="text-lg font-semibold">Yap</div>
                   <div className="text-sm text-muted-foreground">Private local transcription</div>
@@ -486,6 +489,66 @@ export default function App() {
   );
 }
 
+async function runWindowAction(action: "minimize" | "toggleMaximize" | "close") {
+  if (!isTauri()) return;
+
+  const window = getCurrentWindow();
+  try {
+    if (action === "minimize") await window.minimize();
+    if (action === "toggleMaximize") await window.toggleMaximize();
+    if (action === "close") await window.close();
+  } catch {
+    // ponytail: preview/dev without window permissions should not break the UI.
+  }
+}
+
+function AppChrome() {
+  return (
+    <div
+      className="flex h-10 select-none items-center border-b border-border/70 bg-background/95 text-foreground"
+      data-tauri-drag-region
+    >
+      <div className="flex min-w-0 items-center gap-2 px-3" data-tauri-drag-region>
+        <AppIcon className="size-5 rounded-md" />
+        <span className="truncate text-sm font-semibold" data-tauri-drag-region>
+          Yap
+        </span>
+      </div>
+      <div className="min-w-4 flex-1" data-tauri-drag-region />
+      <div className="flex h-full">
+        <button
+          aria-label="Minimize"
+          className="grid h-full w-11 place-items-center text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+          onClick={() => void runWindowAction("minimize")}
+          type="button"
+        >
+          <Minus className="size-4" />
+        </button>
+        <button
+          aria-label="Maximize"
+          className="grid h-full w-11 place-items-center text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+          onClick={() => void runWindowAction("toggleMaximize")}
+          type="button"
+        >
+          <Square className="size-3.5" />
+        </button>
+        <button
+          aria-label="Close"
+          className="grid h-full w-11 place-items-center text-muted-foreground transition hover:bg-destructive hover:text-white"
+          onClick={() => void runWindowAction("close")}
+          type="button"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AppIcon({ className }: { className?: string }) {
+  return <img alt="" className={cn("shrink-0", className)} draggable={false} src="/favicon.png" />;
+}
+
 function ProductRail({
   active,
   auth,
@@ -500,11 +563,9 @@ function ProductRail({
   status: string;
 }) {
   return (
-    <aside className="hidden min-h-[calc(100vh-32px)] w-[238px] shrink-0 flex-col rounded-[28px] bg-background p-3 lg:flex">
+    <aside className="hidden min-h-[calc(100vh-64px)] w-[238px] shrink-0 flex-col rounded-[28px] bg-background p-3 lg:flex">
       <div className="flex items-center gap-3 px-3 py-4">
-        <div className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground">
-          <FileAudio2 className="size-5" />
-        </div>
+        <AppIcon className="size-10 rounded-xl" />
         <div className="text-2xl font-semibold tracking-tight">Yap</div>
       </div>
 
