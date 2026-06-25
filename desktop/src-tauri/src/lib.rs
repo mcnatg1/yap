@@ -103,6 +103,32 @@ fn read_text_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
 }
 
+#[tauri::command]
+fn write_polished_text(path: String, text: String) -> Result<String, String> {
+    let path = std::path::PathBuf::from(path);
+    let is_txt = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"));
+
+    if !is_txt {
+        return Err("Only transcript text files can be polished.".into());
+    }
+
+    let output = polished_path(&path)?;
+    std::fs::write(&output, text).map_err(|err| format!("Failed to save polished transcript: {err}"))?;
+    Ok(output.display().to_string())
+}
+
+fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| "Transcript path has no file name.".to_string())?;
+
+    Ok(path.with_file_name(format!("{stem}.polished.txt")))
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupStatus {
@@ -207,6 +233,12 @@ mod tests {
     }
 
     #[test]
+    fn polished_path_writes_sibling_file() {
+        let path = polished_path(std::path::Path::new("C:/recordings/take.txt")).unwrap();
+        assert_eq!(path.file_name().unwrap(), "take.polished.txt");
+    }
+
+    #[test]
     fn command_failure_message_uses_traceback_tail() {
         let message = command_failure_message("Loading weights: 100%\nTraceback sad", "");
         assert_eq!(message, "Traceback sad");
@@ -226,7 +258,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             setup_status,
             transcribe_files,
-            read_text_file
+            read_text_file,
+            write_polished_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

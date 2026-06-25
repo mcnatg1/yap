@@ -16,6 +16,7 @@ import {
   LockKeyhole,
   Minus,
   RotateCw,
+  Save,
   Settings2,
   Sparkles,
   Square,
@@ -52,6 +53,7 @@ import {
   type TranscriptHistoryEntry,
 } from "@/history";
 import { cn } from "@/lib/utils";
+import { defaultPolishModel, polishToneLabels, polishTranscript, type PolishTone } from "@/polish";
 
 type SetupStatus = {
   model: string;
@@ -130,6 +132,7 @@ export default function App() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
+  const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
 
@@ -397,6 +400,19 @@ export default function App() {
     }
   }
 
+  async function savePolishedTranscript(item: UploadItem, text: string) {
+    if (!item.output || !text.trim()) return "";
+
+    try {
+      const path = await invoke<string>("write_polished_text", { path: item.output, text });
+      setStatus("Polished draft saved");
+      return path;
+    } catch (error) {
+      setStatus("Save failed");
+      throw error;
+    }
+  }
+
   function recordHistoryEntries(entries: TranscriptHistoryEntry[]) {
     if (!entries.length) return;
 
@@ -555,7 +571,19 @@ export default function App() {
               />
             ) : null}
 
-            {showPolish ? <PolishPanel item={selectedItem} /> : null}
+            {showPolish ? (
+              <PolishPanel
+                item={selectedItem}
+                onLoadText={loadTranscriptText}
+                onPolished={(outputPath, text) => {
+                  setPolishedText((current) => ({ ...current, [outputPath]: text }));
+                  setStatus("Polished draft ready");
+                }}
+                onSave={savePolishedTranscript}
+                originalText={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
+                polishedText={selectedItem?.output ? polishedText[selectedItem.output] : undefined}
+              />
+            ) : null}
 
             {showTranscript ? (
               <div className="min-w-0">
@@ -955,8 +983,86 @@ function HistoryList({
   );
 }
 
-function PolishPanel({ item }: { item?: UploadItem }) {
+function PolishPanel({
+  item,
+  onLoadText,
+  onPolished,
+  onSave,
+  originalText,
+  polishedText,
+}: {
+  item?: UploadItem;
+  onLoadText: (path: string) => Promise<string>;
+  onPolished: (outputPath: string, text: string) => void;
+  onSave: (item: UploadItem, text: string) => Promise<string>;
+  originalText?: string;
+  polishedText?: string;
+}) {
   const ready = item?.status === "done";
+  const [tone, setTone] = useState<PolishTone>("light");
+  const [running, setRunning] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [stats, setStats] = useState("");
+  const [savedPath, setSavedPath] = useState("");
+  const hasPolishedText = Boolean(polishedText?.trim());
+  const canPolish = ready && Boolean(item?.output) && !running;
+
+  async function runPolish() {
+    if (!item?.output || running) return;
+
+    setRunning(true);
+    setMessage("");
+    setStats("");
+    setSavedPath("");
+
+    try {
+      const source = originalText ?? (await onLoadText(item.output));
+      const result = await polishTranscript({ text: source, tone });
+      onPolished(item.output, result.text);
+      setStats(
+        [
+          result.tokensPerSecond ? `${result.tokensPerSecond} tok/s CPU` : "",
+          result.totalSeconds ? `${result.totalSeconds}s` : "",
+          result.model.replace("gemma4:", ""),
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+      setMessage("Polished draft ready");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function copyPolished() {
+    if (!polishedText) return;
+
+    try {
+      await navigator.clipboard.writeText(polishedText);
+      setMessage("Polished draft copied");
+    } catch {
+      setMessage("Copy failed");
+    }
+  }
+
+  async function savePolished() {
+    if (!item || !polishedText || saving) return;
+
+    setSaving(true);
+    setMessage("");
+    try {
+      const path = await onSave(item, polishedText);
+      setSavedPath(path);
+      setMessage("Saved polished draft");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
@@ -972,24 +1078,88 @@ function PolishPanel({ item }: { item?: UploadItem }) {
               {item ? item.name : "Select or transcribe a recording to start from real text."}
             </CardDescription>
           </div>
+          <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
+            <Button disabled={!canPolish} onClick={() => void runPolish()} size="sm" type="button">
+              {running ? (
+                <RotateCw data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <Sparkles data-icon="inline-start" />
+              )}
+              Polish
+            </Button>
+            <Button disabled={!hasPolishedText} onClick={() => void copyPolished()} size="sm" type="button" variant="outline">
+              <Copy data-icon="inline-start" />
+              Copy
+            </Button>
+            <Button disabled={!hasPolishedText || saving} onClick={() => void savePolished()} size="sm" type="button" variant="outline">
+              {saving ? <RotateCw data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}
+              Save
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <Separator />
-      <CardContent className="grid gap-3 p-4 sm:p-5">
-        <StatusRow
-          icon={FileText}
-          label="Selected draft"
-          value={ready ? "Transcript is ready below" : "Transcribe a recording first"}
-          wrap
-        />
-        <StatusRow
-          icon={Sparkles}
-          label="Draft state"
-          value={ready ? "Ready for cleanup" : "No finished transcript selected"}
-          wrap
-        />
+      <CardContent className="grid gap-4 p-4 sm:p-5">
+        <div className="grid gap-2 sm:grid-cols-3">
+          {(Object.entries(polishToneLabels) as [PolishTone, string][]).map(([value, label]) => (
+            <button
+              aria-pressed={tone === value}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-left text-sm font-semibold transition-[background-color,border-color,color,box-shadow]",
+                tone === value
+                  ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                  : "bg-background text-muted-foreground hover:bg-secondary hover:text-foreground",
+              )}
+              key={value}
+              onClick={() => setTone(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <StatusRow
+            icon={FileText}
+            label="Selected draft"
+            value={ready ? (originalText ? "Transcript loaded" : "Loading transcript") : "Transcribe a recording first"}
+            wrap
+          />
+          <StatusRow icon={Cpu} label="Polish model" value={`${defaultPolishModel} · CPU only`} wrap />
+          <StatusRow icon={Sparkles} label="Result" value={message || (ready ? "Ready for cleanup" : "No finished transcript selected")} wrap />
+          <StatusRow icon={BadgeCheck} label="Speed" value={stats || "Measured at about 19 tok/s CPU"} wrap />
+        </div>
+
+        {savedPath ? (
+          <div className="rounded-lg border bg-muted p-3 text-xs text-muted-foreground">
+            Saved to <span className="font-medium text-foreground">{basename(savedPath)}</span>
+          </div>
+        ) : null}
+
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2">
+          <TextPreview title="Original" value={originalText} empty={ready ? "Loading transcript preview." : "No transcript selected."} />
+          <TextPreview title="Polished" value={polishedText} empty="Run Polish to create a cleaned draft." />
+        </div>
       </CardContent>
     </Card>
+  );
+}
+
+function TextPreview({ empty, title, value }: { empty: string; title: string; value?: string }) {
+  return (
+    <div className="min-w-0 rounded-lg border bg-[#fffdf8]">
+      <div className="border-b px-3 py-2 text-xs font-semibold uppercase text-muted-foreground">{title}</div>
+      <ScrollArea className="h-[220px]">
+        <div className="p-4">
+          {value?.trim() ? (
+            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{value}</pre>
+          ) : (
+            <p className="text-sm leading-6 text-muted-foreground">{empty}</p>
+          )}
+        </div>
+      </ScrollArea>
+    </div>
   );
 }
 
