@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   BadgeCheck,
   Copy,
@@ -18,7 +19,7 @@ import {
   Trash2,
   UploadCloud,
 } from "lucide-react";
-import { type DragEvent, type ElementType, useEffect, useMemo, useState } from "react";
+import { type DragEvent, type ElementType, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
 import { Badge } from "@/components/ui/badge";
@@ -38,7 +39,6 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  SheetTrigger,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
@@ -55,7 +55,10 @@ type TranscriptResult = {
   output: string;
 };
 
-const audioExts = new Set([".mp3", ".m4a", ".wav", ".mp4", ".flac", ".ogg", ".webm"]);
+type RailAction = "home" | "recordings" | "transcripts" | "polish" | "details" | "help";
+
+const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
+const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
 const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
 
 function basename(path: string) {
@@ -77,6 +80,13 @@ export default function App() {
   const [model, setModel] = useState("Cohere Transcribe");
   const [auth, setAuth] = useState("Checking");
   const [selectedId, setSelectedId] = useState<number>();
+  const [activeRail, setActiveRail] = useState<RailAction>("home");
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
+  const heroRef = useRef<HTMLElement>(null);
+  const queueRef = useRef<HTMLElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -120,6 +130,12 @@ export default function App() {
     }
   }, [queue, selectedId]);
 
+  useEffect(() => {
+    if (selectedItem?.output && !transcriptText[selectedItem.output]) {
+      void loadTranscriptText(selectedItem.output).catch(() => setStatus("Preview unavailable"));
+    }
+  }, [selectedItem?.output, transcriptText]);
+
   async function loadStatus() {
     if (!isTauri()) return;
 
@@ -155,6 +171,46 @@ export default function App() {
     });
   }
 
+  async function pickFiles() {
+    if (!isTauri()) {
+      setStatus("Preview only");
+      return;
+    }
+
+    try {
+      const selected = await openDialog({
+        multiple: true,
+        title: "Choose recordings",
+        filters: [{ name: "Audio and video", extensions: audioExtensions }],
+      });
+      if (Array.isArray(selected)) addPaths(selected);
+      else if (selected) addPaths([selected]);
+    } catch (error) {
+      setStatus(`Picker failed: ${String(error)}`);
+    }
+  }
+
+  function handleRailAction(action: RailAction) {
+    setActiveRail(action);
+
+    if (action === "details") {
+      setDetailsOpen(true);
+      return;
+    }
+    if (action === "help") {
+      setHelpOpen(true);
+      return;
+    }
+    if (action === "polish") {
+      transcriptRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setStatus(selectedItem?.status === "done" ? "Transcript ready" : "Transcribe a file first");
+      return;
+    }
+
+    const target = action === "home" ? heroRef.current : action === "recordings" ? queueRef.current : transcriptRef.current;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   async function runQueue() {
     const pending = queue.filter((item) => item.status === "queued" || item.status === "error");
     if (!pending.length || running) return;
@@ -175,12 +231,22 @@ export default function App() {
         paths: pending.map((item) => item.path),
       });
       const outputs = new Map(results.map((result) => [result.input, result.output]));
+      const texts: Record<string, string> = {};
+
+      for (const result of results) {
+        try {
+          texts[result.output] = await invoke<string>("read_text_file", { path: result.output });
+        } catch {
+          // ponytail: transcript can still be revealed if eager preview read fails.
+        }
+      }
 
       setQueue((items) =>
         items.map((item) =>
           outputs.has(item.path) ? { ...item, output: outputs.get(item.path), status: "done" } : item,
         ),
       );
+      setTranscriptText((current) => ({ ...current, ...texts }));
       setStatus("Ready");
       setAuth("Authorized");
     } catch (error) {
@@ -204,22 +270,54 @@ export default function App() {
   }
 
   function clearQueue() {
-    if (!running) setQueue([]);
+    if (!running) {
+      setQueue([]);
+      setTranscriptText({});
+    }
   }
 
-  async function copyPath(path: string) {
+  async function loadTranscriptText(path: string) {
+    if (transcriptText[path]) return transcriptText[path];
+    if (!isTauri()) return "";
+
+    const text = await invoke<string>("read_text_file", { path });
+    setTranscriptText((current) => ({ ...current, [path]: text }));
+    return text;
+  }
+
+  async function copyTranscript(item: UploadItem) {
+    if (!item.output) return;
+
     try {
-      await navigator.clipboard.writeText(path);
-      setStatus("Copied");
+      const text = await loadTranscriptText(item.output);
+      await navigator.clipboard.writeText(text || item.output);
+      setStatus(text ? "Transcript copied" : "Path copied");
     } catch {
       setStatus("Copy failed");
+    }
+  }
+
+  async function openTranscript(path: string) {
+    try {
+      await openPath(path);
+      setStatus("Opened transcript");
+    } catch {
+      setStatus("Open failed");
+    }
+  }
+
+  async function revealPath(path: string) {
+    try {
+      await revealItemInDir(path);
+    } catch {
+      setStatus("Reveal failed");
     }
   }
 
   return (
     <main className="min-h-screen overflow-x-hidden bg-background p-3 text-foreground sm:p-4">
       <div className="mx-auto flex w-full max-w-[1480px] min-w-0 gap-4">
-        <ProductRail auth={auth} model={model} status={status} />
+        <ProductRail active={activeRail} auth={auth} model={model} onAction={handleRailAction} status={status} />
 
         <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
           <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
@@ -241,12 +339,15 @@ export default function App() {
               <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
               <Metric icon={FileText} label={`${completed} done`} />
               <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
-              <DetailsSheet auth={auth} model={model} status={status} />
+              <Button aria-label="Open setup details" onClick={() => setDetailsOpen(true)} size="icon-sm" type="button" variant="outline">
+                <Settings2 />
+              </Button>
             </div>
           </header>
 
           <DropHero
             dragging={dragging}
+            heroRef={heroRef}
             onDragLeave={() => setDragging(false)}
             onDragOver={(event) => {
               event.preventDefault();
@@ -257,9 +358,13 @@ export default function App() {
               setDragging(false);
               if (!isTauri()) setStatus("Preview only");
             }}
+            onPickFiles={() => void pickFiles()}
           />
 
-          <section className="mt-7 grid w-full min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]">
+          <section
+            className="mt-7 grid w-full min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
+            ref={queueRef}
+          >
             <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
               <CardHeader className="p-4 sm:p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -302,27 +407,45 @@ export default function App() {
                 <StackedUpload
                   items={queue}
                   onRemove={removeItem}
-                  onReveal={(path) => void revealItemInDir(path)}
+                  onReveal={(path) => void revealPath(path)}
                   onSelect={setSelectedId}
                   selectedId={selectedId}
                 />
               </CardContent>
             </Card>
 
-            <TranscriptPanel
-              item={selectedItem}
-              onCopy={copyPath}
-              onReveal={(path) => void revealItemInDir(path)}
-              running={running}
-            />
+            <div className="min-w-0" ref={transcriptRef}>
+              <TranscriptPanel
+                item={selectedItem}
+                onCopy={copyTranscript}
+                onOpen={(path) => void openTranscript(path)}
+                onReveal={(path) => void revealPath(path)}
+                running={running}
+                text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
+              />
+            </div>
           </section>
         </section>
       </div>
+      <DetailsSheet auth={auth} model={model} onOpenChange={setDetailsOpen} open={detailsOpen} status={status} />
+      <HelpSheet onOpenChange={setHelpOpen} open={helpOpen} />
     </main>
   );
 }
 
-function ProductRail({ auth, model, status }: { auth: string; model: string; status: string }) {
+function ProductRail({
+  active,
+  auth,
+  model,
+  onAction,
+  status,
+}: {
+  active: RailAction;
+  auth: string;
+  model: string;
+  onAction: (action: RailAction) => void;
+  status: string;
+}) {
   return (
     <aside className="hidden min-h-[calc(100vh-32px)] w-[238px] shrink-0 flex-col rounded-[28px] bg-background p-3 lg:flex">
       <div className="flex items-center gap-3 px-3 py-4">
@@ -333,32 +456,60 @@ function ProductRail({ auth, model, status }: { auth: string; model: string; sta
       </div>
 
       <nav className="mt-8 flex flex-col gap-1">
-        <RailItem active icon={Grid2X2} label="Home" />
-        <RailItem icon={FileAudio2} label="Recordings" />
-        <RailItem icon={FileText} label="Transcripts" />
-        <RailItem icon={Sparkles} label="Polish" />
+        <RailItem active={active === "home"} icon={Grid2X2} label="Home" onClick={() => onAction("home")} />
+        <RailItem
+          active={active === "recordings"}
+          icon={FileAudio2}
+          label="Recordings"
+          onClick={() => onAction("recordings")}
+        />
+        <RailItem
+          active={active === "transcripts"}
+          icon={FileText}
+          label="Transcripts"
+          onClick={() => onAction("transcripts")}
+        />
+        <RailItem active={active === "polish"} icon={Sparkles} label="Polish" onClick={() => onAction("polish")} />
       </nav>
 
       <div className="mt-auto flex flex-col gap-1">
-        <RailItem icon={LockKeyhole} label={auth === "Authorized" ? "Local mode" : status} />
-        <RailItem icon={Settings2} label={model} />
-        <RailItem icon={HelpCircle} label="Help" />
+        <RailItem
+          active={active === "details"}
+          icon={LockKeyhole}
+          label={auth === "Authorized" ? "Local mode" : status}
+          onClick={() => onAction("details")}
+        />
+        <RailItem active={active === "details"} icon={Settings2} label={model} onClick={() => onAction("details")} />
+        <RailItem active={active === "help"} icon={HelpCircle} label="Help" onClick={() => onAction("help")} />
       </div>
     </aside>
   );
 }
 
-function RailItem({ active, icon: Icon, label }: { active?: boolean; icon: ElementType; label: string }) {
+function RailItem({
+  active,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  active?: boolean;
+  icon: ElementType;
+  label: string;
+  onClick: () => void;
+}) {
   return (
-    <div
+    <button
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "flex min-w-0 items-center gap-3 rounded-lg px-3 py-3 text-sm font-semibold text-muted-foreground",
+        "flex min-w-0 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold text-muted-foreground transition hover:bg-secondary/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
         active && "bg-secondary text-foreground",
       )}
+      onClick={onClick}
+      type="button"
     >
       <Icon className="size-5 shrink-0" />
       <span className="truncate">{label}</span>
-    </div>
+    </button>
   );
 }
 
@@ -373,14 +524,18 @@ function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
 
 function DropHero({
   dragging,
+  heroRef,
   onDragLeave,
   onDragOver,
   onDrop,
+  onPickFiles,
 }: {
   dragging: boolean;
+  heroRef: RefObject<HTMLElement | null>;
   onDragLeave: () => void;
   onDragOver: (event: DragEvent<HTMLElement>) => void;
   onDrop: (event: DragEvent<HTMLElement>) => void;
+  onPickFiles: () => void;
 }) {
   return (
     <section
@@ -391,6 +546,7 @@ function DropHero({
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
+      ref={heroRef}
     >
       <div className="relative min-h-[260px] w-full max-w-full bg-[linear-gradient(110deg,#17120e_0%,#6f3c24_42%,#034f46_100%)] p-6 sm:p-10">
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.2),transparent_65%)]" />
@@ -408,10 +564,15 @@ function DropHero({
             </p>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-3">
-            <div className="inline-flex max-w-full items-center gap-2 rounded-lg bg-white px-4 py-3 text-sm font-semibold text-[#221d18]">
-              <UploadCloud className="size-4" />
+            <Button
+              className="max-w-full bg-white text-[#221d18] hover:bg-white/90"
+              onClick={onPickFiles}
+              type="button"
+              variant="secondary"
+            >
+              <UploadCloud data-icon="inline-start" />
               Drop files here
-            </div>
+            </Button>
             <span className="max-w-full break-words text-sm font-medium text-white/72">{acceptedFormats}</span>
           </div>
         </div>
@@ -423,13 +584,17 @@ function DropHero({
 function TranscriptPanel({
   item,
   onCopy,
+  onOpen,
   onReveal,
   running,
+  text,
 }: {
   item?: UploadItem;
-  onCopy: (path: string) => void;
+  onCopy: (item: UploadItem) => void;
+  onOpen: (path: string) => void;
   onReveal: (path: string) => void;
   running: boolean;
+  text?: string;
 }) {
   const title = item?.status === "done" ? "Transcript ready" : item ? "Transcript workspace" : "No transcript yet";
   const output = item?.output;
@@ -450,9 +615,13 @@ function TranscriptPanel({
           </div>
           {output ? (
             <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
-              <Button onClick={() => void onCopy(output)} size="sm" type="button" variant="outline">
+              <Button onClick={() => void onCopy(item)} size="sm" type="button" variant="outline">
                 <Copy data-icon="inline-start" />
-                Copy path
+                Copy transcript
+              </Button>
+              <Button onClick={() => onOpen(output)} size="sm" type="button" variant="outline">
+                <FileText data-icon="inline-start" />
+                Open
               </Button>
               <Button onClick={() => onReveal(output)} size="sm" type="button">
                 <FolderOpen data-icon="inline-start" />
@@ -483,10 +652,15 @@ function TranscriptPanel({
                   </Badge>
                   <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
                 </div>
-                <p className="max-w-prose text-sm leading-6 text-muted-foreground">
-                  The transcript is ready beside the source file. Open it from here to review, edit, or move it into
-                  your notes.
-                </p>
+                {text ? (
+                  <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                    {text}
+                  </pre>
+                ) : (
+                  <p className="max-w-prose text-sm leading-6 text-muted-foreground">
+                    Loading transcript preview. You can still open or reveal the saved file.
+                  </p>
+                )}
               </>
             ) : item?.status === "error" ? (
               <>
@@ -518,14 +692,21 @@ function TranscriptPanel({
   );
 }
 
-function DetailsSheet({ auth, model, status }: { auth: string; model: string; status: string }) {
+function DetailsSheet({
+  auth,
+  model,
+  onOpenChange,
+  open,
+  status,
+}: {
+  auth: string;
+  model: string;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+  status: string;
+}) {
   return (
-    <Sheet>
-      <SheetTrigger asChild>
-        <Button aria-label="Open setup details" size="icon-sm" type="button" variant="outline">
-          <Settings2 />
-        </Button>
-      </SheetTrigger>
+    <Sheet onOpenChange={onOpenChange} open={open}>
       <SheetContent className="w-[min(420px,calc(100vw-24px))]">
         <SheetHeader>
           <SheetTitle>Setup Details</SheetTitle>
@@ -543,7 +724,36 @@ function DetailsSheet({ auth, model, status }: { auth: string; model: string; st
   );
 }
 
-function StatusRow({ icon: Icon, label, value }: { icon: ElementType; label: string; value: string }) {
+function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean) => void; open: boolean }) {
+  return (
+    <Sheet onOpenChange={onOpenChange} open={open}>
+      <SheetContent className="w-[min(420px,calc(100vw-24px))]">
+        <SheetHeader>
+          <SheetTitle>Help</SheetTitle>
+          <SheetDescription>Quick map of the working controls.</SheetDescription>
+        </SheetHeader>
+        <div className="mt-6 flex flex-col gap-3">
+          <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />
+          <StatusRow icon={Sparkles} label="Transcribe" value="Runs queued audio locally and saves .txt files beside the sources." wrap />
+          <StatusRow icon={Copy} label="Copy" value="Copies transcript text after a file finishes." wrap />
+          <StatusRow icon={FolderOpen} label="Reveal" value="Shows the saved transcript in File Explorer." wrap />
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function StatusRow({
+  icon: Icon,
+  label,
+  value,
+  wrap,
+}: {
+  icon: ElementType;
+  label: string;
+  value: string;
+  wrap?: boolean;
+}) {
   return (
     <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
       <div className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
@@ -551,7 +761,7 @@ function StatusRow({ icon: Icon, label, value }: { icon: ElementType; label: str
       </div>
       <div className="min-w-0">
         <div className="text-xs font-medium text-muted-foreground">{label}</div>
-        <div className="truncate text-sm font-semibold">{value}</div>
+        <div className={cn("text-sm font-semibold", wrap ? "leading-5" : "truncate")}>{value}</div>
       </div>
     </div>
   );

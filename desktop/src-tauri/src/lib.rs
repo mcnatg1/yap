@@ -86,6 +86,21 @@ fn transcribe_files(paths: Vec<String>) -> Result<Vec<TranscriptResult>, String>
         .collect())
 }
 
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    let path = std::path::PathBuf::from(path);
+    let is_txt = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"));
+
+    if !is_txt {
+        return Err("Only transcript text files can be read.".into());
+    }
+
+    std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupStatus {
@@ -161,6 +176,11 @@ mod tests {
         assert_eq!(value["scriptReady"], true);
         assert!(value.get("python_ready").is_none());
     }
+
+    #[test]
+    fn read_text_file_rejects_non_transcripts() {
+        assert!(read_text_file("recording.mp3".into()).is_err());
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -171,8 +191,13 @@ pub fn run() {
     log_line("app start");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![setup_status, transcribe_files])
+        .invoke_handler(tauri::generate_handler![
+            setup_status,
+            transcribe_files,
+            read_text_file
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
