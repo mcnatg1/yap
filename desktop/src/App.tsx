@@ -408,7 +408,9 @@ export default function App() {
                       <p className="text-xs font-semibold uppercase text-muted-foreground">Today</p>
                       <CardTitle className="mt-2 flex items-center gap-2 text-xl">
                         Queue
-                        <Badge variant="secondary">{queue.length}</Badge>
+                        <Badge className="tabular-nums" variant="secondary">
+                          {queue.length}
+                        </Badge>
                       </CardTitle>
                       <CardDescription>
                         {completed
@@ -518,7 +520,7 @@ function AppChrome() {
       <div className="flex h-full">
         <button
           aria-label="Minimize"
-          className="grid h-full w-11 place-items-center text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+          className="grid h-full w-11 place-items-center text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out active:scale-[0.96] hover:bg-secondary hover:text-foreground"
           onClick={() => void runWindowAction("minimize")}
           type="button"
         >
@@ -526,7 +528,7 @@ function AppChrome() {
         </button>
         <button
           aria-label="Maximize"
-          className="grid h-full w-11 place-items-center text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+          className="grid h-full w-11 place-items-center text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out active:scale-[0.96] hover:bg-secondary hover:text-foreground"
           onClick={() => void runWindowAction("toggleMaximize")}
           type="button"
         >
@@ -534,7 +536,7 @@ function AppChrome() {
         </button>
         <button
           aria-label="Close"
-          className="grid h-full w-11 place-items-center text-muted-foreground transition hover:bg-destructive hover:text-white"
+          className="grid h-full w-11 place-items-center text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out active:scale-[0.96] hover:bg-destructive hover:text-white"
           onClick={() => void runWindowAction("close")}
           type="button"
         >
@@ -546,7 +548,14 @@ function AppChrome() {
 }
 
 function AppIcon({ className }: { className?: string }) {
-  return <img alt="" className={cn("shrink-0", className)} draggable={false} src="/favicon.png" />;
+  return (
+    <img
+      alt=""
+      className={cn("shrink-0 outline outline-1 -outline-offset-1 outline-black/10", className)}
+      draggable={false}
+      src="/favicon.png"
+    />
+  );
 }
 
 function ProductRail({
@@ -610,7 +619,7 @@ function RailItem({
     <button
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex min-w-0 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold text-muted-foreground transition hover:bg-secondary/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+        "flex min-w-0 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold text-muted-foreground transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-secondary/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
         active && "bg-secondary text-foreground",
       )}
       onClick={onClick}
@@ -624,7 +633,7 @@ function RailItem({
 
 function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
   return (
-    <div className="inline-flex min-w-0 max-w-full items-center justify-center gap-2 rounded-full px-2 py-2 text-sm font-semibold text-muted-foreground sm:px-3">
+    <div className="inline-flex min-w-0 max-w-full items-center justify-center gap-2 rounded-full px-2 py-2 text-sm font-semibold tabular-nums text-muted-foreground sm:px-3">
       <Icon className="size-4 shrink-0" />
       <span className="whitespace-nowrap max-[359px]:sr-only">{label}</span>
     </div>
@@ -647,7 +656,7 @@ function DropHero({
   return (
     <section
       className={cn(
-        "mt-7 w-full max-w-full overflow-hidden rounded-[28px] border bg-[#17120e] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] transition duration-200",
+        "mt-7 w-full max-w-full overflow-hidden rounded-[28px] border bg-[#17120e] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] transition-[border-color,box-shadow] duration-200",
         dragging && "border-primary shadow-lg shadow-primary/15",
       )}
       onDragLeave={onDragLeave}

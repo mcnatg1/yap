@@ -135,7 +135,7 @@ function UploadCard({
     <motion.li
       animate={{ opacity: 1, y: 0, scale: 1 }}
       className={cn(
-        "relative list-none overflow-hidden rounded-lg border bg-card p-3 outline-none transition",
+        "relative list-none overflow-hidden rounded-lg border bg-card p-3 outline-none transition-[border-color,box-shadow,background-color]",
         "focus-visible:ring-2 focus-visible:ring-ring/50",
         isSelected && "border-primary ring-2 ring-primary/15",
         offset > 0 && "shadow-sm",

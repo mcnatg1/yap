@@ -95,6 +95,21 @@
     margin: 0;
   }
 
+  h1,
+  h2,
+  h3,
+  [data-slot="card-title"],
+  [data-slot="sheet-title"] {
+    text-wrap: balance;
+  }
+
+  p,
+  li,
+  [data-slot="card-description"],
+  [data-slot="sheet-description"] {
+    text-wrap: pretty;
+  }
+
   button {
     font: inherit;
   }
