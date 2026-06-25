@@ -37,7 +37,18 @@ function DrawerContent({
         )}
         {...props}
       >
-        <DrawerPrimitive.Handle className="mx-auto mt-3" />
+        <DrawerPrimitive.Handle
+          className="rounded-full"
+          style={{
+            height: "3rem",
+            left: "0.5rem",
+            margin: 0,
+            position: "absolute",
+            top: "50%",
+            transform: "translateY(-50%)",
+            width: "0.375rem",
+          }}
+        />
         {children}
       </DrawerPrimitive.Content>
     </DrawerPrimitive.Portal>
