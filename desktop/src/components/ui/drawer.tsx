@@ -3,8 +3,19 @@ import { Drawer as DrawerPrimitive } from "vaul"
 
 import { cn } from "@/lib/utils"
 
-function Drawer({ shouldScaleBackground = true, ...props }: React.ComponentProps<typeof DrawerPrimitive.Root>) {
-  return <DrawerPrimitive.Root data-slot="drawer" shouldScaleBackground={shouldScaleBackground} {...props} />
+function Drawer({
+  direction = "right",
+  shouldScaleBackground = true,
+  ...props
+}: React.ComponentProps<typeof DrawerPrimitive.Root>) {
+  return (
+    <DrawerPrimitive.Root
+      data-slot="drawer"
+      direction={direction}
+      shouldScaleBackground={shouldScaleBackground}
+      {...props}
+    />
+  )
 }
 
 function DrawerContent({
@@ -21,7 +32,7 @@ function DrawerContent({
       <DrawerPrimitive.Content
         data-slot="drawer-content"
         className={cn(
-          "fixed inset-x-3 bottom-3 z-50 max-h-[86vh] overflow-y-auto rounded-2xl border bg-background p-0 shadow-lg outline-none sm:left-auto sm:w-[420px]",
+          "fixed inset-y-3 right-3 z-50 w-[min(420px,calc(100vw-24px))] overflow-y-auto rounded-2xl border bg-background p-0 shadow-lg outline-none",
           className,
         )}
         {...props}
