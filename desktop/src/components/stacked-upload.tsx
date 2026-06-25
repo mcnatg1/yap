@@ -12,6 +12,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -70,17 +71,15 @@ const statusMeta = {
 export function StackedUpload({ items, onRemove, onReveal, onSelect, selectedId }: Props) {
   if (!items.length) {
     return (
-      <div className="grid min-h-[200px] place-items-center rounded-lg border border-dashed bg-muted">
-        <div className="flex flex-col items-center gap-3 text-center">
-          <div className="grid size-12 place-items-center rounded-lg border bg-card text-muted-foreground">
-            <FileAudio className="size-5" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold">No audio queued</h3>
-            <p className="mt-1 text-xs text-muted-foreground">Drop files to begin.</p>
-          </div>
+      <Empty>
+        <EmptyMedia>
+          <FileAudio />
+        </EmptyMedia>
+        <div>
+          <EmptyTitle>No audio queued</EmptyTitle>
+          <EmptyDescription>Drop files to begin.</EmptyDescription>
         </div>
-      </div>
+      </Empty>
     );
   }
 

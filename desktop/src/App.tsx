@@ -27,6 +27,7 @@ import {
 import { type DragEvent, type ElementType, type KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +37,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -45,6 +47,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   readTranscriptHistory,
   recordTranscriptHistory,
@@ -966,17 +969,15 @@ function HistoryList({
             </ul>
           </ScrollArea>
         ) : (
-          <div className="grid min-h-[260px] place-items-center rounded-lg border border-dashed bg-muted">
-            <div className="flex flex-col items-center gap-3 text-center">
-              <div className="grid size-12 place-items-center rounded-lg border bg-card text-muted-foreground">
-                <FileText className="size-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold">No saved transcripts yet</h3>
-                <p className="mt-1 text-xs text-muted-foreground">Finished transcriptions will appear here.</p>
-              </div>
+          <Empty className="min-h-[260px]">
+            <EmptyMedia>
+              <FileText />
+            </EmptyMedia>
+            <div>
+              <EmptyTitle>No saved transcripts yet</EmptyTitle>
+              <EmptyDescription>Finished transcriptions will appear here.</EmptyDescription>
             </div>
-          </div>
+          </Empty>
         )}
       </CardContent>
     </Card>
@@ -1100,24 +1101,20 @@ function PolishPanel({
       </CardHeader>
       <Separator />
       <CardContent className="grid gap-4 p-4 sm:p-5">
-        <div className="grid gap-2 sm:grid-cols-3">
+        <ToggleGroup
+          className="grid grid-cols-3"
+          onValueChange={(value) => {
+            if (value) setTone(value as PolishTone);
+          }}
+          type="single"
+          value={tone}
+        >
           {(Object.entries(polishToneLabels) as [PolishTone, string][]).map(([value, label]) => (
-            <button
-              aria-pressed={tone === value}
-              className={cn(
-                "rounded-lg border px-3 py-2 text-left text-sm font-semibold transition-[background-color,border-color,color,box-shadow]",
-                tone === value
-                  ? "border-primary bg-primary text-primary-foreground shadow-sm"
-                  : "bg-background text-muted-foreground hover:bg-secondary hover:text-foreground",
-              )}
-              key={value}
-              onClick={() => setTone(value)}
-              type="button"
-            >
+            <ToggleGroupItem key={value} value={value}>
               {label}
-            </button>
+            </ToggleGroupItem>
           ))}
-        </div>
+        </ToggleGroup>
 
         <div className="grid gap-3 md:grid-cols-2">
           <StatusRow
@@ -1132,9 +1129,12 @@ function PolishPanel({
         </div>
 
         {savedPath ? (
-          <div className="rounded-lg border bg-muted p-3 text-xs text-muted-foreground">
-            Saved to <span className="font-medium text-foreground">{basename(savedPath)}</span>
-          </div>
+          <Alert>
+            <Save />
+            <AlertDescription>
+              Saved to <span className="font-medium text-foreground">{basename(savedPath)}</span>
+            </AlertDescription>
+          </Alert>
         ) : null}
 
         <div className="grid min-w-0 gap-3 lg:grid-cols-2">
