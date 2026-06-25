@@ -27,7 +27,7 @@ import {
 import { type DragEvent, type ElementType, type KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -651,30 +651,36 @@ function AppChrome() {
       </div>
       <div className="min-w-4 flex-1" data-tauri-drag-region />
       <div className="flex h-full">
-        <button
+        <Button
           aria-label="Minimize"
-          className="grid h-full w-11 place-items-center text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out active:scale-[0.96] hover:bg-secondary hover:text-foreground"
+          className="h-full w-11 rounded-none text-muted-foreground hover:bg-secondary hover:text-foreground"
           onClick={() => void runWindowAction("minimize")}
+          size="icon"
           type="button"
+          variant="ghost"
         >
-          <Minus className="size-4" />
-        </button>
-        <button
+          <Minus />
+        </Button>
+        <Button
           aria-label="Maximize"
-          className="grid h-full w-11 place-items-center text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out active:scale-[0.96] hover:bg-secondary hover:text-foreground"
+          className="h-full w-11 rounded-none text-muted-foreground hover:bg-secondary hover:text-foreground"
           onClick={() => void runWindowAction("toggleMaximize")}
+          size="icon"
           type="button"
+          variant="ghost"
         >
-          <Square className="size-3.5" />
-        </button>
-        <button
+          <Square />
+        </Button>
+        <Button
           aria-label="Close"
-          className="grid h-full w-11 place-items-center text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out active:scale-[0.96] hover:bg-destructive hover:text-white"
+          className="h-full w-11 rounded-none text-muted-foreground hover:bg-destructive hover:text-white"
           onClick={() => void runWindowAction("close")}
+          size="icon"
           type="button"
+          variant="ghost"
         >
-          <X className="size-4" />
-        </button>
+          <X />
+        </Button>
       </div>
     </div>
   );
@@ -749,27 +755,28 @@ function RailItem({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Button
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex min-w-0 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold text-muted-foreground transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-secondary/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+        "h-auto w-full justify-start px-3 py-3 text-left font-semibold text-muted-foreground hover:bg-secondary/70 hover:text-foreground",
         active && "bg-secondary text-foreground",
       )}
       onClick={onClick}
       type="button"
+      variant="ghost"
     >
-      <Icon className="size-5 shrink-0" />
+      <Icon />
       <span className="truncate">{label}</span>
-    </button>
+    </Button>
   );
 }
 
 function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
   return (
-    <div className="inline-flex min-w-0 max-w-full items-center justify-center gap-2 rounded-full px-2 py-2 text-sm font-semibold tabular-nums text-muted-foreground sm:px-3">
-      <Icon className="size-4 shrink-0" />
+    <Badge className="max-w-full gap-2 rounded-full px-2 py-2 text-sm font-semibold tabular-nums sm:px-3" variant="secondary">
+      <Icon />
       <span className="whitespace-nowrap max-[359px]:sr-only">{label}</span>
-    </div>
+    </Badge>
   );
 }
 
@@ -1148,18 +1155,22 @@ function PolishPanel({
 
 function TextPreview({ empty, title, value }: { empty: string; title: string; value?: string }) {
   return (
-    <div className="min-w-0 rounded-lg border bg-[#fffdf8]">
-      <div className="border-b px-3 py-2 text-xs font-semibold uppercase text-muted-foreground">{title}</div>
-      <ScrollArea className="h-[220px]">
-        <div className="p-4">
-          {value?.trim() ? (
-            <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{value}</pre>
-          ) : (
-            <p className="text-sm leading-6 text-muted-foreground">{empty}</p>
-          )}
-        </div>
-      </ScrollArea>
-    </div>
+    <Card className="min-w-0 gap-0 bg-[#fffdf8] py-0 shadow-none">
+      <CardHeader className="border-b p-3">
+        <CardTitle className="text-xs font-semibold uppercase text-muted-foreground">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        <ScrollArea className="h-[220px]">
+          <div className="p-4">
+            {value?.trim() ? (
+              <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{value}</pre>
+            ) : (
+              <p className="text-sm leading-6 text-muted-foreground">{empty}</p>
+            )}
+          </div>
+        </ScrollArea>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1215,13 +1226,15 @@ function TranscriptPanel({
       </CardHeader>
       <Separator />
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 sm:p-5">
-        <div className="rounded-lg border bg-muted p-4">
-          <div className="text-xs font-medium text-muted-foreground">Current file</div>
-          <div className="mt-1 truncate text-sm font-semibold">{item?.name ?? "Nothing selected"}</div>
-          <div className="mt-1 truncate text-xs text-muted-foreground">
-            {output ?? item?.path ?? "Files stay local until you drop them here."}
+        <Alert className="bg-muted">
+          <FileText />
+          <div className="min-w-0">
+            <AlertTitle>{item?.name ?? "Nothing selected"}</AlertTitle>
+            <AlertDescription className="mt-1 truncate">
+              {output ?? item?.path ?? "Files stay local until you drop them here."}
+            </AlertDescription>
           </div>
-        </div>
+        </Alert>
 
         <ScrollArea className="min-h-[240px] flex-1 rounded-lg border bg-[#fffdf8]">
           <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
@@ -1239,15 +1252,20 @@ function TranscriptPanel({
                     {text}
                   </pre>
                 ) : (
-                  <p className="max-w-prose text-sm leading-6 text-muted-foreground">
-                    Loading transcript preview. You can still open or reveal the saved file.
-                  </p>
+                  <Alert>
+                    <FileText />
+                    <AlertDescription>
+                      Loading transcript preview. You can still open or reveal the saved file.
+                    </AlertDescription>
+                  </Alert>
                 )}
               </>
             ) : item?.status === "error" ? (
               <>
-                <Badge variant="destructive">Needs attention</Badge>
-                <p className="text-sm leading-6 text-muted-foreground">{item.error}</p>
+                <Alert variant="destructive">
+                  <HelpCircle />
+                  <AlertDescription>{item.error}</AlertDescription>
+                </Alert>
               </>
             ) : item ? (
               <>
@@ -1257,15 +1275,15 @@ function TranscriptPanel({
                 </p>
               </>
             ) : (
-              <div className="flex flex-col items-center gap-3 text-center">
-                <div className="grid size-12 place-items-center rounded-lg bg-muted text-muted-foreground">
-                  <FileText className="size-5" />
-                </div>
+              <Empty className="border-0 bg-transparent">
+                <EmptyMedia>
+                  <FileText />
+                </EmptyMedia>
                 <div>
-                  <div className="text-sm font-semibold">Drop audio to create a transcript</div>
-                  <div className="mt-1 text-xs text-muted-foreground">Yap saves the transcript locally when the source is protected.</div>
+                  <EmptyTitle>Drop audio to create a transcript</EmptyTitle>
+                  <EmptyDescription>Yap saves the transcript locally when the source is protected.</EmptyDescription>
                 </div>
-              </div>
+              </Empty>
             )}
           </div>
         </ScrollArea>
@@ -1337,14 +1355,16 @@ function StatusRow({
   wrap?: boolean;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
-      <div className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
-        <Icon className="size-4" />
-      </div>
-      <div className="min-w-0">
-        <div className="text-xs font-medium text-muted-foreground">{label}</div>
-        <div className={cn("text-sm font-semibold", wrap ? "leading-5" : "truncate")}>{value}</div>
-      </div>
-    </div>
+    <Card className="gap-0 py-0 shadow-none">
+      <CardContent className="flex items-center gap-3 p-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+          <Icon className="size-4" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-muted-foreground">{label}</div>
+          <div className={cn("text-sm font-semibold", wrap ? "leading-5" : "truncate")}>{value}</div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
