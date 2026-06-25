@@ -564,12 +564,7 @@ function ProductRail({
 }) {
   return (
     <aside className="hidden min-h-[calc(100vh-64px)] w-[238px] shrink-0 flex-col rounded-[28px] bg-background p-3 lg:flex">
-      <div className="flex items-center gap-3 px-3 py-4">
-        <AppIcon className="size-10 rounded-xl" />
-        <div className="text-2xl font-semibold tracking-tight">Yap</div>
-      </div>
-
-      <nav className="mt-8 flex flex-col gap-1">
+      <nav className="mt-2 flex flex-col gap-1">
         <RailItem active={active === "home"} icon={Grid2X2} label="Home" onClick={() => onAction("home")} />
         <RailItem
           active={active === "recordings"}
