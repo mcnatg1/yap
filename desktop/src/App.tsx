@@ -28,6 +28,17 @@ import { type DragEvent, type ElementType, type KeyboardEvent, useEffect, useMem
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -528,16 +539,31 @@ export default function App() {
                       </CardDescription>
                     </div>
                     <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
-                      <Button
-                        disabled={running || !queue.length}
-                        onClick={clearQueue}
-                        size="sm"
-                        type="button"
-                        variant="outline"
-                      >
-                        <Trash2 data-icon="inline-start" />
-                        Clear
-                      </Button>
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button disabled={running || !queue.length} size="sm" type="button" variant="outline">
+                            <Trash2 data-icon="inline-start" />
+                            Clear
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Clear the queue?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              This removes the queued files from Yap. Saved transcript files and history stay untouched.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction
+                              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
+                              onClick={clearQueue}
+                            >
+                              Clear queue
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
                       <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
                         {running ? (
                           <RotateCw data-icon="inline-start" className="animate-spin" />
@@ -957,18 +983,36 @@ function HistoryList({
                         <FolderOpen data-icon="inline-start" />
                         Reveal
                       </Button>
-                      <Button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onRemove(entry.outputPath);
-                        }}
-                        size="xs"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Trash2 data-icon="inline-start" />
-                        Remove
-                      </Button>
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            onClick={(event) => event.stopPropagation()}
+                            size="xs"
+                            type="button"
+                            variant="ghost"
+                          >
+                            <Trash2 data-icon="inline-start" />
+                            Remove
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent onClick={(event) => event.stopPropagation()}>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Remove this history item?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              This only removes the entry from Yap history. The transcript file stays on disk.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction
+                              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
+                              onClick={() => onRemove(entry.outputPath)}
+                            >
+                              Remove
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
                     </div>
                   </li>
                 );
