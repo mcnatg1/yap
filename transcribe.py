@@ -5,19 +5,33 @@ import os
 from pathlib import Path
 
 
-MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
+DEFAULT_MODEL_ID = "ZoOtMcNoOt/yap-cohere-transcribe-03-2026"
+UPSTREAM_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
+
+
+def model_ids() -> list[str]:
+    primary = os.environ.get("YAP_MODEL_ID", DEFAULT_MODEL_ID)
+    fallback = os.environ.get("YAP_MODEL_FALLBACK_ID", UPSTREAM_MODEL_ID)
+    return list(dict.fromkeys([primary, fallback]))
 
 
 def load_model():
     from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = CohereAsrForConditionalGeneration.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-        torch_dtype="auto",
-    )
-    return processor, model
+    errors: list[Exception] = []
+    for model_id in model_ids():
+        try:
+            processor = AutoProcessor.from_pretrained(model_id)
+            model = CohereAsrForConditionalGeneration.from_pretrained(
+                model_id,
+                device_map="auto",
+                torch_dtype="auto",
+            )
+            return processor, model
+        except Exception as exc:
+            errors.append(exc)
+
+    raise RuntimeError("; ".join(str(error) for error in errors))
 
 
 def transcribe(path: Path, language: str, punctuation: bool, processor, model) -> str:

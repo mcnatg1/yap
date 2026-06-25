@@ -171,7 +171,7 @@ export default function App() {
 
     try {
       const setup = await invoke<SetupStatus>("setup_status");
-      setModel(setup.model.replace("CohereLabs/", ""));
+      setModel(setup.model.replace("CohereLabs/", "").replace("ZoOtMcNoOt/", ""));
       setStatus(setup.pythonReady && setup.scriptReady ? "Ready" : "Setup missing");
       setAuth(setup.pythonReady ? "Authorized" : setup.python);
     } catch (error) {

@@ -11,7 +11,8 @@ fn setup_status() -> SetupStatus {
     ));
 
     SetupStatus {
-        model: "CohereLabs/cohere-transcribe-03-2026".into(),
+        model: std::env::var("YAP_MODEL_ID")
+            .unwrap_or_else(|_| "ZoOtMcNoOt/yap-cohere-transcribe-03-2026".into()),
         root: root.display().to_string(),
         python_ready: python.exists(),
         script_ready: script.exists(),

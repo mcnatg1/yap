@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from transcribe import unique_path, write_transcript
+from transcribe import DEFAULT_MODEL_ID, UPSTREAM_MODEL_ID, model_ids, unique_path, write_transcript
 
 
 def main() -> None:
@@ -23,6 +23,14 @@ def main() -> None:
         fallback = write_transcript(blocked / "rode.wav", "local", None)
         assert fallback == root / "fallback" / "rode.txt"
         assert fallback.read_text(encoding="utf-8") == "local\n"
+
+        os.environ.pop("YAP_MODEL_ID", None)
+        os.environ.pop("YAP_MODEL_FALLBACK_ID", None)
+        assert model_ids() == [DEFAULT_MODEL_ID, UPSTREAM_MODEL_ID]
+
+        os.environ["YAP_MODEL_ID"] = "local/mirror"
+        os.environ["YAP_MODEL_FALLBACK_ID"] = "local/mirror"
+        assert model_ids() == ["local/mirror"]
 
 
 if __name__ == "__main__":
