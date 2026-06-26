@@ -1,5 +1,4 @@
 import { AnimatePresence, motion } from "framer-motion";
-import type { KeyboardEvent } from "react";
 import {
   CheckCircle2,
   Clock3,
@@ -18,6 +17,7 @@ import {
   AttachmentDescription,
   AttachmentMedia,
   AttachmentTitle,
+  AttachmentTrigger,
 } from "@/components/ui/attachment";
 import { Badge } from "@/components/ui/badge";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -138,13 +138,6 @@ function UploadCard({
   const Icon = meta.icon;
   const detail = item.error ?? item.output ?? item.path;
 
-  function selectFromKeyboard(event: KeyboardEvent<HTMLLIElement>) {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      onSelect(item.id);
-    }
-  }
-
   return (
     <motion.li
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -152,10 +145,6 @@ function UploadCard({
       exit={{ opacity: 0, x: 12, scale: 0.98 }}
       initial={{ opacity: 0, y: 16, scale: 0.98 }}
       layout
-      onClick={() => onSelect(item.id)}
-      onKeyDown={selectFromKeyboard}
-      role="button"
-      tabIndex={0}
       transition={{ duration: 0.18, ease: "easeOut" }}
     >
       <Attachment
@@ -220,6 +209,8 @@ function UploadCard({
             </Tooltip>
           )}
         </AttachmentActions>
+
+        <AttachmentTrigger aria-label={`Select ${item.name}`} onClick={() => onSelect(item.id)} />
       </Attachment>
       <Progress className="mt-3 h-1.5" value={meta.progress} />
     </motion.li>
