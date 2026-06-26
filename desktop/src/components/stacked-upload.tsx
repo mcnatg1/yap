@@ -10,8 +10,16 @@ import {
   XCircle,
 } from "lucide-react";
 
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentMedia,
+  AttachmentTitle,
+} from "@/components/ui/attachment";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -67,6 +75,13 @@ const statusMeta = {
     variant: "destructive" as const,
   },
 };
+
+const attachmentState = {
+  queued: "idle",
+  running: "processing",
+  done: "done",
+  error: "error",
+} as const satisfies Record<UploadStatus, "idle" | "uploading" | "processing" | "error" | "done">;
 
 export function StackedUpload({ items, onRemove, onReveal, onSelect, selectedId }: Props) {
   if (!items.length) {
@@ -133,12 +148,7 @@ function UploadCard({
   return (
     <motion.li
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      className={cn(
-        "relative list-none overflow-hidden rounded-lg border bg-card p-3 outline-none transition-[border-color,box-shadow,background-color]",
-        "focus-visible:ring-2 focus-visible:ring-ring/50",
-        isSelected && "border-primary ring-2 ring-primary/15",
-        offset > 0 && "shadow-sm",
-      )}
+      className="list-none"
       exit={{ opacity: 0, x: 12, scale: 0.98 }}
       initial={{ opacity: 0, y: 16, scale: 0.98 }}
       layout
@@ -148,60 +158,69 @@ function UploadCard({
       tabIndex={0}
       transition={{ duration: 0.18, ease: "easeOut" }}
     >
-      <div className="flex items-center gap-3">
-        <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
-          <FileAudio className="size-5" />
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold">{item.name}</div>
-          <div className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</div>
-        </div>
-
-        <Badge variant={meta.variant}>
-          <Icon className={cn(item.status === "running" && "animate-spin")} />
-          {meta.label}
-        </Badge>
-
-        {item.output ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Reveal transcript"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onReveal(item.output!);
-                }}
-                size="icon-sm"
-                type="button"
-                variant="outline"
-              >
-                <FolderOpen />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Reveal transcript</TooltipContent>
-          </Tooltip>
-        ) : (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Remove file"
-                disabled={item.status === "running"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onRemove(item.id);
-                }}
-                size="icon-sm"
-                type="button"
-                variant="ghost"
-              >
-                <Trash2 />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Remove file</TooltipContent>
-          </Tooltip>
+      <Attachment
+        className={cn(
+          "w-full cursor-pointer overflow-hidden rounded-lg outline-none transition-[border-color,box-shadow,background-color]",
+          "focus-visible:ring-2 focus-visible:ring-ring/50",
+          isSelected && "border-primary ring-2 ring-primary/15",
+          offset > 0 && "shadow-sm",
         )}
-      </div>
+        state={attachmentState[item.status]}
+      >
+        <AttachmentMedia>
+          <FileAudio />
+        </AttachmentMedia>
+
+        <AttachmentContent>
+          <AttachmentTitle>{item.name}</AttachmentTitle>
+          <AttachmentDescription>{detail}</AttachmentDescription>
+        </AttachmentContent>
+
+        <AttachmentActions className="gap-2">
+          <Badge variant={meta.variant}>
+            <Icon className={cn(item.status === "running" && "animate-spin")} />
+            {meta.label}
+          </Badge>
+
+          {item.output ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <AttachmentAction
+                  aria-label="Reveal transcript"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onReveal(item.output!);
+                  }}
+                  size="icon-sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <FolderOpen />
+                </AttachmentAction>
+              </TooltipTrigger>
+              <TooltipContent>Reveal transcript</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <AttachmentAction
+                  aria-label="Remove file"
+                  disabled={item.status === "running"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRemove(item.id);
+                  }}
+                  size="icon-sm"
+                  type="button"
+                >
+                  <Trash2 />
+                </AttachmentAction>
+              </TooltipTrigger>
+              <TooltipContent>Remove file</TooltipContent>
+            </Tooltip>
+          )}
+        </AttachmentActions>
+      </Attachment>
       <Progress className="mt-3 h-1.5" value={meta.progress} />
     </motion.li>
   );
