@@ -17,6 +17,7 @@ import {
   Minus,
   RotateCw,
   Save,
+  Search,
   Settings2,
   Sparkles,
   Square,
@@ -67,21 +68,41 @@ import {
 } from "@/components/ui/chart";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+  CommandShortcut,
+} from "@/components/ui/command";
 import {
-  Combobox,
-  ComboboxContent,
-  ComboboxEmpty,
-  ComboboxInput,
-  ComboboxItem,
-  ComboboxList,
-} from "@/components/ui/combobox";
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Drawer,
   DrawerContent,
@@ -182,10 +203,13 @@ export default function App() {
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
+  const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
+  const [previewText, setPreviewText] = useState("");
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -221,6 +245,18 @@ export default function App() {
 
     setStatus("Preview");
     setAuth("Tauri bridge");
+  }, []);
+
+  useEffect(() => {
+    function onKeyDown(event: globalThis.KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((open) => !open);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -495,6 +531,18 @@ export default function App() {
     setWorkspaceView("transcripts");
   }
 
+  async function previewHistoryEntry(entry: TranscriptHistoryEntry) {
+    selectHistoryEntry(entry);
+    setPreviewEntry(entry);
+    setPreviewText("");
+
+    try {
+      setPreviewText(await loadTranscriptText(entry.outputPath));
+    } catch {
+      setPreviewText("Preview unavailable. Open the transcript file from the actions menu.");
+    }
+  }
+
   return (
     <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
       <AppChrome />
@@ -520,10 +568,13 @@ export default function App() {
               <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
             </div>
 
-            <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
+            <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
               <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
               <Metric icon={FileText} label={`${history.length} saved`} />
               <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
+              <Button aria-label="Open command menu" onClick={() => setCommandOpen(true)} size="icon-sm" type="button" variant="outline">
+                <Search />
+              </Button>
               <Button aria-label="Open setup details" onClick={() => handleRailAction("details")} size="icon-sm" type="button" variant="outline">
                 <Settings2 />
               </Button>
@@ -631,6 +682,7 @@ export default function App() {
                 entries={history}
                 onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
                 onOpen={(entry) => void openTranscript(entry.outputPath)}
+                onPreview={(entry) => void previewHistoryEntry(entry)}
                 onRemove={removeHistoryEntry}
                 onReveal={(entry) => void revealPath(entry.outputPath)}
                 onSelect={selectHistoryEntry}
@@ -684,6 +736,24 @@ export default function App() {
         }}
         open={helpOpen}
       />
+      <CommandCenter
+        history={history}
+        onAction={handleRailAction}
+        onOpenChange={setCommandOpen}
+        onPickFiles={() => void pickFiles()}
+        onPreview={(entry) => void previewHistoryEntry(entry)}
+        open={commandOpen}
+      />
+      <TranscriptPreviewDialog
+        entry={previewEntry}
+        onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
+        onOpen={(entry) => void openTranscript(entry.outputPath)}
+        onOpenChange={(open) => {
+          if (!open) setPreviewEntry(undefined);
+        }}
+        onReveal={(entry) => void revealPath(entry.outputPath)}
+        text={previewText}
+      />
     </main>
   );
 }
@@ -699,6 +769,141 @@ async function runWindowAction(action: "minimize" | "toggleMaximize" | "close") 
   } catch {
     // ponytail: preview/dev without window permissions should not break the UI.
   }
+}
+
+function CommandCenter({
+  history,
+  onAction,
+  onOpenChange,
+  onPickFiles,
+  onPreview,
+  open,
+}: {
+  history: TranscriptHistoryEntry[];
+  onAction: (action: RailAction) => void;
+  onOpenChange: (open: boolean) => void;
+  onPickFiles: () => void;
+  onPreview: (entry: TranscriptHistoryEntry) => void;
+  open: boolean;
+}) {
+  function run(action: () => void) {
+    onOpenChange(false);
+    action();
+  }
+
+  return (
+    <CommandDialog
+      description="Search transcripts and jump around Yap."
+      onOpenChange={onOpenChange}
+      open={open}
+      title="Yap command menu"
+    >
+      <CommandInput placeholder="Search commands or transcripts..." />
+      <CommandList>
+        <CommandEmpty>No results found.</CommandEmpty>
+        <CommandGroup heading="Actions">
+          <CommandItem onSelect={() => run(onPickFiles)}>
+            <UploadCloud />
+            Add recordings
+            <CommandShortcut>Files</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onAction("home"))}>
+            <Grid2X2 />
+            Go home
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onAction("recordings"))}>
+            <FileAudio2 />
+            Recording queue
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onAction("transcripts"))}>
+            <FileText />
+            Transcripts
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onAction("polish"))}>
+            <Sparkles />
+            Polish
+          </CommandItem>
+        </CommandGroup>
+        <CommandSeparator />
+        <CommandGroup heading="System">
+          <CommandItem onSelect={() => run(() => onAction("details"))}>
+            <Settings2 />
+            Setup details
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onAction("help"))}>
+            <HelpCircle />
+            Help
+          </CommandItem>
+        </CommandGroup>
+        {history.length ? (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Recent transcripts">
+              {history.slice(0, 12).map((entry) => (
+                <CommandItem
+                  key={entry.outputPath}
+                  onSelect={() => run(() => onPreview(entry))}
+                  value={`${entry.name} ${entry.sourcePath} ${entry.outputPath}`}
+                >
+                  <FileText />
+                  <span className="truncate">{entry.name}</span>
+                  <CommandShortcut>{formatHistoryDate(entry.createdAt)}</CommandShortcut>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        ) : null}
+      </CommandList>
+    </CommandDialog>
+  );
+}
+
+function TranscriptPreviewDialog({
+  entry,
+  onCopy,
+  onOpen,
+  onOpenChange,
+  onReveal,
+  text,
+}: {
+  entry?: TranscriptHistoryEntry;
+  onCopy: (entry: TranscriptHistoryEntry) => void;
+  onOpen: (entry: TranscriptHistoryEntry) => void;
+  onOpenChange: (open: boolean) => void;
+  onReveal: (entry: TranscriptHistoryEntry) => void;
+  text: string;
+}) {
+  return (
+    <Dialog onOpenChange={onOpenChange} open={Boolean(entry)}>
+      <DialogContent className="max-h-[86vh] overflow-hidden sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{entry?.name ?? "Transcript preview"}</DialogTitle>
+          <DialogDescription className="truncate">{entry?.outputPath ?? "Local transcript"}</DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="max-h-[58vh] rounded-md border bg-muted">
+          <pre className="whitespace-pre-wrap break-words p-4 text-sm leading-6">
+            {text || "Loading transcript..."}
+          </pre>
+        </ScrollArea>
+        {entry ? (
+          <DialogFooter>
+            <Button onClick={() => onCopy(entry)} type="button" variant="outline">
+              <Copy data-icon="inline-start" />
+              Copy
+            </Button>
+            <Button onClick={() => onOpen(entry)} type="button" variant="outline">
+              <FileText data-icon="inline-start" />
+              Open
+            </Button>
+            <Button onClick={() => onReveal(entry)} type="button">
+              <FolderOpen data-icon="inline-start" />
+              Reveal
+            </Button>
+          </DialogFooter>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function AppChrome() {
@@ -981,10 +1186,16 @@ function recentHistoryActivity(entries: TranscriptHistoryEntry[]) {
   return days;
 }
 
+function historyEntryTime(entry: TranscriptHistoryEntry) {
+  const time = Date.parse(entry.createdAt);
+  return Number.isFinite(time) ? time : 0;
+}
+
 function HistoryList({
   entries,
   onCopy,
   onOpen,
+  onPreview,
   onRemove,
   onReveal,
   onSelect,
@@ -993,12 +1204,23 @@ function HistoryList({
   entries: TranscriptHistoryEntry[];
   onCopy: (entry: TranscriptHistoryEntry) => void;
   onOpen: (entry: TranscriptHistoryEntry) => void;
+  onPreview: (entry: TranscriptHistoryEntry) => void;
   onRemove: (outputPath: string) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
   onSelect: (entry: TranscriptHistoryEntry) => void;
   selectedOutputPath?: string;
 }) {
+  const [dateFilter, setDateFilter] = useState("");
   const [showFullPaths, setShowFullPaths] = useState(false);
+  const [sortNewestFirst, setSortNewestFirst] = useState(true);
+
+  const visibleEntries = useMemo(
+    () =>
+      entries
+        .filter((entry) => !dateFilter || localDayKey(new Date(entry.createdAt)) === dateFilter)
+        .sort((a, b) => (sortNewestFirst ? historyEntryTime(b) - historyEntryTime(a) : historyEntryTime(a) - historyEntryTime(b))),
+    [dateFilter, entries, sortNewestFirst],
+  );
 
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
@@ -1013,9 +1235,11 @@ function HistoryList({
           </CardTitle>
           <CardDescription>Saved transcripts stay on this computer.</CardDescription>
         </div>
-        {entries.length ? (
-          <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-72 sm:justify-self-end">
-            <HistoryJump entries={entries} onSelect={onSelect} selectedOutputPath={selectedOutputPath} />
+        {entries.length && dateFilter ? (
+          <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
+            <Button onClick={() => setDateFilter("")} size="sm" type="button" variant="outline">
+              Clear date
+            </Button>
           </CardAction>
         ) : null}
       </CardHeader>
@@ -1023,19 +1247,41 @@ function HistoryList({
       <CardContent className="grid gap-4 p-4 sm:p-5">
         {entries.length ? (
           <>
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto] lg:items-start">
               <HistoryActivityChart entries={entries} />
+              <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+                Saved date
+                <input
+                  className="h-9 rounded-md border bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  onChange={(event) => setDateFilter(event.target.value)}
+                  type="date"
+                  value={dateFilter}
+                />
+              </label>
+              <Button onClick={() => setSortNewestFirst((value) => !value)} size="sm" type="button" variant="outline">
+                {sortNewestFirst ? "Newest first" : "Oldest first"}
+              </Button>
               <label className="flex min-h-9 items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium">
                 <Checkbox checked={showFullPaths} onCheckedChange={(checked) => setShowFullPaths(checked === true)} />
                 <span>Full paths</span>
               </label>
             </div>
-            <ScrollArea className="h-[420px] pr-3">
-              <ul className="flex flex-col gap-2">
-                {entries.map((entry) => {
+            <div className="overflow-hidden rounded-md border bg-background">
+              <ScrollArea className="h-[420px]">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Transcript</TableHead>
+                      <TableHead>Saved</TableHead>
+                      <TableHead>Source</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {visibleEntries.length ? visibleEntries.map((entry) => {
                   const selected = entry.outputPath === selectedOutputPath;
 
-                  function selectFromKeyboard(event: KeyboardEvent<HTMLLIElement>) {
+                  function selectFromKeyboard(event: KeyboardEvent<HTMLTableRowElement>) {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       onSelect(entry);
@@ -1043,121 +1289,92 @@ function HistoryList({
                   }
 
                   return (
-                    <li
-                      className={cn(
-                        "list-none rounded-lg border bg-card p-3 outline-none transition-[border-color,box-shadow,background-color]",
-                        "focus-visible:ring-2 focus-visible:ring-ring/50",
-                        selected && "border-primary ring-2 ring-primary/15",
-                      )}
-                      key={entry.outputPath}
-                      onClick={() => onSelect(entry)}
-                      onKeyDown={selectFromKeyboard}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <Collapsible>
-                        <div className="flex min-w-0 items-start gap-3">
-                          <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
-                            <FileText className="size-5" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-semibold">{entry.name}</div>
-                            <div className="mt-1 text-xs font-medium text-muted-foreground">{formatHistoryDate(entry.createdAt)}</div>
-                          </div>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <ButtonGroup aria-label={`Actions for ${basename(entry.sourcePath)}`}>
-                            <Button
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onCopy(entry);
-                              }}
-                              size="xs"
-                              type="button"
-                              variant="outline"
-                            >
-                              <Copy data-icon="inline-start" />
-                              Copy
-                            </Button>
-                            <Button
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onOpen(entry);
-                              }}
-                              size="xs"
-                              type="button"
-                              variant="outline"
-                            >
-                              <FileText data-icon="inline-start" />
-                              Open
-                            </Button>
-                            <Button
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onReveal(entry);
-                              }}
-                              size="xs"
-                              type="button"
-                              variant="outline"
-                            >
-                              <FolderOpen data-icon="inline-start" />
-                              Reveal
-                            </Button>
-                          </ButtonGroup>
-                          <CollapsibleTrigger asChild>
-                            <Button onClick={(event) => event.stopPropagation()} size="xs" type="button" variant="ghost">
-                              Details
-                            </Button>
-                          </CollapsibleTrigger>
-                          <AlertDialog>
-                            <AlertDialogTrigger asChild>
-                              <Button
-                                onClick={(event) => event.stopPropagation()}
-                                size="xs"
-                                type="button"
-                                variant="ghost"
-                              >
-                                <Trash2 data-icon="inline-start" />
-                                Remove
-                              </Button>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent onClick={(event) => event.stopPropagation()}>
-                              <AlertDialogHeader>
-                                <AlertDialogTitle>Remove this history item?</AlertDialogTitle>
-                                <AlertDialogDescription>
-                                  This only removes the entry from Yap history. The transcript file stays on disk.
-                                </AlertDialogDescription>
-                              </AlertDialogHeader>
-                              <AlertDialogFooter>
-                                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                <AlertDialogAction
-                                  className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
-                                  onClick={() => onRemove(entry.outputPath)}
+                    <ContextMenu key={entry.outputPath}>
+                      <ContextMenuTrigger asChild>
+                        <TableRow
+                          className="cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                          data-state={selected ? "selected" : undefined}
+                          onClick={() => onSelect(entry)}
+                          onKeyDown={selectFromKeyboard}
+                          role="button"
+                          tabIndex={0}
+                        >
+                          <TableCell>
+                            <div className="max-w-[260px] truncate font-medium">{entry.name}</div>
+                            <div className="max-w-[260px] truncate text-xs text-muted-foreground">
+                              {showFullPaths ? entry.outputPath : basename(entry.outputPath)}
+                            </div>
+                          </TableCell>
+                          <TableCell>{formatHistoryDate(entry.createdAt)}</TableCell>
+                          <TableCell>
+                            <div className="max-w-[300px] truncate text-muted-foreground">
+                              {showFullPaths ? entry.sourcePath : basename(entry.sourcePath)}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end">
+                              <ButtonGroup aria-label={`Actions for ${basename(entry.sourcePath)}`}>
+                                <Button
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onPreview(entry);
+                                  }}
+                                  size="xs"
+                                  type="button"
+                                  variant="outline"
                                 >
-                                  Remove
-                                </AlertDialogAction>
-                              </AlertDialogFooter>
-                            </AlertDialogContent>
-                          </AlertDialog>
-                        </div>
-                        <CollapsibleContent>
-                          <div className="mt-3 grid gap-2 rounded-md bg-muted p-3 text-xs text-muted-foreground">
-                            <div className="grid gap-1 sm:grid-cols-[76px_minmax(0,1fr)]">
-                              <span className="font-medium text-foreground">Source</span>
-                              <span className="truncate">{showFullPaths ? entry.sourcePath : basename(entry.sourcePath)}</span>
+                                  <FileText data-icon="inline-start" />
+                                  Preview
+                                </Button>
+                                <Button
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onCopy(entry);
+                                  }}
+                                  size="xs"
+                                  type="button"
+                                  variant="outline"
+                                >
+                                  <Copy data-icon="inline-start" />
+                                  Copy
+                                </Button>
+                                <Button
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onReveal(entry);
+                                  }}
+                                  size="xs"
+                                  type="button"
+                                >
+                                  <FolderOpen data-icon="inline-start" />
+                                  Reveal
+                                </Button>
+                              </ButtonGroup>
                             </div>
-                            <div className="grid gap-1 sm:grid-cols-[76px_minmax(0,1fr)]">
-                              <span className="font-medium text-foreground">Transcript</span>
-                              <span className="truncate">{showFullPaths ? entry.outputPath : basename(entry.outputPath)}</span>
-                            </div>
-                          </div>
-                        </CollapsibleContent>
-                      </Collapsible>
-                    </li>
+                          </TableCell>
+                        </TableRow>
+                      </ContextMenuTrigger>
+                      <HistoryContextMenu
+                        entry={entry}
+                        onCopy={onCopy}
+                        onOpen={onOpen}
+                        onPreview={onPreview}
+                        onRemove={onRemove}
+                        onReveal={onReveal}
+                      />
+                    </ContextMenu>
                   );
-                })}
-              </ul>
-            </ScrollArea>
+                }) : (
+                  <TableRow>
+                    <TableCell className="h-24 text-center text-muted-foreground" colSpan={4}>
+                      No transcripts on that date.
+                    </TableCell>
+                  </TableRow>
+                )}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </div>
           </>
         ) : (
           <Empty className="min-h-[260px]">
@@ -1172,43 +1389,6 @@ function HistoryList({
         )}
       </CardContent>
     </Card>
-  );
-}
-
-function HistoryJump({
-  entries,
-  onSelect,
-  selectedOutputPath,
-}: {
-  entries: TranscriptHistoryEntry[];
-  onSelect: (entry: TranscriptHistoryEntry) => void;
-  selectedOutputPath?: string;
-}) {
-  const selected = entries.find((entry) => entry.outputPath === selectedOutputPath) ?? null;
-
-  return (
-    <Combobox
-      autoHighlight
-      itemToStringLabel={(entry: TranscriptHistoryEntry) => entry.name}
-      itemToStringValue={(entry: TranscriptHistoryEntry) => entry.outputPath}
-      items={entries}
-      onValueChange={(entry) => {
-        if (entry) onSelect(entry as TranscriptHistoryEntry);
-      }}
-      value={selected}
-    >
-      <ComboboxInput aria-label="Jump to transcript" placeholder="Jump to transcript" />
-      <ComboboxContent>
-        <ComboboxEmpty>No transcripts found.</ComboboxEmpty>
-        <ComboboxList>
-          {(entry: TranscriptHistoryEntry) => (
-            <ComboboxItem key={entry.outputPath} value={entry}>
-              <span className="truncate">{entry.name}</span>
-            </ComboboxItem>
-          )}
-        </ComboboxList>
-      </ComboboxContent>
-    </Combobox>
   );
 }
 
@@ -1230,6 +1410,48 @@ function HistoryActivityChart({ entries }: { entries: TranscriptHistoryEntry[] }
         </BarChart>
       </ChartContainer>
     </div>
+  );
+}
+
+function HistoryContextMenu({
+  entry,
+  onCopy,
+  onOpen,
+  onPreview,
+  onRemove,
+  onReveal,
+}: {
+  entry: TranscriptHistoryEntry;
+  onCopy: (entry: TranscriptHistoryEntry) => void;
+  onOpen: (entry: TranscriptHistoryEntry) => void;
+  onPreview: (entry: TranscriptHistoryEntry) => void;
+  onRemove: (outputPath: string) => void;
+  onReveal: (entry: TranscriptHistoryEntry) => void;
+}) {
+  return (
+    <ContextMenuContent>
+      <ContextMenuItem onSelect={() => onPreview(entry)}>
+        <FileText />
+        Preview
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => onCopy(entry)}>
+        <Copy />
+        Copy transcript
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => onOpen(entry)}>
+        <FileText />
+        Open file
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => onReveal(entry)}>
+        <FolderOpen />
+        Reveal in Explorer
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={() => onRemove(entry.outputPath)} variant="destructive">
+        <Trash2 />
+        Remove from history
+      </ContextMenuItem>
+    </ContextMenuContent>
   );
 }
 
