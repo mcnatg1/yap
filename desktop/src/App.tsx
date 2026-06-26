@@ -52,6 +52,7 @@ import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -530,21 +531,21 @@ export default function App() {
             {showQueue ? (
               <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
                 <CardHeader className="p-4 sm:p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <Badge className="w-fit" variant="outline">Today</Badge>
-                      <CardTitle className="mt-2 flex items-center gap-2 text-xl">
-                        Queue
-                        <Badge className="tabular-nums" variant="secondary">
-                          {queue.length}
-                        </Badge>
-                      </CardTitle>
-                      <CardDescription>
-                        {completed
-                          ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
-                          : "Drop recordings and transcribe them in place"}
-                      </CardDescription>
-                    </div>
+                  <div className="min-w-0">
+                    <Badge className="w-fit" variant="outline">Today</Badge>
+                    <CardTitle className="mt-2 flex items-center gap-2 text-xl">
+                      Queue
+                      <Badge className="tabular-nums" variant="secondary">
+                        {queue.length}
+                      </Badge>
+                    </CardTitle>
+                    <CardDescription>
+                      {completed
+                        ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
+                        : "Drop recordings and transcribe them in place"}
+                    </CardDescription>
+                  </div>
+                  <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
                     <ButtonGroup
                       aria-label="Queue actions"
                       className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
@@ -583,7 +584,7 @@ export default function App() {
                         Transcribe
                       </Button>
                     </ButtonGroup>
-                  </div>
+                  </CardAction>
                 </CardHeader>
                 <Separator />
                 <CardContent className="p-4 sm:p-5">
@@ -1171,17 +1172,17 @@ function PolishPanel({
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
       <CardHeader className="p-4 sm:p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <Badge className="w-fit" variant={ready ? "default" : "secondary"}>
-              <Sparkles data-icon="inline-start" />
-              Polish
-            </Badge>
-            <CardTitle className="mt-3 text-2xl">{ready ? "Ready to refine" : "Waiting on a transcript"}</CardTitle>
-            <CardDescription className="break-words">
-              {item ? item.name : "Select or transcribe a recording to start from real text."}
-            </CardDescription>
-          </div>
+        <div className="min-w-0">
+          <Badge className="w-fit" variant={ready ? "default" : "secondary"}>
+            <Sparkles data-icon="inline-start" />
+            Polish
+          </Badge>
+          <CardTitle className="mt-3 text-2xl">{ready ? "Ready to refine" : "Waiting on a transcript"}</CardTitle>
+          <CardDescription className="break-words">
+            {item ? item.name : "Select or transcribe a recording to start from real text."}
+          </CardDescription>
+        </div>
+        <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
           <ButtonGroup
             aria-label="Polish actions"
             className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
@@ -1203,7 +1204,7 @@ function PolishPanel({
               Save
             </Button>
           </ButtonGroup>
-        </div>
+        </CardAction>
       </CardHeader>
       <Separator />
       <CardContent className="grid gap-4 p-4 sm:p-5">
@@ -1294,18 +1295,18 @@ function TranscriptPanel({
   return (
     <Card className="min-h-[420px] min-w-0 border-[#eee8de] bg-card py-0 shadow-none xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
       <CardHeader className="p-4 sm:p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <Badge className="w-fit" variant="outline">
-              <FileText data-icon="inline-start" />
-              Transcript
-            </Badge>
-            <CardTitle className="mt-3 text-2xl">{title}</CardTitle>
-            <CardDescription className="truncate">
-              {item ? item.name : "Drop audio to start"}
-            </CardDescription>
-          </div>
-          {output ? (
+        <div className="min-w-0">
+          <Badge className="w-fit" variant="outline">
+            <FileText data-icon="inline-start" />
+            Transcript
+          </Badge>
+          <CardTitle className="mt-3 text-2xl">{title}</CardTitle>
+          <CardDescription className="truncate">
+            {item ? item.name : "Drop audio to start"}
+          </CardDescription>
+        </div>
+        {output ? (
+          <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
             <ButtonGroup
               aria-label="Transcript actions"
               className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
@@ -1323,8 +1324,8 @@ function TranscriptPanel({
                 Reveal
               </Button>
             </ButtonGroup>
-          ) : null}
-        </div>
+          </CardAction>
+        ) : null}
       </CardHeader>
       <Separator />
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 sm:p-5">
