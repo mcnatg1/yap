@@ -40,6 +40,14 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -163,12 +171,8 @@ export default function App() {
     [...queue].reverse().find((item) => item.status === "done") ??
     (history[0] ? historyEntryToUploadItem(history[0]) : undefined) ??
     queue[0];
-  const today = new Intl.DateTimeFormat(undefined, {
-    month: "long",
-    day: "numeric",
-    weekday: "long",
-  }).format(new Date());
   const workspace = workspaceCopy[workspaceView];
+  const breadcrumbResource = workspaceView === "home" ? undefined : selectedItem?.name;
   const showQueue = workspaceView === "home" || workspaceView === "recordings";
   const showHistory = workspaceView === "transcripts";
   const showTranscript = workspaceView === "home" || workspaceView === "transcripts" || workspaceView === "polish";
@@ -478,9 +482,11 @@ export default function App() {
                   <div className="text-sm text-muted-foreground">Private local transcription</div>
                 </div>
               </div>
-              <p className="text-sm font-medium text-muted-foreground">
-                {workspace.eyebrow} · {today}
-              </p>
+              <WorkspaceBreadcrumb
+                current={workspace.eyebrow}
+                onHome={() => handleRailAction("home")}
+                resource={breadcrumbResource}
+              />
               <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">{workspace.title}</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
             </div>
@@ -709,6 +715,46 @@ function AppChrome() {
         </Button>
       </div>
     </div>
+  );
+}
+
+function WorkspaceBreadcrumb({
+  current,
+  onHome,
+  resource,
+}: {
+  current: string;
+  onHome: () => void;
+  resource?: string;
+}) {
+  return (
+    <Breadcrumb>
+      <BreadcrumbList>
+        <BreadcrumbItem>
+          <BreadcrumbLink asChild>
+            <button className="font-medium" onClick={onHome} type="button">
+              Yap
+            </button>
+          </BreadcrumbLink>
+        </BreadcrumbItem>
+        <BreadcrumbSeparator />
+        <BreadcrumbItem>
+          {resource ? (
+            <span className="font-normal text-muted-foreground">{current}</span>
+          ) : (
+            <BreadcrumbPage>{current}</BreadcrumbPage>
+          )}
+        </BreadcrumbItem>
+        {resource ? (
+          <>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem className="min-w-0">
+              <BreadcrumbPage className="max-w-[min(56vw,420px)] truncate">{resource}</BreadcrumbPage>
+            </BreadcrumbItem>
+          </>
+        ) : null}
+      </BreadcrumbList>
+    </Breadcrumb>
   );
 }
 
