@@ -49,6 +49,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   Card,
   CardContent,
@@ -544,7 +545,10 @@ export default function App() {
                           : "Drop recordings and transcribe them in place"}
                       </CardDescription>
                     </div>
-                    <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
+                    <ButtonGroup
+                      aria-label="Queue actions"
+                      className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
+                    >
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
                           <Button disabled={running || !queue.length} size="sm" type="button" variant="outline">
@@ -578,7 +582,7 @@ export default function App() {
                         )}
                         Transcribe
                       </Button>
-                    </div>
+                    </ButtonGroup>
                   </div>
                 </CardHeader>
                 <Separator />
@@ -993,42 +997,44 @@ function HistoryList({
                       </div>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <Button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onCopy(entry);
-                        }}
-                        size="xs"
-                        type="button"
-                        variant="outline"
-                      >
-                        <Copy data-icon="inline-start" />
-                        Copy
-                      </Button>
-                      <Button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onOpen(entry);
-                        }}
-                        size="xs"
-                        type="button"
-                        variant="outline"
-                      >
-                        <FileText data-icon="inline-start" />
-                        Open
-                      </Button>
-                      <Button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onReveal(entry);
-                        }}
-                        size="xs"
-                        type="button"
-                        variant="outline"
-                      >
-                        <FolderOpen data-icon="inline-start" />
-                        Reveal
-                      </Button>
+                      <ButtonGroup aria-label={`Actions for ${basename(entry.sourcePath)}`}>
+                        <Button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onCopy(entry);
+                          }}
+                          size="xs"
+                          type="button"
+                          variant="outline"
+                        >
+                          <Copy data-icon="inline-start" />
+                          Copy
+                        </Button>
+                        <Button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpen(entry);
+                          }}
+                          size="xs"
+                          type="button"
+                          variant="outline"
+                        >
+                          <FileText data-icon="inline-start" />
+                          Open
+                        </Button>
+                        <Button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onReveal(entry);
+                          }}
+                          size="xs"
+                          type="button"
+                          variant="outline"
+                        >
+                          <FolderOpen data-icon="inline-start" />
+                          Reveal
+                        </Button>
+                      </ButtonGroup>
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
                           <Button
@@ -1176,7 +1182,10 @@ function PolishPanel({
               {item ? item.name : "Select or transcribe a recording to start from real text."}
             </CardDescription>
           </div>
-          <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
+          <ButtonGroup
+            aria-label="Polish actions"
+            className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
+          >
             <Button disabled={!canPolish} onClick={() => void runPolish()} size="sm" type="button">
               {running ? (
                 <RotateCw data-icon="inline-start" className="animate-spin" />
@@ -1193,7 +1202,7 @@ function PolishPanel({
               {saving ? <RotateCw data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}
               Save
             </Button>
-          </div>
+          </ButtonGroup>
         </div>
       </CardHeader>
       <Separator />
@@ -1297,7 +1306,10 @@ function TranscriptPanel({
             </CardDescription>
           </div>
           {output ? (
-            <div className="flex w-full flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
+            <ButtonGroup
+              aria-label="Transcript actions"
+              className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
+            >
               <Button onClick={() => void onCopy(item)} size="sm" type="button" variant="outline">
                 <Copy data-icon="inline-start" />
                 Copy transcript
@@ -1310,7 +1322,7 @@ function TranscriptPanel({
                 <FolderOpen data-icon="inline-start" />
                 Reveal
               </Button>
-            </div>
+            </ButtonGroup>
           ) : null}
         </div>
       </CardHeader>
