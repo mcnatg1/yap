@@ -133,6 +133,21 @@ import {
   MenubarShortcut,
   MenubarTrigger,
 } from "@/components/ui/menubar";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+import {
+  Popover,
+  PopoverContent,
+  PopoverDescription,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -619,7 +634,7 @@ export default function App() {
             <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
               <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
               <Metric icon={FileText} label={`${history.length} saved`} />
-              <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
+              <PrivacyStatus auth={auth} status={status} />
               <Button
                 aria-label="Open command menu"
                 className="px-2"
@@ -1201,6 +1216,29 @@ function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
   );
 }
 
+function PrivacyStatus({ auth, status }: { auth: string; status: string }) {
+  const label = auth === "Authorized" ? "Local" : status;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button className="w-full min-w-0 justify-start rounded-full px-2 font-semibold lg:w-auto" size="sm" type="button" variant="secondary">
+          <LockKeyhole data-icon="inline-start" />
+          <span className="truncate max-[359px]:sr-only">{label}</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end">
+        <PopoverHeader>
+          <PopoverTitle>{label}</PopoverTitle>
+          <PopoverDescription>
+            {auth === "Authorized" ? "Ready to transcribe local files and save transcripts on this computer." : status}
+          </PopoverDescription>
+        </PopoverHeader>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function DropHero({
   dragging,
   onDragLeave,
@@ -1326,6 +1364,7 @@ function HistoryList({
   const [searchFilter, setSearchFilter] = useState("");
   const [showFullPaths, setShowFullPaths] = useState(false);
   const [sortNewestFirst, setSortNewestFirst] = useState(true);
+  const [page, setPage] = useState(1);
 
   const visibleEntries = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
@@ -1338,6 +1377,10 @@ function HistoryList({
       })
       .sort((a, b) => (sortNewestFirst ? historyEntryTime(b) - historyEntryTime(a) : historyEntryTime(a) - historyEntryTime(b)));
   }, [dateFilter, entries, searchFilter, sortNewestFirst]);
+  const pageSize = 8;
+  const totalPages = Math.max(1, Math.ceil(visibleEntries.length / pageSize));
+  const pageNumber = Math.min(page, totalPages);
+  const pagedEntries = visibleEntries.slice((pageNumber - 1) * pageSize, pageNumber * pageSize);
 
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
@@ -1416,7 +1459,7 @@ function HistoryList({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {visibleEntries.length ? visibleEntries.map((entry) => {
+                    {pagedEntries.length ? pagedEntries.map((entry) => {
                   const selected = entry.outputPath === selectedOutputPath;
 
                   function selectFromKeyboard(event: KeyboardEvent<HTMLTableRowElement>) {
@@ -1472,7 +1515,7 @@ function HistoryList({
                 }) : (
                   <TableRow>
                     <TableCell className="h-24 text-center text-muted-foreground" colSpan={4}>
-                      No transcripts on that date.
+                      No transcripts match that view.
                     </TableCell>
                   </TableRow>
                 )}
@@ -1480,6 +1523,40 @@ function HistoryList({
                 </Table>
               </ScrollArea>
             </div>
+            {visibleEntries.length > pageSize ? (
+              <Pagination className="justify-end">
+                <PaginationContent>
+                  <PaginationItem>
+                    <PaginationPrevious
+                      aria-disabled={pageNumber === 1}
+                      className={cn(pageNumber === 1 && "pointer-events-none opacity-50")}
+                      href="#"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        setPage((value) => Math.max(1, value - 1));
+                      }}
+                      text="Prev"
+                    />
+                  </PaginationItem>
+                  <PaginationItem>
+                    <span className="px-2 text-sm text-muted-foreground">
+                      Page {pageNumber} of {totalPages}
+                    </span>
+                  </PaginationItem>
+                  <PaginationItem>
+                    <PaginationNext
+                      aria-disabled={pageNumber === totalPages}
+                      className={cn(pageNumber === totalPages && "pointer-events-none opacity-50")}
+                      href="#"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        setPage((value) => Math.min(totalPages, value + 1));
+                      }}
+                    />
+                  </PaginationItem>
+                </PaginationContent>
+              </Pagination>
+            ) : null}
           </>
         ) : (
           <Empty className="min-h-[260px]">
