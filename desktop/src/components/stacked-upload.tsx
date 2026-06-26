@@ -167,7 +167,7 @@ function UploadCard({
 
         <AttachmentActions className="gap-2">
           <Badge variant={meta.variant}>
-            <Icon className={cn(item.status === "running" && "animate-spin")} />
+            <Icon className={cn(item.status === "running" && "animate-spin")} data-icon="inline-start" />
             {meta.label}
           </Badge>
 

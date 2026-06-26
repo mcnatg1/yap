@@ -525,7 +525,7 @@ export default function App() {
                 <CardHeader className="p-4 sm:p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-xs font-semibold uppercase text-muted-foreground">Today</p>
+                      <Badge className="w-fit" variant="outline">Today</Badge>
                       <CardTitle className="mt-2 flex items-center gap-2 text-xl">
                         Queue
                         <Badge className="tabular-nums" variant="secondary">
@@ -800,7 +800,7 @@ function RailItem({
 function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
   return (
     <Badge className="max-w-full gap-2 rounded-full px-2 py-2 text-sm font-semibold tabular-nums sm:px-3" variant="secondary">
-      <Icon />
+      <Icon data-icon="inline-start" />
       <span className="whitespace-nowrap max-[359px]:sr-only">{label}</span>
     </Badge>
   );
@@ -833,7 +833,7 @@ function DropHero({
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.2),transparent_65%)]" />
         <div className="relative flex w-full min-w-0 max-w-3xl flex-col gap-5">
           <Badge className="w-fit border-white/20 bg-white/12 text-white hover:bg-white/12" variant="outline">
-            <LockKeyhole />
+            <LockKeyhole data-icon="inline-start" />
             Private on this device
           </Badge>
           <div>
@@ -896,7 +896,7 @@ function HistoryList({
       <CardHeader className="p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase text-muted-foreground">Local library</p>
+            <Badge className="w-fit" variant="outline">Local library</Badge>
             <CardTitle className="mt-2 flex items-center gap-2 text-xl">
               History
               <Badge className="tabular-nums" variant="secondary">
@@ -1122,7 +1122,7 @@ function PolishPanel({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <Badge className="w-fit" variant={ready ? "default" : "secondary"}>
-              <Sparkles />
+              <Sparkles data-icon="inline-start" />
               Polish
             </Badge>
             <CardTitle className="mt-3 text-2xl">{ready ? "Ready to refine" : "Waiting on a transcript"}</CardTitle>
@@ -1242,7 +1242,7 @@ function TranscriptPanel({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <Badge className="w-fit" variant="outline">
-              <FileText />
+              <FileText data-icon="inline-start" />
               Transcript
             </Badge>
             <CardTitle className="mt-3 text-2xl">{title}</CardTitle>
@@ -1286,7 +1286,7 @@ function TranscriptPanel({
               <>
                 <div className="flex items-center gap-2">
                   <Badge>
-                    <BadgeCheck />
+                    <BadgeCheck data-icon="inline-start" />
                     Saved
                   </Badge>
                   <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
