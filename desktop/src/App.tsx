@@ -15,6 +15,7 @@ import {
   HelpCircle,
   LockKeyhole,
   Minus,
+  MoreHorizontal,
   RotateCw,
   Save,
   Search,
@@ -92,7 +93,23 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -105,8 +122,10 @@ import {
 } from "@/components/ui/table";
 import {
   Drawer,
+  DrawerClose,
   DrawerContent,
   DrawerDescription,
+  DrawerFooter,
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
@@ -1249,22 +1268,27 @@ function HistoryList({
           <>
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto] lg:items-start">
               <HistoryActivityChart entries={entries} />
-              <label className="grid gap-1 text-xs font-medium text-muted-foreground">
-                Saved date
-                <input
-                  className="h-9 rounded-md border bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              <Field className="min-w-40 gap-1.5">
+                <FieldLabel htmlFor="history-date">Saved date</FieldLabel>
+                <Input
+                  id="history-date"
                   onChange={(event) => setDateFilter(event.target.value)}
                   type="date"
                   value={dateFilter}
                 />
-              </label>
+                <FieldDescription className="sr-only">Filter saved transcripts by local saved date.</FieldDescription>
+              </Field>
               <Button onClick={() => setSortNewestFirst((value) => !value)} size="sm" type="button" variant="outline">
                 {sortNewestFirst ? "Newest first" : "Oldest first"}
               </Button>
-              <label className="flex min-h-9 items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium">
-                <Checkbox checked={showFullPaths} onCheckedChange={(checked) => setShowFullPaths(checked === true)} />
-                <span>Full paths</span>
-              </label>
+              <Field className="min-h-9 rounded-md border bg-background px-3" orientation="horizontal">
+                <Checkbox
+                  checked={showFullPaths}
+                  id="history-full-paths"
+                  onCheckedChange={(checked) => setShowFullPaths(checked === true)}
+                />
+                <FieldLabel htmlFor="history-full-paths">Full paths</FieldLabel>
+              </Field>
             </div>
             <div className="overflow-hidden rounded-md border bg-background">
               <ScrollArea className="h-[420px]">
@@ -1301,55 +1325,22 @@ function HistoryList({
                         >
                           <TableCell>
                             <div className="max-w-[260px] truncate font-medium">{entry.name}</div>
-                            <div className="max-w-[260px] truncate text-xs text-muted-foreground">
-                              {showFullPaths ? entry.outputPath : basename(entry.outputPath)}
-                            </div>
+                            <PathPreview label="Transcript" path={entry.outputPath} short={!showFullPaths} />
                           </TableCell>
                           <TableCell>{formatHistoryDate(entry.createdAt)}</TableCell>
                           <TableCell>
-                            <div className="max-w-[300px] truncate text-muted-foreground">
-                              {showFullPaths ? entry.sourcePath : basename(entry.sourcePath)}
-                            </div>
+                            <PathPreview label="Source" path={entry.sourcePath} short={!showFullPaths} />
                           </TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end">
-                              <ButtonGroup aria-label={`Actions for ${basename(entry.sourcePath)}`}>
-                                <Button
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    onPreview(entry);
-                                  }}
-                                  size="xs"
-                                  type="button"
-                                  variant="outline"
-                                >
-                                  <FileText data-icon="inline-start" />
-                                  Preview
-                                </Button>
-                                <Button
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    onCopy(entry);
-                                  }}
-                                  size="xs"
-                                  type="button"
-                                  variant="outline"
-                                >
-                                  <Copy data-icon="inline-start" />
-                                  Copy
-                                </Button>
-                                <Button
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    onReveal(entry);
-                                  }}
-                                  size="xs"
-                                  type="button"
-                                >
-                                  <FolderOpen data-icon="inline-start" />
-                                  Reveal
-                                </Button>
-                              </ButtonGroup>
+                              <HistoryActionMenu
+                                entry={entry}
+                                onCopy={onCopy}
+                                onOpen={onOpen}
+                                onPreview={onPreview}
+                                onRemove={onRemove}
+                                onReveal={onReveal}
+                              />
                             </div>
                           </TableCell>
                         </TableRow>
@@ -1410,6 +1401,82 @@ function HistoryActivityChart({ entries }: { entries: TranscriptHistoryEntry[] }
         </BarChart>
       </ChartContainer>
     </div>
+  );
+}
+
+function PathPreview({ label, path, short }: { label: string; path: string; short: boolean }) {
+  return (
+    <HoverCard closeDelay={120} openDelay={120}>
+      <HoverCardTrigger asChild>
+        <div className="max-w-[300px] truncate text-xs text-muted-foreground">
+          {short ? basename(path) : path}
+        </div>
+      </HoverCardTrigger>
+      <HoverCardContent align="start" className="w-96">
+        <div className="grid gap-1">
+          <div className="text-sm font-medium">{label}</div>
+          <div className="break-all text-xs leading-5 text-muted-foreground">{path}</div>
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+function HistoryActionMenu({
+  entry,
+  onCopy,
+  onOpen,
+  onPreview,
+  onRemove,
+  onReveal,
+}: {
+  entry: TranscriptHistoryEntry;
+  onCopy: (entry: TranscriptHistoryEntry) => void;
+  onOpen: (entry: TranscriptHistoryEntry) => void;
+  onPreview: (entry: TranscriptHistoryEntry) => void;
+  onRemove: (outputPath: string) => void;
+  onReveal: (entry: TranscriptHistoryEntry) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          aria-label={`Actions for ${entry.name}`}
+          onClick={(event) => event.stopPropagation()}
+          size="icon-xs"
+          type="button"
+          variant="ghost"
+        >
+          <MoreHorizontal />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
+        <DropdownMenuLabel>Transcript</DropdownMenuLabel>
+        <DropdownMenuGroup>
+          <DropdownMenuItem onSelect={() => onPreview(entry)}>
+            <FileText />
+            Preview
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onCopy(entry)}>
+            <Copy />
+            Copy transcript
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onOpen(entry)}>
+            <FileText />
+            Open file
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onReveal(entry)}>
+            <FolderOpen />
+            Reveal in Explorer
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => onRemove(entry.outputPath)} variant="destructive">
+          <Trash2 />
+          Remove from history
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -1782,13 +1849,18 @@ function DetailsSheet({
           <DrawerTitle>Setup Details</DrawerTitle>
           <DrawerDescription>Local runner and output settings.</DrawerDescription>
         </DrawerHeader>
-        <div className="mt-6 flex flex-col gap-3">
+        <div className="flex flex-col gap-3 p-4 pt-0">
           <StatusRow icon={BadgeCheck} label="Status" value={status} />
           <StatusRow icon={Sparkles} label="Model" value={model} />
           <StatusRow icon={Cpu} label="Runner" value="RTX local runner" />
           <StatusRow icon={LockKeyhole} label="Auth" value={auth} />
           <StatusRow icon={FolderOutput} label="Output" value="Source folder, local fallback" />
         </div>
+        <DrawerFooter>
+          <DrawerClose asChild>
+            <Button type="button" variant="outline">Close</Button>
+          </DrawerClose>
+        </DrawerFooter>
       </DrawerContent>
     </Drawer>
   );
@@ -1802,12 +1874,17 @@ function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean) => vo
           <DrawerTitle>Help</DrawerTitle>
           <DrawerDescription>Quick map of the working controls.</DrawerDescription>
         </DrawerHeader>
-        <div className="mt-6 flex flex-col gap-3">
+        <div className="flex flex-col gap-3 p-4 pt-0">
           <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />
           <StatusRow icon={Sparkles} label="Transcribe" value="Saves beside the source when allowed, otherwise to local Yap transcripts." wrap />
           <StatusRow icon={Copy} label="Copy" value="Copies transcript text after a file finishes." wrap />
           <StatusRow icon={FolderOpen} label="Reveal" value="Shows the saved transcript in File Explorer." wrap />
         </div>
+        <DrawerFooter>
+          <DrawerClose asChild>
+            <Button type="button" variant="outline">Close</Button>
+          </DrawerClose>
+        </DrawerFooter>
       </DrawerContent>
     </Drawer>
   );
