@@ -16,7 +16,6 @@ import {
   LockKeyhole,
   Minus,
   MoreHorizontal,
-  RotateCw,
   Save,
   Search,
   Settings2,
@@ -67,7 +66,6 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   CommandDialog,
   CommandEmpty,
@@ -150,7 +148,18 @@ import {
 } from "@/components/ui/popover";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -168,7 +177,9 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
+import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   readTranscriptHistory,
   recordTranscriptHistory,
@@ -603,7 +614,8 @@ export default function App() {
   }
 
   return (
-    <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
+    <TooltipProvider>
+      <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
       <AppChrome
         canRunQueue={hasRunnable && !running}
         onAction={handleRailAction}
@@ -732,7 +744,7 @@ export default function App() {
                       </AlertDialog>
                       <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
                         {running ? (
-                          <RotateCw data-icon="inline-start" className="animate-spin" />
+                          <Spinner data-icon="inline-start" />
                         ) : (
                           <Sparkles data-icon="inline-start" />
                         )}
@@ -842,7 +854,8 @@ export default function App() {
         onReveal={(entry) => void revealPath(entry.outputPath)}
         text={previewText}
       />
-    </main>
+      </main>
+    </TooltipProvider>
   );
 }
 
@@ -1231,18 +1244,19 @@ function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
 
 function PrivacyStatus({ auth, status }: { auth: string; status: string }) {
   const label = auth === "Authorized" ? "Local" : status;
+  const checking = auth === "Checking" || status === "Starting";
 
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button className="w-full min-w-0 justify-start rounded-full px-2 font-semibold lg:w-auto" size="sm" type="button" variant="secondary">
           <LockKeyhole data-icon="inline-start" />
-          <span className="truncate max-[359px]:sr-only">{label}</span>
+          {checking ? <Skeleton className="h-4 w-14 rounded-full" /> : <span className="truncate max-[359px]:sr-only">{label}</span>}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end">
         <PopoverHeader>
-          <PopoverTitle>{label}</PopoverTitle>
+          <PopoverTitle>{checking ? "Checking setup" : label}</PopoverTitle>
           <PopoverDescription>
             {auth === "Authorized" ? "Ready to transcribe local files and save transcripts on this computer." : status}
           </PopoverDescription>
@@ -1378,6 +1392,7 @@ function HistoryList({
   const [showFullPaths, setShowFullPaths] = useState(false);
   const [sortNewestFirst, setSortNewestFirst] = useState(true);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState("8");
 
   const visibleEntries = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
@@ -1390,14 +1405,14 @@ function HistoryList({
       })
       .sort((a, b) => (sortNewestFirst ? historyEntryTime(b) - historyEntryTime(a) : historyEntryTime(a) - historyEntryTime(b)));
   }, [dateFilter, entries, searchFilter, sortNewestFirst]);
-  const pageSize = 8;
-  const totalPages = Math.max(1, Math.ceil(visibleEntries.length / pageSize));
+  const pageSizeNumber = Number(pageSize);
+  const totalPages = Math.max(1, Math.ceil(visibleEntries.length / pageSizeNumber));
   const pageNumber = Math.min(page, totalPages);
-  const pagedEntries = visibleEntries.slice((pageNumber - 1) * pageSize, pageNumber * pageSize);
+  const pagedEntries = visibleEntries.slice((pageNumber - 1) * pageSizeNumber, pageNumber * pageSizeNumber);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter, entries.length, searchFilter, sortNewestFirst]);
+  }, [dateFilter, entries.length, pageSize, searchFilter, sortNewestFirst]);
 
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
@@ -1424,7 +1439,7 @@ function HistoryList({
       <CardContent className="grid gap-4 p-4 sm:p-5">
         {entries.length ? (
           <>
-            <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)_auto_auto_auto] xl:items-start">
+            <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)_auto_auto_auto_auto] xl:items-start">
               <HistoryActivityChart entries={entries} />
               <Field className="min-w-0 gap-1.5">
                 <FieldLabel htmlFor="history-search">Search</FieldLabel>
@@ -1452,11 +1467,33 @@ function HistoryList({
                 />
                 <FieldDescription className="sr-only">Filter saved transcripts by local saved date.</FieldDescription>
               </Field>
-              <Button onClick={() => setSortNewestFirst((value) => !value)} size="sm" type="button" variant="outline">
+              <Toggle
+                aria-label="Sort newest first"
+                onPressedChange={setSortNewestFirst}
+                pressed={sortNewestFirst}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
                 {sortNewestFirst ? "Newest first" : "Oldest first"}
-              </Button>
+              </Toggle>
+              <Field className="min-w-28 gap-1.5">
+                <FieldLabel htmlFor="history-page-size">Rows</FieldLabel>
+                <Select onValueChange={setPageSize} value={pageSize}>
+                  <SelectTrigger id="history-page-size" size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="8">8 rows</SelectItem>
+                      <SelectItem value="16">16 rows</SelectItem>
+                      <SelectItem value="32">32 rows</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </Field>
               <Field className="min-h-9 rounded-md border bg-background px-3" orientation="horizontal">
-                <Checkbox
+                <Switch
                   checked={showFullPaths}
                   id="history-full-paths"
                   onCheckedChange={(checked) => setShowFullPaths(checked === true)}
@@ -1540,7 +1577,7 @@ function HistoryList({
                 </Table>
               </ScrollArea>
             </div>
-            {visibleEntries.length > pageSize ? (
+            {visibleEntries.length > pageSizeNumber ? (
               <Pagination className="justify-end">
                 <PaginationContent>
                   <PaginationItem>
@@ -1831,7 +1868,7 @@ function PolishPanel({
           >
             <Button disabled={!canPolish} onClick={() => void runPolish()} size="sm" type="button">
               {running ? (
-                <RotateCw data-icon="inline-start" className="animate-spin" />
+                <Spinner data-icon="inline-start" />
               ) : (
                 <Sparkles data-icon="inline-start" />
               )}
@@ -1842,7 +1879,7 @@ function PolishPanel({
               Copy
             </Button>
             <Button disabled={!hasPolishedText || saving} onClick={() => void savePolished()} size="sm" type="button" variant="outline">
-              {saving ? <RotateCw data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}
+              {saving ? <Spinner data-icon="inline-start" /> : <Save data-icon="inline-start" />}
               Save
             </Button>
           </ButtonGroup>
