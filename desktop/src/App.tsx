@@ -110,6 +110,19 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { Input } from "@/components/ui/input";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import {
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemMedia,
+  ItemTitle,
+} from "@/components/ui/item";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -591,8 +604,20 @@ export default function App() {
               <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
               <Metric icon={FileText} label={`${history.length} saved`} />
               <Metric icon={LockKeyhole} label={auth === "Authorized" ? "Local" : status} />
-              <Button aria-label="Open command menu" onClick={() => setCommandOpen(true)} size="icon-sm" type="button" variant="outline">
-                <Search />
+              <Button
+                aria-label="Open command menu"
+                className="px-2"
+                onClick={() => setCommandOpen(true)}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <Search data-icon="inline-start" />
+                <span className="hidden xl:inline">Command</span>
+                <KbdGroup className="hidden xl:inline-flex">
+                  <Kbd>Ctrl</Kbd>
+                  <Kbd>K</Kbd>
+                </KbdGroup>
               </Button>
               <Button aria-label="Open setup details" onClick={() => handleRailAction("details")} size="icon-sm" type="button" variant="outline">
                 <Settings2 />
@@ -1230,16 +1255,21 @@ function HistoryList({
   selectedOutputPath?: string;
 }) {
   const [dateFilter, setDateFilter] = useState("");
+  const [searchFilter, setSearchFilter] = useState("");
   const [showFullPaths, setShowFullPaths] = useState(false);
   const [sortNewestFirst, setSortNewestFirst] = useState(true);
 
-  const visibleEntries = useMemo(
-    () =>
-      entries
-        .filter((entry) => !dateFilter || localDayKey(new Date(entry.createdAt)) === dateFilter)
-        .sort((a, b) => (sortNewestFirst ? historyEntryTime(b) - historyEntryTime(a) : historyEntryTime(a) - historyEntryTime(b))),
-    [dateFilter, entries, sortNewestFirst],
-  );
+  const visibleEntries = useMemo(() => {
+    const query = searchFilter.trim().toLowerCase();
+
+    return entries
+      .filter((entry) => !dateFilter || localDayKey(new Date(entry.createdAt)) === dateFilter)
+      .filter((entry) => {
+        if (!query) return true;
+        return `${entry.name} ${entry.sourcePath} ${entry.outputPath}`.toLowerCase().includes(query);
+      })
+      .sort((a, b) => (sortNewestFirst ? historyEntryTime(b) - historyEntryTime(a) : historyEntryTime(a) - historyEntryTime(b)));
+  }, [dateFilter, entries, searchFilter, sortNewestFirst]);
 
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
@@ -1266,8 +1296,24 @@ function HistoryList({
       <CardContent className="grid gap-4 p-4 sm:p-5">
         {entries.length ? (
           <>
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto] lg:items-start">
+            <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)_auto_auto_auto] xl:items-start">
               <HistoryActivityChart entries={entries} />
+              <Field className="min-w-0 gap-1.5">
+                <FieldLabel htmlFor="history-search">Search</FieldLabel>
+                <InputGroup>
+                  <InputGroupInput
+                    id="history-search"
+                    onChange={(event) => setSearchFilter(event.target.value)}
+                    placeholder="Transcript or path"
+                    type="search"
+                    value={searchFilter}
+                  />
+                  <InputGroupAddon align="inline-end">
+                    <Search />
+                  </InputGroupAddon>
+                </InputGroup>
+                <FieldDescription className="sr-only">Filter transcripts by name, source, or output path.</FieldDescription>
+              </Field>
               <Field className="min-w-40 gap-1.5">
                 <FieldLabel htmlFor="history-date">Saved date</FieldLabel>
                 <Input
@@ -1902,16 +1948,16 @@ function StatusRow({
   wrap?: boolean;
 }) {
   return (
-    <Card className="gap-0 py-0 shadow-none">
-      <CardContent className="flex items-center gap-3 p-3">
-        <div className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
-          <Icon className="size-4" />
-        </div>
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-muted-foreground">{label}</div>
-          <div className={cn("text-sm font-semibold", wrap ? "leading-5" : "truncate")}>{value}</div>
-        </div>
-      </CardContent>
-    </Card>
+    <Item size="sm" variant="outline">
+      <ItemMedia variant="icon">
+        <Icon />
+      </ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle className="text-xs text-muted-foreground">{label}</ItemTitle>
+        <ItemDescription className={cn("font-semibold text-foreground", wrap ? "line-clamp-none break-words" : "truncate")}>
+          {value}
+        </ItemDescription>
+      </ItemContent>
+    </Item>
   );
 }
