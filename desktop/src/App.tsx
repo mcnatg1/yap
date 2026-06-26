@@ -123,6 +123,16 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
+import {
+  Menubar,
+  MenubarContent,
+  MenubarGroup,
+  MenubarItem,
+  MenubarMenu,
+  MenubarSeparator,
+  MenubarShortcut,
+  MenubarTrigger,
+} from "@/components/ui/menubar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -577,7 +587,13 @@ export default function App() {
 
   return (
     <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
-      <AppChrome />
+      <AppChrome
+        canRunQueue={hasRunnable && !running}
+        onAction={handleRailAction}
+        onOpenCommand={() => setCommandOpen(true)}
+        onPickFiles={() => void pickFiles()}
+        onRunQueue={() => void runQueue()}
+      />
       <div className="mx-auto flex w-full max-w-[1480px] min-w-0 gap-4 p-3 pt-0 sm:p-4 sm:pt-0">
         <ProductRail active={activeRail} auth={auth} model={model} onAction={handleRailAction} status={status} />
 
@@ -950,7 +966,19 @@ function TranscriptPreviewDialog({
   );
 }
 
-function AppChrome() {
+function AppChrome({
+  canRunQueue,
+  onAction,
+  onOpenCommand,
+  onPickFiles,
+  onRunQueue,
+}: {
+  canRunQueue: boolean;
+  onAction: (action: RailAction) => void;
+  onOpenCommand: () => void;
+  onPickFiles: () => void;
+  onRunQueue: () => void;
+}) {
   return (
     <div
       className="flex h-10 select-none items-center border-b border-border/70 bg-background/95 text-foreground"
@@ -962,6 +990,46 @@ function AppChrome() {
           Yap
         </span>
       </div>
+      <Menubar className="hidden h-8 border-0 bg-transparent p-0 shadow-none sm:flex">
+        <MenubarMenu>
+          <MenubarTrigger>File</MenubarTrigger>
+          <MenubarContent>
+            <MenubarGroup>
+              <MenubarItem onSelect={onPickFiles}>Add recordings</MenubarItem>
+              <MenubarItem disabled={!canRunQueue} onSelect={onRunQueue}>
+                Transcribe queued
+              </MenubarItem>
+            </MenubarGroup>
+          </MenubarContent>
+        </MenubarMenu>
+        <MenubarMenu>
+          <MenubarTrigger>View</MenubarTrigger>
+          <MenubarContent>
+            <MenubarGroup>
+              <MenubarItem onSelect={() => onAction("home")}>Home</MenubarItem>
+              <MenubarItem onSelect={() => onAction("recordings")}>Recordings</MenubarItem>
+              <MenubarItem onSelect={() => onAction("transcripts")}>Transcripts</MenubarItem>
+              <MenubarItem onSelect={() => onAction("polish")}>Polish</MenubarItem>
+            </MenubarGroup>
+            <MenubarSeparator />
+            <MenubarGroup>
+              <MenubarItem onSelect={onOpenCommand}>
+                Command palette
+                <MenubarShortcut>Ctrl K</MenubarShortcut>
+              </MenubarItem>
+            </MenubarGroup>
+          </MenubarContent>
+        </MenubarMenu>
+        <MenubarMenu>
+          <MenubarTrigger>Help</MenubarTrigger>
+          <MenubarContent>
+            <MenubarGroup>
+              <MenubarItem onSelect={() => onAction("details")}>Setup details</MenubarItem>
+              <MenubarItem onSelect={() => onAction("help")}>How Yap works</MenubarItem>
+            </MenubarGroup>
+          </MenubarContent>
+        </MenubarMenu>
+      </Menubar>
       <div className="min-w-4 flex-1" data-tauri-drag-region />
       <div className="flex h-full">
         <Button
