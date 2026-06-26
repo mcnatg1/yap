@@ -148,6 +148,7 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -273,6 +274,7 @@ export default function App() {
     [queue],
   );
   const completed = queue.filter((item) => item.status === "done").length;
+  const queueProgress = queue.length ? Math.round((completed / queue.length) * 100) : 0;
   const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
   const selectedHistoryItem = selectedHistoryEntry ? historyEntryToUploadItem(selectedHistoryEntry) : undefined;
   const selectedItem =
@@ -741,6 +743,17 @@ export default function App() {
                 </CardHeader>
                 <Separator />
                 <CardContent className="p-4 sm:p-5">
+                  {queue.length ? (
+                    <Field className="mb-4 gap-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <FieldLabel>Queue progress</FieldLabel>
+                        <FieldDescription>
+                          {completed} of {queue.length}
+                        </FieldDescription>
+                      </div>
+                      <Progress value={queueProgress} />
+                    </Field>
+                  ) : null}
                   <StackedUpload
                     items={queue}
                     onRemove={removeItem}
@@ -1381,6 +1394,10 @@ function HistoryList({
   const totalPages = Math.max(1, Math.ceil(visibleEntries.length / pageSize));
   const pageNumber = Math.min(page, totalPages);
   const pagedEntries = visibleEntries.slice((pageNumber - 1) * pageSize, pageNumber * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [dateFilter, entries.length, searchFilter, sortNewestFirst]);
 
   return (
     <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
