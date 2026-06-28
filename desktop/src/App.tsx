@@ -147,6 +147,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Progress } from "@/components/ui/progress";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -2007,68 +2012,72 @@ function TranscriptPanel({
         ) : null}
       </CardHeader>
       <Separator />
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 sm:p-5">
-        <Alert className="bg-muted">
-          <FileText />
-          <div className="min-w-0">
-            <AlertTitle>{item?.name ?? "Nothing selected"}</AlertTitle>
-            <AlertDescription className="mt-1 truncate">
-              {output ?? item?.path ?? "Files stay local until you drop them here."}
-            </AlertDescription>
-          </div>
-        </Alert>
-
-        <ScrollArea className="min-h-[240px] flex-1 rounded-lg border bg-[#fffdf8]">
-          <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
-            {item?.status === "done" ? (
-              <>
-                <div className="flex items-center gap-2">
-                  <Badge>
-                    <BadgeCheck data-icon="inline-start" />
-                    Saved
-                  </Badge>
-                  <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
-                </div>
-                {text ? (
-                  <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
-                    {text}
-                  </pre>
-                ) : (
-                  <Alert>
-                    <FileText />
-                    <AlertDescription>
-                      Loading transcript preview. You can still open or reveal the saved file.
-                    </AlertDescription>
+      <CardContent className="min-h-0 flex-1 p-4 sm:p-5">
+        <ResizablePanelGroup className="min-h-[360px]" orientation="vertical">
+          <ResizablePanel defaultSize={22} minSize={18}>
+            <Alert className="bg-muted">
+              <FileText />
+              <div className="min-w-0">
+                <AlertTitle>{item?.name ?? "Nothing selected"}</AlertTitle>
+                <AlertDescription className="mt-1 truncate">
+                  {output ?? item?.path ?? "Files stay local until you drop them here."}
+                </AlertDescription>
+              </div>
+            </Alert>
+          </ResizablePanel>
+          <ResizableHandle className="my-3" withHandle />
+          <ResizablePanel defaultSize={78} minSize={42}>
+            <ScrollArea className="h-full min-h-[240px] rounded-lg border bg-[#fffdf8]">
+              <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
+                {item?.status === "done" ? (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <Badge>
+                        <BadgeCheck data-icon="inline-start" />
+                        Saved
+                      </Badge>
+                      <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
+                    </div>
+                    {text ? (
+                      <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                        {text}
+                      </pre>
+                    ) : (
+                      <Alert>
+                        <FileText />
+                        <AlertDescription>
+                          Loading transcript preview. You can still open or reveal the saved file.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                  </>
+                ) : item?.status === "error" ? (
+                  <Alert variant="destructive">
+                    <HelpCircle />
+                    <AlertDescription>{item.error}</AlertDescription>
                   </Alert>
+                ) : item ? (
+                  <>
+                    <Badge variant="secondary">{running ? "Transcribing locally" : "Queued"}</Badge>
+                    <p className="text-sm leading-6 text-muted-foreground">
+                      This panel switches to the finished transcript as soon as the local run completes.
+                    </p>
+                  </>
+                ) : (
+                  <Empty className="border-0 bg-transparent">
+                    <EmptyMedia>
+                      <FileText />
+                    </EmptyMedia>
+                    <div>
+                      <EmptyTitle>Drop audio to create a transcript</EmptyTitle>
+                      <EmptyDescription>Yap saves the transcript locally when the source is protected.</EmptyDescription>
+                    </div>
+                  </Empty>
                 )}
-              </>
-            ) : item?.status === "error" ? (
-              <>
-                <Alert variant="destructive">
-                  <HelpCircle />
-                  <AlertDescription>{item.error}</AlertDescription>
-                </Alert>
-              </>
-            ) : item ? (
-              <>
-                <Badge variant="secondary">{running ? "Transcribing locally" : "Queued"}</Badge>
-                <p className="text-sm leading-6 text-muted-foreground">
-                  This panel switches to the finished transcript as soon as the local run completes.
-                </p>
-              </>
-            ) : (
-              <Empty className="border-0 bg-transparent">
-                <EmptyMedia>
-                  <FileText />
-                </EmptyMedia>
-                <div>
-                  <EmptyTitle>Drop audio to create a transcript</EmptyTitle>
-                  <EmptyDescription>Yap saves the transcript locally when the source is protected.</EmptyDescription>
-                </div>
-              </Empty>
-            )}
-          </div>
-        </ScrollArea>
+              </div>
+            </ScrollArea>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </CardContent>
     </Card>
   );
