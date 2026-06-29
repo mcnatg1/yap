@@ -1113,7 +1113,7 @@ function ProductRail({
   onAction: (action: RailAction) => void;
 }) {
   return (
-    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background pb-3 pt-4", collapsed && "items-center")}>
+    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background px-[15px] pb-3 pt-4", collapsed && "items-center")}>
       <div className={cn("mb-5 flex items-center gap-2 px-1", collapsed && "justify-center px-0")}>
         <AppIcon className="size-6 rounded-md" />
         {collapsed ? null : (
