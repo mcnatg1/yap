@@ -288,8 +288,7 @@ export default function App() {
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
-  const [widePaneLayout, setWidePaneLayout] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
-  const [desktopShellLayout, setDesktopShellLayout] = useState(() => window.matchMedia("(min-width: 1024px)").matches);
+  const [desktopShellLayout, setDesktopShellLayout] = useState(() => window.matchMedia("(min-width: 1180px)").matches);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -341,15 +340,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const query = window.matchMedia("(min-width: 1280px)");
-    const sync = () => setWidePaneLayout(query.matches);
-    sync();
-    query.addEventListener("change", sync);
-    return () => query.removeEventListener("change", sync);
-  }, []);
-
-  useEffect(() => {
-    const query = window.matchMedia("(min-width: 1024px)");
+    const query = window.matchMedia("(min-width: 1180px)");
     const sync = () => setDesktopShellLayout(query.matches);
     sync();
     query.addEventListener("change", sync);
@@ -764,18 +755,7 @@ export default function App() {
       />
     </div>
   ) : null;
-  const canResizeWorkspace = widePaneLayout && showTranscript && (showQueue || showHistory || showPolish);
-  const workspaceMain = canResizeWorkspace ? (
-    <ResizablePanelGroup className="min-h-[520px]" orientation="horizontal">
-      <ResizablePanel defaultSize={showQueue ? 58 : 52} minSize={32}>
-        {workspaceLeftPane}
-      </ResizablePanel>
-      <ResizableHandle className="mx-3" withHandle />
-      <ResizablePanel defaultSize={showQueue ? 42 : 48} minSize={30}>
-        {workspaceTranscriptPane}
-      </ResizablePanel>
-    </ResizablePanelGroup>
-  ) : (
+  const workspaceMain = (
     <div
       className={cn(
         "grid w-full min-w-0 gap-5",
@@ -790,15 +770,17 @@ export default function App() {
   );
   const appWorkspace = (
     <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
-      <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+      <header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
         <div className="min-w-0">
-          <div className="mb-4 flex items-center gap-3 lg:hidden">
-            <AppIcon className="size-10 rounded-xl shadow-sm" />
-            <div>
-              <div className="text-lg font-semibold">Yap</div>
-              <div className="text-sm text-muted-foreground">Private local transcription</div>
+          {!desktopShellLayout ? (
+            <div className="mb-4 flex items-center gap-3">
+              <AppIcon className="size-10 rounded-xl shadow-sm" />
+              <div>
+                <div className="text-lg font-semibold">Yap</div>
+                <div className="text-sm text-muted-foreground">Private local transcription</div>
+              </div>
             </div>
-          </div>
+          ) : null}
           <WorkspaceBreadcrumb
             current={workspace.eyebrow}
             onHome={() => handleRailAction("home")}
@@ -808,7 +790,7 @@ export default function App() {
           <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
         </div>
 
-        <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
+        <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 xl:flex xl:w-auto xl:gap-2 xl:rounded-full">
           <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
           <Metric icon={FileText} label={`${history.length} saved`} />
           <PrivacyStatus auth={auth} status={status} />
@@ -884,7 +866,7 @@ export default function App() {
                 status={status}
               />
             </ResizablePanel>
-            <ResizableHandle className={cn("mx-3", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
+            <ResizableHandle className={cn("z-10 -mx-1 bg-transparent", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
             <ResizablePanel defaultSize={railCollapsed ? "94.5%" : "83%"} minSize="60%">
               {appWorkspace}
             </ResizablePanel>
