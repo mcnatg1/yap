@@ -744,14 +744,14 @@ export default function App() {
     </div>
   );
   const appWorkspace = (
-    <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card p-4 shadow-none sm:p-6 lg:p-8">
-      <header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
+    <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card p-[15px] shadow-none">
+      <header className="grid gap-4">
         <div className="min-w-0">
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{workspace.title}</h1>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
         </div>
 
-        <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 xl:flex xl:w-auto xl:gap-2 xl:rounded-full">
+        <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 rounded-2xl bg-secondary p-1">
           <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
           <Metric icon={FileText} label={`${history.length} saved`} />
           <PrivacyStatus auth={auth} status={status} />
@@ -807,7 +807,7 @@ export default function App() {
         collapsed={railCollapsed}
         onToggleRail={() => setRailCollapsed((collapsed) => !collapsed)}
       />
-      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background p-3 pt-0 sm:p-4 sm:pt-0">
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background px-[15px] pb-[15px] pt-0">
         <ResizablePanelGroup className="h-full min-h-0 bg-background" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
           <ResizablePanel
             className="bg-background"
