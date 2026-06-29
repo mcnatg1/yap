@@ -1256,7 +1256,7 @@ function PrivacyStatus({ auth, status }: { auth: string; status: string }) {
       <PopoverTrigger asChild>
         <Button className="w-full min-w-0 justify-start rounded-full px-2 font-semibold lg:w-auto" size="sm" type="button" variant="secondary">
           <LockKeyhole data-icon="inline-start" />
-          {checking ? <Skeleton className="h-4 w-14 rounded-full" /> : <span className="truncate max-[359px]:sr-only">{label}</span>}
+          {checking ? <Skeleton className="h-4 w-14 rounded-full" /> : <span className="truncate max-sm:sr-only">{label}</span>}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end">
