@@ -164,7 +164,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
@@ -630,7 +629,7 @@ export default function App() {
   const workspaceLeftPane = (
     <>
       {showQueue ? (
-        <Card className="h-full min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+        <Card className="h-full min-w-0 bg-card py-0">
           <CardHeader className="p-4 sm:p-5">
             <div className="min-w-0">
               <Badge className="w-fit" variant="outline">Today</Badge>
@@ -687,7 +686,6 @@ export default function App() {
               </ButtonGroup>
             </CardAction>
           </CardHeader>
-          <Separator />
           <CardContent className="p-4 sm:p-5">
             {queue.length ? (
               <Field className="mb-4 gap-2">
@@ -1495,7 +1493,7 @@ function HistoryList({
   }, [dateFilter, entries.length, pageSize, searchFilter, sortNewestFirst]);
 
   return (
-    <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+    <Card className="min-w-0 bg-card py-0">
       <CardHeader className="p-4 sm:p-5">
         <div className="min-w-0">
           <Badge className="w-fit" variant="outline">Local library</Badge>
@@ -1515,7 +1513,6 @@ function HistoryList({
           </CardAction>
         ) : null}
       </CardHeader>
-      <Separator />
       <CardContent className="grid gap-4 p-4 sm:p-5">
         {entries.length ? (
           <>
@@ -1929,7 +1926,7 @@ function PolishPanel({
   }
 
   return (
-    <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+    <Card className="min-w-0 bg-card py-0">
       <CardHeader className="p-4 sm:p-5">
         <div className="min-w-0">
           <Badge className="w-fit" variant={ready ? "default" : "secondary"}>
@@ -1965,7 +1962,6 @@ function PolishPanel({
           </ButtonGroup>
         </CardAction>
       </CardHeader>
-      <Separator />
       <CardContent className="grid gap-4 p-4 sm:p-5">
         <ToggleGroup
           className="grid grid-cols-3"
@@ -2014,7 +2010,7 @@ function PolishPanel({
 
 function TextPreview({ empty, title, value }: { empty: string; title: string; value?: string }) {
   return (
-    <Card className="min-w-0 gap-0 bg-[#fffdf8] py-0 shadow-none">
+    <Card className="min-w-0 gap-0 border bg-[#fffdf8] py-0 shadow-none">
       <CardHeader className="border-b p-3">
         <CardTitle className="text-xs font-semibold uppercase text-muted-foreground">{title}</CardTitle>
       </CardHeader>
@@ -2052,7 +2048,7 @@ function TranscriptPanel({
   const output = item?.output;
 
   return (
-    <Card className="min-h-[420px] min-w-0 border-[#eee8de] bg-card py-0 shadow-none xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
+    <Card className="min-h-[420px] min-w-0 bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
       <CardHeader className="p-4 sm:p-5">
         <div className="min-w-0">
           <Badge className="w-fit" variant="outline">
@@ -2086,7 +2082,6 @@ function TranscriptPanel({
           </CardAction>
         ) : null}
       </CardHeader>
-      <Separator />
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 sm:p-5">
         <Alert className="bg-muted">
           <FileText />
