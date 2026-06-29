@@ -240,6 +240,7 @@ const workspaceCopy: Record<WorkspaceView, { eyebrow: string; title: string; des
 const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
 const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
+const desktopShellMinWidth = 1120;
 const historyChartConfig = {
   transcripts: {
     label: "Transcripts",
@@ -288,7 +289,7 @@ export default function App() {
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
-  const [desktopShellLayout, setDesktopShellLayout] = useState(() => window.matchMedia("(min-width: 1180px)").matches);
+  const [desktopShellLayout, setDesktopShellLayout] = useState(() => window.matchMedia(`(min-width: ${desktopShellMinWidth}px)`).matches);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -340,7 +341,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const query = window.matchMedia("(min-width: 1180px)");
+    const query = window.matchMedia(`(min-width: ${desktopShellMinWidth}px)`);
     const sync = () => setDesktopShellLayout(query.matches);
     sync();
     query.addEventListener("change", sync);
