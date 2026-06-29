@@ -770,7 +770,7 @@ export default function App() {
     </div>
   );
   const appWorkspace = (
-    <section className="h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
+    <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
       <header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
         <div className="min-w-0">
           {!desktopShellLayout ? (
@@ -849,7 +849,7 @@ export default function App() {
         onPickFiles={() => void pickFiles()}
         onRunQueue={() => void runQueue()}
       />
-      <div className="mx-auto min-h-0 w-full max-w-[1480px] min-w-0 flex-1 overflow-hidden p-3 pt-0 sm:p-4 sm:pt-0">
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden p-3 pt-0 sm:p-4 sm:pt-0">
         {desktopShellLayout ? (
           <ResizablePanelGroup className="h-full min-h-0" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
             <ResizablePanel
