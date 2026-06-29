@@ -18,6 +18,7 @@
         "height": 760,
         "minWidth": 1122,
         "minHeight": 740,
+        "backgroundColor": "#f3f0ea",
         "devtools": true,
         "decorations": false,
         "dragDropEnabled": true

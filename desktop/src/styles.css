@@ -92,6 +92,7 @@
   }
 
   body {
+    background: var(--background);
     min-width: 0;
     min-height: 620px;
     height: 100%;
@@ -100,6 +101,7 @@
   }
 
   #root {
+    background: var(--background);
     height: 100%;
     overflow: hidden;
   }

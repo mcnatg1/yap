@@ -765,7 +765,7 @@ export default function App() {
     </div>
   );
   const appWorkspace = (
-    <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
+    <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card p-4 shadow-none sm:p-6 lg:p-8">
       <header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
         <div className="min-w-0">
           <WorkspaceBreadcrumb
@@ -836,9 +836,10 @@ export default function App() {
         onPickFiles={() => void pickFiles()}
         onRunQueue={() => void runQueue()}
       />
-      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden p-3 pt-0 sm:p-4 sm:pt-0">
-        <ResizablePanelGroup className="h-full min-h-0" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background p-3 pt-0 sm:p-4 sm:pt-0">
+        <ResizablePanelGroup className="h-full min-h-0 bg-background" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
           <ResizablePanel
+            className="bg-background"
             defaultSize={railCollapsed ? "5.5%" : "17%"}
             maxSize={railCollapsed ? "5.5%" : "24%"}
             minSize={railCollapsed ? "5.5%" : "13%"}
@@ -851,7 +852,7 @@ export default function App() {
             />
           </ResizablePanel>
           <ResizableHandle className={cn("z-10 -mx-1 bg-transparent", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
-          <ResizablePanel defaultSize={railCollapsed ? "94.5%" : "83%"} minSize="60%">
+          <ResizablePanel className="bg-background" defaultSize={railCollapsed ? "94.5%" : "83%"} minSize="60%">
             {appWorkspace}
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -1361,14 +1362,14 @@ function DropHero({
   return (
     <section
       className={cn(
-        "mt-7 w-full max-w-full overflow-hidden rounded-[28px] border bg-[#17120e] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] transition-[border-color,box-shadow] duration-200",
+        "mt-7 w-full max-w-full overflow-hidden rounded-[28px] border bg-[linear-gradient(110deg,#3b2a21_0%,#6f3c24_42%,#034f46_100%)] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] transition-[border-color,box-shadow] duration-200",
         dragging && "border-primary shadow-lg shadow-primary/15",
       )}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <div className="relative min-h-[260px] w-full max-w-full bg-[linear-gradient(110deg,#17120e_0%,#6f3c24_42%,#034f46_100%)] p-6 sm:p-10">
+      <div className="relative min-h-[260px] w-full max-w-full p-6 sm:p-10">
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.2),transparent_65%)]" />
         <div className="relative flex w-full min-w-0 max-w-3xl flex-col gap-5">
           <Badge className="w-fit border-white/20 bg-white/12 text-white hover:bg-white/12" variant="outline">
