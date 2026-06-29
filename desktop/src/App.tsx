@@ -865,12 +865,9 @@ export default function App() {
             >
               <ProductRail
                 active={activeRail}
-                auth={auth}
                 collapsed={railCollapsed}
-                model={model}
                 onAction={handleRailAction}
                 onToggle={() => setRailCollapsed((collapsed) => !collapsed)}
-                status={status}
               />
             </ResizablePanel>
             <ResizableHandle className={cn("z-10 -mx-1 bg-transparent", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
@@ -1240,20 +1237,14 @@ function AppIcon({ className }: { className?: string }) {
 
 function ProductRail({
   active,
-  auth,
   collapsed,
-  model,
   onAction,
   onToggle,
-  status,
 }: {
   active: RailAction;
-  auth: string;
   collapsed: boolean;
-  model: string;
   onAction: (action: RailAction) => void;
   onToggle: () => void;
-  status: string;
 }) {
   return (
     <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-[#f5f3ee] p-3", collapsed && "items-center")}>
@@ -1305,14 +1296,7 @@ function ProductRail({
       </nav>
 
       <div className="mt-auto flex w-full flex-col gap-1 border-t pt-4">
-        <RailItem
-          active={active === "details"}
-          collapsed={collapsed}
-          icon={LockKeyhole}
-          label={auth === "Authorized" ? "Local mode" : status}
-          onClick={() => onAction("details")}
-        />
-        <RailItem active={active === "details"} collapsed={collapsed} icon={Settings2} label={model} onClick={() => onAction("details")} />
+        <RailItem active={active === "details"} collapsed={collapsed} icon={Settings2} label="Settings" onClick={() => onAction("details")} />
         <RailItem active={active === "help"} collapsed={collapsed} icon={HelpCircle} label="Help" onClick={() => onAction("help")} />
       </div>
     </aside>

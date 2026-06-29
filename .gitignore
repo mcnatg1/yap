@@ -7,6 +7,9 @@ desktop/node_modules/
 desktop/dist/
 desktop/dist-portable/
 desktop/src-tauri/target/
+.tools/
+.xwin-cache/
+.xwin-sdk/
 
 *.local
 .DS_Store
