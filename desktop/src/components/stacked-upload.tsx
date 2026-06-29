@@ -59,7 +59,7 @@ const statusMeta = {
   running: {
     label: "Running",
     icon: Loader2,
-    progress: 62,
+    progress: null,
     variant: "outline" as const,
   },
   done: {
@@ -136,7 +136,15 @@ function UploadCard({
 }) {
   const meta = statusMeta[item.status];
   const Icon = meta.icon;
-  const detail = item.error ?? item.output ?? item.path;
+  const detail =
+    item.error ??
+    (item.status === "done"
+      ? "Transcript saved"
+      : item.status === "running"
+        ? "Transcribing locally…"
+        : item.status === "queued"
+          ? "Ready to transcribe"
+          : "Needs attention");
 
   return (
     <motion.li
@@ -212,7 +220,13 @@ function UploadCard({
 
         <AttachmentTrigger aria-label={`Select ${item.name}`} onClick={() => onSelect(item.id)} />
       </Attachment>
-      <Progress className="mt-3 h-1.5" value={meta.progress} />
+      {meta.progress === null ? (
+        <div aria-hidden className="mt-3 h-1.5 overflow-hidden rounded-full bg-primary/20">
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
+        </div>
+      ) : (
+        <Progress className="mt-3 h-1.5" value={meta.progress} />
+      )}
     </motion.li>
   );
 }
