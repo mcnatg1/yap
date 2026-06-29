@@ -16,6 +16,8 @@ import {
   LockKeyhole,
   Minus,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   Save,
   Search,
   Settings2,
@@ -23,6 +25,7 @@ import {
   Square,
   Trash2,
   UploadCloud,
+  CircleUserRound,
   X,
 } from "lucide-react";
 import { type DragEvent, type ElementType, type KeyboardEvent, useEffect, useMemo, useState } from "react";
@@ -275,6 +278,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
+  const [railCollapsed, setRailCollapsed] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -285,6 +289,7 @@ export default function App() {
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
   const [widePaneLayout, setWidePaneLayout] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
+  const [desktopShellLayout, setDesktopShellLayout] = useState(() => window.matchMedia("(min-width: 1024px)").matches);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -338,6 +343,14 @@ export default function App() {
   useEffect(() => {
     const query = window.matchMedia("(min-width: 1280px)");
     const sync = () => setWidePaneLayout(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1024px)");
+    const sync = () => setDesktopShellLayout(query.matches);
     sync();
     query.addEventListener("change", sync);
     return () => query.removeEventListener("change", sync);
@@ -775,6 +788,73 @@ export default function App() {
       {workspaceTranscriptPane}
     </div>
   );
+  const appWorkspace = (
+    <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
+      <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+        <div className="min-w-0">
+          <div className="mb-4 flex items-center gap-3 lg:hidden">
+            <AppIcon className="size-10 rounded-xl shadow-sm" />
+            <div>
+              <div className="text-lg font-semibold">Yap</div>
+              <div className="text-sm text-muted-foreground">Private local transcription</div>
+            </div>
+          </div>
+          <WorkspaceBreadcrumb
+            current={workspace.eyebrow}
+            onHome={() => handleRailAction("home")}
+            resource={breadcrumbResource}
+          />
+          <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">{workspace.title}</h1>
+          <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
+        </div>
+
+        <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
+          <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
+          <Metric icon={FileText} label={`${history.length} saved`} />
+          <PrivacyStatus auth={auth} status={status} />
+          <Button
+            aria-label="Open command menu"
+            className="px-2"
+            onClick={() => setCommandOpen(true)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Search data-icon="inline-start" />
+            <span className="hidden xl:inline">Command</span>
+            <KbdGroup className="hidden xl:inline-flex">
+              <Kbd>Ctrl</Kbd>
+              <Kbd>K</Kbd>
+            </KbdGroup>
+          </Button>
+          <Button aria-label="Open setup details" onClick={() => handleRailAction("details")} size="icon-sm" type="button" variant="outline">
+            <Settings2 />
+          </Button>
+        </div>
+      </header>
+
+      {workspaceView === "home" ? (
+        <DropHero
+          dragging={dragging}
+          onDragLeave={() => setDragging(false)}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+            if (!isTauri()) setStatus("Preview only");
+          }}
+          onPickFiles={() => void pickFiles()}
+        />
+      ) : null}
+
+      <section className="mt-7 w-full min-w-0">
+        {workspaceMain}
+      </section>
+    </section>
+  );
 
   return (
     <TooltipProvider>
@@ -787,79 +867,31 @@ export default function App() {
         onRunQueue={() => void runQueue()}
       />
       <div className="mx-auto w-full max-w-[1480px] min-w-0 p-3 pt-0 sm:p-4 sm:pt-0">
-        <ResizablePanelGroup className="min-h-[calc(100vh-64px)]" orientation="horizontal">
-          <ResizablePanel className="hidden lg:block" defaultSize="17%" maxSize="24%" minSize="13%">
-            <ProductRail active={activeRail} auth={auth} model={model} onAction={handleRailAction} status={status} />
-          </ResizablePanel>
-          <ResizableHandle className="mx-3 hidden lg:flex" withHandle />
-          <ResizablePanel defaultSize="83%" minSize="60%">
-            <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
-          <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
-            <div className="min-w-0">
-              <div className="mb-4 flex items-center gap-3 lg:hidden">
-                <AppIcon className="size-10 rounded-xl shadow-sm" />
-                <div>
-                  <div className="text-lg font-semibold">Yap</div>
-                  <div className="text-sm text-muted-foreground">Private local transcription</div>
-                </div>
-              </div>
-              <WorkspaceBreadcrumb
-                current={workspace.eyebrow}
-                onHome={() => handleRailAction("home")}
-                resource={breadcrumbResource}
+        {desktopShellLayout ? (
+          <ResizablePanelGroup className="min-h-[calc(100vh-64px)]" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
+            <ResizablePanel
+              defaultSize={railCollapsed ? "5.5%" : "17%"}
+              maxSize={railCollapsed ? "5.5%" : "24%"}
+              minSize={railCollapsed ? "5.5%" : "13%"}
+            >
+              <ProductRail
+                active={activeRail}
+                auth={auth}
+                collapsed={railCollapsed}
+                model={model}
+                onAction={handleRailAction}
+                onToggle={() => setRailCollapsed((collapsed) => !collapsed)}
+                status={status}
               />
-              <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">{workspace.title}</h1>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
-            </div>
-
-            <div className="grid w-full min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] items-center gap-1 rounded-2xl bg-secondary p-1 lg:flex lg:w-auto lg:gap-2 lg:rounded-full">
-              <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
-              <Metric icon={FileText} label={`${history.length} saved`} />
-              <PrivacyStatus auth={auth} status={status} />
-              <Button
-                aria-label="Open command menu"
-                className="px-2"
-                onClick={() => setCommandOpen(true)}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <Search data-icon="inline-start" />
-                <span className="hidden xl:inline">Command</span>
-                <KbdGroup className="hidden xl:inline-flex">
-                  <Kbd>Ctrl</Kbd>
-                  <Kbd>K</Kbd>
-                </KbdGroup>
-              </Button>
-              <Button aria-label="Open setup details" onClick={() => handleRailAction("details")} size="icon-sm" type="button" variant="outline">
-                <Settings2 />
-              </Button>
-            </div>
-          </header>
-
-          {workspaceView === "home" ? (
-            <DropHero
-              dragging={dragging}
-              onDragLeave={() => setDragging(false)}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragging(true);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragging(false);
-                if (!isTauri()) setStatus("Preview only");
-              }}
-              onPickFiles={() => void pickFiles()}
-            />
-          ) : null}
-
-          <section className="mt-7 w-full min-w-0">
-            {workspaceMain}
-          </section>
-            </section>
-          </ResizablePanel>
-        </ResizablePanelGroup>
+            </ResizablePanel>
+            <ResizableHandle className={cn("mx-3", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
+            <ResizablePanel defaultSize={railCollapsed ? "94.5%" : "83%"} minSize="60%">
+              {appWorkspace}
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          appWorkspace
+        )}
       </div>
       <DetailsSheet
         auth={auth}
@@ -1204,44 +1236,79 @@ function AppIcon({ className }: { className?: string }) {
 function ProductRail({
   active,
   auth,
+  collapsed,
   model,
   onAction,
+  onToggle,
   status,
 }: {
   active: RailAction;
   auth: string;
+  collapsed: boolean;
   model: string;
   onAction: (action: RailAction) => void;
+  onToggle: () => void;
   status: string;
 }) {
   return (
-    <aside className="flex h-full min-h-[calc(100vh-64px)] min-w-0 flex-col rounded-[28px] bg-background p-3">
-      <nav className="mt-2 flex flex-col gap-1">
-        <RailItem active={active === "home"} icon={Grid2X2} label="Home" onClick={() => onAction("home")} />
+    <aside className={cn("flex h-full min-h-[calc(100vh-64px)] min-w-0 flex-col bg-[#f5f3ee] p-3", collapsed && "items-center")}>
+      <div className={cn("mb-8 flex w-full items-center", collapsed ? "justify-center" : "justify-between")}>
+        <Button
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={onToggle}
+          size="icon-sm"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          type="button"
+          variant="ghost"
+        >
+          {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+        </Button>
+        {collapsed ? null : (
+          <Button aria-label="Account" onClick={() => onAction("details")} size="icon-sm" type="button" variant="ghost">
+            <CircleUserRound />
+          </Button>
+        )}
+      </div>
+
+      <div className={cn("mb-7 flex items-center gap-2 px-2", collapsed && "justify-center px-0")}>
+        <AppIcon className="size-9 rounded-xl" />
+        {collapsed ? null : (
+          <>
+            <div className="text-2xl font-semibold tracking-tight">Yap</div>
+            <Badge className="bg-[#edd7ff] text-[#44215f] hover:bg-[#edd7ff]" variant="secondary">Local</Badge>
+          </>
+        )}
+      </div>
+
+      <nav className="flex w-full flex-col gap-1">
+        <RailItem active={active === "home"} collapsed={collapsed} icon={Grid2X2} label="Home" onClick={() => onAction("home")} />
         <RailItem
           active={active === "recordings"}
+          collapsed={collapsed}
           icon={FileAudio2}
           label="Recordings"
           onClick={() => onAction("recordings")}
         />
         <RailItem
           active={active === "transcripts"}
+          collapsed={collapsed}
           icon={FileText}
           label="Transcripts"
           onClick={() => onAction("transcripts")}
         />
-        <RailItem active={active === "polish"} icon={Sparkles} label="Polish" onClick={() => onAction("polish")} />
+        <RailItem active={active === "polish"} collapsed={collapsed} icon={Sparkles} label="Polish" onClick={() => onAction("polish")} />
       </nav>
 
-      <div className="mt-auto flex flex-col gap-1">
+      <div className="mt-auto flex w-full flex-col gap-1 border-t pt-4">
         <RailItem
           active={active === "details"}
+          collapsed={collapsed}
           icon={LockKeyhole}
           label={auth === "Authorized" ? "Local mode" : status}
           onClick={() => onAction("details")}
         />
-        <RailItem active={active === "details"} icon={Settings2} label={model} onClick={() => onAction("details")} />
-        <RailItem active={active === "help"} icon={HelpCircle} label="Help" onClick={() => onAction("help")} />
+        <RailItem active={active === "details"} collapsed={collapsed} icon={Settings2} label={model} onClick={() => onAction("details")} />
+        <RailItem active={active === "help"} collapsed={collapsed} icon={HelpCircle} label="Help" onClick={() => onAction("help")} />
       </div>
     </aside>
   );
@@ -1249,11 +1316,13 @@ function ProductRail({
 
 function RailItem({
   active,
+  collapsed,
   icon: Icon,
   label,
   onClick,
 }: {
   active?: boolean;
+  collapsed?: boolean;
   icon: ElementType;
   label: string;
   onClick: () => void;
@@ -1262,15 +1331,17 @@ function RailItem({
     <Button
       aria-current={active ? "page" : undefined}
       className={cn(
-        "h-auto w-full justify-start px-3 py-3 text-left font-semibold text-muted-foreground hover:bg-secondary/70 hover:text-foreground",
+        "h-auto w-full justify-start rounded-lg px-3 py-3 text-left font-semibold text-foreground hover:bg-[#ece8df]",
         active && "bg-secondary text-foreground",
+        collapsed && "justify-center px-2",
       )}
       onClick={onClick}
+      title={label}
       type="button"
       variant="ghost"
     >
       <Icon />
-      <span className="truncate">{label}</span>
+      <span className={cn("truncate", collapsed && "sr-only")}>{label}</span>
     </Button>
   );
 }
