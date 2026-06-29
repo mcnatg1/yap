@@ -770,7 +770,7 @@ export default function App() {
     </div>
   );
   const appWorkspace = (
-    <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
+    <section className="h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
       <header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
         <div className="min-w-0">
           {!desktopShellLayout ? (
@@ -841,7 +841,7 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
+      <main className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <AppChrome
         canRunQueue={hasRunnable && !running}
         onAction={handleRailAction}
@@ -849,9 +849,9 @@ export default function App() {
         onPickFiles={() => void pickFiles()}
         onRunQueue={() => void runQueue()}
       />
-      <div className="mx-auto w-full max-w-[1480px] min-w-0 p-3 pt-0 sm:p-4 sm:pt-0">
+      <div className="mx-auto min-h-0 w-full max-w-[1480px] min-w-0 flex-1 overflow-hidden p-3 pt-0 sm:p-4 sm:pt-0">
         {desktopShellLayout ? (
-          <ResizablePanelGroup className="min-h-[calc(100vh-64px)]" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
+          <ResizablePanelGroup className="h-full min-h-0" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
             <ResizablePanel
               defaultSize={railCollapsed ? "5.5%" : "17%"}
               maxSize={railCollapsed ? "5.5%" : "24%"}
@@ -1234,7 +1234,7 @@ function ProductRail({
   status: string;
 }) {
   return (
-    <aside className={cn("flex h-full min-h-[calc(100vh-64px)] min-w-0 flex-col bg-[#f5f3ee] p-3", collapsed && "items-center")}>
+    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-[#f5f3ee] p-3", collapsed && "items-center")}>
       <div className={cn("mb-8 flex w-full items-center", collapsed ? "justify-center" : "justify-between")}>
         <Button
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
