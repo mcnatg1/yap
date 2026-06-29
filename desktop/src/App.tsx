@@ -807,7 +807,7 @@ export default function App() {
         collapsed={railCollapsed}
         onToggleRail={() => setRailCollapsed((collapsed) => !collapsed)}
       />
-      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background px-[15px] pb-[15px] pt-0">
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background pb-[15px] pr-[15px] pt-0">
         <ResizablePanelGroup className="h-full min-h-0 bg-background" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
           <ResizablePanel
             className="bg-background"
@@ -1113,7 +1113,7 @@ function ProductRail({
   onAction: (action: RailAction) => void;
 }) {
   return (
-    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background px-3 pb-3 pt-4", collapsed && "items-center px-2")}>
+    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background pb-3 pt-4", collapsed && "items-center")}>
       <div className={cn("mb-5 flex items-center gap-2 px-1", collapsed && "justify-center px-0")}>
         <AppIcon className="size-6 rounded-md" />
         {collapsed ? null : (
