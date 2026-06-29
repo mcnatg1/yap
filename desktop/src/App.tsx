@@ -1071,7 +1071,7 @@ function AppChrome({
 }) {
   return (
     <div
-      className="flex h-10 select-none items-center border-b border-border/70 bg-background/95 text-foreground"
+      className="flex h-10 select-none items-center bg-background text-foreground"
       data-tauri-drag-region
     >
       <div className="flex min-w-0 items-center gap-2 px-3" data-tauri-drag-region>
@@ -1224,7 +1224,7 @@ function ProductRail({
   onToggle: () => void;
 }) {
   return (
-    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-[#f5f3ee] p-3", collapsed && "items-center")}>
+    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background p-3", collapsed && "items-center")}>
       <div className={cn("mb-8 flex w-full items-center", collapsed ? "justify-center" : "justify-between")}>
         <Button
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
