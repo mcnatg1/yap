@@ -284,6 +284,7 @@ export default function App() {
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
+  const [widePaneLayout, setWidePaneLayout] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -332,6 +333,14 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1280px)");
+    const sync = () => setWidePaneLayout(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
   }, []);
 
   useEffect(() => {
@@ -618,6 +627,155 @@ export default function App() {
     }
   }
 
+  const workspaceLeftPane = (
+    <>
+      {showQueue ? (
+        <Card className="h-full min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
+          <CardHeader className="p-4 sm:p-5">
+            <div className="min-w-0">
+              <Badge className="w-fit" variant="outline">Today</Badge>
+              <CardTitle className="mt-2 flex items-center gap-2 text-xl">
+                Queue
+                <Badge className="tabular-nums" variant="secondary">
+                  {queue.length}
+                </Badge>
+              </CardTitle>
+              <CardDescription>
+                {completed
+                  ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
+                  : "Drop recordings and transcribe them in place"}
+              </CardDescription>
+            </div>
+            <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
+              <ButtonGroup
+                aria-label="Queue actions"
+                className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
+              >
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button disabled={running || !queue.length} size="sm" type="button" variant="outline">
+                      <Trash2 data-icon="inline-start" />
+                      Clear
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Clear the queue?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This removes the queued files from Yap. Saved transcript files and history stay untouched.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction
+                        className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
+                        onClick={clearQueue}
+                      >
+                        Clear queue
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+                <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
+                  {running ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <Sparkles data-icon="inline-start" />
+                  )}
+                  Transcribe
+                </Button>
+              </ButtonGroup>
+            </CardAction>
+          </CardHeader>
+          <Separator />
+          <CardContent className="p-4 sm:p-5">
+            {queue.length ? (
+              <Field className="mb-4 gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <FieldLabel>Queue progress</FieldLabel>
+                  <FieldDescription>
+                    {completed} of {queue.length}
+                  </FieldDescription>
+                </div>
+                <Progress value={queueProgress} />
+              </Field>
+            ) : null}
+            <StackedUpload
+              items={queue}
+              onRemove={removeItem}
+              onReveal={(path) => void revealPath(path)}
+              onSelect={selectQueueItem}
+              selectedId={selectedId}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {showHistory ? (
+        <HistoryList
+          entries={history}
+          onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
+          onOpen={(entry) => void openTranscript(entry.outputPath)}
+          onPreview={(entry) => void previewHistoryEntry(entry)}
+          onRemove={removeHistoryEntry}
+          onReveal={(entry) => void revealPath(entry.outputPath)}
+          onSelect={selectHistoryEntry}
+          selectedOutputPath={selectedHistoryOutput ?? selectedItem?.output}
+        />
+      ) : null}
+
+      {showPolish ? (
+        <PolishPanel
+          item={selectedItem}
+          onLoadText={loadTranscriptText}
+          onPolished={(outputPath, text) => {
+            setPolishedText((current) => ({ ...current, [outputPath]: text }));
+            setStatus("Polished draft ready");
+          }}
+          onSave={savePolishedTranscript}
+          originalText={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
+          polishedText={selectedItem?.output ? polishedText[selectedItem.output] : undefined}
+        />
+      ) : null}
+    </>
+  );
+  const workspaceTranscriptPane = showTranscript ? (
+    <div className="h-full min-w-0">
+      <TranscriptPanel
+        item={selectedItem}
+        onCopy={copyTranscript}
+        onOpen={(path) => void openTranscript(path)}
+        onReveal={(path) => void revealPath(path)}
+        running={running}
+        text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
+      />
+    </div>
+  ) : null;
+  const canResizeWorkspace = widePaneLayout && showTranscript && (showQueue || showHistory || showPolish);
+  const workspaceMain = canResizeWorkspace ? (
+    <ResizablePanelGroup className="min-h-[520px]" orientation="horizontal">
+      <ResizablePanel defaultSize={showQueue ? 58 : 52} minSize={32}>
+        {workspaceLeftPane}
+      </ResizablePanel>
+      <ResizableHandle className="mx-3" withHandle />
+      <ResizablePanel defaultSize={showQueue ? 42 : 48} minSize={30}>
+        {workspaceTranscriptPane}
+      </ResizablePanel>
+    </ResizablePanelGroup>
+  ) : (
+    <div
+      className={cn(
+        "grid w-full min-w-0 gap-5",
+        workspaceView === "home" || workspaceView === "polish" || workspaceView === "transcripts"
+          ? "xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
+          : "xl:grid-cols-1",
+      )}
+    >
+      {workspaceLeftPane}
+      {workspaceTranscriptPane}
+    </div>
+  );
+
   return (
     <TooltipProvider>
       <main className="min-h-screen overflow-x-hidden bg-background text-foreground">
@@ -692,135 +850,8 @@ export default function App() {
             />
           ) : null}
 
-          <section
-            className={cn(
-              "mt-7 grid w-full min-w-0 gap-5",
-              workspaceView === "home" || workspaceView === "polish" || workspaceView === "transcripts"
-                ? "xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
-                : "xl:grid-cols-1",
-            )}
-          >
-            {showQueue ? (
-              <Card className="min-w-0 border-[#eee8de] bg-card py-0 shadow-none">
-                <CardHeader className="p-4 sm:p-5">
-                  <div className="min-w-0">
-                    <Badge className="w-fit" variant="outline">Today</Badge>
-                    <CardTitle className="mt-2 flex items-center gap-2 text-xl">
-                      Queue
-                      <Badge className="tabular-nums" variant="secondary">
-                        {queue.length}
-                      </Badge>
-                    </CardTitle>
-                    <CardDescription>
-                      {completed
-                        ? `${completed} transcript${completed === 1 ? "" : "s"} ready`
-                        : "Drop recordings and transcribe them in place"}
-                    </CardDescription>
-                  </div>
-                  <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
-                    <ButtonGroup
-                      aria-label="Queue actions"
-                      className="w-full sm:w-auto [&>[data-slot=button]]:flex-1 sm:[&>[data-slot=button]]:flex-none"
-                    >
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button disabled={running || !queue.length} size="sm" type="button" variant="outline">
-                            <Trash2 data-icon="inline-start" />
-                            Clear
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>Clear the queue?</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              This removes the queued files from Yap. Saved transcript files and history stay untouched.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
-                              onClick={clearQueue}
-                            >
-                              Clear queue
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                      <Button disabled={running || !hasRunnable} onClick={runQueue} size="sm" type="button">
-                        {running ? (
-                          <Spinner data-icon="inline-start" />
-                        ) : (
-                          <Sparkles data-icon="inline-start" />
-                        )}
-                        Transcribe
-                      </Button>
-                    </ButtonGroup>
-                  </CardAction>
-                </CardHeader>
-                <Separator />
-                <CardContent className="p-4 sm:p-5">
-                  {queue.length ? (
-                    <Field className="mb-4 gap-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <FieldLabel>Queue progress</FieldLabel>
-                        <FieldDescription>
-                          {completed} of {queue.length}
-                        </FieldDescription>
-                      </div>
-                      <Progress value={queueProgress} />
-                    </Field>
-                  ) : null}
-                  <StackedUpload
-                    items={queue}
-                    onRemove={removeItem}
-                    onReveal={(path) => void revealPath(path)}
-                    onSelect={selectQueueItem}
-                    selectedId={selectedId}
-                  />
-                </CardContent>
-              </Card>
-            ) : null}
-
-            {showHistory ? (
-              <HistoryList
-                entries={history}
-                onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
-                onOpen={(entry) => void openTranscript(entry.outputPath)}
-                onPreview={(entry) => void previewHistoryEntry(entry)}
-                onRemove={removeHistoryEntry}
-                onReveal={(entry) => void revealPath(entry.outputPath)}
-                onSelect={selectHistoryEntry}
-                selectedOutputPath={selectedHistoryOutput ?? selectedItem?.output}
-              />
-            ) : null}
-
-            {showPolish ? (
-              <PolishPanel
-                item={selectedItem}
-                onLoadText={loadTranscriptText}
-                onPolished={(outputPath, text) => {
-                  setPolishedText((current) => ({ ...current, [outputPath]: text }));
-                  setStatus("Polished draft ready");
-                }}
-                onSave={savePolishedTranscript}
-                originalText={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
-                polishedText={selectedItem?.output ? polishedText[selectedItem.output] : undefined}
-              />
-            ) : null}
-
-            {showTranscript ? (
-              <div className="min-w-0">
-                <TranscriptPanel
-                  item={selectedItem}
-                  onCopy={copyTranscript}
-                  onOpen={(path) => void openTranscript(path)}
-                  onReveal={(path) => void revealPath(path)}
-                  running={running}
-                  text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
-                />
-              </div>
-            ) : null}
+          <section className="mt-7 w-full min-w-0">
+            {workspaceMain}
           </section>
         </section>
       </div>
@@ -2012,72 +2043,65 @@ function TranscriptPanel({
         ) : null}
       </CardHeader>
       <Separator />
-      <CardContent className="min-h-0 flex-1 p-4 sm:p-5">
-        <ResizablePanelGroup className="min-h-[360px]" orientation="vertical">
-          <ResizablePanel defaultSize={22} minSize={18}>
-            <Alert className="bg-muted">
-              <FileText />
-              <div className="min-w-0">
-                <AlertTitle>{item?.name ?? "Nothing selected"}</AlertTitle>
-                <AlertDescription className="mt-1 truncate">
-                  {output ?? item?.path ?? "Files stay local until you drop them here."}
-                </AlertDescription>
-              </div>
-            </Alert>
-          </ResizablePanel>
-          <ResizableHandle className="my-3" withHandle />
-          <ResizablePanel defaultSize={78} minSize={42}>
-            <ScrollArea className="h-full min-h-[240px] rounded-lg border bg-[#fffdf8]">
-              <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
-                {item?.status === "done" ? (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <Badge>
-                        <BadgeCheck data-icon="inline-start" />
-                        Saved
-                      </Badge>
-                      <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
-                    </div>
-                    {text ? (
-                      <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
-                        {text}
-                      </pre>
-                    ) : (
-                      <Alert>
-                        <FileText />
-                        <AlertDescription>
-                          Loading transcript preview. You can still open or reveal the saved file.
-                        </AlertDescription>
-                      </Alert>
-                    )}
-                  </>
-                ) : item?.status === "error" ? (
-                  <Alert variant="destructive">
-                    <HelpCircle />
-                    <AlertDescription>{item.error}</AlertDescription>
-                  </Alert>
-                ) : item ? (
-                  <>
-                    <Badge variant="secondary">{running ? "Transcribing locally" : "Queued"}</Badge>
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      This panel switches to the finished transcript as soon as the local run completes.
-                    </p>
-                  </>
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 sm:p-5">
+        <Alert className="bg-muted">
+          <FileText />
+          <div className="min-w-0">
+            <AlertTitle>{item?.name ?? "Nothing selected"}</AlertTitle>
+            <AlertDescription className="mt-1 truncate">
+              {output ?? item?.path ?? "Files stay local until you drop them here."}
+            </AlertDescription>
+          </div>
+        </Alert>
+        <ScrollArea className="min-h-[240px] flex-1 rounded-lg border bg-[#fffdf8]">
+          <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
+            {item?.status === "done" ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <Badge>
+                    <BadgeCheck data-icon="inline-start" />
+                    Saved
+                  </Badge>
+                  <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
+                </div>
+                {text ? (
+                  <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                    {text}
+                  </pre>
                 ) : (
-                  <Empty className="border-0 bg-transparent">
-                    <EmptyMedia>
-                      <FileText />
-                    </EmptyMedia>
-                    <div>
-                      <EmptyTitle>Drop audio to create a transcript</EmptyTitle>
-                      <EmptyDescription>Yap saves the transcript locally when the source is protected.</EmptyDescription>
-                    </div>
-                  </Empty>
+                  <Alert>
+                    <FileText />
+                    <AlertDescription>
+                      Loading transcript preview. You can still open or reveal the saved file.
+                    </AlertDescription>
+                  </Alert>
                 )}
-              </div>
-            </ScrollArea>
-          </ResizablePanel>
-        </ResizablePanelGroup>
+              </>
+            ) : item?.status === "error" ? (
+              <Alert variant="destructive">
+                <HelpCircle />
+                <AlertDescription>{item.error}</AlertDescription>
+              </Alert>
+            ) : item ? (
+              <>
+                <Badge variant="secondary">{running ? "Transcribing locally" : "Queued"}</Badge>
+                <p className="text-sm leading-6 text-muted-foreground">
+                  This panel switches to the finished transcript as soon as the local run completes.
+                </p>
+              </>
+            ) : (
+              <Empty className="border-0 bg-transparent">
+                <EmptyMedia>
+                  <FileText />
+                </EmptyMedia>
+                <div>
+                  <EmptyTitle>Drop audio to create a transcript</EmptyTitle>
+                  <EmptyDescription>Yap saves the transcript locally when the source is protected.</EmptyDescription>
+                </div>
+              </Empty>
+            )}
+          </div>
+        </ScrollArea>
       </CardContent>
     </Card>
   );
