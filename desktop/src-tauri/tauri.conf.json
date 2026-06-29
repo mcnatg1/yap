@@ -18,6 +18,7 @@
         "height": 760,
         "minWidth": 1122,
         "minHeight": 740,
+        "devtools": true,
         "decorations": false,
         "dragDropEnabled": true
       }

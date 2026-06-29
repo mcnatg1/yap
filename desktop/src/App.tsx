@@ -334,6 +334,11 @@ export default function App() {
         event.preventDefault();
         setCommandOpen((open) => !open);
       }
+
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        void openDevtools();
+      }
     }
 
     window.addEventListener("keydown", onKeyDown);
@@ -845,6 +850,7 @@ export default function App() {
       <AppChrome
         canRunQueue={hasRunnable && !running}
         onAction={handleRailAction}
+        onOpenDevtools={() => void openDevtools()}
         onOpenCommand={() => setCommandOpen(true)}
         onPickFiles={() => void pickFiles()}
         onRunQueue={() => void runQueue()}
@@ -926,6 +932,16 @@ async function runWindowAction(action: "minimize" | "toggleMaximize" | "close") 
     if (action === "close") await window.close();
   } catch {
     // ponytail: preview/dev without window permissions should not break the UI.
+  }
+}
+
+async function openDevtools() {
+  if (!isTauri()) return;
+
+  try {
+    await invoke("open_devtools");
+  } catch {
+    // ponytail: browser preview should not care about native devtools.
   }
 }
 
@@ -1067,12 +1083,14 @@ function TranscriptPreviewDialog({
 function AppChrome({
   canRunQueue,
   onAction,
+  onOpenDevtools,
   onOpenCommand,
   onPickFiles,
   onRunQueue,
 }: {
   canRunQueue: boolean;
   onAction: (action: RailAction) => void;
+  onOpenDevtools: () => void;
   onOpenCommand: () => void;
   onPickFiles: () => void;
   onRunQueue: () => void;
@@ -1114,6 +1132,10 @@ function AppChrome({
               <MenubarItem onSelect={onOpenCommand}>
                 Command palette
                 <MenubarShortcut>Ctrl K</MenubarShortcut>
+              </MenubarItem>
+              <MenubarItem onSelect={onOpenDevtools}>
+                Developer tools
+                <MenubarShortcut>Ctrl Shift I</MenubarShortcut>
               </MenubarItem>
             </MenubarGroup>
           </MenubarContent>

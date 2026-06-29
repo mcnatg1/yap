@@ -120,6 +120,11 @@ fn write_polished_text(path: String, text: String) -> Result<String, String> {
     Ok(output.display().to_string())
 }
 
+#[tauri::command]
+fn open_devtools(window: tauri::WebviewWindow) {
+    window.open_devtools();
+}
+
 fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let stem = path
         .file_stem()
@@ -259,7 +264,8 @@ pub fn run() {
             setup_status,
             transcribe_files,
             read_text_file,
-            write_polished_text
+            write_polished_text,
+            open_devtools
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
