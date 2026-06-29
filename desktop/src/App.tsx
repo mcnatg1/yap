@@ -1206,7 +1206,7 @@ function AppIcon({ className }: { className?: string }) {
       alt=""
       className={cn("shrink-0", className)}
       draggable={false}
-      src="/favicon.png"
+      src="/app-icon.png"
     />
   );
 }
