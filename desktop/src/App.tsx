@@ -786,10 +786,14 @@ export default function App() {
         onPickFiles={() => void pickFiles()}
         onRunQueue={() => void runQueue()}
       />
-      <div className="mx-auto flex w-full max-w-[1480px] min-w-0 gap-4 p-3 pt-0 sm:p-4 sm:pt-0">
-        <ProductRail active={activeRail} auth={auth} model={model} onAction={handleRailAction} status={status} />
-
-        <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
+      <div className="mx-auto w-full max-w-[1480px] min-w-0 p-3 pt-0 sm:p-4 sm:pt-0">
+        <ResizablePanelGroup className="min-h-[calc(100vh-64px)]" orientation="horizontal">
+          <ResizablePanel className="hidden lg:block" defaultSize="17%" maxSize="24%" minSize="13%">
+            <ProductRail active={activeRail} auth={auth} model={model} onAction={handleRailAction} status={status} />
+          </ResizablePanel>
+          <ResizableHandle className="mx-3 hidden lg:flex" withHandle />
+          <ResizablePanel defaultSize="83%" minSize="60%">
+            <section className="w-full min-w-0 flex-1 overflow-hidden rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
           <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <div className="min-w-0">
               <div className="mb-4 flex items-center gap-3 lg:hidden">
@@ -853,7 +857,9 @@ export default function App() {
           <section className="mt-7 w-full min-w-0">
             {workspaceMain}
           </section>
-        </section>
+            </section>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
       <DetailsSheet
         auth={auth}
@@ -1209,7 +1215,7 @@ function ProductRail({
   status: string;
 }) {
   return (
-    <aside className="hidden min-h-[calc(100vh-64px)] w-[238px] shrink-0 flex-col rounded-[28px] bg-background p-3 lg:flex">
+    <aside className="flex h-full min-h-[calc(100vh-64px)] min-w-0 flex-col rounded-[28px] bg-background p-3">
       <nav className="mt-2 flex flex-col gap-1">
         <RailItem active={active === "home"} icon={Grid2X2} label="Home" onClick={() => onAction("home")} />
         <RailItem
