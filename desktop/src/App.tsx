@@ -125,16 +125,6 @@ import {
 } from "@/components/ui/item";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import {
-  Menubar,
-  MenubarContent,
-  MenubarGroup,
-  MenubarItem,
-  MenubarMenu,
-  MenubarSeparator,
-  MenubarShortcut,
-  MenubarTrigger,
-} from "@/components/ui/menubar";
-import {
   Pagination,
   PaginationContent,
   PaginationItem,
@@ -827,26 +817,22 @@ export default function App() {
     <TooltipProvider>
       <main className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <AppChrome
-        canRunQueue={hasRunnable && !running}
         onAction={handleRailAction}
-        onOpenDevtools={() => void openDevtools()}
-        onOpenCommand={() => setCommandOpen(true)}
-        onPickFiles={() => void pickFiles()}
-        onRunQueue={() => void runQueue()}
+        collapsed={railCollapsed}
+        onToggleRail={() => setRailCollapsed((collapsed) => !collapsed)}
       />
       <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background p-3 pt-0 sm:p-4 sm:pt-0">
         <ResizablePanelGroup className="h-full min-h-0 bg-background" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
           <ResizablePanel
             className="bg-background"
-            defaultSize={railCollapsed ? "5.5%" : "17%"}
-            maxSize={railCollapsed ? "5.5%" : "24%"}
-            minSize={railCollapsed ? "5.5%" : "13%"}
+            defaultSize={railCollapsed ? "5.5%" : "15%"}
+            maxSize={railCollapsed ? "5.5%" : "22%"}
+            minSize={railCollapsed ? "5.5%" : "14%"}
           >
             <ProductRail
               active={activeRail}
               collapsed={railCollapsed}
               onAction={handleRailAction}
-              onToggle={() => setRailCollapsed((collapsed) => !collapsed)}
             />
           </ResizablePanel>
           <ResizableHandle className={cn("z-10 -mx-1 bg-transparent", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
@@ -1054,75 +1040,35 @@ function TranscriptPreviewDialog({
 }
 
 function AppChrome({
-  canRunQueue,
   onAction,
-  onOpenDevtools,
-  onOpenCommand,
-  onPickFiles,
-  onRunQueue,
+  collapsed,
+  onToggleRail,
 }: {
-  canRunQueue: boolean;
   onAction: (action: RailAction) => void;
-  onOpenDevtools: () => void;
-  onOpenCommand: () => void;
-  onPickFiles: () => void;
-  onRunQueue: () => void;
+  collapsed: boolean;
+  onToggleRail: () => void;
 }) {
   return (
     <div
       className="flex h-10 select-none items-center bg-background text-foreground"
       data-tauri-drag-region
     >
-      <div className="flex min-w-0 items-center gap-2 px-3" data-tauri-drag-region>
-        <AppIcon className="size-5 rounded-md" />
-        <span className="truncate text-sm font-semibold" data-tauri-drag-region>
-          Yap
-        </span>
+      <div className="flex items-center gap-2 px-4">
+        <Button
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="bg-secondary"
+          onClick={onToggleRail}
+          size="icon-xs"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          type="button"
+          variant="ghost"
+        >
+          {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+        </Button>
+        <Button aria-label="Account" onClick={() => onAction("details")} size="icon-xs" type="button" variant="ghost">
+          <CircleUserRound />
+        </Button>
       </div>
-      <Menubar className="hidden h-8 border-0 bg-transparent p-0 shadow-none sm:flex">
-        <MenubarMenu>
-          <MenubarTrigger>File</MenubarTrigger>
-          <MenubarContent>
-            <MenubarGroup>
-              <MenubarItem onSelect={onPickFiles}>Add recordings</MenubarItem>
-              <MenubarItem disabled={!canRunQueue} onSelect={onRunQueue}>
-                Transcribe queued
-              </MenubarItem>
-            </MenubarGroup>
-          </MenubarContent>
-        </MenubarMenu>
-        <MenubarMenu>
-          <MenubarTrigger>View</MenubarTrigger>
-          <MenubarContent>
-            <MenubarGroup>
-              <MenubarItem onSelect={() => onAction("home")}>Home</MenubarItem>
-              <MenubarItem onSelect={() => onAction("recordings")}>Recordings</MenubarItem>
-              <MenubarItem onSelect={() => onAction("transcripts")}>Transcripts</MenubarItem>
-              <MenubarItem onSelect={() => onAction("polish")}>Polish</MenubarItem>
-            </MenubarGroup>
-            <MenubarSeparator />
-            <MenubarGroup>
-              <MenubarItem onSelect={onOpenCommand}>
-                Command palette
-                <MenubarShortcut>Ctrl K</MenubarShortcut>
-              </MenubarItem>
-              <MenubarItem onSelect={onOpenDevtools}>
-                Developer tools
-                <MenubarShortcut>Ctrl Shift I</MenubarShortcut>
-              </MenubarItem>
-            </MenubarGroup>
-          </MenubarContent>
-        </MenubarMenu>
-        <MenubarMenu>
-          <MenubarTrigger>Help</MenubarTrigger>
-          <MenubarContent>
-            <MenubarGroup>
-              <MenubarItem onSelect={() => onAction("details")}>Setup details</MenubarItem>
-              <MenubarItem onSelect={() => onAction("help")}>How Yap works</MenubarItem>
-            </MenubarGroup>
-          </MenubarContent>
-        </MenubarMenu>
-      </Menubar>
       <div className="min-w-4 flex-1" data-tauri-drag-region />
       <div className="flex h-full">
         <Button
@@ -1215,39 +1161,19 @@ function ProductRail({
   active,
   collapsed,
   onAction,
-  onToggle,
 }: {
   active: RailAction;
   collapsed: boolean;
   onAction: (action: RailAction) => void;
-  onToggle: () => void;
 }) {
   return (
-    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background p-3", collapsed && "items-center")}>
-      <div className={cn("mb-8 flex w-full items-center", collapsed ? "justify-center" : "justify-between")}>
-        <Button
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={onToggle}
-          size="icon-sm"
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          type="button"
-          variant="ghost"
-        >
-          {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-        </Button>
-        {collapsed ? null : (
-          <Button aria-label="Account" onClick={() => onAction("details")} size="icon-sm" type="button" variant="ghost">
-            <CircleUserRound />
-          </Button>
-        )}
-      </div>
-
-      <div className={cn("mb-7 flex items-center gap-2 px-2", collapsed && "justify-center px-0")}>
-        <AppIcon className="size-9 rounded-xl" />
+    <aside className={cn("flex h-full min-h-0 min-w-0 flex-col bg-background px-3 pb-3 pt-4", collapsed && "items-center px-2")}>
+      <div className={cn("mb-5 flex items-center gap-2 px-1", collapsed && "justify-center px-0")}>
+        <AppIcon className="size-6 rounded-md" />
         {collapsed ? null : (
           <>
-            <div className="text-2xl font-semibold tracking-tight">Yap</div>
-            <Badge className="bg-[#edd7ff] text-[#44215f] hover:bg-[#edd7ff]" variant="secondary">Local</Badge>
+            <div className="text-xl font-semibold tracking-tight">Yap</div>
+            <Badge className="h-6 bg-[#edd7ff] px-2 text-xs text-[#44215f] hover:bg-[#edd7ff]" variant="secondary">Local</Badge>
           </>
         )}
       </div>
@@ -1296,7 +1222,7 @@ function RailItem({
     <Button
       aria-current={active ? "page" : undefined}
       className={cn(
-        "h-auto w-full justify-start rounded-lg px-3 py-3 text-left font-semibold text-foreground hover:bg-[#ece8df]",
+        "h-auto w-full justify-start rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-foreground hover:bg-[#ece8df]",
         active && "bg-secondary text-foreground",
         collapsed && "justify-center px-2",
       )}
