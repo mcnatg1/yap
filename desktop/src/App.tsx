@@ -240,7 +240,6 @@ const workspaceCopy: Record<WorkspaceView, { eyebrow: string; title: string; des
 const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
 const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
-const desktopShellMinWidth = 1120;
 const historyChartConfig = {
   transcripts: {
     label: "Transcripts",
@@ -289,7 +288,6 @@ export default function App() {
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
-  const [desktopShellLayout, setDesktopShellLayout] = useState(() => window.matchMedia(`(min-width: ${desktopShellMinWidth}px)`).matches);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -343,14 +341,6 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
-
-  useEffect(() => {
-    const query = window.matchMedia(`(min-width: ${desktopShellMinWidth}px)`);
-    const sync = () => setDesktopShellLayout(query.matches);
-    sync();
-    query.addEventListener("change", sync);
-    return () => query.removeEventListener("change", sync);
   }, []);
 
   useEffect(() => {
@@ -766,8 +756,8 @@ export default function App() {
       className={cn(
         "grid w-full min-w-0 gap-5",
         workspaceView === "home" || workspaceView === "polish" || workspaceView === "transcripts"
-          ? "xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]"
-          : "xl:grid-cols-1",
+          ? "grid-cols-[minmax(0,1fr)_minmax(320px,0.78fr)]"
+          : "grid-cols-1",
       )}
     >
       {workspaceLeftPane}
@@ -778,15 +768,6 @@ export default function App() {
     <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card/95 p-4 shadow-[0_20px_70px_rgba(32,28,20,0.08)] sm:p-6 lg:p-8">
       <header className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
         <div className="min-w-0">
-          {!desktopShellLayout ? (
-            <div className="mb-4 flex items-center gap-3">
-              <AppIcon className="size-10 rounded-xl shadow-sm" />
-              <div>
-                <div className="text-lg font-semibold">Yap</div>
-                <div className="text-sm text-muted-foreground">Private local transcription</div>
-              </div>
-            </div>
-          ) : null}
           <WorkspaceBreadcrumb
             current={workspace.eyebrow}
             onHome={() => handleRailAction("home")}
@@ -856,28 +837,24 @@ export default function App() {
         onRunQueue={() => void runQueue()}
       />
       <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden p-3 pt-0 sm:p-4 sm:pt-0">
-        {desktopShellLayout ? (
-          <ResizablePanelGroup className="h-full min-h-0" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
-            <ResizablePanel
-              defaultSize={railCollapsed ? "5.5%" : "17%"}
-              maxSize={railCollapsed ? "5.5%" : "24%"}
-              minSize={railCollapsed ? "5.5%" : "13%"}
-            >
-              <ProductRail
-                active={activeRail}
-                collapsed={railCollapsed}
-                onAction={handleRailAction}
-                onToggle={() => setRailCollapsed((collapsed) => !collapsed)}
-              />
-            </ResizablePanel>
-            <ResizableHandle className={cn("z-10 -mx-1 bg-transparent", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
-            <ResizablePanel defaultSize={railCollapsed ? "94.5%" : "83%"} minSize="60%">
-              {appWorkspace}
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        ) : (
-          appWorkspace
-        )}
+        <ResizablePanelGroup className="h-full min-h-0" key={railCollapsed ? "rail-collapsed" : "rail-expanded"} orientation="horizontal">
+          <ResizablePanel
+            defaultSize={railCollapsed ? "5.5%" : "17%"}
+            maxSize={railCollapsed ? "5.5%" : "24%"}
+            minSize={railCollapsed ? "5.5%" : "13%"}
+          >
+            <ProductRail
+              active={activeRail}
+              collapsed={railCollapsed}
+              onAction={handleRailAction}
+              onToggle={() => setRailCollapsed((collapsed) => !collapsed)}
+            />
+          </ResizablePanel>
+          <ResizableHandle className={cn("z-10 -mx-1 bg-transparent", railCollapsed && "opacity-0")} withHandle={!railCollapsed} />
+          <ResizablePanel defaultSize={railCollapsed ? "94.5%" : "83%"} minSize="60%">
+            {appWorkspace}
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
       <DetailsSheet
         auth={auth}
