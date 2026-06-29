@@ -29,10 +29,9 @@ import {
   X,
 } from "lucide-react";
 import { type DragEvent, type ElementType, type KeyboardEvent, useEffect, useMemo, useState } from "react";
-import { Bar, BarChart, CartesianGrid, XAxis } from "recharts";
 
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -56,12 +55,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "@/components/ui/chart";
-import {
   CommandDialog,
   CommandEmpty,
   CommandGroup,
@@ -71,13 +64,6 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
 import {
   Dialog,
   DialogContent,
@@ -97,17 +83,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
-import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from "@/components/ui/hover-card";
-import { Input } from "@/components/ui/input";
-import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupInput,
-} from "@/components/ui/input-group";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import {
   Item,
   ItemContent,
@@ -116,13 +92,6 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationNext,
-  PaginationPrevious,
-} from "@/components/ui/pagination";
 import {
   Popover,
   PopoverContent,
@@ -138,25 +107,8 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   Drawer,
   DrawerClose,
@@ -166,7 +118,6 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
-import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -195,38 +146,28 @@ type TranscriptResult = {
 type RailAction = "home" | "recordings" | "transcripts" | "polish" | "details" | "help";
 type WorkspaceView = "home" | "recordings" | "transcripts" | "polish";
 
-const workspaceCopy: Record<WorkspaceView, { eyebrow: string; title: string; description: string }> = {
+const workspaceCopy: Record<WorkspaceView, { title: string; description: string }> = {
   home: {
-    eyebrow: "Today",
-    title: "Ready when you are.",
-    description: "Drop recordings, transcribe them locally, and review the latest result in one place.",
+    title: "Drop recordings",
+    description: "Add audio or video files, transcribe locally, and review the text here.",
   },
   recordings: {
-    eyebrow: "Recordings",
-    title: "Your recording queue.",
-    description: "Manage the files waiting for transcription and restart anything that needs another pass.",
+    title: "Recording queue",
+    description: "Files waiting to transcribe or rerun.",
   },
   transcripts: {
-    eyebrow: "Transcripts",
-    title: "Review the finished text.",
-    description: "Open, copy, or reveal the saved transcript for the selected recording.",
+    title: "Transcripts",
+    description: "Past transcriptions, grouped by day.",
   },
   polish: {
-    eyebrow: "Polish",
-    title: "Clean up the selected transcript.",
-    description: "Use the selected result as the working draft before adding richer rewrite tools.",
+    title: "Polish",
+    description: "Clean up the selected transcript before you copy or export it.",
   },
 };
 
 const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
 const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
-const historyChartConfig = {
-  transcripts: {
-    label: "Transcripts",
-    color: "var(--primary)",
-  },
-} satisfies ChartConfig;
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
@@ -613,8 +554,7 @@ export default function App() {
         <Card className="h-full min-w-0 bg-card py-0">
           <CardHeader className="p-4 sm:p-5">
             <div className="min-w-0">
-              <Badge className="w-fit" variant="outline">Today</Badge>
-              <CardTitle className="mt-2 flex items-center gap-2 text-xl">
+              <CardTitle className="flex items-center gap-2 text-xl">
                 Queue
                 <Badge className="tabular-nums" variant="secondary">
                   {queue.length}
@@ -745,16 +685,19 @@ export default function App() {
   );
   const appWorkspace = (
     <section className="scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-[28px] border bg-card p-[15px] shadow-none">
-      <header className="grid gap-4">
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{workspace.title}</h1>
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{workspace.title}</h1>
+          <p className="mt-1.5 max-w-xl text-sm leading-6 text-muted-foreground">{workspace.description}</p>
         </div>
 
-        <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 rounded-2xl bg-secondary p-1">
-          <Metric icon={FileAudio2} label={`${queue.length} file${queue.length === 1 ? "" : "s"}`} />
-          <Metric icon={FileText} label={`${history.length} saved`} />
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <PrivacyStatus auth={auth} status={status} />
+          {history.length ? (
+            <Badge className="rounded-full px-3 py-1.5 text-sm font-semibold tabular-nums" variant="secondary">
+              {history.length} saved
+            </Badge>
+          ) : null}
           <Button
             aria-label="Open command menu"
             className="px-2"
@@ -764,7 +707,7 @@ export default function App() {
             variant="outline"
           >
             <Search data-icon="inline-start" />
-            <span className="hidden xl:inline">Command</span>
+            <span className="hidden xl:inline">Search</span>
             <KbdGroup className="hidden xl:inline-flex">
               <Kbd>Ctrl</Kbd>
               <Kbd>K</Kbd>
@@ -1119,7 +1062,7 @@ function ProductRail({
         {collapsed ? null : (
           <>
             <div className="text-xl font-semibold tracking-tight">Yap</div>
-            <Badge className="h-6 bg-[#edd7ff] px-2 text-xs text-[#44215f] hover:bg-[#edd7ff]" variant="secondary">Local</Badge>
+            <Badge className="h-6 bg-accent-soft px-2 text-xs text-accent-ink hover:bg-accent-soft" variant="secondary">Local</Badge>
           </>
         )}
       </div>
@@ -1168,7 +1111,7 @@ function RailItem({
     <Button
       aria-current={active ? "page" : undefined}
       className={cn(
-        "h-auto w-full justify-start rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-foreground hover:bg-[#ece8df]",
+        "h-auto w-full justify-start rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-foreground hover:bg-[var(--rail-hover)]",
         active && "bg-secondary text-foreground",
         collapsed && "justify-center px-2",
       )}
@@ -1183,32 +1126,23 @@ function RailItem({
   );
 }
 
-function Metric({ icon: Icon, label }: { icon: ElementType; label: string }) {
-  return (
-    <Badge className="max-w-full gap-2 rounded-full px-2 py-2 text-sm font-semibold tabular-nums sm:px-3" variant="secondary">
-      <Icon data-icon="inline-start" />
-      <span className="whitespace-nowrap max-[359px]:sr-only">{label}</span>
-    </Badge>
-  );
-}
-
 function PrivacyStatus({ auth, status }: { auth: string; status: string }) {
-  const label = auth === "Authorized" ? "Local" : status;
+  const label = auth === "Authorized" ? "Ready" : status;
   const checking = auth === "Checking" || status === "Starting";
 
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button className="w-full min-w-0 justify-start rounded-full px-2 font-semibold lg:w-auto" size="sm" type="button" variant="secondary">
+        <Button className="rounded-full px-3 font-semibold" size="sm" type="button" variant="secondary">
           <LockKeyhole data-icon="inline-start" />
-          {checking ? <Skeleton className="h-4 w-14 rounded-full" /> : <span className="truncate max-sm:sr-only">{label}</span>}
+          {checking ? <Skeleton className="h-4 w-14 rounded-full" /> : label}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end">
         <PopoverHeader>
           <PopoverTitle>{checking ? "Checking setup" : label}</PopoverTitle>
           <PopoverDescription>
-            {auth === "Authorized" ? "Ready to transcribe local files and save transcripts on this computer." : status}
+            {auth === "Authorized" ? "Files stay on this device. Transcripts save locally." : status}
           </PopoverDescription>
         </PopoverHeader>
       </PopoverContent>
@@ -1232,40 +1166,32 @@ function DropHero({
   return (
     <section
       className={cn(
-        "mt-7 w-full max-w-full overflow-hidden rounded-[28px] border bg-[linear-gradient(110deg,#3b2a21_0%,#6f3c24_42%,#034f46_100%)] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] transition-[border-color,box-shadow] duration-200",
-        dragging && "border-primary shadow-lg shadow-primary/15",
+        "mt-5 w-full rounded-xl border-2 border-dashed bg-[var(--surface-transcript)] transition-[border-color,background-color,box-shadow] duration-200",
+        dragging ? "border-primary bg-[var(--primary-soft)] shadow-sm" : "border-border",
       )}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <div className="relative min-h-[260px] w-full max-w-full p-6 sm:p-10">
-        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.2),transparent_65%)]" />
-        <div className="relative flex w-full min-w-0 max-w-3xl flex-col gap-5">
-          <Badge className="w-fit border-white/20 bg-white/12 text-white hover:bg-white/12" variant="outline">
+      <div className="flex min-h-[168px] flex-col items-center justify-center gap-4 px-6 py-8 text-center">
+        <div className="flex size-12 items-center justify-center rounded-full bg-secondary">
+          <UploadCloud className="size-6 text-primary" />
+        </div>
+        <div className="max-w-md">
+          <h2 className="text-lg font-semibold tracking-tight">Drop recordings here</h2>
+          <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
+            Or choose files to transcribe locally. {acceptedFormats}.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <Button onClick={onPickFiles} type="button">
+            <UploadCloud data-icon="inline-start" />
+            Choose files
+          </Button>
+          <Badge className="border-primary/20 bg-[var(--primary-soft)] text-primary hover:bg-[var(--primary-soft)]" variant="outline">
             <LockKeyhole data-icon="inline-start" />
             Private on this device
           </Badge>
-          <div>
-            <h2 className="max-w-full break-words font-serif text-3xl leading-tight tracking-normal sm:text-5xl">
-              Drop recordings. Get polished text.
-            </h2>
-            <p className="mt-4 max-w-full text-base leading-7 text-white/82 sm:max-w-xl">
-              Bring in audio or video files and Yap will save transcripts locally, ready to review.
-            </p>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-3">
-            <Button
-              className="max-w-full bg-white text-[#221d18] hover:bg-white/90"
-              onClick={onPickFiles}
-              type="button"
-              variant="secondary"
-            >
-              <UploadCloud data-icon="inline-start" />
-              Drop files here
-            </Button>
-            <span className="max-w-full break-words text-sm font-medium text-white/72">{acceptedFormats}</span>
-          </div>
         </div>
       </div>
     </section>
@@ -1292,30 +1218,54 @@ function localDayKey(date: Date) {
   ].join("-");
 }
 
-function recentHistoryActivity(entries: TranscriptHistoryEntry[]) {
-  const today = new Date();
-  const days = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (6 - index));
-    return {
-      day: new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(date),
-      key: localDayKey(date),
-      transcripts: 0,
-    };
-  });
-  const byDay = new Map(days.map((day) => [day.key, day]));
-
-  for (const entry of entries) {
-    const date = new Date(entry.createdAt);
-    const day = Number.isNaN(date.getTime()) ? undefined : byDay.get(localDayKey(date));
-    if (day) day.transcripts += 1;
-  }
-
-  return days;
-}
-
 function historyEntryTime(entry: TranscriptHistoryEntry) {
   const time = Date.parse(entry.createdAt);
   return Number.isFinite(time) ? time : 0;
+}
+
+function historyDayLabel(date: Date) {
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const key = localDayKey(date);
+  if (key === localDayKey(today)) return "Today";
+  if (key === localDayKey(yesterday)) return "Yesterday";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function formatHistoryTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Saved";
+
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function groupHistoryByDay(entries: TranscriptHistoryEntry[]) {
+  const sorted = [...entries].sort((a, b) => historyEntryTime(b) - historyEntryTime(a));
+  const groups: { key: string; label: string; entries: TranscriptHistoryEntry[] }[] = [];
+  const indexByKey = new Map<string, number>();
+
+  for (const entry of sorted) {
+    const date = new Date(entry.createdAt);
+    const key = Number.isNaN(date.getTime()) ? "unknown" : localDayKey(date);
+    const label = Number.isNaN(date.getTime()) ? "Earlier" : historyDayLabel(date);
+    const index = indexByKey.get(key);
+
+    if (index === undefined) {
+      indexByKey.set(key, groups.length);
+      groups.push({ key, label, entries: [entry] });
+    } else {
+      groups[index].entries.push(entry);
+    }
+  }
+
+  return groups;
 }
 
 function HistoryList({
@@ -1337,39 +1287,22 @@ function HistoryList({
   onSelect: (entry: TranscriptHistoryEntry) => void;
   selectedOutputPath?: string;
 }) {
-  const [dateFilter, setDateFilter] = useState("");
   const [searchFilter, setSearchFilter] = useState("");
-  const [showFullPaths, setShowFullPaths] = useState(false);
-  const [sortNewestFirst, setSortNewestFirst] = useState(true);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState("8");
 
-  const visibleEntries = useMemo(() => {
+  const visibleGroups = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
+    const filtered = query
+      ? entries.filter((entry) => `${entry.name} ${entry.sourcePath}`.toLowerCase().includes(query))
+      : entries;
 
-    return entries
-      .filter((entry) => !dateFilter || localDayKey(new Date(entry.createdAt)) === dateFilter)
-      .filter((entry) => {
-        if (!query) return true;
-        return `${entry.name} ${entry.sourcePath} ${entry.outputPath}`.toLowerCase().includes(query);
-      })
-      .sort((a, b) => (sortNewestFirst ? historyEntryTime(b) - historyEntryTime(a) : historyEntryTime(a) - historyEntryTime(b)));
-  }, [dateFilter, entries, searchFilter, sortNewestFirst]);
-  const pageSizeNumber = Number(pageSize);
-  const totalPages = Math.max(1, Math.ceil(visibleEntries.length / pageSizeNumber));
-  const pageNumber = Math.min(page, totalPages);
-  const pagedEntries = visibleEntries.slice((pageNumber - 1) * pageSizeNumber, pageNumber * pageSizeNumber);
-
-  useEffect(() => {
-    setPage(1);
-  }, [dateFilter, entries.length, pageSize, searchFilter, sortNewestFirst]);
+    return groupHistoryByDay(filtered);
+  }, [entries, searchFilter]);
 
   return (
     <Card className="min-w-0 bg-card py-0">
       <CardHeader className="p-4 sm:p-5">
         <div className="min-w-0">
-          <Badge className="w-fit" variant="outline">Local library</Badge>
-          <CardTitle className="mt-2 flex items-center gap-2 text-xl">
+          <CardTitle className="flex items-center gap-2 text-xl">
             History
             <Badge className="tabular-nums" variant="secondary">
               {entries.length}
@@ -1377,189 +1310,79 @@ function HistoryList({
           </CardTitle>
           <CardDescription>Saved transcripts stay on this computer.</CardDescription>
         </div>
-        {entries.length && dateFilter ? (
-          <CardAction className="col-span-full col-start-1 row-span-1 row-start-2 w-full justify-self-stretch sm:col-span-1 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:w-auto sm:justify-self-end">
-            <Button onClick={() => setDateFilter("")} size="sm" type="button" variant="outline">
-              Clear date
-            </Button>
-          </CardAction>
-        ) : null}
       </CardHeader>
       <CardContent className="grid gap-4 p-4 sm:p-5">
         {entries.length ? (
           <>
-            <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(220px,0.75fr)_auto_auto_auto_auto] xl:items-start">
-              <HistoryActivityChart entries={entries} />
-              <Field className="min-w-0 gap-1.5">
-                <FieldLabel htmlFor="history-search">Search</FieldLabel>
-                <InputGroup>
-                  <InputGroupInput
-                    id="history-search"
-                    onChange={(event) => setSearchFilter(event.target.value)}
-                    placeholder="Transcript or path"
-                    type="search"
-                    value={searchFilter}
-                  />
-                  <InputGroupAddon align="inline-end">
-                    <Search />
-                  </InputGroupAddon>
-                </InputGroup>
-                <FieldDescription className="sr-only">Filter transcripts by name, source, or output path.</FieldDescription>
-              </Field>
-              <Field className="min-w-40 gap-1.5">
-                <FieldLabel htmlFor="history-date">Saved date</FieldLabel>
-                <Input
-                  id="history-date"
-                  onChange={(event) => setDateFilter(event.target.value)}
-                  type="date"
-                  value={dateFilter}
-                />
-                <FieldDescription className="sr-only">Filter saved transcripts by local saved date.</FieldDescription>
-              </Field>
-              <Toggle
-                aria-label="Sort newest first"
-                onPressedChange={setSortNewestFirst}
-                pressed={sortNewestFirst}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                {sortNewestFirst ? "Newest first" : "Oldest first"}
-              </Toggle>
-              <Field className="min-w-28 gap-1.5">
-                <FieldLabel htmlFor="history-page-size">Rows</FieldLabel>
-                <Select onValueChange={setPageSize} value={pageSize}>
-                  <SelectTrigger id="history-page-size" size="sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="8">8 rows</SelectItem>
-                      <SelectItem value="16">16 rows</SelectItem>
-                      <SelectItem value="32">32 rows</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field className="min-h-9 rounded-md border bg-background px-3" orientation="horizontal">
-                <Switch
-                  checked={showFullPaths}
-                  id="history-full-paths"
-                  onCheckedChange={(checked) => setShowFullPaths(checked === true)}
-                />
-                <FieldLabel htmlFor="history-full-paths">Full paths</FieldLabel>
-              </Field>
-            </div>
-            <div className="overflow-hidden rounded-md border bg-background">
-              <ScrollArea className="h-[420px]">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Transcript</TableHead>
-                      <TableHead>Saved</TableHead>
-                      <TableHead>Source</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pagedEntries.length ? pagedEntries.map((entry) => {
-                  const selected = entry.outputPath === selectedOutputPath;
+            <InputGroup>
+              <InputGroupInput
+                aria-label="Search transcripts"
+                onChange={(event) => setSearchFilter(event.target.value)}
+                placeholder="Search transcripts"
+                type="search"
+                value={searchFilter}
+              />
+              <InputGroupAddon align="inline-end">
+                <Search />
+              </InputGroupAddon>
+            </InputGroup>
 
-                  function selectFromKeyboard(event: KeyboardEvent<HTMLTableRowElement>) {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      onSelect(entry);
-                    }
-                  }
+            <ScrollArea className="h-[min(520px,calc(100vh-280px))] pr-3">
+              {visibleGroups.length ? (
+                <div className="flex flex-col gap-6">
+                  {visibleGroups.map((group) => (
+                    <section key={group.key}>
+                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {group.label}
+                      </h3>
+                      <ul className="flex flex-col gap-1">
+                        {group.entries.map((entry) => {
+                          const selected = entry.outputPath === selectedOutputPath;
 
-                  return (
-                    <ContextMenu key={entry.outputPath}>
-                      <ContextMenuTrigger asChild>
-                        <TableRow
-                          className="cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                          data-state={selected ? "selected" : undefined}
-                          onClick={() => onSelect(entry)}
-                          onKeyDown={selectFromKeyboard}
-                          role="button"
-                          tabIndex={0}
-                        >
-                          <TableCell>
-                            <div className="max-w-[260px] truncate font-medium">{entry.name}</div>
-                            <PathPreview label="Transcript" path={entry.outputPath} short={!showFullPaths} />
-                          </TableCell>
-                          <TableCell>{formatHistoryDate(entry.createdAt)}</TableCell>
-                          <TableCell>
-                            <PathPreview label="Source" path={entry.sourcePath} short={!showFullPaths} />
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex justify-end">
-                              <HistoryActionMenu
-                                entry={entry}
-                                onCopy={onCopy}
-                                onOpen={onOpen}
-                                onPreview={onPreview}
-                                onRemove={onRemove}
-                                onReveal={onReveal}
-                              />
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      </ContextMenuTrigger>
-                      <HistoryContextMenu
-                        entry={entry}
-                        onCopy={onCopy}
-                        onOpen={onOpen}
-                        onPreview={onPreview}
-                        onRemove={onRemove}
-                        onReveal={onReveal}
-                      />
-                    </ContextMenu>
-                  );
-                }) : (
-                  <TableRow>
-                    <TableCell className="h-24 text-center text-muted-foreground" colSpan={4}>
-                      No transcripts match that view.
-                    </TableCell>
-                  </TableRow>
-                )}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
-            </div>
-            {visibleEntries.length > pageSizeNumber ? (
-              <Pagination className="justify-end">
-                <PaginationContent>
-                  <PaginationItem>
-                    <PaginationPrevious
-                      aria-disabled={pageNumber === 1}
-                      className={cn(pageNumber === 1 && "pointer-events-none opacity-50")}
-                      href="#"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        setPage((value) => Math.max(1, value - 1));
-                      }}
-                      text="Prev"
-                    />
-                  </PaginationItem>
-                  <PaginationItem>
-                    <span className="px-2 text-sm text-muted-foreground">
-                      Page {pageNumber} of {totalPages}
-                    </span>
-                  </PaginationItem>
-                  <PaginationItem>
-                    <PaginationNext
-                      aria-disabled={pageNumber === totalPages}
-                      className={cn(pageNumber === totalPages && "pointer-events-none opacity-50")}
-                      href="#"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        setPage((value) => Math.min(totalPages, value + 1));
-                      }}
-                    />
-                  </PaginationItem>
-                </PaginationContent>
-              </Pagination>
-            ) : null}
+                          function selectFromKeyboard(event: KeyboardEvent<HTMLButtonElement>) {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              onSelect(entry);
+                            }
+                          }
+
+                          return (
+                            <li key={entry.outputPath}>
+                              <button
+                                className={cn(
+                                  "flex w-full items-center gap-3 rounded-lg border bg-background px-3 py-2.5 text-left outline-none transition-colors",
+                                  "hover:bg-secondary/70 focus-visible:ring-2 focus-visible:ring-ring/50",
+                                  selected && "border-primary bg-[var(--primary-soft)]/40",
+                                )}
+                                onClick={() => onSelect(entry)}
+                                onKeyDown={selectFromKeyboard}
+                                type="button"
+                              >
+                                <FileText className="size-4 shrink-0 text-muted-foreground" />
+                                <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
+                                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                                  {formatHistoryTime(entry.createdAt)}
+                                </span>
+                                <HistoryActionMenu
+                                  entry={entry}
+                                  onCopy={onCopy}
+                                  onOpen={onOpen}
+                                  onPreview={onPreview}
+                                  onRemove={onRemove}
+                                  onReveal={onReveal}
+                                />
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              ) : (
+                <p className="py-8 text-center text-sm text-muted-foreground">No transcripts match that search.</p>
+              )}
+            </ScrollArea>
           </>
         ) : (
           <Empty className="min-h-[260px]">
@@ -1568,51 +1391,12 @@ function HistoryList({
             </EmptyMedia>
             <div>
               <EmptyTitle>No saved transcripts yet</EmptyTitle>
-              <EmptyDescription>Finished transcriptions will appear here.</EmptyDescription>
+              <EmptyDescription>Finished transcriptions will appear here, grouped by day.</EmptyDescription>
             </div>
           </Empty>
         )}
       </CardContent>
     </Card>
-  );
-}
-
-function HistoryActivityChart({ entries }: { entries: TranscriptHistoryEntry[] }) {
-  const data = useMemo(() => recentHistoryActivity(entries), [entries]);
-
-  return (
-    <div className="min-w-0 rounded-lg border bg-muted/30 p-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="text-sm font-semibold">Last 7 days</span>
-        <Badge variant="secondary">{entries.length} saved</Badge>
-      </div>
-      <ChartContainer config={historyChartConfig} className="h-[140px] w-full aspect-auto">
-        <BarChart accessibilityLayer data={data}>
-          <CartesianGrid vertical={false} />
-          <XAxis dataKey="day" tickLine={false} tickMargin={8} axisLine={false} />
-          <ChartTooltip content={<ChartTooltipContent hideLabel />} />
-          <Bar dataKey="transcripts" fill="var(--color-transcripts)" radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ChartContainer>
-    </div>
-  );
-}
-
-function PathPreview({ label, path, short }: { label: string; path: string; short: boolean }) {
-  return (
-    <HoverCard closeDelay={120} openDelay={120}>
-      <HoverCardTrigger asChild>
-        <div className="max-w-[300px] truncate text-xs text-muted-foreground">
-          {short ? basename(path) : path}
-        </div>
-      </HoverCardTrigger>
-      <HoverCardContent align="start" className="w-96">
-        <div className="grid gap-1">
-          <div className="text-sm font-medium">{label}</div>
-          <div className="break-all text-xs leading-5 text-muted-foreground">{path}</div>
-        </div>
-      </HoverCardContent>
-    </HoverCard>
   );
 }
 
@@ -1671,48 +1455,6 @@ function HistoryActionMenu({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-function HistoryContextMenu({
-  entry,
-  onCopy,
-  onOpen,
-  onPreview,
-  onRemove,
-  onReveal,
-}: {
-  entry: TranscriptHistoryEntry;
-  onCopy: (entry: TranscriptHistoryEntry) => void;
-  onOpen: (entry: TranscriptHistoryEntry) => void;
-  onPreview: (entry: TranscriptHistoryEntry) => void;
-  onRemove: (outputPath: string) => void;
-  onReveal: (entry: TranscriptHistoryEntry) => void;
-}) {
-  return (
-    <ContextMenuContent>
-      <ContextMenuItem onSelect={() => onPreview(entry)}>
-        <FileText />
-        Preview
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={() => onCopy(entry)}>
-        <Copy />
-        Copy transcript
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={() => onOpen(entry)}>
-        <FileText />
-        Open file
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={() => onReveal(entry)}>
-        <FolderOpen />
-        Reveal in Explorer
-      </ContextMenuItem>
-      <ContextMenuSeparator />
-      <ContextMenuItem onSelect={() => onRemove(entry.outputPath)} variant="destructive">
-        <Trash2 />
-        Remove from history
-      </ContextMenuItem>
-    </ContextMenuContent>
   );
 }
 
@@ -1882,7 +1624,7 @@ function PolishPanel({
 
 function TextPreview({ empty, title, value }: { empty: string; title: string; value?: string }) {
   return (
-    <Card className="min-w-0 gap-0 border bg-[#fffdf8] py-0 shadow-none">
+    <Card className="min-w-0 gap-0 border bg-[var(--surface-transcript)] py-0 shadow-none">
       <CardHeader className="border-b p-3">
         <CardTitle className="text-xs font-semibold uppercase text-muted-foreground">{title}</CardTitle>
       </CardHeader>
@@ -1890,7 +1632,7 @@ function TextPreview({ empty, title, value }: { empty: string; title: string; va
         <ScrollArea className="h-[220px]">
           <div className="p-4">
             {value?.trim() ? (
-              <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{value}</pre>
+              <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{value}</pre>
             ) : (
               <p className="text-sm leading-6 text-muted-foreground">{empty}</p>
             )}
@@ -1916,20 +1658,23 @@ function TranscriptPanel({
   running: boolean;
   text?: string;
 }) {
-  const title = item?.status === "done" ? "Transcript ready" : item ? "Transcript workspace" : "No transcript yet";
   const output = item?.output;
 
   return (
-    <Card className="min-h-[420px] min-w-0 bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
-      <CardHeader className="p-4 sm:p-5">
+    <Card className="flex min-h-[420px] min-w-0 flex-col bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
+      <CardHeader className="gap-3 border-b p-4 sm:p-5">
         <div className="min-w-0">
-          <Badge className="w-fit" variant="outline">
-            <FileText data-icon="inline-start" />
-            Transcript
-          </Badge>
-          <CardTitle className="mt-3 text-2xl">{title}</CardTitle>
-          <CardDescription className="truncate">
-            {item ? item.name : "Drop audio to start"}
+          <CardTitle className="truncate text-lg">{item?.name ?? "Transcript"}</CardTitle>
+          <CardDescription>
+            {item?.status === "done"
+              ? "Saved locally"
+              : item?.status === "running"
+                ? "Transcribing locally…"
+                : item?.status === "error"
+                  ? "Transcription failed"
+                  : item
+                    ? "Waiting in queue"
+                    : "Select a file or finish a transcription to preview text here."}
           </CardDescription>
         </div>
         {output ? (
@@ -1940,13 +1685,13 @@ function TranscriptPanel({
             >
               <Button onClick={() => void onCopy(item)} size="sm" type="button" variant="outline">
                 <Copy data-icon="inline-start" />
-                Copy transcript
+                Copy
               </Button>
               <Button onClick={() => onOpen(output)} size="sm" type="button" variant="outline">
                 <FileText data-icon="inline-start" />
                 Open
               </Button>
-              <Button onClick={() => onReveal(output)} size="sm" type="button">
+              <Button onClick={() => onReveal(output)} size="sm" type="button" variant="outline">
                 <FolderOpen data-icon="inline-start" />
                 Reveal
               </Button>
@@ -1954,60 +1699,40 @@ function TranscriptPanel({
           </CardAction>
         ) : null}
       </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 sm:p-5">
-        <Alert className="bg-muted">
-          <FileText />
-          <div className="min-w-0">
-            <AlertTitle>{item?.name ?? "Nothing selected"}</AlertTitle>
-            <AlertDescription className="mt-1 truncate">
-              {output ?? item?.path ?? "Files stay local until you drop them here."}
-            </AlertDescription>
-          </div>
-        </Alert>
-        <ScrollArea className="min-h-[240px] flex-1 rounded-lg border bg-[#fffdf8]">
-          <div className="flex min-h-[240px] flex-col justify-center gap-4 p-5">
+      <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+        <ScrollArea className="min-h-[280px] flex-1 bg-[var(--surface-transcript)]">
+          <div className="min-h-[280px] p-5">
             {item?.status === "done" ? (
-              <>
-                <div className="flex items-center gap-2">
-                  <Badge>
-                    <BadgeCheck data-icon="inline-start" />
-                    Saved
-                  </Badge>
-                  <span className="truncate text-sm text-muted-foreground">{basename(output ?? "")}</span>
+              text ? (
+                <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{text}</pre>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-5/6" />
+                  <p className="text-sm text-muted-foreground">Loading transcript…</p>
                 </div>
-                {text ? (
-                  <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
-                    {text}
-                  </pre>
-                ) : (
-                  <Alert>
-                    <FileText />
-                    <AlertDescription>
-                      Loading transcript preview. You can still open or reveal the saved file.
-                    </AlertDescription>
-                  </Alert>
-                )}
-              </>
+              )
             ) : item?.status === "error" ? (
               <Alert variant="destructive">
                 <HelpCircle />
                 <AlertDescription>{item.error}</AlertDescription>
               </Alert>
             ) : item ? (
-              <>
-                <Badge variant="secondary">{running ? "Transcribing locally" : "Queued"}</Badge>
-                <p className="text-sm leading-6 text-muted-foreground">
-                  This panel switches to the finished transcript as soon as the local run completes.
+              <div className="flex flex-col gap-3">
+                <Badge variant="secondary">{running ? "Transcribing" : "Queued"}</Badge>
+                <p className="text-[15px] leading-7 text-muted-foreground">
+                  The finished transcript will appear here as soon as the local run completes.
                 </p>
-              </>
+              </div>
             ) : (
               <Empty className="border-0 bg-transparent">
                 <EmptyMedia>
                   <FileText />
                 </EmptyMedia>
                 <div>
-                  <EmptyTitle>Drop audio to create a transcript</EmptyTitle>
-                  <EmptyDescription>Yap saves the transcript locally when the source is protected.</EmptyDescription>
+                  <EmptyTitle>No transcript selected</EmptyTitle>
+                  <EmptyDescription>Drop a recording on Home or pick one from History.</EmptyDescription>
                 </div>
               </Empty>
             )}

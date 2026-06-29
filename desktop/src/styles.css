@@ -49,6 +49,10 @@
     --input: #ded6ca;
     --ring: #034f46;
     --primary-soft: #dff7ed;
+    --surface-transcript: #fffefa;
+    --accent-soft: #edd7ff;
+    --accent-ink: #44215f;
+    --rail-hover: #ece8df;
   }
 
   * {
