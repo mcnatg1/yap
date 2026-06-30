@@ -157,9 +157,11 @@ The primary layout is a warm workbench with one obvious action at a time.
 - Settings/status: model, auth, runner, output path, and logs live in a secondary
   area. They should not dominate the first screen.
 
-Use an 8px rhythm. Keep desktop widths readable, and collapse to one column
-below tablet width. Nothing in the main flow should require horizontal scrolling
-at the 390px mobile check or the 360px minimum window width.
+Use an 8px rhythm. The Tauri window enforces a minimum of 1122×740 (default
+1122×760; see `desktop/src-tauri/tauri.conf.json`). Layout targets that floor.
+Responsive single-column at mobile widths (e.g. 360px) is not a current target
+unless `minWidth` is lowered later. Nothing in the main flow should require
+horizontal scrolling at the enforced minimum size.
 
 ## Elevation & Depth
 
@@ -218,7 +220,7 @@ details behind disclosure unless an error requires them.
 - Do make the transcript or next user action the visual center.
 - Do say "Private on this device" or "Files stay on this machine" instead of
   exposing implementation details.
-- Do keep the app usable at 360px wide with no overlapping controls.
+- Do keep the app usable at the Tauri minimum size (1122×740) with no overlapping controls.
 - Do use icons for actions like remove, reveal, copy, settings, and export.
 - Don't lead with model IDs, Python paths, auth mechanisms, or RTX jargon.
 - Don't make the app look like a dashboard when it is a file-to-transcript tool.

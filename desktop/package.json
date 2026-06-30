@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "shadcn": "node --use-system-ca ./node_modules/shadcn/dist/index.js",
+    "shadcn:info": "npm run shadcn -- info --json",
+    "shadcn:search": "npm run shadcn -- search @shadcn",
+    "shadcn:add": "npm run shadcn -- add"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -19,11 +23,13 @@
     "cmdk": "^1.1.1",
     "framer-motion": "^12.41.0",
     "lucide-react": "^1.21.0",
+    "next-themes": "^0.4.6",
     "radix-ui": "^1.6.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-resizable-panels": "^4.12.0",
     "recharts": "^3.8.0",
+    "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "vaul": "^1.1.2"
   },

@@ -1,10 +1,11 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   CheckCircle2,
   Clock3,
   FileAudio,
   FolderOpen,
   Loader2,
+  RotateCcw,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -29,6 +30,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { formatElapsed } from "@/lib/app-types";
 
 export type UploadStatus = "queued" | "running" | "done" | "error";
 
@@ -42,8 +44,10 @@ export type UploadItem = {
 };
 
 type Props = {
+  elapsedSeconds?: number;
   items: UploadItem[];
   onRemove: (id: number) => void;
+  onRetry: (id: number) => void;
   onReveal: (path: string) => void;
   onSelect: (id: number) => void;
   selectedId?: number;
@@ -83,7 +87,9 @@ const attachmentState = {
   error: "error",
 } as const satisfies Record<UploadStatus, "idle" | "uploading" | "processing" | "error" | "done">;
 
-export function StackedUpload({ items, onRemove, onReveal, onSelect, selectedId }: Props) {
+export function StackedUpload({ elapsedSeconds, items, onRemove, onRetry, onReveal, onSelect, selectedId }: Props) {
+  const reducedMotion = useReducedMotion() ?? false;
+
   if (!items.length) {
     return (
       <Empty>
@@ -104,13 +110,16 @@ export function StackedUpload({ items, onRemove, onReveal, onSelect, selectedId 
         <AnimatePresence initial={false}>
           {items.map((item, index) => (
             <UploadCard
+              elapsedSeconds={item.status === "running" ? elapsedSeconds : undefined}
               isSelected={selectedId === item.id}
               item={item}
               key={item.id}
               offset={index}
               onRemove={onRemove}
+              onRetry={onRetry}
               onReveal={onReveal}
               onSelect={onSelect}
+              reducedMotion={reducedMotion}
             />
           ))}
         </AnimatePresence>
@@ -120,19 +129,25 @@ export function StackedUpload({ items, onRemove, onReveal, onSelect, selectedId 
 }
 
 function UploadCard({
+  elapsedSeconds,
   isSelected,
   item,
   offset,
   onRemove,
+  onRetry,
   onReveal,
   onSelect,
+  reducedMotion,
 }: {
+  elapsedSeconds?: number;
   isSelected: boolean;
   item: UploadItem;
   offset: number;
   onRemove: (id: number) => void;
+  onRetry: (id: number) => void;
   onReveal: (path: string) => void;
   onSelect: (id: number) => void;
+  reducedMotion: boolean;
 }) {
   const meta = statusMeta[item.status];
   const Icon = meta.icon;
@@ -141,23 +156,29 @@ function UploadCard({
     (item.status === "done"
       ? "Transcript saved"
       : item.status === "running"
-        ? "Transcribing locally…"
+        ? elapsedSeconds
+          ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
+          : "Transcribing locally…"
         : item.status === "queued"
           ? "Ready to transcribe"
           : "Needs attention");
 
+  const cardTransition = reducedMotion
+    ? { duration: 0 }
+    : { delay: offset * 0.1, duration: 0.18, ease: "easeOut" as const };
+
   return (
     <motion.li
-      animate={{ opacity: 1, y: 0, scale: 1 }}
+      animate={reducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
       className="list-none"
-      exit={{ opacity: 0, x: 12, scale: 0.98 }}
-      initial={{ opacity: 0, y: 16, scale: 0.98 }}
-      layout
-      transition={{ duration: 0.18, ease: "easeOut" }}
+      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 4, scale: 0.99 }}
+      initial={reducedMotion ? false : { opacity: 0, y: 8, scale: 0.98 }}
+      layout={!reducedMotion}
+      transition={cardTransition}
     >
       <Attachment
         className={cn(
-          "w-full cursor-pointer overflow-hidden rounded-lg outline-none transition-[border-color,box-shadow,background-color]",
+          "w-full cursor-pointer overflow-hidden outline-none transition-[border-color,box-shadow,background-color]",
           "focus-visible:ring-2 focus-visible:ring-ring/50",
           isSelected && "border-primary ring-2 ring-primary/15",
           offset > 0 && "shadow-sm",
@@ -175,9 +196,36 @@ function UploadCard({
 
         <AttachmentActions className="gap-2">
           <Badge variant={meta.variant}>
-            <Icon className={cn(item.status === "running" && "animate-spin")} data-icon="inline-start" />
-            {meta.label}
+            <Icon
+              className={cn(item.status === "running" && "animate-spin motion-reduce:animate-none")}
+              data-icon="inline-start"
+            />
+            {item.status === "running" && elapsedSeconds !== undefined ? (
+              <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+            ) : (
+              meta.label
+            )}
           </Badge>
+
+          {item.status === "error" ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <AttachmentAction
+                  aria-label="Retry transcription"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRetry(item.id);
+                  }}
+                  size="icon-sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RotateCcw />
+                </AttachmentAction>
+              </TooltipTrigger>
+              <TooltipContent>Retry</TooltipContent>
+            </Tooltip>
+          ) : null}
 
           {item.output ? (
             <Tooltip>
@@ -222,7 +270,7 @@ function UploadCard({
       </Attachment>
       {meta.progress === null ? (
         <div aria-hidden className="mt-3 h-1.5 overflow-hidden rounded-full bg-primary/20">
-          <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
+          <div className="h-full w-1/3 animate-pulse motion-reduce:animate-none rounded-full bg-primary" />
         </div>
       ) : (
         <Progress className="mt-3 h-1.5" value={meta.progress} />

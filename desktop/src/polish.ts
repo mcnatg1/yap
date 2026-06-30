@@ -8,6 +8,12 @@ export const polishToneLabels: Record<PolishTone, string> = {
   notes: "Notes",
 };
 
+export const polishToneHints: Record<PolishTone, string> = {
+  light: "Trim fillers and stutters; keep your voice.",
+  clean: "Smooth into clear, readable prose.",
+  notes: "Condense into concise meeting-style notes.",
+};
+
 const polishInstructions: Record<PolishTone, string> = {
   light:
     "Lightly clean the transcript. Remove filler words, obvious repeated stutters, and tiny false starts. Keep the speaker's voice and meaning. Do not summarize.",
