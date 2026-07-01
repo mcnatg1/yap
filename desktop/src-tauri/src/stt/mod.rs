@@ -40,3 +40,4 @@ pub mod error;
 pub mod model;
 pub mod pin;
 pub mod python;
+pub mod sidecar;
