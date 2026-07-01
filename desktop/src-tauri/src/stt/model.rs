@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::stt::error::SttError;
+use crate::stt::pin::CrispasrPin;
 
 pub fn models_dir_from<F>(env: F) -> PathBuf
 where
@@ -49,6 +50,52 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), SttError> {
     }
 }
 
+pub fn hf_resolve_url(repo: &str, revision: &str, file: &str) -> String {
+    format!("https://huggingface.co/{repo}/resolve/{revision}/{file}")
+}
+
+pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, download: D) -> Result<PathBuf, SttError>
+where
+    D: Fn(&str, &Path) -> Result<(), SttError>,
+{
+    let dest = dir.join(&pin.gguf_file);
+    if dest.exists() {
+        verify_sha256(&dest, &pin.gguf_sha256)?;
+        return Ok(dest);
+    }
+    std::fs::create_dir_all(dir).map_err(|_| SttError::ModelMissing)?;
+    let url = hf_resolve_url(&pin.gguf_repo, &pin.gguf_revision, &pin.gguf_file);
+    download(&url, &dest)?;
+    match verify_sha256(&dest, &pin.gguf_sha256) {
+        Ok(()) => Ok(dest),
+        Err(err) => {
+            let _ = std::fs::remove_file(&dest);
+            Err(err)
+        }
+    }
+}
+
+pub fn download_file(url: &str, dest: &Path) -> Result<(), SttError> {
+    let client = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|_| SttError::ModelMissing)?;
+    let mut response = client.get(url).send().map_err(|_| SttError::ModelMissing)?;
+    if !response.status().is_success() {
+        return Err(SttError::ModelMissing);
+    }
+    let tmp = dest.with_extension("part");
+    let mut file = std::fs::File::create(&tmp).map_err(|_| SttError::ModelMissing)?;
+    std::io::copy(&mut response, &mut file).map_err(|_| SttError::ModelMissing)?;
+    drop(file);
+    std::fs::rename(&tmp, dest).map_err(|_| SttError::ModelMissing)?;
+    Ok(())
+}
+
+pub fn ensure_model() -> Result<PathBuf, SttError> {
+    let pin = crate::stt::pin::load_pin().map_err(|_| SttError::ModelCorrupt)?;
+    ensure_model_at(&models_dir(), &pin, download_file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +135,65 @@ mod tests {
     fn verify_sha256_missing_file_is_model_missing() {
         let path = std::env::temp_dir().join("yap-absent-3f9c1a.bin");
         assert_eq!(verify_sha256(&path, &"0".repeat(64)).unwrap_err(), SttError::ModelMissing);
+    }
+
+    #[test]
+    fn hf_resolve_url_is_pinned_by_revision() {
+        assert_eq!(
+            hf_resolve_url("owner/repo", "abc123", "model.gguf"),
+            "https://huggingface.co/owner/repo/resolve/abc123/model.gguf"
+        );
+    }
+
+    fn sample_pin(gguf_sha256: &str) -> crate::stt::pin::CrispasrPin {
+        crate::stt::pin::CrispasrPin {
+            crispasr_version: "0.4.6".into(),
+            binary_sha256: "a".repeat(64),
+            gguf_repo: "owner/repo".into(),
+            gguf_revision: "rev".into(),
+            gguf_file: "m.gguf".into(),
+            gguf_sha256: gguf_sha256.into(),
+        }
+    }
+
+    #[test]
+    fn ensure_model_downloads_then_verifies() {
+        let dir = std::env::temp_dir().join(format!("yap-dl-ok-{}", std::process::id()));
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let pin = sample_pin(hello);
+        let dest = ensure_model_at(&dir, &pin, |_url, path| {
+            std::fs::write(path, b"hello").map_err(|_| SttError::ModelMissing)
+        })
+        .unwrap();
+        assert!(dest.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_model_rejects_corrupt_download() {
+        let dir = std::env::temp_dir().join(format!("yap-dl-bad-{}", std::process::id()));
+        let pin = sample_pin(&"0".repeat(64));
+        let err = ensure_model_at(&dir, &pin, |_url, path| {
+            std::fs::write(path, b"tampered").map_err(|_| SttError::ModelMissing)
+        })
+        .unwrap_err();
+        assert_eq!(err, SttError::ModelCorrupt);
+        assert!(!dir.join("m.gguf").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_model_uses_valid_cache_without_downloading() {
+        let dir = std::env::temp_dir().join(format!("yap-dl-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.gguf"), b"hello").unwrap();
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let pin = sample_pin(hello);
+        let dest = ensure_model_at(&dir, &pin, |_url, _path| {
+            panic!("download must not run when a valid cache exists")
+        })
+        .unwrap();
+        assert!(dest.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
