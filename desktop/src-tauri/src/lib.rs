@@ -1,15 +1,15 @@
 mod stt;
 
 #[tauri::command]
-fn setup_status() -> SetupStatus {
+fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
     let root = project_root();
     let python = python_path(&root);
     let script = root.join("transcribe.py");
+    let engine_ready = stt::dispatch::engine_ready();
+    let using_fallback = state.fell_back();
+    let readiness = stt::dispatch::engine_readiness(engine_ready, using_fallback);
     log_line(&format!(
-        "setup_status root={} python_ready={} script_ready={}",
-        root.display(),
-        python.exists(),
-        script.exists()
+        "setup_status engine_ready={engine_ready} using_fallback={using_fallback}"
     ));
 
     SetupStatus {
@@ -19,75 +19,19 @@ fn setup_status() -> SetupStatus {
         python_ready: python.exists(),
         script_ready: script.exists(),
         python: python.display().to_string(),
+        engine_ready,
+        using_fallback,
+        engine_status: stt::dispatch::engine_status_label(readiness).to_string(),
     }
 }
 
 #[tauri::command]
-fn transcribe_files(paths: Vec<String>) -> Result<Vec<TranscriptResult>, String> {
+fn transcribe_files(
+    state: tauri::State<'_, stt::dispatch::SttState>,
+    paths: Vec<String>,
+) -> Result<Vec<stt::dispatch::TranscriptResult>, stt::dispatch::SttCommandError> {
     log_line(&format!("transcribe_files count={}", paths.len()));
-
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let root = project_root();
-    let python = python_path(&root);
-    let script = root.join("transcribe.py");
-
-    if !python.exists() {
-        log_line(&format!("missing python {}", python.display()));
-        return Err(format!("Missing Python venv: {}", python.display()));
-    }
-
-    if !script.exists() {
-        log_line(&format!("missing runner {}", script.display()));
-        return Err(format!("Missing runner: {}", script.display()));
-    }
-
-    let mut command = std::process::Command::new(&python);
-    command.current_dir(&root).arg(&script).args(&paths);
-    hide_child_console(&mut command);
-
-    let output = command.output().map_err(|err| {
-        log_line(&format!("failed to start transcription: {err}"));
-        format!("Failed to start transcription: {err}")
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let message = command_failure_message(&stderr, &stdout);
-        log_line(&format!(
-            "transcription failed status={:?} stderr={} stdout={}",
-            output.status.code(),
-            stderr,
-            stdout
-        ));
-        return Err(message);
-    }
-
-    let outputs: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(String::from)
-        .collect();
-
-    log_line(&format!("transcription complete outputs={}", outputs.len()));
-
-    Ok(paths
-        .into_iter()
-        .enumerate()
-        .map(|(index, input)| TranscriptResult {
-            input: input.clone(),
-            output: outputs.get(index).cloned().unwrap_or_else(|| {
-                std::path::Path::new(&input)
-                    .with_extension("txt")
-                    .display()
-                    .to_string()
-            }),
-        })
-        .collect())
+    stt::dispatch::transcribe_paths(&state, project_root(), paths, "en")
 }
 
 #[tauri::command]
@@ -144,12 +88,9 @@ struct SetupStatus {
     python_ready: bool,
     script_ready: bool,
     python: String,
-}
-
-#[derive(serde::Serialize)]
-struct TranscriptResult {
-    input: String,
-    output: String,
+    engine_ready: bool,
+    using_fallback: bool,
+    engine_status: String,
 }
 
 fn project_root() -> std::path::PathBuf {
@@ -183,37 +124,6 @@ fn log_line(message: &str) {
     }
 }
 
-fn command_failure_message(stderr: &str, stdout: &str) -> String {
-    let message = if stderr.is_empty() { stdout } else { stderr };
-    if let Some(index) = message.rfind("Traceback") {
-        return message[index..].trim().to_string();
-    }
-
-    const MAX_CHARS: usize = 4000;
-    if message.chars().count() <= MAX_CHARS {
-        return message.to_string();
-    }
-
-    let tail: String = message
-        .chars()
-        .rev()
-        .take(MAX_CHARS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("...{tail}")
-}
-
-#[cfg(windows)]
-fn hide_child_console(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x08000000);
-}
-
-#[cfg(not(windows))]
-fn hide_child_console(_: &mut std::process::Command) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,11 +136,17 @@ mod tests {
             python_ready: true,
             script_ready: true,
             python: "python.exe".into(),
+            engine_ready: true,
+            using_fallback: false,
+            engine_status: "Transcription engine ready".into(),
         })
         .unwrap();
 
         assert_eq!(value["pythonReady"], true);
         assert_eq!(value["scriptReady"], true);
+        assert_eq!(value["engineReady"], true);
+        assert_eq!(value["usingFallback"], false);
+        assert_eq!(value["engineStatus"], "Transcription engine ready");
         assert!(value.get("python_ready").is_none());
     }
 
@@ -244,12 +160,6 @@ mod tests {
         let path = polished_path(std::path::Path::new("C:/recordings/take.txt")).unwrap();
         assert_eq!(path.file_name().unwrap(), "take.polished.txt");
     }
-
-    #[test]
-    fn command_failure_message_uses_traceback_tail() {
-        let message = command_failure_message("Loading weights: 100%\nTraceback sad", "");
-        assert_eq!(message, "Traceback sad");
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -259,9 +169,21 @@ pub fn run() {
     }));
     log_line("app start");
 
+    let stt_state = stt::dispatch::SttState::new();
+    let sidecar_for_monitor = std::sync::Arc::clone(&stt_state.sidecar);
+    let sidecar_for_exit = std::sync::Arc::clone(&stt_state.sidecar);
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        if let Ok(mut sidecar) = sidecar_for_monitor.lock() {
+            sidecar.unload_if_idle();
+        }
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(stt_state)
         .invoke_handler(tauri::generate_handler![
             setup_status,
             transcribe_files,
@@ -269,6 +191,13 @@ pub fn run() {
             write_polished_text,
             open_devtools
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(move |_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Ok(mut sidecar) = sidecar_for_exit.lock() {
+                    sidecar.shutdown();
+                }
+            }
+        });
 }
