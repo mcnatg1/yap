@@ -1,3 +1,5 @@
+mod stt;
+
 #[tauri::command]
 fn setup_status() -> SetupStatus {
     let root = project_root();
