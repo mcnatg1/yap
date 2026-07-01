@@ -41,6 +41,7 @@ import {
 } from "@/lib/app-types";
 import { historyEntryToUploadItem } from "@/lib/history-utils";
 import { cn } from "@/lib/utils";
+import { SttInvokeError, transcribeFiles, transcriptFileError } from "@/stt";
 
 type SetupStatus = {
   model: string;
@@ -48,11 +49,9 @@ type SetupStatus = {
   pythonReady: boolean;
   scriptReady: boolean;
   python: string;
-};
-
-type TranscriptResult = {
-  input: string;
-  output: string;
+  engineReady: boolean;
+  usingFallback: boolean;
+  engineStatus: string;
 };
 
 export default function App() {
@@ -175,7 +174,11 @@ export default function App() {
     try {
       const setup = await invoke<SetupStatus>("setup_status");
       setModel(setup.model.replace("CohereLabs/", "").replace("ZoOtMcNoOt/", ""));
-      setStatus(setup.pythonReady && setup.scriptReady ? "Ready" : "Setup missing");
+      setStatus(
+        setup.engineReady || (setup.pythonReady && setup.scriptReady)
+          ? setup.engineStatus
+          : "Setup missing",
+      );
       setAuth(setup.pythonReady ? "Authorized" : setup.python);
     } catch (error) {
       setStatus("Setup check failed");
@@ -270,13 +273,14 @@ export default function App() {
     );
 
     try {
-      const results = await invoke<TranscriptResult[]>("transcribe_files", {
-        paths: pending.map((item) => item.path),
-      });
-      const outputs = new Map(results.map((result) => [result.input, result.output]));
+      const results = await transcribeFiles(pending.map((item) => item.path));
+      const succeeded = results.filter((result) => !result.error);
+      const failed = results.filter((result) => result.error);
+      const outputs = new Map(succeeded.map((result) => [result.input, result.output]));
+      const failedInputs = new Set(failed.map((result) => result.input));
       const texts: Record<string, string> = {};
 
-      for (const result of results) {
+      for (const result of succeeded) {
         try {
           texts[result.output] = await invoke<string>("read_text_file", { path: result.output });
         } catch {
@@ -285,9 +289,15 @@ export default function App() {
       }
 
       setQueue((items) =>
-        items.map((item) =>
-          outputs.has(item.path) ? { ...item, output: outputs.get(item.path), status: "done" } : item,
-        ),
+        items.map((item) => {
+          if (outputs.has(item.path)) {
+            return { ...item, output: outputs.get(item.path), status: "done" };
+          }
+          if (failedInputs.has(item.path)) {
+            return { ...item, status: "error", error: "Transcription failed" };
+          }
+          return item;
+        }),
       );
       recordHistoryEntries(
         pending.flatMap((item) => {
@@ -305,11 +315,18 @@ export default function App() {
         }),
       );
       setTranscriptText((current) => ({ ...current, ...texts }));
-      setStatus("Ready");
+      for (const result of failed) {
+        toast.error(transcriptFileError(result) ?? "Transcription failed.");
+      }
+      setStatus(failed.length ? "Needs attention" : "Ready");
       setAuth("Authorized");
-      toast.success(`Transcribed ${results.length} file${results.length === 1 ? "" : "s"}`);
+      if (succeeded.length) {
+        toast.success(`Transcribed ${succeeded.length} file${succeeded.length === 1 ? "" : "s"}`);
+      }
     } catch (error) {
-      const message = String(error || "Transcription failed");
+      const failure = error instanceof SttInvokeError ? error : undefined;
+      const message = failure?.message ?? String(error || "Transcription failed");
+      const detail = failure?.detail ?? message;
       setQueue((items) =>
         items.map((item) =>
           pending.some((pendingItem) => pendingItem.id === item.id)
@@ -318,7 +335,7 @@ export default function App() {
         ),
       );
       setStatus("Needs attention");
-      setAuth(message.includes("Hugging Face") ? "Run hf auth login" : "Check runner output");
+      setAuth(detail.includes("Hugging Face") ? "Run hf auth login" : "Check runner output");
       toast.error(message);
     } finally {
       setRunning(false);

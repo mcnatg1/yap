@@ -11,7 +11,8 @@
     "shadcn": "node --use-system-ca ./node_modules/shadcn/dist/index.js",
     "shadcn:info": "npm run shadcn -- info --json",
     "shadcn:search": "npm run shadcn -- search @shadcn",
-    "shadcn:add": "npm run shadcn -- add"
+    "shadcn:add": "npm run shadcn -- add",
+    "test": "vitest run"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -43,6 +44,7 @@
     "shadcn": "^4.12.0",
     "tailwindcss": "^4.3.1",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^4.1.9"
   }
 }
