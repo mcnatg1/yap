@@ -54,14 +54,20 @@ pub fn hf_resolve_url(repo: &str, revision: &str, file: &str) -> String {
     format!("https://huggingface.co/{repo}/resolve/{revision}/{file}")
 }
 
-pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, download: D) -> Result<PathBuf, SttError>
+pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, mut download: D) -> Result<PathBuf, SttError>
 where
-    D: Fn(&str, &Path) -> Result<(), SttError>,
+    D: FnMut(&str, &Path) -> Result<(), SttError>,
 {
     let dest = dir.join(&pin.gguf_file);
     if dest.exists() {
-        verify_sha256(&dest, &pin.gguf_sha256)?;
-        return Ok(dest);
+        match verify_sha256(&dest, &pin.gguf_sha256) {
+            Ok(()) => return Ok(dest),
+            Err(SttError::ModelCorrupt) => {
+                let _ = std::fs::remove_file(&dest);
+                // ponytail: fall through to download path — same repair as post-download mismatch
+            }
+            Err(err) => return Err(err),
+        }
     }
     std::fs::create_dir_all(dir).map_err(|_| SttError::ModelMissing)?;
     let url = hf_resolve_url(&pin.gguf_repo, &pin.gguf_revision, &pin.gguf_file);
@@ -194,6 +200,25 @@ mod tests {
         })
         .unwrap();
         assert!(dest.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_model_deletes_corrupt_cache_and_redownloads() {
+        let dir = std::env::temp_dir().join(format!("yap-dl-corrupt-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.gguf"), b"tampered-on-disk").unwrap();
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let pin = sample_pin(hello);
+        let mut download_calls = 0;
+        let dest = ensure_model_at(&dir, &pin, |_url, path| {
+            download_calls += 1;
+            std::fs::write(path, b"hello").map_err(|_| SttError::ModelMissing)
+        })
+        .unwrap();
+        assert_eq!(download_calls, 1, "must re-download after deleting corrupt cache");
+        assert!(dest.exists());
+        assert!(verify_sha256(&dest, hello).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
