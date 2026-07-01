@@ -1,4 +1,4 @@
-mod stt;
+pub mod stt;
 
 #[tauri::command]
 fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
