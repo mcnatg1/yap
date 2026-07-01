@@ -2930,6 +2930,83 @@ git add .github/workflows/ci.yml .github/dependabot.yml
 git commit -m "ci(stt): lockfile-pinned builds + npm/cargo audit + dependabot"
 ```
 
+### Task 19: Corrupt cached GGUF repair (delete + re-download)
+
+**Files:**
+- Modify: `desktop/src-tauri/src/stt/model.rs`
+
+**Origin:** Task 5 leaves a gap — when a cached GGUF exists but `verify_sha256` fails (`ModelCorrupt`), the file stays on disk and every subsequent run fails without re-downloading. This task closes that loop: delete the corrupt cache entry and fall through to the download path (same fail-closed policy as a bad fresh download).
+
+- [ ] **Step 1: Write the failing test**
+
+Add inside the existing `tests` module in `desktop/src-tauri/src/stt/model.rs`:
+
+```rust
+    #[test]
+    fn ensure_model_deletes_corrupt_cache_and_redownloads() {
+        let dir = std::env::temp_dir().join(format!("yap-dl-corrupt-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.gguf"), b"tampered-on-disk").unwrap();
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let pin = sample_pin(hello);
+        let mut download_calls = 0;
+        let dest = ensure_model_at(&dir, &pin, |_url, path| {
+            download_calls += 1;
+            std::fs::write(path, b"hello").map_err(|_| SttError::ModelMissing)
+        })
+        .unwrap();
+        assert_eq!(download_calls, 1, "must re-download after deleting corrupt cache");
+        assert!(dest.exists());
+        assert!(verify_sha256(&dest, hello).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run (in `desktop/src-tauri/`): `cargo test ensure_model_deletes_corrupt_cache_and_redownloads`
+Expected: FAIL — corrupt cache returns `ModelCorrupt` without re-downloading (or test panics because download never runs).
+
+- [ ] **Step 3: Fix `ensure_model_at` cache branch**
+
+In `ensure_model_at`, replace the early-return on cache hit:
+
+```rust
+    if dest.exists() {
+        verify_sha256(&dest, &pin.gguf_sha256)?;
+        return Ok(dest);
+    }
+```
+
+with:
+
+```rust
+    if dest.exists() {
+        match verify_sha256(&dest, &pin.gguf_sha256) {
+            Ok(()) => return Ok(dest),
+            Err(SttError::ModelCorrupt) => {
+                let _ = std::fs::remove_file(&dest);
+                // ponytail: fall through to download path — same repair as post-download mismatch
+            }
+            Err(err) => return Err(err),
+        }
+    }
+```
+
+Keep the post-download mismatch delete unchanged (no duplication beyond the shared `verify_sha256` call).
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run (in `desktop/src-tauri/`): `cargo test stt::model`
+Expected: PASS (9 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add desktop/src-tauri/src/stt/model.rs
+git commit -m "fix(stt): delete corrupt cached GGUF and re-download"
+```
+
 ---
 
 ## Self-Review
@@ -2948,7 +3025,7 @@ Performed after all tasks were written; issues found were fixed inline.
 | §6.2 Batch happy path + tolerant parse | 9 (`parse_transcription_json`), 11 (`post_transcription`) |
 | §6.3 `/load`, §6.4 `/inference` | **Not built** — spec keeps them as future/documented alternatives (accommodated by the trait) |
 | §7 Lifecycle (lazy spawn, port 8765→8775, 10s ready-gate, one-in-flight, restart-once+retry-once, idle-unload 10min, kill on exit, log) | 8, 10, 11, 14 |
-| §8 Model cache + pinned download + SHA-256 verify (fail-closed); offline run | 3, 4, 5 (+ §8 "offline": launch with local `-m <gguf>`, no auto-download flags — see note below) |
+| §8 Model cache + pinned download + SHA-256 verify (fail-closed); offline run; **corrupt cache repair** | 3, 4, 5, **19** (+ §8 "offline": launch with local `-m <gguf>`, no auto-download flags — see note below) |
 | §9 Binary acquisition (externalBin, version pin, `YAP_CRISPASR_BIN`, verify before spawn) | 3, 8, 10, 17 |
 | §10.3 Controls (pin+hash binary & GGUF, scrubbed env, loopback+ephemeral port, validate inputs, CI hygiene) | 3, 4, 5, 8, 9, 10, 17, 18 |
 | §10.4 Signing + OS sandbox | **Out of Scope** (release fast-follow, noted once) |
