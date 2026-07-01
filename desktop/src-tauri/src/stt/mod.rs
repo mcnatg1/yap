@@ -2,3 +2,4 @@
 //! HTTP sidecar. Spec: docs/superpowers/specs/2026-06-30-crispasr-stt-sidecar-design.md
 
 pub mod error;
+pub mod pin;
