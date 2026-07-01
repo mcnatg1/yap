@@ -18,3 +18,5 @@ Thumbs.db
 .idea/
 
 .impeccable-*-out.*
+
+.worktrees/
