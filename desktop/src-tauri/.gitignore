@@ -7,4 +7,8 @@
 /gen/schemas
 
 # Sidecar binaries (dev/packaging prep — not committed)
-/binaries/*.exe
+/binaries/*
+!/binaries/.gitkeep
+
+# Local crispasr copies for dev (prefer YAP_CRISPASR_BIN or binaries/)
+/resources/

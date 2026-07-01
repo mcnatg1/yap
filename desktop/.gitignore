@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local smoke/parity clips and outputs (set YAP_PARITY_CLIP to your own path)
+test-fixtures/
