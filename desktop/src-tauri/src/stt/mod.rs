@@ -37,6 +37,7 @@ fn stt_log_path() -> std::path::PathBuf {
 
 pub mod backend;
 pub mod crispasr;
+pub mod dispatch;
 pub mod error;
 pub mod model;
 pub mod parity;
