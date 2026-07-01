@@ -39,6 +39,7 @@ pub mod backend;
 pub mod crispasr;
 pub mod error;
 pub mod model;
+pub mod parity;
 pub mod pin;
 pub mod python;
 pub mod sidecar;
