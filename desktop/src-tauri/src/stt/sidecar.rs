@@ -1,6 +1,7 @@
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::stt::error::SttError;
 
@@ -79,6 +80,145 @@ where
     }
 }
 
+pub struct CrispasrSidecar {
+    child: Option<Child>,
+    pub(crate) port: Option<u16>,
+    last_used: Instant,
+}
+
+impl CrispasrSidecar {
+    pub fn new() -> Self {
+        Self {
+            child: None,
+            port: None,
+            last_used: Instant::now(),
+        }
+    }
+
+    pub fn base_url(&self) -> Option<String> {
+        self.port.map(|port| format!("http://{HOST}:{port}"))
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => false,
+                Err(_) => false,
+            },
+            None => false,
+        }
+    }
+
+    pub fn mark_used(&mut self) {
+        self.last_used = Instant::now();
+    }
+
+    pub fn ensure_ready(&mut self) -> Result<String, SttError> {
+        if self.is_running() {
+            if let Some(url) = self.base_url() {
+                self.mark_used();
+                return Ok(url);
+            }
+        }
+        self.shutdown();
+
+        let binary = resolve_binary(|key| std::env::var(key).ok(), &current_exe_dir())?;
+        let pin = crate::stt::pin::load_pin().map_err(|_| SttError::ModelCorrupt)?;
+        if crate::stt::model::verify_sha256(&binary, &pin.binary_sha256).is_err() {
+            crate::stt::log_stt("crispasr binary failed SHA-256 verification; refusing to spawn");
+            return Err(SttError::SidecarUnreachable);
+        }
+        let model = crate::stt::model::ensure_model()?;
+        let port = probe_port().ok_or(SttError::SidecarUnreachable)?;
+
+        let child = spawn_child(&binary, &model, port)?;
+        self.child = Some(child);
+        self.port = Some(port);
+
+        let url = self.base_url().ok_or(SttError::SidecarUnreachable)?;
+        if wait_ready(&url) {
+            self.mark_used();
+            crate::stt::log_stt(&format!("crispasr sidecar ready on {url}"));
+            Ok(url)
+        } else {
+            crate::stt::log_stt("crispasr sidecar failed the 10s ready-gate");
+            self.shutdown();
+            Err(SttError::SidecarUnreachable)
+        }
+    }
+
+    pub fn restart(&mut self) -> Result<String, SttError> {
+        crate::stt::log_stt("crispasr sidecar restart-once");
+        self.shutdown();
+        self.ensure_ready()
+    }
+
+    pub fn unload_if_idle(&mut self) {
+        if self.is_running() && should_unload(self.last_used.elapsed(), IDLE_UNLOAD) {
+            crate::stt::log_stt("crispasr sidecar idle-unload after 10min");
+            self.shutdown();
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.port = None;
+    }
+}
+
+impl Default for CrispasrSidecar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn current_exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn spawn_child(binary: &Path, model: &Path, port: u16) -> Result<Child, SttError> {
+    let mut command = Command::new(binary);
+    command.args(build_launch_args(model, port));
+    command.env_clear();
+    command.envs(sidecar_env(std::env::vars()));
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    crate::stt::hide_child_console(&mut command);
+    command.spawn().map_err(|_| SttError::SidecarUnreachable)
+}
+
+fn wait_ready(base_url: &str) -> bool {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + READY_BUDGET;
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(format!("{base_url}/health")).send() {
+            if response.status().is_success() {
+                if let Ok(body) = response.text() {
+                    if health_is_ready(&body) {
+                        return true;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +272,20 @@ mod tests {
     fn resolve_binary_missing_dev_override_is_unreachable() {
         let err = resolve_binary(|_| Some("C:/definitely/not/here.exe".into()), std::path::Path::new("C:/app"));
         assert_eq!(err.unwrap_err(), SttError::SidecarUnreachable);
+    }
+
+    #[test]
+    fn new_sidecar_is_not_running_and_has_no_url() {
+        let mut sidecar = CrispasrSidecar::new();
+        assert!(!sidecar.is_running());
+        assert!(sidecar.base_url().is_none());
+        sidecar.shutdown(); // no panic when there is no child
+    }
+
+    #[test]
+    fn base_url_uses_loopback_and_port() {
+        let mut sidecar = CrispasrSidecar::new();
+        sidecar.port = Some(8770);
+        assert_eq!(sidecar.base_url().unwrap(), "http://127.0.0.1:8770");
     }
 }
