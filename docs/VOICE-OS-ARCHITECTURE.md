@@ -46,7 +46,7 @@
 
 | | **Yap v1 target** | **Voice OS (long-term)** |
 |--|---------------------|---------------------------|
-| Primary input | Local live/offline fallback + file queue shell | + live mic, eventually global hotkey |
+| Primary input | Thin client live/offline fallback + recording queue shell | + live mic, eventually global hotkey |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
 | STT runtime | **Moonshine tiny CrispASR fallback** + future server connector | Same client shell; heavier pools move server-side |
@@ -58,16 +58,16 @@
 
 ## Two deployment profiles
 
-| Attribute | **Solo / local-first** | **Team / server** |
+| Attribute | **Solo / fallback** | **Team / server** |
 |-----------|------------------------|-------------------|
-| Target | Individual users, offline, privacy-max | Org teams on a shared DGX Spark |
+| Target | Individual users with local live fallback | Org teams on a shared DGX Spark |
 | STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server Moonshine GPU (streaming ASR pool, WSS) |
 | STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
 | Diarization | WeSpeaker + vault (Phase 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 10, ADR 0015) |
 | Identity | None | Entra ID / MSAL (ADR 0016) |
 | Knowledge base | Local OKF markdown (Phase 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 11, ADR 0017) |
-| Network | None required | LAN/VPN to DGX Spark |
+| Network | None required for live fallback; DGX/server required for official recordings | LAN/VPN to DGX Spark |
 
 The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In PR3, the local path is a Moonshine tiny fallback for live/offline degraded use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
