@@ -13,7 +13,7 @@
 ## Not In Scope
 
 - Python runtime fallback.
-- Local Cohere as default batch runtime.
+- Client-side Cohere as the default batch runtime.
 - Runtime backend switching.
 - CLI-per-file fallback.
 - DGX/server batch connector.

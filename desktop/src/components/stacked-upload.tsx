@@ -1,4 +1,3 @@
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   CheckCircle2,
   Clock3,
@@ -91,8 +90,6 @@ const attachmentState = {
 } as const satisfies Record<UploadStatus, "idle" | "uploading" | "processing" | "error" | "done">;
 
 export function StackedUpload({ elapsedSeconds, items, onRemove, onRetry, onReveal, onSelect, selectedId }: Props) {
-  const reducedMotion = useReducedMotion() ?? false;
-
   if (!items.length) {
     return (
       <Empty>
@@ -110,22 +107,19 @@ export function StackedUpload({ elapsedSeconds, items, onRemove, onRetry, onReve
   return (
     <ScrollArea className="h-[260px] pr-3">
       <ul className="flex flex-col gap-2">
-        <AnimatePresence initial={false}>
-          {items.map((item, index) => (
-            <UploadCard
-              elapsedSeconds={item.status === "running" ? elapsedSeconds : undefined}
-              isSelected={selectedId === item.id}
-              item={item}
-              key={item.id}
-              offset={index}
-              onRemove={onRemove}
-              onRetry={onRetry}
-              onReveal={onReveal}
-              onSelect={onSelect}
-              reducedMotion={reducedMotion}
-            />
-          ))}
-        </AnimatePresence>
+        {items.map((item, index) => (
+          <UploadCard
+            elapsedSeconds={item.status === "running" ? elapsedSeconds : undefined}
+            isSelected={selectedId === item.id}
+            item={item}
+            key={item.id}
+            offset={index}
+            onRemove={onRemove}
+            onRetry={onRetry}
+            onReveal={onReveal}
+            onSelect={onSelect}
+          />
+        ))}
       </ul>
     </ScrollArea>
   );
@@ -140,7 +134,6 @@ function UploadCard({
   onRetry,
   onReveal,
   onSelect,
-  reducedMotion,
 }: {
   elapsedSeconds?: number;
   isSelected: boolean;
@@ -150,7 +143,6 @@ function UploadCard({
   onRetry: (id: number) => void;
   onReveal: (path: string) => void;
   onSelect: (id: number) => void;
-  reducedMotion: boolean;
 }) {
   const meta = statusMeta[item.status];
   const Icon = meta.icon;
@@ -167,19 +159,8 @@ function UploadCard({
           ? "Ready to transcribe"
           : "Needs attention");
 
-  const cardTransition = reducedMotion
-    ? { duration: 0 }
-    : { delay: offset * 0.1, duration: 0.18, ease: "easeOut" as const };
-
   return (
-    <motion.li
-      animate={reducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
-      className="list-none"
-      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 4, scale: 0.99 }}
-      initial={reducedMotion ? false : { opacity: 0, y: 8, scale: 0.98 }}
-      layout={!reducedMotion}
-      transition={cardTransition}
-    >
+    <li className="list-none">
       <Attachment
         className={cn(
           "w-full cursor-pointer overflow-hidden outline-none transition-[border-color,box-shadow,background-color]",
@@ -279,6 +260,6 @@ function UploadCard({
       ) : item.status === "running" || meta.progress !== null ? (
         <Progress className="mt-3 h-1.5" value={item.progressPercent ?? meta.progress ?? 0} />
       ) : null}
-    </motion.li>
+    </li>
   );
 }

@@ -1,6 +1,5 @@
 import { Sparkles, Trash2 } from "lucide-react";
 
-import { AnimatedActionIcon } from "@/components/app/animated-action-icon";
 import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
 import {
   AlertDialog,
@@ -60,6 +59,8 @@ export function QueuePanel({
   runningItem?: UploadItem;
   selectedId?: number;
 }) {
+  const TranscribeIcon = running ? Spinner : Sparkles;
+
   return (
     <Card className="surface-workspace-inset h-full min-w-0 bg-card py-0">
       <CardHeader className="p-4 sm:p-5">
@@ -129,13 +130,9 @@ export function QueuePanel({
               </AlertDialogContent>
             </AlertDialog>
             <Button disabled={running || !hasRunnable} onClick={onRun} size="sm" type="button">
-              <AnimatedActionIcon
-                activeKey={running ? "running" : "idle"}
-                icons={{
-                  idle: Sparkles,
-                  running: Spinner,
-                }}
-              />
+              <span className="relative inline-flex size-4 shrink-0 items-center justify-center" data-icon="inline-start">
+                <TranscribeIcon />
+              </span>
               Transcribe
             </Button>
           </ButtonGroup>

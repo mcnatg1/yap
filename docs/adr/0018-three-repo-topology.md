@@ -26,7 +26,7 @@ Split the codebase into **three repositories**, each with a single, clear deploy
 | **Contents** | Tauri + React thin client |
 | **Primary language** | Rust (Tauri backend) + TypeScript (React frontend) |
 | **Deployment** | NSIS installer (Windows); future: macOS DMG, Linux AppImage |
-| **Responsibilities** | Mic capture; Silero VAD; Opus encoding; global hotkey + text injection (ADR 0013); ghost / preview UI; server connector (WSS + HTTP); local file selection; local Moonshine/Cohere sidecar (solo profile / offline fallback); Settings UI |
+| **Responsibilities** | Mic capture; Silero VAD; Opus encoding; global hotkey + text injection (ADR 0013); ghost / preview UI; server connector (WSS + HTTP); local file selection; local Moonshine tiny fallback sidecar; Settings UI |
 | **Maps from** | `cohere-transcribe-local/desktop/` |
 
 `yap-desktop` ships to end-user machines. It must be code-signed and notarised per-platform. It contains no server-side logic and no knowledge data.
@@ -97,7 +97,7 @@ The current `cohere-transcribe-local` workspace maps as follows:
 |--------------|-----------------|
 | `desktop/` | `yap-desktop` |
 | `docs/` | Move to `yap-desktop/docs/` (client ADRs) + shared `docs/` in a docs-umbrella or keep in `yap-desktop` |
-| `transcribe.py`, `requirements.txt` | `yap-desktop` (solo-profile Python fallback, Phase 0–1) |
+| Historical `transcribe.py`, `requirements.txt` | Not migrated; removed from the PR3 runtime after the local Moonshine fallback sidecar replaced the Python path |
 | `PRODUCT.md`, `DESIGN.md` | `yap-desktop` (product docs) |
 | *New server code* | `yap-server` (new repo) |
 | *Knowledge data* | `yap-knowledge` (new repo) |

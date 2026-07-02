@@ -473,8 +473,8 @@ export default function App() {
       const next = entries.reduce(recordTranscriptHistory, current);
       try {
         writeTranscriptHistory(next);
-      } catch {
-        // ponytail: best-effort localStorage index, replace with file-backed history when transcripts need sync/search.
+      } catch (error) {
+        console.warn("Transcript history could not be saved.", error);
       }
       return next;
     });
@@ -485,8 +485,8 @@ export default function App() {
       const next = removeTranscriptHistory(current, outputPath);
       try {
         writeTranscriptHistory(next);
-      } catch {
-        // ponytail: best-effort localStorage removal, replace with file-backed history when deletion must persist.
+      } catch (error) {
+        console.warn("Transcript history removal could not be saved.", error);
       }
       return next;
     });

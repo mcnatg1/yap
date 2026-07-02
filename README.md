@@ -60,7 +60,7 @@ DGX/server Cohere connector work, not in this local fallback branch.
                 |-- parity.rs         Small WER/timestamp helpers for tests.
                 |-- pin.rs            `crispasr-version.txt` parser.
                 |-- progress.rs       Progress event structs.
-                |-- settings.rs       Minimal STT settings.
+                |-- settings.rs       Env-only GPU preference (`YAP_USE_GPU`); no persisted app settings.
                 `-- sidecar.rs        Sidecar process lifecycle, auth, launch args.
 ```
 
@@ -89,7 +89,7 @@ Useful narrow checks:
 ```powershell
 cd C:\dev\cohere-transcribe-local
 git diff --check
-rg -n "transcribe.py|YAP_STT_BACKEND|CommandCenter" -g "!node_modules" -g "!target"
+rg -n "transcribe.py|CommandCenter" -g "!node_modules" -g "!target"
 ```
 
 ## Local Files
