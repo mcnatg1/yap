@@ -13,7 +13,10 @@ const HOST: &str = "127.0.0.1";
 const LOCAL_FALLBACK_BACKEND: &str = "moonshine-streaming";
 const ENV_ALLOWLIST: [&str; 4] = ["PATH", "SYSTEMROOT", "TEMP", "TMP"];
 
-pub fn first_free_port(range: RangeInclusive<u16>, mut is_free: impl FnMut(u16) -> bool) -> Option<u16> {
+pub fn first_free_port(
+    range: RangeInclusive<u16>,
+    mut is_free: impl FnMut(u16) -> bool,
+) -> Option<u16> {
     range.into_iter().find(|port| is_free(*port))
 }
 
@@ -31,12 +34,16 @@ where
 {
     source
         .into_iter()
-        .filter(|(key, _)| ENV_ALLOWLIST.iter().any(|allowed| key.eq_ignore_ascii_case(allowed)))
+        .filter(|(key, _)| {
+            ENV_ALLOWLIST
+                .iter()
+                .any(|allowed| key.eq_ignore_ascii_case(allowed))
+        })
         .collect()
 }
 
-pub fn build_launch_args(gguf: &Path, port: u16, _gpu_layers: u32) -> Vec<String> {
-    vec![
+pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String> {
+    let mut args = vec![
         "--server".to_string(),
         "--backend".to_string(),
         LOCAL_FALLBACK_BACKEND.to_string(),
@@ -46,8 +53,14 @@ pub fn build_launch_args(gguf: &Path, port: u16, _gpu_layers: u32) -> Vec<String
         HOST.to_string(),
         "--port".to_string(),
         port.to_string(),
-        "-ng".to_string(),
-    ]
+    ];
+    if gpu_layers > 0 {
+        args.push("--gpu-backend".to_string());
+        args.push("auto".to_string());
+    } else {
+        args.push("-ng".to_string());
+    }
+    args
 }
 
 pub fn health_is_ready(json: &str) -> bool {
@@ -66,7 +79,11 @@ pub fn should_unload(idle: Duration, threshold: Duration) -> bool {
 }
 
 pub fn sidecar_binary_path(exe_dir: &Path) -> PathBuf {
-    let name = if cfg!(windows) { "crispasr.exe" } else { "crispasr" };
+    let name = if cfg!(windows) {
+        "crispasr.exe"
+    } else {
+        "crispasr"
+    };
     exe_dir.join(name)
 }
 
@@ -123,7 +140,11 @@ impl CrispasrSidecar {
         if self.is_running() {
             if let Some(url) = self.base_url() {
                 self.mark_used();
-                crate::stt::log_stt_timed("ensure_ready", started.elapsed(), "sidecar already running");
+                crate::stt::log_stt_timed(
+                    "ensure_ready",
+                    started.elapsed(),
+                    "sidecar already running",
+                );
                 return Ok(url);
             }
         }
@@ -140,7 +161,11 @@ impl CrispasrSidecar {
             }
             binary::BinaryInstallStatus::Downloadable | binary::BinaryInstallStatus::Invalid => {
                 if let Some(report) = reporter {
-                    report.emit("loading_model", Some(5), "Downloading transcription engine…");
+                    report.emit(
+                        "loading_model",
+                        Some(5),
+                        "Downloading transcription engine…",
+                    );
                 }
                 crate::stt::log_stt("ensure_ready: downloading binary (fallback)");
                 binary::ensure_binary()?
@@ -202,7 +227,11 @@ impl CrispasrSidecar {
         let child = spawn_child(&binary, &model, port, gpu.layers)?;
         self.child = Some(child);
         self.port = Some(port);
-        crate::stt::log_stt_timed("ensure_ready", spawn_started.elapsed(), "sidecar process spawned");
+        crate::stt::log_stt_timed(
+            "ensure_ready",
+            spawn_started.elapsed(),
+            "sidecar process spawned",
+        );
 
         let url = self.base_url().ok_or(SttError::SidecarUnreachable)?;
         if wait_ready_with_progress(&url, reporter, started) {
@@ -217,7 +246,10 @@ impl CrispasrSidecar {
             crate::stt::log_stt_timed(
                 "ensure_ready",
                 started.elapsed(),
-                &format!("sidecar failed ready-gate after {}s", READY_BUDGET.as_secs()),
+                &format!(
+                    "sidecar failed ready-gate after {}s",
+                    READY_BUDGET.as_secs()
+                ),
             );
             self.shutdown();
             Err(SttError::SidecarUnreachable)
@@ -315,7 +347,8 @@ fn wait_ready_with_progress(
                 READY_BUDGET.as_secs()
             ));
             if let Some(report) = reporter {
-                let pct = (8 + elapsed.min(READY_BUDGET.as_secs()).saturating_mul(82) / READY_BUDGET.as_secs()) as u8;
+                let pct = (8 + elapsed.min(READY_BUDGET.as_secs()).saturating_mul(82)
+                    / READY_BUDGET.as_secs()) as u8;
                 report.emit(
                     "loading_model",
                     Some(pct.min(90)),
@@ -362,8 +395,12 @@ mod tests {
         let scrubbed = sidecar_env(source);
         assert!(scrubbed.iter().any(|(k, _)| k == "PATH"));
         assert!(scrubbed.iter().any(|(k, _)| k == "SystemRoot"));
-        assert!(!scrubbed.iter().any(|(k, _)| k.eq_ignore_ascii_case("HF_TOKEN")));
-        assert!(!scrubbed.iter().any(|(k, _)| k.eq_ignore_ascii_case("GITHUB_TOKEN")));
+        assert!(!scrubbed
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("HF_TOKEN")));
+        assert!(!scrubbed
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("GITHUB_TOKEN")));
     }
 
     #[test]
@@ -377,28 +414,42 @@ mod tests {
         let port = args.iter().position(|a| a == "--port").unwrap();
         assert_eq!(args[port + 1], "8765");
         assert!(args.contains(&"-ng".to_string()));
+        assert!(!args.contains(&"--gpu-backend".to_string()));
     }
 
     #[test]
-    fn launch_args_stay_cpu_for_tiny_fallback() {
+    fn launch_args_use_gpu_backend_auto_when_gpu_available() {
         let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 99);
-        assert!(!args.contains(&"--gpu-backend".to_string()));
-        assert!(args.contains(&"-ng".to_string()));
+        let gpu = args.iter().position(|a| a == "--gpu-backend").unwrap();
+        assert_eq!(args[gpu + 1], "auto");
+        assert!(!args.contains(&"-ng".to_string()));
     }
 
     #[test]
     fn health_ready_requires_ok_and_moonshine_streaming() {
-        assert!(health_is_ready(r#"{"status":"ok","backend":"moonshine-streaming"}"#));
-        assert!(health_is_ready(r#"{"status":"ok","backend":"moonshine_streaming"}"#));
+        assert!(health_is_ready(
+            r#"{"status":"ok","backend":"moonshine-streaming"}"#
+        ));
+        assert!(health_is_ready(
+            r#"{"status":"ok","backend":"moonshine_streaming"}"#
+        ));
         assert!(!health_is_ready(r#"{"status":"ok","backend":"whisper"}"#));
-        assert!(!health_is_ready(r#"{"status":"loading","backend":"moonshine-streaming"}"#));
+        assert!(!health_is_ready(
+            r#"{"status":"loading","backend":"moonshine-streaming"}"#
+        ));
         assert!(!health_is_ready("not json"));
     }
 
     #[test]
     fn should_unload_after_threshold() {
-        assert!(should_unload(std::time::Duration::from_secs(601), IDLE_UNLOAD));
-        assert!(!should_unload(std::time::Duration::from_secs(10), IDLE_UNLOAD));
+        assert!(should_unload(
+            std::time::Duration::from_secs(601),
+            IDLE_UNLOAD
+        ));
+        assert!(!should_unload(
+            std::time::Duration::from_secs(10),
+            IDLE_UNLOAD
+        ));
     }
 
     #[test]

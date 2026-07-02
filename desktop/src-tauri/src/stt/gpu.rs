@@ -2,9 +2,9 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuPreference {
-    /// CPU-only via CrispASR `-ng` (default).
+    /// CPU-only via CrispASR `-ng`.
     Cpu,
-    /// Use GPU layers when a discrete GPU is detected.
+    /// Use GPU acceleration when a graphics adapter is detected.
     Auto,
     /// Request GPU layers when available; otherwise CPU.
     On,
@@ -21,10 +21,15 @@ pub struct GpuStatus {
 impl GpuStatus {
     pub fn resolve() -> Self {
         let preference = crate::stt::settings::effective_gpu_preference();
-        let adapter_name = detect_discrete_gpu_name();
+        let adapter_name = detect_gpu_name();
         let available = adapter_name.is_some();
         let layers = gpu_layers(preference, available);
-        Self { available, adapter_name, preference, layers }
+        Self {
+            available,
+            adapter_name,
+            preference,
+            layers,
+        }
     }
 
     pub fn using_gpu(&self) -> bool {
@@ -62,8 +67,11 @@ pub fn gpu_layers(preference: GpuPreference, gpu_available: bool) -> u32 {
     }
 }
 
-pub fn detect_discrete_gpu_name() -> Option<String> {
+pub fn detect_gpu_name() -> Option<String> {
     if let Some(name) = nvidia_gpu_name() {
+        return Some(name);
+    }
+    if let Some(name) = platform_gpu_name() {
         return Some(name);
     }
     None
@@ -77,8 +85,51 @@ fn nvidia_gpu_name() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let name = String::from_utf8_lossy(&output.stdout).trim().lines().next()?.trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    let name = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn platform_gpu_name() -> Option<String> {
+    #[cfg(windows)]
+    {
+        return windows_gpu_name();
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn windows_gpu_name() -> Option<String> {
+    let script = "Get-CimInstance Win32_VideoController | Where-Object { $_.PNPDeviceID -like 'PCI*' -and $_.Name -notmatch 'Virtual|Mirror|Remote|Basic Display' } | Select-Object -First 1 -ExpandProperty Name";
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-Command", script]);
+    crate::stt::hide_child_console(&mut command);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 #[cfg(test)]

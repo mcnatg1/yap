@@ -7,8 +7,8 @@ use crate::stt::gpu::GpuPreference;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuSetting {
-    #[default]
     Cpu,
+    #[default]
     Auto,
 }
 
@@ -53,9 +53,11 @@ pub fn load_settings() -> AppSettings {
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     let path = settings_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("Failed to create settings dir: {err}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create settings dir: {err}"))?;
     }
-    let body = serde_json::to_string_pretty(settings).map_err(|err| format!("Failed to encode settings: {err}"))?;
+    let body = serde_json::to_string_pretty(settings)
+        .map_err(|err| format!("Failed to encode settings: {err}"))?;
     std::fs::write(&path, body).map_err(|err| format!("Failed to write settings: {err}"))
 }
 
@@ -81,15 +83,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_prefer_cpu() {
+    fn default_settings_use_auto_gpu() {
         let settings = AppSettings::default();
-        assert_eq!(settings.use_gpu, GpuSetting::Cpu);
-        assert_eq!(settings.use_gpu.to_preference(), GpuPreference::Cpu);
+        assert_eq!(settings.use_gpu, GpuSetting::Auto);
+        assert_eq!(settings.use_gpu.to_preference(), GpuPreference::Auto);
     }
 
     #[test]
     fn round_trip_json() {
-        let settings = AppSettings { use_gpu: GpuSetting::Auto };
+        let settings = AppSettings {
+            use_gpu: GpuSetting::Auto,
+        };
         let json = serde_json::to_string(&settings).unwrap();
         let parsed: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, settings);

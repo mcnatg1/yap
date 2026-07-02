@@ -1,6 +1,6 @@
 # CrispASR optional local fallback pins. All values are integrity-critical; verification is fail-closed.
 crispasr_version=0.6.12
-binary_sha256=48bfc1c3ff9a86c85e0e611738740e43fe07084783196ca99f91fc96d94cfd37
+binary_sha256=481baf03ecda96792c00c3c9d2b5e3640e01a84b07fff24fdccfef99703ba8ef
 gguf_repo=cstr/moonshine-streaming-tiny-GGUF
 gguf_revision=56e0ac359fe5b44674cb4f6e8adee0b4f2baaec1
 gguf_file=moonshine-streaming-tiny-q4_k.gguf

@@ -59,6 +59,7 @@ pub fn release_url(version: &str, asset: &str) -> String {
 
 struct PlatformRelease<'a> {
     asset: &'a str,
+    dir: &'a str,
     member: &'a str,
 }
 
@@ -66,14 +67,16 @@ fn platform_release() -> Option<PlatformRelease<'static>> {
     #[cfg(windows)]
     {
         return Some(PlatformRelease {
-            asset: "crispasr-windows-x86_64-cpu.zip",
-            member: "crispasr-windows-x86_64-cpu/crispasr.exe",
+            asset: "crispasr-windows-x86_64-vulkan.zip",
+            dir: "crispasr-windows-x86_64-vulkan",
+            member: "crispasr-windows-x86_64-vulkan/crispasr.exe",
         });
     }
     #[cfg(target_os = "macos")]
     {
         return Some(PlatformRelease {
             asset: "crispasr-macos.tar.gz",
+            dir: "crispasr-macos",
             member: "crispasr-macos/crispasr",
         });
     }
@@ -81,6 +84,7 @@ fn platform_release() -> Option<PlatformRelease<'static>> {
     {
         return Some(PlatformRelease {
             asset: "crispasr-linux-x86_64.tar.gz",
+            dir: "crispasr-linux-x86_64",
             member: "crispasr-linux-x86_64/crispasr",
         });
     }
@@ -117,7 +121,8 @@ pub fn binary_install_status(exe_dir: &Path) -> Result<BinaryInstallStatus, SttE
         return Ok(BinaryInstallStatus::Installed);
     }
 
-    if bundled.exists() && bundled.metadata().map(|meta| meta.len()).unwrap_or(0) < MIN_BINARY_BYTES {
+    if bundled.exists() && bundled.metadata().map(|meta| meta.len()).unwrap_or(0) < MIN_BINARY_BYTES
+    {
         return Ok(BinaryInstallStatus::Invalid);
     }
 
@@ -209,9 +214,13 @@ where
     download(&url, &archive_part)?;
     std::fs::rename(&archive_part, &archive_path).map_err(|_| SttError::ModelMissing)?;
 
-    let extracted_part = dest.with_extension("part");
-    extract_member(&archive_path, release.member, &extracted_part)?;
-    std::fs::rename(&extracted_part, &dest).map_err(|_| SttError::ModelMissing)?;
+    extract_release(
+        &archive_path,
+        release.dir,
+        release.member,
+        &bin_dir(),
+        &dest,
+    )?;
     let _ = std::fs::remove_file(&archive_path);
 
     match verify_sha256(&dest, &pin.binary_sha256) {
@@ -223,7 +232,9 @@ where
         Err(err) => {
             let _ = std::fs::remove_file(&dest);
             let _ = std::fs::remove_file(verified_marker_path(&dest));
-            crate::stt::log_stt("crispasr downloaded binary failed SHA-256 verification; refusing install");
+            crate::stt::log_stt(
+                "crispasr downloaded binary failed SHA-256 verification; refusing install",
+            );
             Err(err)
         }
     }
@@ -236,32 +247,63 @@ fn verified_marker_path(binary: &Path) -> PathBuf {
 fn write_verified_marker(binary: &Path, expected_hash: &str) -> Result<(), SttError> {
     let metadata = std::fs::metadata(binary).map_err(|_| SttError::ModelMissing)?;
     let marker = verified_marker_path(binary);
-    std::fs::write(marker, format!("{expected_hash}\n{}\n", metadata.len())).map_err(|_| SttError::ModelMissing)
+    std::fs::write(marker, format!("{expected_hash}\n{}\n", metadata.len()))
+        .map_err(|_| SttError::ModelMissing)
 }
 
-fn extract_member(archive: &Path, member: &str, dest: &Path) -> Result<(), SttError> {
+fn extract_release(
+    archive: &Path,
+    dir: &str,
+    member: &str,
+    dest_dir: &Path,
+    dest: &Path,
+) -> Result<(), SttError> {
     #[cfg(windows)]
     {
-        return extract_member_from_zip(archive, member, dest);
+        return extract_release_from_zip(archive, dir, member, dest_dir, dest);
     }
     #[cfg(not(windows))]
     {
-        let _ = (archive, member, dest);
+        let _ = (archive, dir, member, dest_dir, dest);
         Err(SttError::SidecarUnreachable)
     }
 }
 
 #[cfg(windows)]
-fn extract_member_from_zip(archive: &Path, member: &str, dest: &Path) -> Result<(), SttError> {
+fn extract_release_from_zip(
+    archive: &Path,
+    dir: &str,
+    member: &str,
+    dest_dir: &Path,
+    dest: &Path,
+) -> Result<(), SttError> {
     let file = std::fs::File::open(archive).map_err(|_| SttError::ModelMissing)?;
     let mut zip = zip::ZipArchive::new(file).map_err(|_| SttError::ModelCorrupt)?;
-    let mut entry = zip.by_name(member).map_err(|_| SttError::ModelCorrupt)?;
-    let tmp = dest.with_extension("extract.part");
-    let mut out = std::fs::File::create(&tmp).map_err(|_| SttError::ModelMissing)?;
-    std::io::copy(&mut entry, &mut out).map_err(|_| SttError::ModelMissing)?;
-    out.flush().map_err(|_| SttError::ModelMissing)?;
-    drop(out);
-    std::fs::rename(&tmp, dest).map_err(|_| SttError::ModelMissing)?;
+    let prefix = format!("{dir}/");
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(|_| SttError::ModelCorrupt)?;
+        let name = entry.name().to_string();
+        if !name.starts_with(&prefix) || name.ends_with('/') {
+            continue;
+        }
+        let file_name = std::path::Path::new(&name)
+            .file_name()
+            .ok_or(SttError::ModelCorrupt)?;
+        let target = if name == member {
+            dest.to_path_buf()
+        } else {
+            dest_dir.join(file_name)
+        };
+        let tmp = target.with_extension("extract.part");
+        let mut out = std::fs::File::create(&tmp).map_err(|_| SttError::ModelMissing)?;
+        std::io::copy(&mut entry, &mut out).map_err(|_| SttError::ModelMissing)?;
+        out.flush().map_err(|_| SttError::ModelMissing)?;
+        drop(out);
+        std::fs::rename(&tmp, &target).map_err(|_| SttError::ModelMissing)?;
+    }
+    if !dest.exists() {
+        return Err(SttError::ModelCorrupt);
+    }
     Ok(())
 }
 
@@ -318,26 +360,36 @@ mod tests {
             tokenizer_sha256: "c".repeat(64),
         };
 
-        let archive = bin_dir.join("crispasr-windows-x86_64-cpu.zip");
+        let archive = bin_dir.join("crispasr-windows-x86_64-vulkan.zip");
         {
             let file = std::fs::File::create(&archive).unwrap();
             let mut zip = ZipWriter::new(file);
             zip.start_file(
-                "crispasr-windows-x86_64-cpu/crispasr.exe",
+                "crispasr-windows-x86_64-vulkan/crispasr.exe",
                 SimpleFileOptions::default(),
             )
             .unwrap();
             zip.write_all(&payload).unwrap();
+            zip.start_file(
+                "crispasr-windows-x86_64-vulkan/ggml-vulkan.dll",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"dll").unwrap();
             zip.finish().unwrap();
         }
 
         let dest = ensure_binary_at(&pin, |url, path| {
             assert!(url.contains("v0.6.12"));
-            std::fs::copy(&archive, path).map(|_| ()).map_err(|_| SttError::ModelMissing)
+            assert!(url.contains("crispasr-windows-x86_64-vulkan.zip"));
+            std::fs::copy(&archive, path)
+                .map(|_| ())
+                .map_err(|_| SttError::ModelMissing)
         })
         .unwrap();
 
         assert!(dest.exists());
+        assert!(bin_dir.join("ggml-vulkan.dll").exists());
         assert!(is_verified_binary(&dest, &pin.binary_sha256));
         std::env::remove_var("YAP_BIN_DIR");
         std::fs::remove_dir_all(&root).ok();
@@ -345,7 +397,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn extract_member_from_zip_writes_executable_bytes() {
+    fn extract_release_from_zip_writes_executable_bytes_and_siblings() {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
         use zip::ZipWriter;
@@ -359,16 +411,30 @@ mod tests {
             let file = std::fs::File::create(&archive).unwrap();
             let mut zip = ZipWriter::new(file);
             zip.start_file(
-                "crispasr-windows-x86_64-cpu/crispasr.exe",
+                "crispasr-windows-x86_64-vulkan/crispasr.exe",
                 SimpleFileOptions::default(),
             )
             .unwrap();
             zip.write_all(b"hello").unwrap();
+            zip.start_file(
+                "crispasr-windows-x86_64-vulkan/ggml-vulkan.dll",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"dll").unwrap();
             zip.finish().unwrap();
         }
 
-        extract_member_from_zip(&archive, "crispasr-windows-x86_64-cpu/crispasr.exe", &dest).unwrap();
+        extract_release_from_zip(
+            &archive,
+            "crispasr-windows-x86_64-vulkan",
+            "crispasr-windows-x86_64-vulkan/crispasr.exe",
+            &dir,
+            &dest,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+        assert_eq!(std::fs::read(dir.join("ggml-vulkan.dll")).unwrap(), b"dll");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
