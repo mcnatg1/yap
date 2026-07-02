@@ -55,7 +55,6 @@ pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String>
         HOST.to_string(),
         "--port".to_string(),
         port.to_string(),
-        "--no-punctuation".to_string(),
         "-t".to_string(),
         LOCAL_FALLBACK_THREADS.to_string(),
         "-p".to_string(),
@@ -420,7 +419,7 @@ mod tests {
         assert_eq!(args[host + 1], "127.0.0.1");
         let port = args.iter().position(|a| a == "--port").unwrap();
         assert_eq!(args[port + 1], "8765");
-        assert!(args.contains(&"--no-punctuation".to_string()));
+        assert!(!args.contains(&"--no-punctuation".to_string()));
         let threads = args.iter().position(|a| a == "-t").unwrap();
         assert_eq!(args[threads + 1], "8");
         let processors = args.iter().position(|a| a == "-p").unwrap();
