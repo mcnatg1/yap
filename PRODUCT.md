@@ -6,13 +6,13 @@ product
 
 ## Users
 
-Privacy-conscious people who need accurate text from audio or video files on their own machine — journalists transcribing interviews, researchers working through field recordings, podcasters, students, and anyone who batch-processes media without sending it to the cloud.
+Privacy-conscious people who need accurate text from audio or video files — journalists transcribing interviews, researchers working through field recordings, podcasters, students, and anyone who batch-processes media without sending it to a third-party cloud.
 
 They arrive with files already on disk (MP3, M4A, WAV, MP4, and similar formats), not with a microphone open for live dictation. Context is focused work: drop files, wait for local transcription, review and export text, occasionally polish wording before sharing. They care that processing stays on-device and that the app feels like a trustworthy utility, not a developer tool or a marketing site.
 
 ## Product Purpose
 
-Yap is a local-first batch transcription desktop app (Tauri + React in `desktop/`). Users drop audio or video files, transcribe on-device with the Cohere Transcribe model, and get readable text saved beside the source or in a local transcripts folder.
+Yap is a desktop transcription app (Tauri + React in `desktop/`). Users drop audio or video files, transcribe through the best available trusted runtime, and get readable text saved beside the source or in a local transcripts folder. Local Moonshine is the offline/live fallback; higher-quality recording transcription belongs on the DGX/server Cohere path.
 
 Success looks like: files in, accurate transcripts out, with minimal friction between drop → queue → transcript → copy/export. The interface should make the current file and its transcript the center of attention; model names, auth paths, and runner details stay in secondary status unless something needs attention.
 

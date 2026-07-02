@@ -7,4 +7,5 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   Delete "$INSTDIR\WebView2Loader.dll"
   Delete "$INSTDIR\libunwind.dll"
+  Delete "$INSTDIR\crispasr.exe"
 !macroend

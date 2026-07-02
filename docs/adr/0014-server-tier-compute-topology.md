@@ -25,16 +25,16 @@ This ADR records the pivot to a **two-profile architecture** that preserves the 
 
 Yap supports two deployment profiles. Neither profile is deleted. The team profile is the new **default for multi-user org deployments**.
 
-| Attribute | Solo / local-first profile | Team / server profile |
+| Attribute | Solo / fallback profile | Team / server profile |
 |-----------|---------------------------|----------------------|
-| Target | Individual users, offline, privacy-max | Org teams on a shared DGX Spark |
+| Target | Individual users with local live fallback | Org teams on a shared DGX Spark |
 | STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server-hosted Moonshine GPU (streaming ASR pool) |
-| STT (batch) | Local Cohere GGUF (CrispASR sidecar) | Server Cohere batch pool (concurrent GPU workers) |
+| STT (batch) | Queue/block larger recordings when offline; no local Cohere default in PR3 | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
 | Diarization | Server-less (L3 worker, Phase 7b) | Two-pass server pipeline (ADR 0015, Phase 10) |
 | Knowledge base | Local OKF markdown (Phase 7c) | `yap-knowledge` Git repo + KB compiler (ADR 0017, Phase 11) |
 | Auth | None / local | Entra ID / MSAL (ADR 0016, Phase 9) |
-| Network | None required | LAN/VPN to DGX Spark |
+| Network | None required for live fallback; DGX/server required for official recordings | LAN/VPN to DGX Spark |
 
 ### Client-side responsibilities (both profiles)
 
@@ -49,7 +49,7 @@ The Tauri desktop app (`yap-desktop`) retains everything that cannot be delegate
 | **Ghost / preview UI** | Tauri webview overlay; latency-sensitive rendering |
 | **Local file selection** | OS file picker; files may be uploaded to server for batch |
 | **Server connector** | Manages WSS (live) and HTTP/job (batch) connections to `yap-server` |
-| **Offline / solo fallback** | Local Moonshine tiny + local Cohere GGUF when server unreachable |
+| **Offline / solo fallback** | Local Moonshine tiny; larger recordings should queue/block when server unreachable |
 
 ### Server-side architecture (`yap-server` on DGX Spark)
 

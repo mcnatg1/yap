@@ -16,5 +16,12 @@ desktop/src-tauri/target/
 .DS_Store
 Thumbs.db
 .idea/
+.vscode/
+**/.vscode/
+.cursor/
+**/.cursor/
 
 .impeccable-*-out.*
+.impeccable/
+
+.worktrees/

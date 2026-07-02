@@ -85,9 +85,10 @@ export function TranscriptPanel({
                 </>
               )
               : isRunning
-                ? elapsedSeconds
-                  ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
-                  : "Transcribing locally…"
+                ? item?.progressMessage ??
+                  (elapsedSeconds
+                    ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
+                    : "Transcribing locally…")
                 : isError
                   ? "Transcription failed"
                   : item
@@ -152,10 +153,24 @@ export function TranscriptPanel({
             ) : item ? (
               <div className="flex flex-col gap-3">
                 <Badge variant="secondary">
-                  {isRunning && elapsedSeconds ? (
-                    <>
-                      Transcribing · <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
-                    </>
+                  {isRunning ? (
+                    item.progressMessage ? (
+                      <>
+                        {item.progressMessage}
+                        {item.progressPercent !== undefined ? (
+                          <>
+                            {" "}
+                            · <span className="tabular-nums">{item.progressPercent}%</span>
+                          </>
+                        ) : null}
+                      </>
+                    ) : elapsedSeconds ? (
+                      <>
+                        Transcribing · <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+                      </>
+                    ) : (
+                      "Transcribing"
+                    )
                   ) : running ? (
                     "Transcribing"
                   ) : (

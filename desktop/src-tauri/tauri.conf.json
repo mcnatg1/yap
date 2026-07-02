@@ -10,7 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Yap",
@@ -19,7 +18,6 @@
         "minWidth": 1122,
         "minHeight": 740,
         "backgroundColor": "#f3f0ea",
-        "devtools": true,
         "decorations": false,
         "dragDropEnabled": true
       }
@@ -30,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": "nsis",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

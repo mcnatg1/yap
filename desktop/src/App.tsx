@@ -2,14 +2,12 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
 import { AppSidebar } from "@/components/app/app-sidebar";
-import { openDevtools } from "@/components/app/window-actions";
-import { CommandCenter } from "@/components/command-center";
-import { DetailsSheet, HelpSheet } from "@/components/panels/app-sheets";
+import { HelpSheet, SettingsSheet } from "@/components/panels/app-sheets";
 import { DropHero } from "@/components/panels/drop-hero";
 import { HomePanel } from "@/components/panels/home-panel";
 import { HistoryPanel } from "@/components/panels/history-panel";
@@ -41,19 +39,27 @@ import {
 } from "@/lib/app-types";
 import { historyEntryToUploadItem } from "@/lib/history-utils";
 import { cn } from "@/lib/utils";
+import {
+  listenTranscribeEvents,
+  SttInvokeError,
+  startTranscribe,
+  transcriptFileError,
+  type TranscribeBatchCompleteEvent,
+  type TranscribeFileCompleteEvent,
+  type TranscribeProgressEvent,
+} from "@/stt";
 
 type SetupStatus = {
   model: string;
   root: string;
-  pythonReady: boolean;
-  scriptReady: boolean;
-  python: string;
+  engineReady: boolean;
+  engineBinaryStatus: string;
+  fallbackEnabled: boolean;
+  modelInstalled: boolean;
+  engineStatus: string;
 };
 
-type TranscriptResult = {
-  input: string;
-  output: string;
-};
+const setupSkipKey = "yap-local-fallback-setup-skipped";
 
 export default function App() {
   const [queue, setQueue] = useState<UploadItem[]>([]);
@@ -62,21 +68,27 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const [model, setModel] = useState("Cohere Transcribe");
+  const [model, setModel] = useState("Moonshine tiny");
   const [auth, setAuth] = useState("Checking");
+  const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
+  const [engineReady, setEngineReady] = useState(false);
+  const [fallbackEnabled, setFallbackEnabled] = useState(true);
+  const [modelInstalled, setModelInstalled] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [commandOpen, setCommandOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
+  const pathToItemId = useRef<Map<string, number>>(new Map());
+  const setupPrompted = useRef(false);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -101,36 +113,124 @@ export default function App() {
   const showPolish = workspaceView === "polish";
 
   useEffect(() => {
-    loadStatus();
+    if (!isTauri()) return;
 
-    if (isTauri()) {
-      getCurrentWebview().onDragDropEvent((event) => {
-        if (event.payload.type === "enter") setDragging(true);
-        if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
-        if (event.payload.type === "drop") addPaths(event.payload.paths);
-      });
+    let unlisten: (() => void) | undefined;
+
+    void listenTranscribeEvents({
+      onProgress: (event) => {
+        updateItemProgress(event);
+      },
+      onFileComplete: (event) => {
+        applyFileResult(event);
+      },
+      onComplete: (event) => {
+        finishBatch(event);
+      },
+      onError: (error) => {
+        setRunning(false);
+        setRunningSince(undefined);
+        setStatus("Needs attention");
+        setAuth("Check local engine");
+        toast.error(error.message || "Transcription failed");
+      },
+    }).then((stop) => {
+      unlisten = stop;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  function updateQueueItem(path: string, updater: (item: UploadItem) => UploadItem) {
+    setQueue((items) =>
+      items.map((entry) => (entry.path === path ? updater(entry) : entry)),
+    );
+  }
+
+  function updateItemProgress(event: TranscribeProgressEvent) {
+    updateQueueItem(event.path, (entry) => ({
+      ...entry,
+      status: "running",
+      progressPhase: event.phase,
+      progressPercent: event.percent,
+      progressMessage: event.message,
+      error: undefined,
+    }));
+    setStatus(event.message);
+    const itemId = pathToItemId.current.get(event.path);
+    if (itemId !== undefined) setSelectedId(itemId);
+  }
+
+  function applyFileResult(event: TranscribeFileCompleteEvent) {
+    const { result } = event;
+    const itemId = pathToItemId.current.get(event.path);
+
+    if (result.error) {
+      const message = transcriptFileError(result) ?? "Transcription failed.";
+      updateQueueItem(event.path, (entry) => ({
+        ...entry,
+        status: "error",
+        error: message,
+        progressPhase: undefined,
+        progressPercent: undefined,
+        progressMessage: undefined,
+      }));
+      toast.error(`${basename(event.path)}: ${message}`);
       return;
     }
 
-    setStatus("Preview");
-    setAuth("Tauri bridge");
-  }, []);
+    updateQueueItem(event.path, (entry) => ({
+      ...entry,
+      output: result.output,
+      status: "done",
+      error: undefined,
+      progressPhase: "done",
+      progressPercent: 100,
+      progressMessage: "Transcript saved",
+    }));
+    recordHistoryEntries([
+      {
+        createdAt: new Date().toISOString(),
+        name: basename(event.path),
+        outputPath: result.output,
+        sourcePath: event.path,
+      },
+    ]);
+    void loadTranscriptText(result.output).catch(() => undefined);
+    if (itemId !== undefined) setSelectedId(itemId);
+  }
+
+  function finishBatch(event: TranscribeBatchCompleteEvent) {
+    setStatus(event.failed ? "Needs attention" : "Ready");
+    setAuth("Authorized");
+    if (event.succeeded) {
+      toast.success(`Transcribed ${event.succeeded} file${event.succeeded === 1 ? "" : "s"}`);
+    }
+    setRunning(false);
+    setRunningSince(undefined);
+    pathToItemId.current.clear();
+  }
 
   useEffect(() => {
-    function onKeyDown(event: globalThis.KeyboardEvent) {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setCommandOpen((open) => !open);
-      }
+    void loadStatus();
 
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "i") {
-        event.preventDefault();
-        void openDevtools();
-      }
+    if (!isTauri()) {
+      setStatus("Preview");
+      setAuth("Tauri bridge");
+      return;
     }
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    const unlistenDrag = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "enter") setDragging(true);
+      if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
+      if (event.payload.type === "drop") addPaths(event.payload.paths);
+    });
+
+    return () => {
+      void unlistenDrag.then((fn) => fn());
+    };
   }, []);
 
   useEffect(() => {
@@ -174,13 +274,84 @@ export default function App() {
 
     try {
       const setup = await invoke<SetupStatus>("setup_status");
-      setModel(setup.model.replace("CohereLabs/", "").replace("ZoOtMcNoOt/", ""));
-      setStatus(setup.pythonReady && setup.scriptReady ? "Ready" : "Setup missing");
-      setAuth(setup.pythonReady ? "Authorized" : setup.python);
+      applySetupStatus(setup);
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
     }
+  }
+
+  function applySetupStatus(setup: SetupStatus) {
+    setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
+    setStatus(setup.engineReady ? setup.engineStatus : "Setup missing");
+    setAuth(setup.engineReady ? "Authorized" : "Local engine unavailable");
+    setEngineBinaryStatus(setup.engineBinaryStatus);
+    setEngineReady(setup.engineReady);
+    setFallbackEnabled(setup.fallbackEnabled);
+    setModelInstalled(setup.modelInstalled);
+
+    if (!setup.engineReady && !setupPrompted.current && localStorage.getItem(setupSkipKey) !== "true") {
+      setupPrompted.current = true;
+      setActiveRail("details");
+      setDetailsOpen(true);
+    }
+  }
+
+  async function installFallback() {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    setStatus("Installing local fallback");
+    try {
+      const setup = await invoke<SetupStatus>("install_local_fallback");
+      localStorage.removeItem(setupSkipKey);
+      applySetupStatus(setup);
+      toast.success("Local fallback installed");
+    } catch (error) {
+      toast.error(`Install failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  async function removeFallback() {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    try {
+      const setup = await invoke<SetupStatus>("remove_local_fallback");
+      applySetupStatus(setup);
+      toast.success("Local fallback files removed");
+    } catch (error) {
+      toast.error(`Remove failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  async function setFallbackEnabledSetting(enabled: boolean) {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    try {
+      const setup = await invoke<SetupStatus>("set_local_fallback_enabled", { enabled });
+      if (!enabled) localStorage.setItem(setupSkipKey, "true");
+      applySetupStatus(setup);
+      toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
+    } catch (error) {
+      toast.error(`Update failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  function skipSetup() {
+    localStorage.setItem(setupSkipKey, "true");
+    setDetailsOpen(false);
+    if (activeRail === "details") setActiveRail(workspaceView);
   }
 
   function addPaths(paths: string[]) {
@@ -240,6 +411,7 @@ export default function App() {
 
     if (action === "details") {
       setDetailsOpen(true);
+      void loadStatus();
       return;
     }
     if (action === "help") {
@@ -255,74 +427,41 @@ export default function App() {
   }
 
   async function transcribeItems(pending: UploadItem[]) {
-    if (!pending.length || running) return;
+    if (!pending.length || running || !isTauri()) return;
 
+    pathToItemId.current = new Map(pending.map((item) => [item.path, item.id]));
     setRunning(true);
     setRunningSince(Date.now());
-    setStatus("Transcribing locally");
-    setSelectedId(pending[0].id);
-    setQueue((items) =>
-      items.map((item) =>
-        pending.some((pendingItem) => pendingItem.id === item.id)
-          ? { ...item, status: "running", error: undefined }
-          : item,
-      ),
-    );
+    setStatus(`Transcribing 0/${pending.length}`);
+
+    for (const [index, item] of pending.entries()) {
+      if (index === 0) setSelectedId(item.id);
+      setQueue((items) =>
+        items.map((entry) =>
+          entry.id === item.id
+            ? {
+                ...entry,
+                status: index === 0 ? "running" : "queued",
+                error: undefined,
+                progressPhase: index === 0 ? "starting" : undefined,
+                progressPercent: index === 0 ? 0 : undefined,
+                progressMessage: index === 0 ? "Preparing…" : undefined,
+              }
+            : entry,
+        ),
+      );
+    }
 
     try {
-      const results = await invoke<TranscriptResult[]>("transcribe_files", {
-        paths: pending.map((item) => item.path),
-      });
-      const outputs = new Map(results.map((result) => [result.input, result.output]));
-      const texts: Record<string, string> = {};
-
-      for (const result of results) {
-        try {
-          texts[result.output] = await invoke<string>("read_text_file", { path: result.output });
-        } catch {
-          // ponytail: transcript can still be revealed if eager preview read fails.
-        }
-      }
-
-      setQueue((items) =>
-        items.map((item) =>
-          outputs.has(item.path) ? { ...item, output: outputs.get(item.path), status: "done" } : item,
-        ),
-      );
-      recordHistoryEntries(
-        pending.flatMap((item) => {
-          const output = outputs.get(item.path);
-          return output
-            ? [
-                {
-                  createdAt: new Date().toISOString(),
-                  name: item.name,
-                  outputPath: output,
-                  sourcePath: item.path,
-                },
-              ]
-            : [];
-        }),
-      );
-      setTranscriptText((current) => ({ ...current, ...texts }));
-      setStatus("Ready");
-      setAuth("Authorized");
-      toast.success(`Transcribed ${results.length} file${results.length === 1 ? "" : "s"}`);
+      await startTranscribe(pending.map((item) => item.path));
     } catch (error) {
-      const message = String(error || "Transcription failed");
-      setQueue((items) =>
-        items.map((item) =>
-          pending.some((pendingItem) => pendingItem.id === item.id)
-            ? { ...item, status: "error", error: message }
-            : item,
-        ),
-      );
-      setStatus("Needs attention");
-      setAuth(message.includes("Hugging Face") ? "Run hf auth login" : "Check runner output");
-      toast.error(message);
-    } finally {
+      const failure = error instanceof SttInvokeError ? error : undefined;
+      const message = failure?.message ?? String(error || "Transcription failed");
       setRunning(false);
       setRunningSince(undefined);
+      pathToItemId.current.clear();
+      setStatus("Needs attention");
+      toast.error(message);
     }
   }
 
@@ -413,8 +552,8 @@ export default function App() {
       const next = entries.reduce(recordTranscriptHistory, current);
       try {
         writeTranscriptHistory(next);
-      } catch {
-        // ponytail: transcripts are already saved; history can be rebuilt manually if localStorage is full.
+      } catch (error) {
+        console.warn("Transcript history could not be saved.", error);
       }
       return next;
     });
@@ -425,8 +564,8 @@ export default function App() {
       const next = removeTranscriptHistory(current, outputPath);
       try {
         writeTranscriptHistory(next);
-      } catch {
-        // ponytail: removal is UI-only if localStorage refuses the write.
+      } catch (error) {
+        console.warn("Transcript history removal could not be saved.", error);
       }
       return next;
     });
@@ -539,7 +678,6 @@ export default function App() {
         auth={auth}
         description={workspace.description}
         historyCount={history.length}
-        onOpenCommand={() => setCommandOpen(true)}
         onOpenDetails={() => handleRailAction("details")}
         onOpenHelp={() => handleRailAction("help")}
         status={status}
@@ -598,13 +736,22 @@ export default function App() {
           {appWorkspace}
         </div>
       </SidebarInset>
-      <DetailsSheet
+      <SettingsSheet
         auth={auth}
+        busy={setupBusy}
+        engineReady={engineReady}
+        engineBinaryStatus={engineBinaryStatus}
+        fallbackEnabled={fallbackEnabled}
         model={model}
+        modelInstalled={modelInstalled}
+        onInstallFallback={() => void installFallback()}
         onOpenChange={(open) => {
           setDetailsOpen(open);
           if (!open && activeRail === "details") setActiveRail(workspaceView);
         }}
+        onRemoveFallback={() => void removeFallback()}
+        onSetFallbackEnabled={(enabled) => void setFallbackEnabledSetting(enabled)}
+        onSkipSetup={skipSetup}
         open={detailsOpen}
         status={status}
       />
@@ -614,14 +761,6 @@ export default function App() {
           if (!open && activeRail === "help") setActiveRail(workspaceView);
         }}
         open={helpOpen}
-      />
-      <CommandCenter
-        history={history}
-        onAction={handleRailAction}
-        onOpenChange={setCommandOpen}
-        onPickFiles={() => void pickFiles()}
-        onPreview={(entry) => void previewHistoryEntry(entry)}
-        open={commandOpen}
       />
       <TranscriptPreviewDialog
         entry={previewEntry}

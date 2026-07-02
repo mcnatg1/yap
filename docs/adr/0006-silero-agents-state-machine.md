@@ -3,7 +3,7 @@
 **Date:** 2026-06-30
 **Status:** Accepted
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md), [ADR 0005](0005-llama-server-agents.md)
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, the model-residency state machine (moonshine XOR cohere) moves to the **server-side workload router**; the client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading). Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The full state machine spec in §3 of this ADR is normative for the **solo/local-first profile**.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and PR3 — model residency for Moonshine/Cohere moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus a local Moonshine tiny fallback path. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context; PR3 does not load local Cohere.
 
 ## Context
 
@@ -12,11 +12,11 @@ The Voice OS architecture references **Silero VAD** on the live path (silence de
 Without explicit rules, we risk:
 
 - Running Silero twice (L2 + L3) and wasting CPU
-- Loading **Moonshine + Cohere + llama-server + worker** concurrently
+- Loading **Moonshine fallback + server batch upload + llama-server + worker** without bounds
 - Multiple **background LLM jobs** (Student + Analyst + Curator) stacking on Scribe
 - No clear **idle/evict** transitions → memory stays pinned
 
-This ADR specifies **where Silero lives**, **scoped agent profiles**, and a **runtime state machine** so only one heavy STT model and bounded LLM/work load run at a time.
+This ADR specifies **where Silero lives**, **scoped agent profiles**, and a **runtime state machine** so local fallback, server upload, and bounded LLM/worker load do not compete blindly.
 
 ## Decision
 
@@ -73,9 +73,11 @@ Orchestrator lives in **Tauri Rust** (`RuntimeOrchestrator` or equivalent). Side
 ```
 AppRuntimeState:
   Idle                 # no STT model loaded; sidecars may be up empty
-  BatchReady           # crispasr: cohere GGUF loaded
-  BatchRunning         # transcribe queue active
-  LiveReady            # crispasr: moonshine GGUF loaded
+  FallbackReady        # crispasr: Moonshine tiny fallback loaded
+  FallbackRunning      # local degraded/offline transcription active
+  ServerQueued         # batch file queued for DGX/server Cohere path
+  ServerUploading      # server batch upload/job active
+  LiveReady            # mic path ready
   LiveActive           # mic open, streaming
   BackgroundEnriching  # knowledge worker has ≥1 chunk (orthogonal badge)
   DegradedBackground   # FIFO overflow; stitch at session end
@@ -85,19 +87,20 @@ AppRuntimeState:
 
 | From | Event | To | Side effects |
 |------|-------|-----|--------------|
-| Idle | User opens Transcribe / queue file | BatchReady | Load **cohere**; unload moonshine if loaded |
-| BatchReady | Queue empty + idle timeout (10m) | Idle | Unload cohere |
-| Idle | User opens Live | LiveReady | Load **moonshine**; unload cohere if loaded |
+| Idle | User queues larger recording | ServerQueued | Prepare server job; do not load local Cohere |
+| ServerQueued | Server available + user runs queue | ServerUploading | Upload/job through DGX/server Cohere path |
+| ServerQueued | Server unavailable | Idle | Queue/block; do not silently degrade larger recordings |
+| Idle | User opens Live or explicit offline fallback | FallbackReady | Load pinned **Moonshine tiny** fallback |
 | LiveReady | Start mic | LiveActive | Pre-warm llama-server (Scribe) |
-| LiveActive | Stop mic | LiveReady | Keep moonshine warm briefly |
-| LiveReady | Idle timeout (5m) | Idle | Unload moonshine |
-| LiveActive | User starts batch | BatchReady | **Stop mic first**; unload moonshine; load cohere |
+| LiveActive | Stop mic | FallbackReady | Keep Moonshine fallback warm briefly |
+| FallbackReady | Idle timeout (5m) | Idle | Unload Moonshine fallback |
+| LiveActive | User starts batch | ServerQueued | **Stop mic first**; queue server job |
 | Any | Worker queue depth ≥3 | DegradedBackground | Set `degraded` on new chunks |
 | DegradedBackground | Session end | BackgroundEnriching → Idle worker | Flush queue |
 
 **Hard invariants:**
 
-1. **At most one crispasr backend loaded:** `moonshine` XOR `cohere`.
+1. **At most one local crispasr fallback loaded:** PR3 loads Moonshine tiny only; no local Cohere backend.
 2. **At most one HOT llama-server call** at a time (Scribe).
 3. **At most one BACKGROUND_LLM job** queued; additional jobs coalesce or wait.
 4. **knowledge-worker:** sequential chunk processing; **idle exit 5 min** after empty queue.
@@ -110,29 +113,30 @@ AppRuntimeState:
                     ┌─────────┐
          ┌─────────│  Idle   │─────────┐
          │         └────┬────┘         │
-    open Live      open Batch      timeout
+ open fallback     queue batch     timeout
          │              │              │
          ▼              ▼              │
-   ┌───────────┐ ┌────────────┐       │
-   │ LiveReady │ │ BatchReady │       │
-   └─────┬─────┘ └──────┬─────┘       │
-    start mic      run queue          │
+   ┌───────────────┐ ┌────────────┐   │
+   │FallbackReady  │ │ServerQueued│   │
+   └──────┬────────┘ └──────┬─────┘   │
+    run fallback      upload/job      │
          │              │              │
          ▼              ▼              │
-   ┌───────────┐ ┌────────────┐       │
-   │LiveActive │ │BatchRunning│───────┘
-   └───────────┘ └────────────┘
-         │              │
-         └────── XOR ────┘  (never both STT backends loaded)
+   ┌───────────────┐ ┌──────────────┐ │
+   │FallbackRunning│ │ServerUploading│─┘
+   └───────────────┘ └──────────────┘
+         local Moonshine       server Cohere
 ```
 
 ### 4. Orchestrator API (Rust — sketch)
 
 ```rust
-enum SttBackend { None, Moonshine, Cohere }
+enum LocalSttBackend { None, MoonshineFallback }
+enum BatchRoute { None, ServerCohere }
 
 struct RuntimeOrchestrator {
-  stt: SttBackend,
+  local_stt: LocalSttBackend,
+  batch_route: BatchRoute,
   app_state: AppRuntimeState,
   llm_hot_busy: bool,
   llm_background_queue: VecDeque<AgentJob>,
@@ -140,14 +144,15 @@ struct RuntimeOrchestrator {
 }
 
 impl RuntimeOrchestrator {
-  fn request_stt(&mut self, backend: SttBackend) -> Result<(), Conflict>;
+  fn request_local_fallback(&mut self) -> Result<(), Conflict>;
+  fn queue_server_batch(&mut self) -> Result<(), Conflict>;
   fn try_run_scribe(&mut self, raw: &str) -> ScribeOutcome; // RawOnly | Polished
   fn enqueue_background_agent(&mut self, job: AgentJob); // rejects if LiveActive + wrong profile
   fn on_chunk_enqueued(&mut self) -> bool; // false → degraded
 }
 ```
 
-Frontend asks orchestrator before starting Live, queue, or Polish — not ad-hoc sidecar spawns.
+Frontend asks orchestrator before starting Live, fallback, queue, or Polish — not ad-hoc sidecar spawns.
 
 ## Consequences
 
@@ -155,7 +160,7 @@ Frontend asks orchestrator before starting Live, queue, or Polish — not ad-hoc
 
 - Silero defined once on L2; L3 reuses segments — saves CPU.
 - Agent scope prevents eight LLMs firing on a 16 GB box.
-- State machine enforces **one STT model** and bounded queues — predictable RAM.
+- State machine enforces **one local fallback model** and bounded queues — predictable RAM.
 - v1 can ship with **Scribe profile only**; others gated by feature flags.
 
 ### Negative

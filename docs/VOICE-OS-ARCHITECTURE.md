@@ -3,7 +3,7 @@
 **Status:** Living document (2026-07-01)
 **Authority:** Decisions are normative in [ADR 0001–0018](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
-> **2026-07-01 — Major pivot:** Yap now supports two deployment profiles. The **solo / local-first profile** is today's on-device stack (unchanged). The **team / server profile** adds an on-prem DGX Spark server tier. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
+> **2026-07-01 — Major pivot:** Yap now targets a thin desktop client with an on-prem DGX Spark server tier for heavy transcription. The client keeps a local Moonshine tiny sidecar as live/offline fallback; larger recordings belong on the DGX/server Cohere path. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
 
 ---
 
@@ -18,7 +18,7 @@
 | **Local-first (solo profile)** | Offline, privacy-max; no cloud STT lock-in for individual users. |
 | **On-prem GPU (team profile)** | DGX Spark is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
 | **Critical path isolation** | Live stays fast; heavy work (diarization, OKF, agents) never blocks typing. |
-| **Right model per job** | Moonshine for live speed; Cohere for recordings; **LLM pool** for polish/agents — not one model for everything. |
+| **Right model per job** | Moonshine tiny for live/offline fallback; server Cohere for recordings; **LLM pool** for polish/agents — not one model for everything. |
 | **Two-pass diarization** | ECAPA-TDNN live labels + AHC/VBx post-meeting accuracy; rolling centroid improves speaker recognition over time. |
 | **Modular diarizer** | WeSpeaker + vault (~200 MB) for solo; ECAPA-TDNN on GPU for team — realistic on both hardware targets. |
 | **Graceful degradation** | Dual-track Scribe, quarantine folder, RAG confidence gates, offline fallback to local sidecar — production-minded. |
@@ -30,7 +30,7 @@
 |------|----------------------|
 | **Scope creep** | Ship Yap batch → CrispASR → live EN → LID → L3 OKF in that order. |
 | **Three processes** | crispasr + llama-server + knowledge worker; worker idles out after 5 min. |
-| **CrispASR dependency** | Pin version; `YAP_STT_BACKEND=python` fallback; CI smoke tests. |
+| **CrispASR dependency** | Pin version; verified companions; loopback auth; CI smoke tests. |
 | **Wispr comparison on v1** | Don’t promise global hotkey + inject until Phase 7+; compete on batch + local first. |
 | **OKF/agents before core STT** | Transcripts history first; OKF Phase 7c. |
 
@@ -46,10 +46,10 @@
 
 | | **Yap v1 target** | **Voice OS (long-term)** |
 |--|---------------------|---------------------------|
-| Primary input | Audio/video **files on disk** | + live mic, eventually global hotkey |
+| Primary input | Thin client live/offline fallback + recording queue shell | + live mic, eventually global hotkey |
 | Live language | **English only** | Multilingual live router (future ADR) |
-| Batch language | Cohere **14 langs** (manual + LID gate later) | Same |
-| STT runtime | **CrispASR sidecar** (replacing Python) | Same |
+| Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
+| STT runtime | **Moonshine tiny CrispASR fallback** + future server connector | Same client shell; heavier pools move server-side |
 | Polish | **llama-server** (bundled, CPU `-ngl 0`) | Scribe + agents; Ollama dev fallback |
 | Speakers | Plain transcript | Diarization + vault + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Git + compiler (team) | OKF + glossary agents + Q&A |
@@ -58,18 +58,18 @@
 
 ## Two deployment profiles
 
-| Attribute | **Solo / local-first** | **Team / server** |
+| Attribute | **Solo / fallback** | **Team / server** |
 |-----------|------------------------|-------------------|
-| Target | Individual users, offline, privacy-max | Org teams on a shared DGX Spark |
+| Target | Individual users with local live fallback | Org teams on a shared DGX Spark |
 | STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server Moonshine GPU (streaming ASR pool, WSS) |
-| STT (batch) | Local Cohere GGUF (CrispASR sidecar) | Server Cohere batch pool (concurrent GPU workers) |
+| STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
 | Diarization | WeSpeaker + vault (Phase 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 10, ADR 0015) |
 | Identity | None | Entra ID / MSAL (ADR 0016) |
 | Knowledge base | Local OKF markdown (Phase 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 11, ADR 0017) |
-| Network | None required | LAN/VPN to DGX Spark |
+| Network | None required for live fallback; DGX/server required for official recordings | LAN/VPN to DGX Spark |
 
-The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In the solo profile the connector is unused; in the team profile it streams to `yap-server`. Server unavailability automatically falls back to the solo path.
+The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In PR3, the local path is a Moonshine tiny fallback for live/offline degraded use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem DGX Spark is **org-owned hardware on an org-controlled LAN** — not a public cloud service. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
@@ -79,9 +79,9 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 
 ## Core decisions (summary)
 
-1. **Recordings → Cohere** (accuracy, multilingual, long files).
-2. **Live mic → Moonshine streaming** (English v1, low latency).
-3. **One warm CrispASR sidecar**; lazy-load one GGUF at a time.
+1. **Recordings → server Cohere** (accuracy, multilingual, long files).
+2. **Live mic / offline fallback → Moonshine tiny** (English v1, low latency).
+3. **One warm local CrispASR fallback sidecar**; server router owns heavier model residency.
 4. **SpeechBrain LID** = language **gate** (“Detected French — continue?”), not silent auto-`-l`.
 5. **L3 background worker** = separate subprocess (not Python thread — avoids GIL).
 6. **Diarization** = off hot path; silence-anchored chunks + **Speaker Vault**.
@@ -96,9 +96,9 @@ Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-u
 
 ## Pipeline charts
 
-Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the **solo/local-first profile** (current implementation). For the team/server profile, replace the local sidecars with the `yap-server` workload router and model pools ([ADR 0014](adr/0014-server-tier-compute-topology.md)). Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
+Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Moonshine tiny fallback, and DGX/server model pools for official large-recording work. PR3 implements the local fallback slice only. Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
 
-**Read order:** UI → **RuntimeOrchestrator** → sidecars. **Live** and **batch** never load both STT backends. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
+**Read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
 
 ### High-level overview
 
@@ -112,10 +112,10 @@ flowchart TB
         UI["Transcribe · Live · Polish · History · KB agents"]
     end
 
-    Orch["RuntimeOrchestrator<br/>moonshine XOR cohere · bounded LLM"]
+    Orch["RuntimeOrchestrator<br/>Moonshine fallback · server connector · bounded LLM"]
 
     subgraph Sidecars["Local sidecars — localhost only"]
-        CR["crispasr<br/>one GGUF loaded"]
+        CR["crispasr<br/>Moonshine tiny fallback"]
         LL["llama-server<br/>Scribe + agents · -ngl 0"]
         KW["yap-knowledge-worker<br/>align · diarize · OKF"]
     end
@@ -126,7 +126,7 @@ flowchart TB
 
     subgraph L2["L2 — critical path"]
         Live["Live mic → Moonshine EN → Scribe → ghost UI"]
-        Batch["File drop → Cohere 14 langs → History"]
+        Batch["File drop → server Cohere path / queue → History"]
     end
 
     Handoff["Async handoff<br/>silence chunks · FIFO ≤ 3 · chunk manifest"]
@@ -221,12 +221,12 @@ flowchart TB
     end
 
     subgraph Orch["RuntimeOrchestrator — Rust"]
-        States["Idle · LiveReady · LiveActive · BatchReady · BatchRunning · DegradedBackground"]
-        Inv["moonshine XOR cohere · 1 HOT Scribe · 1 bg LLM queue · worker 1 chunk · FIFO ≤ 3"]
+        States["Idle · FallbackReady · FallbackRunning · ServerQueued · ServerRunning · DegradedBackground"]
+        Inv["Moonshine local fallback · server ASR request · 1 HOT Scribe · 1 bg LLM queue · worker 1 chunk · FIFO ≤ 3"]
     end
 
     subgraph Sidecars["Sidecars — subprocess / sidecar"]
-        CR["crispasr<br/>moonshine-streaming OR cohere GGUF"]
+        CR["crispasr<br/>Moonshine tiny fallback"]
         LL["llama-server<br/>~2B Q4 · CPU -ngl 0"]
         KW["yap-knowledge-worker<br/>BELOW_NORMAL · ORT 2 threads · idle exit 5 min"]
     end
@@ -246,10 +246,10 @@ flowchart TB
         Injector["Cross-app text inject · Phase 7+"]
     end
 
-    subgraph L2Batch["L2 batch — warm path · Yap primary today"]
+    subgraph L2Batch["L2 batch — server path · Yap recording quality"]
         Drop["File drop / queue"]
         LID["SpeechBrain LID gate · user confirms lang · Phase 4"]
-        COH["Cohere transcribe · crispasr · -l lang · 14 langs"]
+        COH["DGX/server Cohere · job API · 14 langs"]
         Save["Write .txt · append Transcripts/ history"]
         ScribeB["Polish panel · optional Scribe on saved text"]
     end
@@ -287,7 +287,7 @@ flowchart TB
 
     subgraph L6["L6 — ecosystem gateways · Phase 7e+"]
         MCP["MCP server"]
-        IDE["Cursor / VS Code open folder"]
+        IDE["IDE open folder"]
         Vec["Vector search / embeddings"]
     end
 
@@ -356,7 +356,7 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Optional AGC; Silero required |
 | **L2** Silero VAD | ✅ | ADR 0004 §3, §10 | Shared `vad_segments` → L3 |
 | **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2 v1**; batch gate Phase 4 |
-| **L2** Cohere ASR (llama.cpp) | ✅ Reconciled | ADR 0001–0002 | **Moonshine live**; **Cohere recordings** via CrispASR |
+| **L2** Cohere ASR (llama.cpp) | ✅ Reconciled | ADR 0001–0002/0014 | **Moonshine local fallback**; **server Cohere recordings** via DGX/server connector |
 | **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | **llama-server** ~2B Q4, `-ngl 0` |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
 | **L2** Cross-app injector | ✅ | Phase 7+ | Deferred |
@@ -380,7 +380,7 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **Agent profiles (8 personas)** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | Mutex groups; v1 = Scribe only |
 | **Runtime state machine** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | One STT backend; bounded LLM queue |
 | **16 GB RAM budget** | ✅ | ADR 0004 §9 | Pyannote rejected |
-| **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003 | Cohere batch — not in original diagram |
+| **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server Cohere batch; local fallback only when explicitly degraded |
 
 **Not in code yet** — all of the above is **architecture only** until phases ship.
 
@@ -496,7 +496,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 | Rule | Limit |
 |------|--------|
-| crispasr STT loaded | **Moonshine XOR Cohere** — never both |
+| crispasr STT loaded | PR3 client fallback loads **Moonshine tiny only**; server router owns Cohere residency |
 | Scribe (HOT) | **1** at a time; **400 ms** max |
 | Background LLM agents | **1 queued** (Student, Curator, Analyst, …) |
 | Knowledge worker | **1 chunk** processing; **3** pending max → degraded |
@@ -506,9 +506,9 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 **Silero:** ONNX in **Rust** on audio thread → live VAD + chunk cuts + `vad_segments`; worker **does not** re-run Silero.
 
 ```
-Idle ↔ LiveReady ↔ LiveActive     (moonshine)
-Idle ↔ BatchReady ↔ BatchRunning  (cohere)
-         never both STT backends loaded
+Idle ↔ FallbackReady ↔ FallbackRunning  (local Moonshine tiny)
+Idle ↔ ServerQueued ↔ ServerRunning     (DGX/server Cohere)
+         client does not load local Cohere in PR3
 ```
 
 ---
@@ -531,11 +531,11 @@ Idle ↔ BatchReady ↔ BatchRunning  (cohere)
 | Mode | Languages | Detection |
 |------|-----------|-----------|
 | **Live** | English only (v1) | No LID on hot path |
-| **Batch** | Cohere 14 | Manual picker; SpeechBrain **suggests** with user gate (Phase 4) |
+| **Batch / larger recordings** | Server Cohere 14 | Manual picker; SpeechBrain **suggests** with user gate (Phase 4) |
 
 Supported batch codes: `en`, `fr`, `de`, `it`, `es`, `pt`, `el`, `nl`, `pl`, `zh`, `ja`, `ko`, `vi`, `ar`.
 
-UI copy: **“Live: English · Files: 14 languages”**
+UI copy: **“Local fallback: English · Server files: 14 languages”**
 
 ---
 
@@ -545,7 +545,7 @@ UI copy: **“Live: English · Files: 14 languages”**
 
 ```
 Yap (Tauri)  [yap-desktop]
-  ├─ crispasr sidecar          STT — one GGUF loaded (moonshine OR cohere)
+  ├─ crispasr sidecar          STT — Moonshine tiny fallback
   ├─ llama-server sidecar      Polish + LLM agents (CPU -ngl 0)
   └─ yap-knowledge-worker      align + diarize + OKF (queue-driven)
 
@@ -600,14 +600,14 @@ Two phase tracks run in parallel: a **numbered/lettered** product track (STT →
 
 | Phase | Track | Deliverable | Spec / ADR |
 |-------|-------|-------------|------------|
-| **0** | product | Batch via Python (today) | — |
-| **1–2** | product | CrispASR sidecar + Cohere batch GGUF | [STT spec](specs/phase-1-2-stt-sidecar.md) · [0001](adr/0001-dual-stt-backends.md)/[0002](adr/0002-crispasr-unified-stt-runtime.md) |
+| **0** | product | Historical Python batch path (removed from PR3 runtime) | — |
+| **1–2** | product | Local Moonshine tiny fallback sidecar + pinned artifacts | [STT spec](specs/phase-1-2-stt-sidecar.md) · [0001](adr/0001-dual-stt-backends.md)/[0002](adr/0002-crispasr-unified-stt-runtime.md) |
 | **A** | LLM | Bundle llama-server + Rust manager | [LLM spec](specs/phase-a-d-llm-sidecar.md) · [0005](adr/0005-llama-server-agents.md) |
 | **B–C** | LLM | Migrate Polish off Ollama; default llama | [LLM spec](specs/phase-a-d-llm-sidecar.md) |
 | **3** | product | Live English (Moonshine) + Scribe bypass + Silero | [Live spec](specs/phase-3-live-ux-audio.md) · [0006](adr/0006-silero-agents-state-machine.md) |
 | **D** | LLM | Live Scribe on shared client (with Phase 3) | [LLM spec](specs/phase-a-d-llm-sidecar.md) |
 | **4** | product | SpeechBrain batch LID + language gate | [0008](adr/0008-speechbrain-lid-gate.md) |
-| **5** | product | Save live WAV → Cohere re-pass | — |
+| **5** | product | Save live WAV → server Cohere re-pass | — |
 | **7a** | voice OS | Knowledge worker + alignment | [0009](adr/0009-knowledge-worker-protocol.md) · [0007](adr/0007-forced-alignment-engine.md) |
 | **7b** | voice OS | Diarization + Speaker Vault | [0004](adr/0004-background-diarization-okf-agents.md) |
 | **7c** | voice OS | OKF Archivist + stitch | [0010](adr/0010-okf-conversation-schema.md) |
@@ -634,7 +634,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
-| **1–2** STT sidecar | Batch via crispasr; `python` fallback | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; Setup status copy |
+| **1–2** STT sidecar | Local Moonshine fallback sidecar | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; Setup status copy |
 | **A–D** llama-server | Polish off Ollama → llama-server | New LLM sidecar spec; `polish.ts` notes; dev-only Ollama docs |
 | **3** Live EN | Moonshine + Scribe bypass + Silero | **PRODUCT.md**: add live entry, soften “not dictation” → “not global dictation *yet*”; new Live UX spec |
 | **4** LID gate | SpeechBrain batch detect | Resolve [ADR 0003 open questions](adr/0003-long-term-voice-architecture.md); language-memory UX |
@@ -652,7 +652,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 **STT (Phase 1–2)**
 
-- [ ] `YAP_STT_BACKEND=crispasr|python`
+- [ ] Local Moonshine fallback sidecar
 - [ ] Pin CrispASR version; CI smoke test
 - [ ] Sidecar health in Setup UI
 - [ ] Structured error codes → toasts

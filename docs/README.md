@@ -14,7 +14,7 @@
 
 | Spec | Phase | Status |
 |------|-------|--------|
-| [phase-1-2-stt-sidecar.md](specs/phase-1-2-stt-sidecar.md) | 1–2 | Draft — CrispASR batch sidecar, IPC, errors, cutover |
+| [phase-1-2-stt-sidecar.md](specs/phase-1-2-stt-sidecar.md) | 1–2 | Draft — local Moonshine fallback sidecar, IPC, errors, cutover |
 | [phase-a-d-llm-sidecar.md](specs/phase-a-d-llm-sidecar.md) | A–D | Draft — llama-server, Polish migration, shared client |
 | [phase-3-live-ux-audio.md](specs/phase-3-live-ux-audio.md) | 3 | Draft — mic, Silero audio thread, ghost UI, state map |
 | [testing-strategy.md](specs/testing-strategy.md) | all | Draft — fixtures, WER gates, sidecar CI matrix |

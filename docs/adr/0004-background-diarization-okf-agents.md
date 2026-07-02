@@ -271,7 +271,7 @@ These promote former “room for improvement” items into **non-optional** impl
 ### Neutral
 
 - Global OS injector / Caps Lock hotkey remains separate product surface (Phase 7+).
-- MCP / vector DB / Cursor gateway consume OKF output — no change to Yap core loop.
+- MCP / vector DB gateway consume OKF output — no change to Yap core loop.
 
 ## Critical review (Voice OS spec vs this ADR)
 

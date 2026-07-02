@@ -1,3 +1,5 @@
+import { polishNumGpuLayers } from "@/settings";
+
 export const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
 
 export type PolishTone = "light" | "clean" | "notes";
@@ -52,6 +54,8 @@ export async function polishTranscript({
   const source = text.trim();
   if (!source) throw new Error("The selected transcript is empty.");
 
+  const numGpu = await polishNumGpuLayers().catch(() => 0);
+
   const response = await fetch("http://127.0.0.1:11434/api/chat", {
     body: JSON.stringify({
       model,
@@ -70,7 +74,7 @@ export async function polishTranscript({
       think: false,
       keep_alive: "10m",
       options: {
-        num_gpu: 0,
+        num_gpu: numGpu,
         temperature: tone === "light" ? 0.2 : 0.3,
         num_predict: tone === "notes" ? 320 : 220,
       },
