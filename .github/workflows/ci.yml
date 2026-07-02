@@ -5,9 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     runs-on: windows-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: desktop
@@ -25,15 +30,33 @@ jobs:
 
   rust:
     runs-on: windows-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: desktop/src-tauri
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+            desktop/src-tauri/.cargo-tools/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
       - run: cargo test --locked
       - name: cargo audit
         run: |
-          cargo install cargo-audit --locked
-          cargo audit
+          $env:PATH = "$PWD\.cargo-tools\bin;$env:PATH"
+          if (-not (Test-Path ".cargo-tools\bin\cargo-audit.exe")) {
+            cargo install cargo-audit --locked --root .cargo-tools
+          }
+          # quick-xml is pulled transitively through tauri-utils -> plist.
+          # Remove these ignores once plist can move to quick-xml >=0.41.
+          cargo audit --target-os windows --target-arch x86_64 `
+            --ignore RUSTSEC-2026-0194 `
+            --ignore RUSTSEC-2026-0195
