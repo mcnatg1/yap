@@ -3,38 +3,8 @@ use std::sync::Arc;
 pub mod stt;
 
 #[tauri::command]
-fn get_app_settings() -> stt::settings::AppSettings {
-    stt::settings::load_settings()
-}
-
-#[tauri::command]
-fn save_app_settings(
-    state: tauri::State<'_, stt::dispatch::SttState>,
-    settings: stt::settings::AppSettings,
-) -> Result<(), String> {
-    if state.is_transcribing() {
-        return Err("Cannot change settings while transcribing.".into());
-    }
-    stt::settings::save_settings(&settings)?;
-    state.reset_sidecar();
-    Ok(())
-}
-
-#[tauri::command]
 fn polish_num_gpu() -> u32 {
     stt::settings::polish_num_gpu_layers()
-}
-
-#[tauri::command]
-fn install_engine(app: tauri::AppHandle) -> Result<String, String> {
-    stt::bootstrap::run_blocking(&app)?;
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path =
-        stt::binary::resolve_for_spawn(&exe_dir).map_err(|error| error.user_message().to_string())?;
-    Ok(path.display().to_string())
 }
 
 #[tauri::command]
@@ -54,16 +24,15 @@ fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus
         .unwrap_or(false);
     let using_fallback = state.fell_back();
     let engine_ready = pin.is_some()
+        && model_installed
         && matches!(
             binary_status,
-            stt::binary::BinaryInstallStatus::Installed | stt::binary::BinaryInstallStatus::Downloadable
+            stt::binary::BinaryInstallStatus::Installed
         )
         && !using_fallback;
     let readiness = stt::dispatch::engine_readiness(engine_ready, using_fallback);
-    let gpu = stt::gpu::GpuStatus::resolve();
     log_line(&format!(
-        "setup_status engine_ready={engine_ready} using_fallback={using_fallback} binary={binary_status:?} gpu_layers={}",
-        gpu.layers
+        "setup_status engine_ready={engine_ready} using_fallback={using_fallback} binary={binary_status:?}"
     ));
 
     SetupStatus {
@@ -78,11 +47,6 @@ fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus
         model_installed,
         using_fallback,
         engine_status: compose_engine_status(binary_status, model_installed, using_fallback, readiness),
-        gpu_available: gpu.available,
-        gpu_adapter: gpu.adapter_name.clone().unwrap_or_default(),
-        gpu_layers: gpu.layers,
-        runner: gpu.runner_label().to_string(),
-        use_gpu: stt::settings::load_settings().use_gpu,
     }
 }
 
@@ -100,13 +64,13 @@ fn compose_engine_status(
             stt::dispatch::engine_status_label(stt::dispatch::EngineReadiness::Ready).to_string()
         }
         stt::binary::BinaryInstallStatus::Installed => {
-            "Model missing — re-run the installer".into()
+            "Local fallback model missing".into()
         }
         stt::binary::BinaryInstallStatus::Downloadable => {
-            "Transcription engine and model install with the app installer".into()
+            "Local fallback not installed".into()
         }
         stt::binary::BinaryInstallStatus::Invalid => {
-            "Engine failed verification — re-run the installer".into()
+            "Local fallback failed verification".into()
         }
         stt::binary::BinaryInstallStatus::Unsupported => {
             stt::dispatch::engine_status_label(readiness).to_string()
@@ -240,11 +204,6 @@ struct SetupStatus {
     model_installed: bool,
     using_fallback: bool,
     engine_status: String,
-    gpu_available: bool,
-    gpu_adapter: String,
-    gpu_layers: u32,
-    runner: String,
-    use_gpu: stt::settings::GpuSetting,
 }
 
 fn project_root() -> std::path::PathBuf {
@@ -278,11 +237,6 @@ mod tests {
             model_installed: true,
             using_fallback: false,
             engine_status: "Transcription engine ready".into(),
-            gpu_available: true,
-            gpu_adapter: "NVIDIA RTX".into(),
-            gpu_layers: 0,
-            runner: "CPU (GPU available)".into(),
-            use_gpu: stt::settings::GpuSetting::Cpu,
         })
         .unwrap();
 
@@ -293,10 +247,6 @@ mod tests {
         assert_eq!(value["modelInstalled"], true);
         assert_eq!(value["usingFallback"], false);
         assert_eq!(value["engineStatus"], "Transcription engine ready");
-        assert_eq!(value["gpuAvailable"], true);
-        assert_eq!(value["gpuLayers"], 0);
-        assert_eq!(value["runner"], "CPU (GPU available)");
-        assert_eq!(value["useGpu"], "cpu");
         assert!(value.get("python_ready").is_none());
     }
 
@@ -338,16 +288,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(stt_state)
-        .setup(|app| {
-            stt::bootstrap::spawn(app.handle().clone());
-            stt::prewarm::spawn_background(app.handle().clone());
+        .setup(|_app| {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             setup_status,
-            install_engine,
-            get_app_settings,
-            save_app_settings,
             polish_num_gpu,
             transcribe_files,
             start_transcribe,

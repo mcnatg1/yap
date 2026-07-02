@@ -20,8 +20,8 @@ impl BinaryInstallStatus {
     pub fn label(self) -> &'static str {
         match self {
             BinaryInstallStatus::Installed => "Installed",
-            BinaryInstallStatus::Downloadable => "Downloads during install (dev: npm run fetch:crispasr)",
-            BinaryInstallStatus::Invalid => "Invalid — re-run installer or fetch:crispasr",
+            BinaryInstallStatus::Downloadable => "Optional local fallback not installed",
+            BinaryInstallStatus::Invalid => "Invalid local fallback binary",
             BinaryInstallStatus::Unsupported => "Manual install required",
         }
     }

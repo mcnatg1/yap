@@ -41,7 +41,6 @@ import {
 } from "@/lib/app-types";
 import { historyEntryToUploadItem } from "@/lib/history-utils";
 import { cn } from "@/lib/utils";
-import { installEngine, listenEngineBootstrap, saveAppSettings, type GpuSetting } from "@/settings";
 import {
   listenTranscribeEvents,
   SttInvokeError,
@@ -60,14 +59,8 @@ type SetupStatus = {
   python: string;
   engineReady: boolean;
   engineBinaryStatus: string;
-  modelInstalled: boolean;
   usingFallback: boolean;
   engineStatus: string;
-  gpuAvailable: boolean;
-  gpuAdapter: string;
-  gpuLayers: number;
-  runner: string;
-  useGpu: GpuSetting;
 };
 
 export default function App() {
@@ -79,14 +72,7 @@ export default function App() {
   const [status, setStatus] = useState("Starting");
   const [model, setModel] = useState("Cohere Transcribe");
   const [auth, setAuth] = useState("Checking");
-  const [runner, setRunner] = useState("CPU");
-  const [gpuAdapter, setGpuAdapter] = useState("");
-  const [gpuAvailable, setGpuAvailable] = useState(false);
-  const [useGpu, setUseGpu] = useState<GpuSetting>("cpu");
-  const [settingsSaving, setSettingsSaving] = useState(false);
   const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
-  const [engineInstalling, setEngineInstalling] = useState(false);
-  const [modelInstalled, setModelInstalled] = useState(false);
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
@@ -234,27 +220,6 @@ export default function App() {
       return;
     }
 
-    let unlistenBootstrap: (() => void) | undefined;
-
-    void listenEngineBootstrap({
-      onProgress: (event) => {
-        setStatus(event.message);
-        setEngineInstalling(true);
-      },
-      onComplete: () => {
-        setEngineInstalling(false);
-        void loadStatus();
-      },
-      onError: (event) => {
-        setEngineInstalling(false);
-        setStatus(event.message);
-        toast.error(event.message);
-        void loadStatus();
-      },
-    }).then((stop) => {
-      unlistenBootstrap = stop;
-    });
-
     const unlistenDrag = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "enter") setDragging(true);
       if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
@@ -262,7 +227,6 @@ export default function App() {
     });
 
     return () => {
-      unlistenBootstrap?.();
       void unlistenDrag.then((fn) => fn());
     };
   }, []);
@@ -332,12 +296,7 @@ export default function App() {
           : "Setup missing",
       );
       setAuth(setup.pythonReady ? "Authorized" : setup.python);
-      setRunner(setup.runner);
-      setGpuAdapter(setup.gpuAdapter);
-      setGpuAvailable(setup.gpuAvailable);
-      setUseGpu(setup.useGpu);
       setEngineBinaryStatus(setup.engineBinaryStatus);
-      setModelInstalled(setup.modelInstalled);
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
@@ -393,37 +352,6 @@ export default function App() {
       else if (selected) addPaths([selected]);
     } catch (error) {
       toast.error(`Picker failed: ${String(error)}`);
-    }
-  }
-
-  async function handleInstallEngine() {
-    if (!isTauri() || engineInstalling) return;
-
-    setEngineInstalling(true);
-    try {
-      await installEngine();
-      await loadStatus();
-      toast.success("Transcription engine installed");
-    } catch (error) {
-      toast.error(String(error));
-    } finally {
-      setEngineInstalling(false);
-    }
-  }
-
-  async function handleUseGpuChange(next: GpuSetting) {
-    if (!isTauri() || next === useGpu) return;
-
-    setSettingsSaving(true);
-    try {
-      await saveAppSettings({ useGpu: next });
-      setUseGpu(next);
-      await loadStatus();
-      toast.success(next === "auto" ? "GPU enabled for transcription and polish" : "Using CPU for transcription and polish");
-    } catch (error) {
-      toast.error(String(error));
-    } finally {
-      setSettingsSaving(false);
     }
   }
 
@@ -761,22 +689,13 @@ export default function App() {
       <SettingsSheet
         auth={auth}
         engineBinaryStatus={engineBinaryStatus}
-        engineInstalling={engineInstalling}
-        gpuAdapter={gpuAdapter}
-        gpuAvailable={gpuAvailable}
         model={model}
-        modelInstalled={modelInstalled}
-        onInstallEngine={() => void handleInstallEngine()}
         onOpenChange={(open) => {
           setDetailsOpen(open);
           if (!open && activeRail === "details") setActiveRail(workspaceView);
         }}
-        onUseGpuChange={(next) => void handleUseGpuChange(next)}
         open={detailsOpen}
-        runner={runner}
-        saving={settingsSaving}
         status={status}
-        useGpu={useGpu}
       />
       <HelpSheet
         onOpenChange={(open) => {

@@ -1,5 +1,5 @@
-//! STT backends: dispatcher, error contract, Python fallback, and the CrispASR
-//! HTTP sidecar. Spec: docs/superpowers/specs/2026-06-30-crispasr-stt-sidecar-design.md
+//! STT backends: dispatcher, error contract, Python fallback, and optional
+//! CrispASR local fallback.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -70,7 +70,6 @@ pub(crate) fn log_yap(message: &str) {
 
 pub mod backend;
 pub mod binary;
-pub mod bootstrap;
 pub mod crispasr;
 pub mod dispatch;
 pub mod error;
@@ -78,7 +77,6 @@ pub mod gpu;
 pub mod model;
 pub mod parity;
 pub mod pin;
-pub mod prewarm;
 pub mod progress;
 pub mod python;
 pub mod settings;

@@ -78,7 +78,7 @@ export function isSttErrorCode(value: string): value is SttErrorCode {
 export function sttErrorMessage(code: SttErrorCode): string {
   switch (code) {
     case "MODEL_MISSING":
-      return "Transcription model isn't installed yet. Re-run the installer or npm run fetch:crispasr.";
+      return "Local fallback model isn't installed yet.";
     case "MODEL_CORRUPT":
       return "Model file failed verification.";
     case "BAD_LANG":

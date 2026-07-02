@@ -20,8 +20,9 @@ pub enum BackendChoice {
 pub fn select_backend(value: Option<&str>) -> BackendChoice {
     match value {
         Some("crispasr") => BackendChoice::Crispasr,
+        Some("auto") => BackendChoice::PreferCrispasr,
         Some("python") => BackendChoice::Python,
-        Some(_) | None => BackendChoice::PreferCrispasr,
+        Some(_) | None => BackendChoice::Python,
     }
 }
 
@@ -40,9 +41,10 @@ mod tests {
     #[test]
     fn selects_backend_from_env_value() {
         assert_eq!(select_backend(Some("crispasr")), BackendChoice::Crispasr);
+        assert_eq!(select_backend(Some("auto")), BackendChoice::PreferCrispasr);
         assert_eq!(select_backend(Some("python")), BackendChoice::Python);
-        assert_eq!(select_backend(None), BackendChoice::PreferCrispasr);
-        assert_eq!(select_backend(Some("bogus")), BackendChoice::PreferCrispasr);
+        assert_eq!(select_backend(None), BackendChoice::Python);
+        assert_eq!(select_backend(Some("bogus")), BackendChoice::Python);
     }
 
     #[test]
