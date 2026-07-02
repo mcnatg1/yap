@@ -44,7 +44,20 @@ where
         .collect()
 }
 
-pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarEndpoint {
+    pub url: String,
+    pub api_key: String,
+}
+
+pub fn build_launch_args(
+    gguf: &Path,
+    punc_model: &Path,
+    port: u16,
+    gpu_layers: u32,
+    api_key: &str,
+) -> Vec<String> {
+    let cache_dir = gguf.parent().unwrap_or_else(|| Path::new("."));
     let mut args = vec![
         "--server".to_string(),
         "--backend".to_string(),
@@ -55,6 +68,12 @@ pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String>
         HOST.to_string(),
         "--port".to_string(),
         port.to_string(),
+        "--api-keys".to_string(),
+        api_key.to_string(),
+        "--cache-dir".to_string(),
+        cache_dir.to_string_lossy().to_string(),
+        "--punc-model".to_string(),
+        punc_model.to_string_lossy().to_string(),
         "-t".to_string(),
         LOCAL_FALLBACK_THREADS.to_string(),
         "-p".to_string(),
@@ -67,6 +86,54 @@ pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String>
         args.push("-ng".to_string());
     }
     args
+}
+
+pub fn redact_launch_args(args: &[String]) -> Vec<String> {
+    let mut redacted = args.to_vec();
+    if let Some(index) = redacted.iter().position(|arg| arg == "--api-keys") {
+        if let Some(value) = redacted.get_mut(index + 1) {
+            *value = "<redacted>".to_string();
+        }
+    }
+    redacted
+}
+
+fn random_api_key() -> Result<String, SttError> {
+    let mut bytes = [0u8; 32];
+    fill_random(&mut bytes)?;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+fn fill_random(bytes: &mut [u8]) -> Result<(), SttError> {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn SystemFunction036(buffer: *mut std::ffi::c_void, length: u32) -> u8;
+    }
+    let ok = unsafe { SystemFunction036(bytes.as_mut_ptr().cast(), bytes.len() as u32) };
+    if ok == 0 {
+        Err(SttError::SidecarUnreachable)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn fill_random(bytes: &mut [u8]) -> Result<(), SttError> {
+    use std::io::Read as _;
+
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(bytes))
+        .map_err(|_| SttError::SidecarUnreachable)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn fill_random(_bytes: &mut [u8]) -> Result<(), SttError> {
+    Err(SttError::SidecarUnreachable)
 }
 
 pub fn health_is_ready(json: &str) -> bool {
@@ -103,6 +170,7 @@ where
 pub struct CrispasrSidecar {
     child: Option<Child>,
     pub(crate) port: Option<u16>,
+    api_key: Option<String>,
     last_used: Instant,
 }
 
@@ -111,8 +179,16 @@ impl CrispasrSidecar {
         Self {
             child: None,
             port: None,
+            api_key: None,
             last_used: Instant::now(),
         }
+    }
+
+    fn endpoint(&self) -> Option<SidecarEndpoint> {
+        Some(SidecarEndpoint {
+            url: self.base_url()?,
+            api_key: self.api_key.clone()?,
+        })
     }
 
     pub fn base_url(&self) -> Option<String> {
@@ -134,24 +210,24 @@ impl CrispasrSidecar {
         self.last_used = Instant::now();
     }
 
-    pub fn ensure_ready(&mut self) -> Result<String, SttError> {
+    pub fn ensure_ready(&mut self) -> Result<SidecarEndpoint, SttError> {
         self.ensure_ready_with_progress(None)
     }
 
     pub fn ensure_ready_with_progress(
         &mut self,
         reporter: Option<&ProgressReporter>,
-    ) -> Result<String, SttError> {
+    ) -> Result<SidecarEndpoint, SttError> {
         let started = Instant::now();
         if self.is_running() {
-            if let Some(url) = self.base_url() {
+            if let Some(endpoint) = self.endpoint() {
                 self.mark_used();
                 crate::stt::log_stt_timed(
                     "ensure_ready",
                     started.elapsed(),
                     "sidecar already running",
                 );
-                return Ok(url);
+                return Ok(endpoint);
             }
         }
         self.shutdown();
@@ -217,7 +293,9 @@ impl CrispasrSidecar {
                 crate::stt::model::download_file,
             )?
         };
+        let punc_model = crate::stt::model::models_dir().join(&pin.punc_file);
         let port = probe_port().ok_or(SttError::SidecarUnreachable)?;
+        let api_key = random_api_key()?;
 
         let gpu = crate::stt::gpu::GpuStatus::resolve();
         crate::stt::log_stt(&format!(
@@ -230,9 +308,10 @@ impl CrispasrSidecar {
             gpu.adapter_name.as_deref().unwrap_or("none")
         ));
         let spawn_started = Instant::now();
-        let child = spawn_child(&binary, &model, port, gpu.layers)?;
+        let child = spawn_child(&binary, &model, &punc_model, port, gpu.layers, &api_key)?;
         self.child = Some(child);
         self.port = Some(port);
+        self.api_key = Some(api_key);
         crate::stt::log_stt_timed(
             "ensure_ready",
             spawn_started.elapsed(),
@@ -247,7 +326,7 @@ impl CrispasrSidecar {
                 started.elapsed(),
                 &format!("sidecar ready on {url}"),
             );
-            Ok(url)
+            self.endpoint().ok_or(SttError::SidecarUnreachable)
         } else {
             crate::stt::log_stt_timed(
                 "ensure_ready",
@@ -262,7 +341,7 @@ impl CrispasrSidecar {
         }
     }
 
-    pub fn restart(&mut self) -> Result<String, SttError> {
+    pub fn restart(&mut self) -> Result<SidecarEndpoint, SttError> {
         crate::stt::log_stt("crispasr sidecar restart-once");
         self.shutdown();
         self.ensure_ready()
@@ -281,6 +360,7 @@ impl CrispasrSidecar {
             let _ = child.wait();
         }
         self.port = None;
+        self.api_key = None;
     }
 }
 
@@ -297,7 +377,14 @@ fn current_exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn spawn_child(binary: &Path, model: &Path, port: u16, gpu_layers: u32) -> Result<Child, SttError> {
+fn spawn_child(
+    binary: &Path,
+    model: &Path,
+    punc_model: &Path,
+    port: u16,
+    gpu_layers: u32,
+    api_key: &str,
+) -> Result<Child, SttError> {
     let stderr_path = crate::stt::sidecar_stderr_log_path();
     if let Some(parent) = stderr_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -307,14 +394,15 @@ fn spawn_child(binary: &Path, model: &Path, port: u16, gpu_layers: u32) -> Resul
         .append(true)
         .open(&stderr_path)
         .map_err(|_| SttError::SidecarUnreachable)?;
+    let args = build_launch_args(model, punc_model, port, gpu_layers, api_key);
     crate::stt::log_stt(&format!(
         "spawning sidecar stderr_log={} args={:?}",
         stderr_path.display(),
-        build_launch_args(model, port, gpu_layers)
+        redact_launch_args(&args)
     ));
 
     let mut command = Command::new(binary);
-    command.args(build_launch_args(model, port, gpu_layers));
+    command.args(args);
     command.env_clear();
     command.envs(sidecar_env(std::env::vars()));
     command.stdin(Stdio::null());
@@ -411,7 +499,13 @@ mod tests {
 
     #[test]
     fn launch_args_bind_loopback_only() {
-        let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 0);
+        let args = build_launch_args(
+            std::path::Path::new("C:/models/m.gguf"),
+            std::path::Path::new("C:/models/punc.gguf"),
+            8765,
+            0,
+            "secret",
+        );
         assert_eq!(args[0], "--server");
         assert_eq!(args[1], "--backend");
         assert_eq!(args[2], "moonshine-streaming");
@@ -419,6 +513,12 @@ mod tests {
         assert_eq!(args[host + 1], "127.0.0.1");
         let port = args.iter().position(|a| a == "--port").unwrap();
         assert_eq!(args[port + 1], "8765");
+        let api_key = args.iter().position(|a| a == "--api-keys").unwrap();
+        assert_eq!(args[api_key + 1], "secret");
+        let cache_dir = args.iter().position(|a| a == "--cache-dir").unwrap();
+        assert_eq!(args[cache_dir + 1], "C:/models");
+        let punc = args.iter().position(|a| a == "--punc-model").unwrap();
+        assert_eq!(args[punc + 1], "C:/models/punc.gguf");
         assert!(!args.contains(&"--no-punctuation".to_string()));
         let threads = args.iter().position(|a| a == "-t").unwrap();
         assert_eq!(args[threads + 1], "8");
@@ -430,10 +530,29 @@ mod tests {
 
     #[test]
     fn launch_args_use_gpu_backend_auto_when_gpu_available() {
-        let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 99);
+        let args = build_launch_args(
+            std::path::Path::new("C:/models/m.gguf"),
+            std::path::Path::new("C:/models/punc.gguf"),
+            8765,
+            99,
+            "secret",
+        );
         let gpu = args.iter().position(|a| a == "--gpu-backend").unwrap();
         assert_eq!(args[gpu + 1], "auto");
         assert!(!args.contains(&"-ng".to_string()));
+    }
+
+    #[test]
+    fn redacts_api_key_from_logged_args() {
+        let args = vec![
+            "--api-keys".to_string(),
+            "secret".to_string(),
+            "--port".to_string(),
+            "8765".to_string(),
+        ];
+        let redacted = redact_launch_args(&args);
+        assert_eq!(redacted[1], "<redacted>");
+        assert_eq!(args[1], "secret");
     }
 
     #[test]

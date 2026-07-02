@@ -95,6 +95,7 @@ pub fn is_installed(pin: &CrispasrPin) -> bool {
     let dir = models_dir();
     verify_or_trust(&dir.join(&pin.gguf_file), &pin.gguf_sha256).is_ok()
         && verify_or_trust(&dir.join(&pin.tokenizer_file), &pin.tokenizer_sha256).is_ok()
+        && verify_or_trust(&dir.join(&pin.punc_file), &pin.punc_sha256).is_ok()
 }
 
 pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, mut download: D) -> Result<PathBuf, SttError>
@@ -115,6 +116,14 @@ where
         &pin.gguf_revision,
         &pin.tokenizer_file,
         &pin.tokenizer_sha256,
+        &mut download,
+    )?;
+    ensure_artifact_at(
+        dir,
+        &pin.punc_repo,
+        &pin.punc_revision,
+        &pin.punc_file,
+        &pin.punc_sha256,
         &mut download,
     )?;
     Ok(dest)
@@ -238,6 +247,10 @@ mod tests {
             gguf_sha256: gguf_sha256.into(),
             tokenizer_file: "tokenizer.bin".into(),
             tokenizer_sha256: gguf_sha256.into(),
+            punc_repo: "owner/punc".into(),
+            punc_revision: "punc-rev".into(),
+            punc_file: "punc.gguf".into(),
+            punc_sha256: gguf_sha256.into(),
         }
     }
 
@@ -247,11 +260,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let model = dir.join("m.gguf");
         let tokenizer = dir.join("tokenizer.bin");
+        let punc = dir.join("punc.gguf");
         std::fs::write(&model, b"hello").unwrap();
         std::fs::write(&tokenizer, b"hello").unwrap();
+        std::fs::write(&punc, b"hello").unwrap();
         let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         write_verified_marker(&model, hello).unwrap();
         write_verified_marker(&tokenizer, hello).unwrap();
+        write_verified_marker(&punc, hello).unwrap();
         let pin = sample_pin(hello);
         std::env::set_var("YAP_MODELS_DIR", &dir);
         assert!(is_installed(&pin));
@@ -281,6 +297,7 @@ mod tests {
         .unwrap();
         assert!(dest.exists());
         assert!(dir.join("tokenizer.bin").exists());
+        assert!(dir.join("punc.gguf").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -303,6 +320,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("m.gguf"), b"hello").unwrap();
         std::fs::write(dir.join("tokenizer.bin"), b"hello").unwrap();
+        std::fs::write(dir.join("punc.gguf"), b"hello").unwrap();
         let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let pin = sample_pin(hello);
         let dest = ensure_model_at(&dir, &pin, |_url, _path| {
@@ -326,9 +344,10 @@ mod tests {
             std::fs::write(path, b"hello").map_err(|_| SttError::ModelMissing)
         })
         .unwrap();
-        assert_eq!(download_calls, 2, "must re-download corrupt model and missing tokenizer");
+        assert_eq!(download_calls, 3, "must re-download corrupt model and missing companions");
         assert!(dest.exists());
         assert!(dir.join("tokenizer.bin").exists());
+        assert!(dir.join("punc.gguf").exists());
         assert!(verify_sha256(&dest, hello).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }

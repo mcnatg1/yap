@@ -42,7 +42,7 @@ fn crispasr_verbose_json_carries_timestamps() {
     };
 
     let sidecar = Arc::new(Mutex::new(CrispasrSidecar::new()));
-    let base_url = sidecar.lock().unwrap().ensure_ready().expect("sidecar ready");
+    let endpoint = sidecar.lock().unwrap().ensure_ready().expect("sidecar ready");
 
     let client = reqwest::blocking::Client::new();
     let form = reqwest::blocking::multipart::Form::new()
@@ -51,7 +51,8 @@ fn crispasr_verbose_json_carries_timestamps() {
         .text("language", "en")
         .text("response_format", "verbose_json");
     let body = client
-        .post(format!("{base_url}/v1/audio/transcriptions"))
+        .post(format!("{}/v1/audio/transcriptions", endpoint.url))
+        .bearer_auth(&endpoint.api_key)
         .multipart(form)
         .send()
         .expect("verbose_json request")

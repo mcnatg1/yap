@@ -358,6 +358,10 @@ mod tests {
             gguf_sha256: "b".repeat(64),
             tokenizer_file: "tokenizer.bin".into(),
             tokenizer_sha256: "c".repeat(64),
+            punc_repo: "owner/punc".into(),
+            punc_revision: "punc-rev".into(),
+            punc_file: "punc.gguf".into(),
+            punc_sha256: "d".repeat(64),
         };
 
         let archive = bin_dir.join("crispasr-windows-x86_64-vulkan.zip");

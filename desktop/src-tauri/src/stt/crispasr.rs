@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::stt::backend::SttBackend;
 use crate::stt::error::SttError;
 use crate::stt::progress::ProgressReporter;
-use crate::stt::sidecar::CrispasrSidecar;
+use crate::stt::sidecar::{CrispasrSidecar, SidecarEndpoint};
 
 pub const MAX_AUDIO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MIN_INFERENCE_TIMEOUT_SECS: u64 = 600;
@@ -137,13 +137,13 @@ impl CrispasrBackend {
         validate_audio_input(audio)?;
 
         let sidecar = Arc::clone(&self.sidecar);
-        let ensure = || -> Result<String, SttError> {
+        let ensure = || -> Result<SidecarEndpoint, SttError> {
             sidecar
                 .lock()
                 .map_err(|_| SttError::SidecarCrash)?
                 .ensure_ready_with_progress(reporter)
         };
-        let restart = || -> Result<String, SttError> {
+        let restart = || -> Result<SidecarEndpoint, SttError> {
             sidecar.lock().map_err(|_| SttError::SidecarCrash)?.restart()
         };
 
@@ -151,8 +151,8 @@ impl CrispasrBackend {
             report.emit("transcribing", Some(12), "Starting transcription…");
         }
 
-        let result = run_with_retry(ensure, restart, |url| {
-            post_transcription_with_progress(url, audio, language, reporter)
+        let result = run_with_retry(ensure, restart, |endpoint| {
+            post_transcription_with_progress(endpoint, audio, language, reporter)
         });
         if result.is_ok() {
             if let Ok(mut guard) = self.sidecar.lock() {
@@ -186,16 +186,16 @@ fn is_sidecar_failure(error: SttError) -> bool {
 
 fn run_with_retry<E, R, P>(ensure: E, restart: R, mut post: P) -> Result<String, SttError>
 where
-    E: Fn() -> Result<String, SttError>,
-    R: Fn() -> Result<String, SttError>,
-    P: FnMut(&str) -> Result<String, SttError>,
+    E: Fn() -> Result<SidecarEndpoint, SttError>,
+    R: Fn() -> Result<SidecarEndpoint, SttError>,
+    P: FnMut(&SidecarEndpoint) -> Result<String, SttError>,
 {
-    let url = ensure()?;
-    match post(&url) {
+    let endpoint = ensure()?;
+    match post(&endpoint) {
         Ok(text) => Ok(text),
         Err(error) if is_sidecar_failure(error) => {
-            let url = restart()?;
-            match post(&url) {
+            let endpoint = restart()?;
+            match post(&endpoint) {
                 Ok(text) => Ok(text),
                 Err(_) => Err(SttError::SidecarCrash),
             }
@@ -212,7 +212,7 @@ fn transcribe_progress_estimate_secs(audio: &Path) -> u64 {
 }
 
 fn post_transcription_with_progress(
-    base_url: &str,
+    endpoint: &SidecarEndpoint,
     audio: &Path,
     language: &str,
     reporter: Option<&ProgressReporter>,
@@ -260,7 +260,8 @@ fn post_transcription_with_progress(
         .map_err(|_| SttError::AudioDecode)?
         .text("language", language.to_string());
     let response = client
-        .post(format!("{base_url}/v1/audio/transcriptions"))
+        .post(format!("{}/v1/audio/transcriptions", endpoint.url))
+        .bearer_auth(&endpoint.api_key)
         .multipart(form)
         .send()
         .map_err(|err| if err.is_timeout() { SttError::Timeout } else { SttError::SidecarCrash })?;
@@ -286,6 +287,13 @@ mod tests {
 
     use super::*;
     use crate::stt::sidecar::CrispasrSidecar;
+
+    fn endpoint(url: &str) -> SidecarEndpoint {
+        SidecarEndpoint {
+            url: url.to_string(),
+            api_key: "secret".to_string(),
+        }
+    }
 
     #[test]
     fn parse_reads_text_and_ignores_unknown_fields() {
@@ -348,8 +356,8 @@ mod tests {
     fn retry_succeeds_on_first_post() {
         let calls = Cell::new(0);
         let out = run_with_retry(
-            || Ok("url".to_string()),
-            || Ok("url2".to_string()),
+            || Ok(endpoint("url")),
+            || Ok(endpoint("url2")),
             |_url| {
                 calls.set(calls.get() + 1);
                 Ok("hi".to_string())
@@ -363,8 +371,8 @@ mod tests {
     fn retry_restarts_then_succeeds() {
         let calls = Cell::new(0);
         let out = run_with_retry(
-            || Ok("url".to_string()),
-            || Ok("url2".to_string()),
+            || Ok(endpoint("url")),
+            || Ok(endpoint("url2")),
             |_url| {
                 let n = calls.get();
                 calls.set(n + 1);
@@ -382,8 +390,8 @@ mod tests {
     #[test]
     fn retry_gives_up_after_second_failure() {
         let out = run_with_retry(
-            || Ok("url".to_string()),
-            || Ok("url2".to_string()),
+            || Ok(endpoint("url")),
+            || Ok(endpoint("url2")),
             |_url| Err(SttError::SidecarUnreachable),
         );
         assert_eq!(out.unwrap_err(), SttError::SidecarCrash);
@@ -393,10 +401,10 @@ mod tests {
     fn retry_propagates_non_sidecar_errors_without_restart() {
         let restarted = Cell::new(false);
         let out = run_with_retry(
-            || Ok("url".to_string()),
+            || Ok(endpoint("url")),
             || {
                 restarted.set(true);
-                Ok("url2".to_string())
+                Ok(endpoint("url2"))
             },
             |_url| Err(SttError::AudioDecode),
         );
