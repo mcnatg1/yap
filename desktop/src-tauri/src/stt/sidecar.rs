@@ -232,6 +232,11 @@ impl CrispasrSidecar {
         }
         self.shutdown();
 
+        if !crate::stt::settings::local_fallback_enabled() {
+            crate::stt::log_stt("ensure_ready: local fallback disabled");
+            return Err(SttError::FallbackDisabled);
+        }
+
         if let Some(report) = reporter {
             report.emit("loading_model", Some(3), "Preparing transcription engine…");
         }
@@ -241,19 +246,10 @@ impl CrispasrSidecar {
             binary::BinaryInstallStatus::Installed => {
                 binary::resolve_for_spawn(&current_exe_dir())?
             }
-            binary::BinaryInstallStatus::Downloadable | binary::BinaryInstallStatus::Invalid => {
-                if let Some(report) = reporter {
-                    report.emit(
-                        "loading_model",
-                        Some(5),
-                        "Downloading transcription engine…",
-                    );
-                }
-                crate::stt::log_stt("ensure_ready: downloading binary (fallback)");
-                binary::ensure_binary()?
-            }
-            binary::BinaryInstallStatus::Unsupported => {
-                crate::stt::log_stt("crispasr auto-install unsupported on this platform");
+            binary::BinaryInstallStatus::Downloadable
+            | binary::BinaryInstallStatus::Invalid
+            | binary::BinaryInstallStatus::Unsupported => {
+                crate::stt::log_stt("ensure_ready: local fallback binary unavailable");
                 return Err(SttError::SidecarUnreachable);
             }
         };
@@ -279,19 +275,8 @@ impl CrispasrSidecar {
             );
             path
         } else {
-            if let Some(report) = reporter {
-                report.emit(
-                    "loading_model",
-                    Some(6),
-                    "Downloading transcription model (fallback)…",
-                );
-            }
-            crate::stt::log_stt("ensure_ready: downloading model (fallback)");
-            crate::stt::model::ensure_model_at(
-                &crate::stt::model::models_dir(),
-                &pin,
-                crate::stt::model::download_file,
-            )?
+            crate::stt::log_stt("ensure_ready: local fallback model missing");
+            return Err(SttError::ModelMissing);
         };
         let punc_model = crate::stt::model::models_dir().join(&pin.punc_file);
         let port = probe_port().ok_or(SttError::SidecarUnreachable)?;

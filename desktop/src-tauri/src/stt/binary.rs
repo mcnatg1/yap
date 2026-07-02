@@ -165,7 +165,7 @@ pub fn resolve_for_spawn(exe_dir: &Path) -> Result<PathBuf, SttError> {
         return Ok(cached);
     }
 
-    ensure_binary_at(&pin, download_file)
+    Err(SttError::SidecarUnreachable)
 }
 
 pub fn ensure_binary() -> Result<PathBuf, SttError> {

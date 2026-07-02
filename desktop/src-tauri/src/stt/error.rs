@@ -7,6 +7,7 @@ pub enum SttError {
     AudioDecode,
     SidecarCrash,
     SidecarUnreachable,
+    FallbackDisabled,
     Busy,
     Timeout,
 }
@@ -21,6 +22,7 @@ impl SttError {
             SttError::AudioDecode => "AUDIO_DECODE",
             SttError::SidecarCrash => "SIDECAR_CRASH",
             SttError::SidecarUnreachable => "SIDECAR_UNREACHABLE",
+            SttError::FallbackDisabled => "FALLBACK_DISABLED",
             SttError::Busy => "BUSY",
             SttError::Timeout => "TIMEOUT",
         }
@@ -28,15 +30,14 @@ impl SttError {
 
     pub fn user_message(&self) -> &'static str {
         match self {
-            SttError::ModelMissing => {
-                "Local fallback model isn't installed yet."
-            }
+            SttError::ModelMissing => "Local fallback model isn't installed yet.",
             SttError::ModelCorrupt => "Model file failed verification.",
             SttError::BadLang => "That language isn't supported.",
             SttError::Oom => "Ran out of memory while transcribing.",
             SttError::AudioDecode => "Couldn't read that audio file.",
             SttError::SidecarCrash => "Transcription engine crashed.",
             SttError::SidecarUnreachable => "Transcription engine didn't start.",
+            SttError::FallbackDisabled => "Local fallback is disabled.",
             SttError::Busy => "Transcription is busy — try again in a moment.",
             SttError::Timeout => "Transcription timed out.",
         }
@@ -65,6 +66,7 @@ mod tests {
             SttError::AudioDecode,
             SttError::SidecarCrash,
             SttError::SidecarUnreachable,
+            SttError::FallbackDisabled,
             SttError::Busy,
             SttError::Timeout,
         ];
@@ -73,7 +75,13 @@ mod tests {
             assert!(!error.user_message().is_empty());
         }
         assert_eq!(SttError::SidecarUnreachable.code(), "SIDECAR_UNREACHABLE");
-        assert_eq!(SttError::ModelCorrupt.user_message(), "Model file failed verification.");
-        assert_eq!(SttError::Timeout.to_string(), "TIMEOUT: Transcription timed out.");
+        assert_eq!(
+            SttError::ModelCorrupt.user_message(),
+            "Model file failed verification."
+        );
+        assert_eq!(
+            SttError::Timeout.to_string(),
+            "TIMEOUT: Transcription timed out."
+        );
     }
 }

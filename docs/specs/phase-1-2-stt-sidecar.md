@@ -7,6 +7,7 @@
 - One local CrispASR sidecar.
 - One local model family: Moonshine tiny for live/offline degraded use.
 - Pinned and verified artifacts: CrispASR binary, Moonshine GGUF, tokenizer, FireRed punctuation.
+- Setup/settings own artifact download, removal, and fallback disablement; runtime never silently downloads.
 - Loopback HTTP requires a per-launch API key.
 - Rust writes transcript files beside source files.
 

@@ -10,6 +10,7 @@ DGX/server Cohere connector work, not in this local fallback branch.
 ## Current Posture
 
 - Local/live fallback: Moonshine tiny through a CrispASR sidecar.
+- Local fallback install: explicit setup/settings action; runtime never silently downloads models.
 - Batch/large recordings: future DGX/server Cohere path.
 - Offline without a suitable server/GPU path: queue or block instead of producing low-confidence
   official-looking transcripts.
@@ -69,8 +70,8 @@ DGX/server Cohere connector work, not in this local fallback branch.
 1. The React UI calls `start_transcribe` through `desktop/src/stt.ts`.
 2. Tauri spawns a worker thread in `desktop/src-tauri/src/lib.rs`.
 3. `stt::dispatch` serializes files, emits progress, and writes sibling `.txt` files.
-4. `stt::sidecar` ensures the pinned CrispASR sidecar, model, tokenizer, and punctuation model are
-   present and ready.
+4. `stt::sidecar` uses the already-installed CrispASR sidecar, model, tokenizer, and punctuation
+   model; setup/settings own downloads and removal.
 5. `stt::crispasr` sends authenticated loopback HTTP requests and returns transcript text.
 
 ## Development

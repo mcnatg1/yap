@@ -180,6 +180,7 @@ fn is_sidecar_failure(error: SttError) -> bool {
         | SttError::BadLang
         | SttError::Oom
         | SttError::AudioDecode
+        | SttError::FallbackDisabled
         | SttError::Busy => false,
     }
 }

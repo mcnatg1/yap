@@ -54,8 +54,12 @@ type SetupStatus = {
   root: string;
   engineReady: boolean;
   engineBinaryStatus: string;
+  fallbackEnabled: boolean;
+  modelInstalled: boolean;
   engineStatus: string;
 };
+
+const setupSkipKey = "yap-local-fallback-setup-skipped";
 
 export default function App() {
   const [queue, setQueue] = useState<UploadItem[]>([]);
@@ -67,6 +71,10 @@ export default function App() {
   const [model, setModel] = useState("Moonshine tiny");
   const [auth, setAuth] = useState("Checking");
   const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
+  const [engineReady, setEngineReady] = useState(false);
+  const [fallbackEnabled, setFallbackEnabled] = useState(true);
+  const [modelInstalled, setModelInstalled] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
@@ -80,6 +88,7 @@ export default function App() {
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
   const pathToItemId = useRef<Map<string, number>>(new Map());
+  const setupPrompted = useRef(false);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -265,14 +274,84 @@ export default function App() {
 
     try {
       const setup = await invoke<SetupStatus>("setup_status");
-      setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
-      setStatus(setup.engineReady ? setup.engineStatus : "Setup missing");
-      setAuth(setup.engineReady ? "Authorized" : "Local engine unavailable");
-      setEngineBinaryStatus(setup.engineBinaryStatus);
+      applySetupStatus(setup);
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
     }
+  }
+
+  function applySetupStatus(setup: SetupStatus) {
+    setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
+    setStatus(setup.engineReady ? setup.engineStatus : "Setup missing");
+    setAuth(setup.engineReady ? "Authorized" : "Local engine unavailable");
+    setEngineBinaryStatus(setup.engineBinaryStatus);
+    setEngineReady(setup.engineReady);
+    setFallbackEnabled(setup.fallbackEnabled);
+    setModelInstalled(setup.modelInstalled);
+
+    if (!setup.engineReady && !setupPrompted.current && localStorage.getItem(setupSkipKey) !== "true") {
+      setupPrompted.current = true;
+      setActiveRail("details");
+      setDetailsOpen(true);
+    }
+  }
+
+  async function installFallback() {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    setStatus("Installing local fallback");
+    try {
+      const setup = await invoke<SetupStatus>("install_local_fallback");
+      localStorage.removeItem(setupSkipKey);
+      applySetupStatus(setup);
+      toast.success("Local fallback installed");
+    } catch (error) {
+      toast.error(`Install failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  async function removeFallback() {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    try {
+      const setup = await invoke<SetupStatus>("remove_local_fallback");
+      applySetupStatus(setup);
+      toast.success("Local fallback files removed");
+    } catch (error) {
+      toast.error(`Remove failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  async function setFallbackEnabledSetting(enabled: boolean) {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    try {
+      const setup = await invoke<SetupStatus>("set_local_fallback_enabled", { enabled });
+      if (!enabled) localStorage.setItem(setupSkipKey, "true");
+      applySetupStatus(setup);
+      toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
+    } catch (error) {
+      toast.error(`Update failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  function skipSetup() {
+    localStorage.setItem(setupSkipKey, "true");
+    setDetailsOpen(false);
+    if (activeRail === "details") setActiveRail(workspaceView);
   }
 
   function addPaths(paths: string[]) {
@@ -659,12 +738,20 @@ export default function App() {
       </SidebarInset>
       <SettingsSheet
         auth={auth}
+        busy={setupBusy}
+        engineReady={engineReady}
         engineBinaryStatus={engineBinaryStatus}
+        fallbackEnabled={fallbackEnabled}
         model={model}
+        modelInstalled={modelInstalled}
+        onInstallFallback={() => void installFallback()}
         onOpenChange={(open) => {
           setDetailsOpen(open);
           if (!open && activeRail === "details") setActiveRail(workspaceView);
         }}
+        onRemoveFallback={() => void removeFallback()}
+        onSetFallbackEnabled={(enabled) => void setFallbackEnabledSetting(enabled)}
+        onSkipSetup={skipSetup}
         open={detailsOpen}
         status={status}
       />

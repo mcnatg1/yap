@@ -9,6 +9,41 @@ fn polish_num_gpu() -> u32 {
 
 #[tauri::command]
 fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
+    current_setup_status()
+}
+
+#[tauri::command]
+async fn install_local_fallback() -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        stt::settings::set_local_fallback_enabled(true)?;
+        stt::binary::ensure_binary()?;
+        stt::model::ensure_model()?;
+        Ok(current_setup_status())
+    })
+    .await
+    .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::SidecarCrash))?
+}
+
+#[tauri::command]
+fn remove_local_fallback(
+    state: tauri::State<'_, stt::dispatch::SttState>,
+) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+    if let Ok(mut sidecar) = state.sidecar.lock() {
+        sidecar.shutdown();
+    }
+    remove_local_fallback_files()?;
+    Ok(current_setup_status())
+}
+
+#[tauri::command]
+fn set_local_fallback_enabled(
+    enabled: bool,
+) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+    stt::settings::set_local_fallback_enabled(enabled)?;
+    Ok(current_setup_status())
+}
+
+fn current_setup_status() -> SetupStatus {
     let root = project_root();
     let exe_dir = std::env::current_exe()
         .ok()
@@ -21,11 +56,13 @@ fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatu
         .as_ref()
         .map(|pin| stt::model::is_installed(pin))
         .unwrap_or(false);
-    let engine_ready = pin.is_some()
+    let fallback_enabled = stt::settings::local_fallback_enabled();
+    let engine_ready = fallback_enabled
+        && pin.is_some()
         && model_installed
         && matches!(binary_status, stt::binary::BinaryInstallStatus::Installed);
     log_line(&format!(
-        "setup_status engine_ready={engine_ready} binary={binary_status:?}"
+        "setup_status engine_ready={engine_ready} fallback_enabled={fallback_enabled} binary={binary_status:?}"
     ));
 
     SetupStatus {
@@ -37,14 +74,19 @@ fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatu
         engine_ready,
         engine_binary_status: binary_status.label().to_string(),
         model_installed,
-        engine_status: compose_engine_status(binary_status, model_installed),
+        fallback_enabled,
+        engine_status: compose_engine_status(binary_status, model_installed, fallback_enabled),
     }
 }
 
 fn compose_engine_status(
     binary_status: stt::binary::BinaryInstallStatus,
     model_installed: bool,
+    fallback_enabled: bool,
 ) -> String {
+    if !fallback_enabled {
+        return "Local fallback disabled".into();
+    }
     match binary_status {
         stt::binary::BinaryInstallStatus::Installed if model_installed => {
             "Transcription engine ready".to_string()
@@ -56,6 +98,29 @@ fn compose_engine_status(
             "Transcription engine requires manual install".into()
         }
     }
+}
+
+fn remove_local_fallback_files() -> Result<(), stt::dispatch::SttCommandError> {
+    let pin = stt::pin::load_pin().map_err(|_| stt::error::SttError::ModelCorrupt)?;
+    remove_if_exists(stt::binary::cached_binary_path(&pin.crispasr_version))?;
+    remove_if_exists(stt::model::models_dir().join(&pin.gguf_file))?;
+    remove_if_exists(stt::model::models_dir().join(&pin.tokenizer_file))?;
+    remove_if_exists(stt::model::models_dir().join(&pin.punc_file))?;
+    Ok(())
+}
+
+fn remove_if_exists(path: std::path::PathBuf) -> Result<(), stt::dispatch::SttCommandError> {
+    remove_one(path.clone())?;
+    let verified = path.with_extension("verified");
+    remove_one(verified)
+}
+
+fn remove_one(path: std::path::PathBuf) -> Result<(), stt::dispatch::SttCommandError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(path)
+        .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::ModelMissing))
 }
 
 #[tauri::command]
@@ -164,6 +229,7 @@ struct SetupStatus {
     engine_ready: bool,
     engine_binary_status: String,
     model_installed: bool,
+    fallback_enabled: bool,
     engine_status: String,
 }
 
@@ -189,6 +255,7 @@ mod tests {
             engine_ready: true,
             engine_binary_status: "Installed".into(),
             model_installed: true,
+            fallback_enabled: true,
             engine_status: "Transcription engine ready".into(),
         })
         .unwrap();
@@ -196,8 +263,17 @@ mod tests {
         assert_eq!(value["engineReady"], true);
         assert_eq!(value["engineBinaryStatus"], "Installed");
         assert_eq!(value["modelInstalled"], true);
+        assert_eq!(value["fallbackEnabled"], true);
         assert_eq!(value["engineStatus"], "Transcription engine ready");
         assert!(value.get("python_ready").is_none());
+    }
+
+    #[test]
+    fn disabled_status_wins() {
+        assert_eq!(
+            compose_engine_status(stt::binary::BinaryInstallStatus::Installed, true, false),
+            "Local fallback disabled"
+        );
     }
 
     #[test]
@@ -241,6 +317,9 @@ pub fn run() {
         .setup(|_app| Ok(()))
         .invoke_handler(tauri::generate_handler![
             setup_status,
+            install_local_fallback,
+            remove_local_fallback,
+            set_local_fallback_enabled,
             polish_num_gpu,
             start_transcribe,
             read_text_file,
