@@ -30,7 +30,7 @@
 |------|----------------------|
 | **Scope creep** | Ship Yap batch → CrispASR → live EN → LID → L3 OKF in that order. |
 | **Three processes** | crispasr + llama-server + knowledge worker; worker idles out after 5 min. |
-| **CrispASR dependency** | Pin version; `YAP_STT_BACKEND=python` fallback; CI smoke tests. |
+| **CrispASR dependency** | Pin version; verified companions; loopback auth; CI smoke tests. |
 | **Wispr comparison on v1** | Don’t promise global hotkey + inject until Phase 7+; compete on batch + local first. |
 | **OKF/agents before core STT** | Transcripts history first; OKF Phase 7c. |
 
@@ -634,7 +634,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
-| **1–2** STT sidecar | Batch via crispasr; `python` fallback | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; Setup status copy |
+| **1–2** STT sidecar | Local Moonshine fallback sidecar | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; Setup status copy |
 | **A–D** llama-server | Polish off Ollama → llama-server | New LLM sidecar spec; `polish.ts` notes; dev-only Ollama docs |
 | **3** Live EN | Moonshine + Scribe bypass + Silero | **PRODUCT.md**: add live entry, soften “not dictation” → “not global dictation *yet*”; new Live UX spec |
 | **4** LID gate | SpeechBrain batch detect | Resolve [ADR 0003 open questions](adr/0003-long-term-voice-architecture.md); language-memory UX |
@@ -652,7 +652,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 **STT (Phase 1–2)**
 
-- [ ] `YAP_STT_BACKEND=crispasr|python`
+- [ ] Local Moonshine fallback sidecar
 - [ ] Pin CrispASR version; CI smoke test
 - [ ] Sidecar health in Setup UI
 - [ ] Structured error codes → toasts

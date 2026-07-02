@@ -54,12 +54,8 @@ import {
 type SetupStatus = {
   model: string;
   root: string;
-  pythonReady: boolean;
-  scriptReady: boolean;
-  python: string;
   engineReady: boolean;
   engineBinaryStatus: string;
-  usingFallback: boolean;
   engineStatus: string;
 };
 
@@ -129,7 +125,7 @@ export default function App() {
         setRunning(false);
         setRunningSince(undefined);
         setStatus("Needs attention");
-        setAuth(error.message.includes("Hugging Face") ? "Run hf auth login" : "Check runner output");
+        setAuth("Check local engine");
         toast.error(error.message || "Transcription failed");
       },
     }).then((stop) => {
@@ -290,12 +286,8 @@ export default function App() {
     try {
       const setup = await invoke<SetupStatus>("setup_status");
       setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
-      setStatus(
-        setup.engineReady || (setup.pythonReady && setup.scriptReady)
-          ? setup.engineStatus
-          : "Setup missing",
-      );
-      setAuth(setup.pythonReady ? "Authorized" : setup.python);
+      setStatus(setup.engineReady ? setup.engineStatus : "Setup missing");
+      setAuth(setup.engineReady ? "Authorized" : "Local engine unavailable");
       setEngineBinaryStatus(setup.engineBinaryStatus);
     } catch (error) {
       setStatus("Setup check failed");

@@ -8,31 +8,24 @@ fn polish_num_gpu() -> u32 {
 }
 
 #[tauri::command]
-fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
+fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
     let root = project_root();
-    let python = python_path(&root);
-    let script = root.join("transcribe.py");
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let binary_status = stt::binary::binary_install_status(&exe_dir).unwrap_or(stt::binary::BinaryInstallStatus::Unsupported);
+    let binary_status = stt::binary::binary_install_status(&exe_dir)
+        .unwrap_or(stt::binary::BinaryInstallStatus::Unsupported);
     let pin = stt::pin::load_pin().ok();
     let model_installed = pin
         .as_ref()
         .map(|pin| stt::model::is_installed(pin))
         .unwrap_or(false);
-    let using_fallback = state.fell_back();
     let engine_ready = pin.is_some()
         && model_installed
-        && matches!(
-            binary_status,
-            stt::binary::BinaryInstallStatus::Installed
-        )
-        && !using_fallback;
-    let readiness = stt::dispatch::engine_readiness(engine_ready, using_fallback);
+        && matches!(binary_status, stt::binary::BinaryInstallStatus::Installed);
     log_line(&format!(
-        "setup_status engine_ready={engine_ready} using_fallback={using_fallback} binary={binary_status:?}"
+        "setup_status engine_ready={engine_ready} binary={binary_status:?}"
     ));
 
     SetupStatus {
@@ -41,41 +34,26 @@ fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus
             .map(|pin| pin.gguf_file.clone())
             .unwrap_or_else(|| "moonshine-streaming-tiny-q4_k.gguf".into()),
         root: root.display().to_string(),
-        python_ready: python.exists(),
-        script_ready: script.exists(),
-        python: python.display().to_string(),
         engine_ready,
         engine_binary_status: stt::dispatch::engine_binary_status_label(binary_status).to_string(),
         model_installed,
-        using_fallback,
-        engine_status: compose_engine_status(binary_status, model_installed, using_fallback, readiness),
+        engine_status: compose_engine_status(binary_status, model_installed),
     }
 }
 
 fn compose_engine_status(
     binary_status: stt::binary::BinaryInstallStatus,
     model_installed: bool,
-    using_fallback: bool,
-    readiness: stt::dispatch::EngineReadiness,
 ) -> String {
-    if using_fallback {
-        return stt::dispatch::engine_status_label(stt::dispatch::EngineReadiness::Fallback).to_string();
-    }
     match binary_status {
         stt::binary::BinaryInstallStatus::Installed if model_installed => {
-            stt::dispatch::engine_status_label(stt::dispatch::EngineReadiness::Ready).to_string()
+            "Transcription engine ready".to_string()
         }
-        stt::binary::BinaryInstallStatus::Installed => {
-            "Local fallback model missing".into()
-        }
-        stt::binary::BinaryInstallStatus::Downloadable => {
-            "Local fallback not installed".into()
-        }
-        stt::binary::BinaryInstallStatus::Invalid => {
-            "Local fallback failed verification".into()
-        }
+        stt::binary::BinaryInstallStatus::Installed => "Local fallback model missing".into(),
+        stt::binary::BinaryInstallStatus::Downloadable => "Local fallback not installed".into(),
+        stt::binary::BinaryInstallStatus::Invalid => "Local fallback failed verification".into(),
         stt::binary::BinaryInstallStatus::Unsupported => {
-            stt::dispatch::engine_status_label(readiness).to_string()
+            "Transcription engine requires manual install".into()
         }
     }
 }
@@ -86,7 +64,7 @@ fn transcribe_files(
     paths: Vec<String>,
 ) -> Result<Vec<stt::dispatch::TranscriptResult>, stt::dispatch::SttCommandError> {
     log_line(&format!("transcribe_files count={}", paths.len()));
-    stt::dispatch::transcribe_paths(&state, project_root(), paths, "en")
+    stt::dispatch::transcribe_paths(&state, paths, "en")
 }
 
 #[tauri::command]
@@ -106,7 +84,6 @@ fn start_transcribe(
     }
 
     log_line(&format!("start_transcribe count={}", paths.len()));
-    let root = project_root();
     std::thread::spawn(move || {
         use tauri::{Emitter, Manager};
 
@@ -132,7 +109,6 @@ fn start_transcribe(
         let state = app.state::<stt::dispatch::SttState>();
         let result = stt::dispatch::transcribe_paths_with_callbacks(
             &state,
-            root,
             paths,
             "en",
             Some(progress),
@@ -175,7 +151,8 @@ fn write_polished_text(path: String, text: String) -> Result<String, String> {
     }
 
     let output = polished_path(&path)?;
-    std::fs::write(&output, text).map_err(|err| format!("Failed to save polished transcript: {err}"))?;
+    std::fs::write(&output, text)
+        .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
     Ok(output.display().to_string())
 }
 
@@ -198,13 +175,9 @@ fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
 struct SetupStatus {
     model: String,
     root: String,
-    python_ready: bool,
-    script_ready: bool,
-    python: String,
     engine_ready: bool,
     engine_binary_status: String,
     model_installed: bool,
-    using_fallback: bool,
     engine_status: String,
 }
 
@@ -212,10 +185,6 @@ fn project_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-}
-
-fn python_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join(".venv").join("Scripts").join("python.exe")
 }
 
 fn log_line(message: &str) {
@@ -231,23 +200,16 @@ mod tests {
         let value = serde_json::to_value(SetupStatus {
             model: "model".into(),
             root: "root".into(),
-            python_ready: true,
-            script_ready: true,
-            python: "python.exe".into(),
             engine_ready: true,
             engine_binary_status: "Installed".into(),
             model_installed: true,
-            using_fallback: false,
             engine_status: "Transcription engine ready".into(),
         })
         .unwrap();
 
-        assert_eq!(value["pythonReady"], true);
-        assert_eq!(value["scriptReady"], true);
         assert_eq!(value["engineReady"], true);
         assert_eq!(value["engineBinaryStatus"], "Installed");
         assert_eq!(value["modelInstalled"], true);
-        assert_eq!(value["usingFallback"], false);
         assert_eq!(value["engineStatus"], "Transcription engine ready");
         assert!(value.get("python_ready").is_none());
     }
@@ -290,9 +252,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(stt_state)
-        .setup(|_app| {
-            Ok(())
-        })
+        .setup(|_app| Ok(()))
         .invoke_handler(tauri::generate_handler![
             setup_status,
             polish_num_gpu,

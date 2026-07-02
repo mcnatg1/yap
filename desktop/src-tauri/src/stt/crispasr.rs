@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::stt::backend::SttBackend;
 use crate::stt::error::SttError;
 use crate::stt::progress::ProgressReporter;
 use crate::stt::sidecar::{CrispasrSidecar, SidecarEndpoint};
@@ -79,7 +78,8 @@ fn wav_duration_seconds(path: &Path) -> Option<u64> {
 }
 
 pub fn parse_transcription_json(body: &str) -> Result<String, SttError> {
-    let value: serde_json::Value = serde_json::from_str(body).map_err(|_| SttError::SidecarCrash)?;
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| SttError::SidecarCrash)?;
     match value.get("text").and_then(serde_json::Value::as_str) {
         Some(text) => Ok(text.to_string()),
         None => Err(SttError::SidecarCrash),
@@ -124,7 +124,10 @@ pub struct CrispasrBackend {
 
 impl CrispasrBackend {
     pub fn new(sidecar: Arc<Mutex<CrispasrSidecar>>) -> Self {
-        Self { sidecar, inflight: Arc::new(Mutex::new(())) }
+        Self {
+            sidecar,
+            inflight: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn transcribe_with_progress(
@@ -144,7 +147,10 @@ impl CrispasrBackend {
                 .ensure_ready_with_progress(reporter)
         };
         let restart = || -> Result<SidecarEndpoint, SttError> {
-            sidecar.lock().map_err(|_| SttError::SidecarCrash)?.restart()
+            sidecar
+                .lock()
+                .map_err(|_| SttError::SidecarCrash)?
+                .restart()
         };
 
         if let Some(report) = reporter {
@@ -163,12 +169,6 @@ impl CrispasrBackend {
             }
         }
         result
-    }
-}
-
-impl SttBackend for CrispasrBackend {
-    fn transcribe(&self, audio: &Path, language: &str) -> Result<String, SttError> {
-        self.transcribe_with_progress(audio, language, None)
     }
 }
 
@@ -218,7 +218,10 @@ fn post_transcription_with_progress(
     reporter: Option<&ProgressReporter>,
 ) -> Result<String, SttError> {
     let timeout = inference_timeout_for(audio);
-    let audio_secs = estimate_audio_seconds(audio, std::fs::metadata(audio).map(|meta| meta.len()).unwrap_or(0));
+    let audio_secs = estimate_audio_seconds(
+        audio,
+        std::fs::metadata(audio).map(|meta| meta.len()).unwrap_or(0),
+    );
     let estimated_secs = transcribe_progress_estimate_secs(audio);
 
     crate::stt::log_stt(&format!(
@@ -264,7 +267,13 @@ fn post_transcription_with_progress(
         .bearer_auth(&endpoint.api_key)
         .multipart(form)
         .send()
-        .map_err(|err| if err.is_timeout() { SttError::Timeout } else { SttError::SidecarCrash })?;
+        .map_err(|err| {
+            if err.is_timeout() {
+                SttError::Timeout
+            } else {
+                SttError::SidecarCrash
+            }
+        })?;
     let status = response.status();
     let body = response.text().map_err(|_| SttError::SidecarCrash)?;
 
@@ -308,24 +317,42 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_text_and_bad_json() {
-        assert_eq!(parse_transcription_json(r#"{"segments":[]}"#).unwrap_err(), SttError::SidecarCrash);
-        assert_eq!(parse_transcription_json("not json").unwrap_err(), SttError::SidecarCrash);
+        assert_eq!(
+            parse_transcription_json(r#"{"segments":[]}"#).unwrap_err(),
+            SttError::SidecarCrash
+        );
+        assert_eq!(
+            parse_transcription_json("not json").unwrap_err(),
+            SttError::SidecarCrash
+        );
     }
 
     #[test]
     fn classify_response_maps_status_and_body() {
         assert_eq!(classify_response(408, ""), SttError::Timeout);
-        assert_eq!(classify_response(400, "unsupported language code"), SttError::BadLang);
+        assert_eq!(
+            classify_response(400, "unsupported language code"),
+            SttError::BadLang
+        );
         assert_eq!(classify_response(500, "ggml out of memory"), SttError::Oom);
-        assert_eq!(classify_response(500, "failed to decode audio"), SttError::AudioDecode);
+        assert_eq!(
+            classify_response(500, "failed to decode audio"),
+            SttError::AudioDecode
+        );
         assert_eq!(classify_response(500, "panic"), SttError::SidecarCrash);
     }
 
     #[test]
     fn check_audio_size_rejects_empty_and_oversized() {
         assert!(check_audio_size(1, MAX_AUDIO_BYTES).is_ok());
-        assert_eq!(check_audio_size(0, MAX_AUDIO_BYTES).unwrap_err(), SttError::AudioDecode);
-        assert_eq!(check_audio_size(MAX_AUDIO_BYTES + 1, MAX_AUDIO_BYTES).unwrap_err(), SttError::AudioDecode);
+        assert_eq!(
+            check_audio_size(0, MAX_AUDIO_BYTES).unwrap_err(),
+            SttError::AudioDecode
+        );
+        assert_eq!(
+            check_audio_size(MAX_AUDIO_BYTES + 1, MAX_AUDIO_BYTES).unwrap_err(),
+            SttError::AudioDecode
+        );
     }
 
     #[test]
@@ -416,7 +443,9 @@ mod tests {
     fn transcribe_returns_busy_when_a_request_is_in_flight() {
         let backend = CrispasrBackend::new(Arc::new(Mutex::new(CrispasrSidecar::new())));
         let _held = backend.inflight.lock().unwrap();
-        let err = backend.transcribe(Path::new("C:/clips/a.wav"), "en").unwrap_err();
+        let err = backend
+            .transcribe_with_progress(Path::new("C:/clips/a.wav"), "en", None)
+            .unwrap_err();
         assert_eq!(err, SttError::Busy);
     }
 }

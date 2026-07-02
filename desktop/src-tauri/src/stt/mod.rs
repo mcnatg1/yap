@@ -1,5 +1,4 @@
-//! STT backends: dispatcher, error contract, Python fallback, and optional
-//! CrispASR local fallback.
+//! STT runtime: dispatcher, error contract, and CrispASR local sidecar.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -68,7 +67,6 @@ pub(crate) fn log_yap(message: &str) {
     append_log(&yap_log_path(), message);
 }
 
-pub mod backend;
 pub mod binary;
 pub mod crispasr;
 pub mod dispatch;
@@ -78,6 +76,5 @@ pub mod model;
 pub mod parity;
 pub mod pin;
 pub mod progress;
-pub mod python;
 pub mod settings;
 pub mod sidecar;
