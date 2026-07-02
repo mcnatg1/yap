@@ -73,11 +73,19 @@ export function QueuePanel({
           <CardDescription>
             {running && runningItem ? (
               <>
-                Transcribing <span className="font-medium text-foreground">{runningItem.name}</span>
+                <span className="font-medium text-foreground">{runningItem.name}</span>
+                {" · "}
+                {runningItem.progressMessage ?? "Transcribing"}
                 {elapsedSeconds ? (
                   <>
                     {" "}
                     · <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+                  </>
+                ) : null}
+                {runningItem.progressPercent !== undefined ? (
+                  <>
+                    {" "}
+                    · <span className="tabular-nums">{runningItem.progressPercent}%</span>
                   </>
                 ) : null}
               </>

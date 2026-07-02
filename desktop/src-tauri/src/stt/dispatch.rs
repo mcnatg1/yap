@@ -5,10 +5,28 @@ use std::sync::{Arc, Mutex};
 use crate::stt::backend::{select_backend, BackendChoice, SttBackend};
 use crate::stt::crispasr::CrispasrBackend;
 use crate::stt::error::SttError;
+use crate::stt::progress::{ProgressReporter, ProgressSink};
 use crate::stt::python::PythonBackend;
 use crate::stt::sidecar::CrispasrSidecar;
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeFileCompleteEvent {
+    pub path: String,
+    pub index: usize,
+    pub total: usize,
+    pub result: TranscriptResult,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeBatchCompleteEvent {
+    pub results: Vec<TranscriptResult>,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptResult {
     pub input: String,
@@ -17,7 +35,7 @@ pub struct TranscriptResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SttCommandError {
     pub code: String,
@@ -33,11 +51,33 @@ impl From<SttError> for SttCommandError {
 pub struct SttState {
     pub sidecar: Arc<Mutex<CrispasrSidecar>>,
     fell_back: AtomicBool,
+    transcribing: Arc<AtomicBool>,
 }
 
 impl SttState {
     pub fn new() -> Self {
-        Self { sidecar: Arc::new(Mutex::new(CrispasrSidecar::new())), fell_back: AtomicBool::new(false) }
+        Self {
+            sidecar: Arc::new(Mutex::new(CrispasrSidecar::new())),
+            fell_back: AtomicBool::new(false),
+            transcribing: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn transcribing_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.transcribing)
+    }
+
+    pub fn set_transcribing(&self, value: bool) {
+        self.transcribing.store(value, Ordering::Relaxed);
+        if value {
+            if let Ok(mut sidecar) = self.sidecar.lock() {
+                sidecar.mark_used();
+            }
+        }
+    }
+
+    pub fn is_transcribing(&self) -> bool {
+        self.transcribing.load(Ordering::Relaxed)
     }
 
     pub fn set_fell_back(&self, value: bool) {
@@ -46,6 +86,12 @@ impl SttState {
 
     pub fn fell_back(&self) -> bool {
         self.fell_back.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_sidecar(&self) {
+        if let Ok(mut sidecar) = self.sidecar.lock() {
+            sidecar.shutdown();
+        }
     }
 }
 
@@ -80,16 +126,36 @@ pub fn engine_status_label(state: EngineReadiness) -> &'static str {
     }
 }
 
+pub fn engine_status_for_binary(status: crate::stt::binary::BinaryInstallStatus) -> &'static str {
+    match status {
+        crate::stt::binary::BinaryInstallStatus::Installed => "Transcription engine ready",
+        crate::stt::binary::BinaryInstallStatus::Downloadable => "Installing transcription engine…",
+        crate::stt::binary::BinaryInstallStatus::Invalid => "Re-installing transcription engine…",
+        crate::stt::binary::BinaryInstallStatus::Unsupported => {
+            "Transcription engine requires manual install"
+        }
+    }
+}
+
 pub fn engine_ready() -> bool {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
-    let binary_ok = crate::stt::sidecar::resolve_binary(|key| std::env::var(key).ok(), &exe_dir).is_ok();
-    let model_ok = crate::stt::pin::load_pin()
-        .map(|pin| crate::stt::model::models_dir().join(pin.gguf_file).exists())
+    let binary_ok = crate::stt::binary::binary_install_status(&exe_dir)
+        .map(|status| {
+            matches!(
+                status,
+                crate::stt::binary::BinaryInstallStatus::Installed
+                    | crate::stt::binary::BinaryInstallStatus::Downloadable
+            )
+        })
         .unwrap_or(false);
-    binary_ok && model_ok
+    crate::stt::pin::load_pin().is_ok() && binary_ok
+}
+
+pub fn engine_binary_status_label(status: crate::stt::binary::BinaryInstallStatus) -> &'static str {
+    status.label()
 }
 
 pub fn transcribe_paths(
@@ -98,19 +164,135 @@ pub fn transcribe_paths(
     paths: Vec<String>,
     language: &str,
 ) -> Result<Vec<TranscriptResult>, SttCommandError> {
+    transcribe_paths_with_callbacks(state, root, paths, language, None, None, None)
+}
+
+pub fn transcribe_paths_with_callbacks(
+    state: &SttState,
+    root: PathBuf,
+    paths: Vec<String>,
+    language: &str,
+    progress: Option<ProgressSink>,
+    on_file_complete: Option<Arc<dyn Fn(TranscribeFileCompleteEvent) + Send + Sync>>,
+    on_batch_complete: Option<Arc<dyn Fn(TranscribeBatchCompleteEvent) + Send + Sync>>,
+) -> Result<Vec<TranscriptResult>, SttCommandError> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
+    state.set_transcribing(true);
+    struct TranscribingGuard<'a>(&'a SttState);
+    impl Drop for TranscribingGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_transcribing(false);
+        }
+    }
+    let _guard = TranscribingGuard(state);
+
     let backend_env = std::env::var("YAP_STT_BACKEND").ok();
     let choice = select_backend(backend_env.as_deref());
     let crispasr = CrispasrBackend::new(Arc::clone(&state.sidecar));
     let python = PythonBackend::new(root);
     let mut fell_back = false;
-    let result = dispatch(choice, &crispasr, &python, &mut fell_back, &paths, language);
+    let total = paths.len();
+    let mut results = Vec::with_capacity(total);
+
+    for (index, path) in paths.iter().enumerate() {
+        if let Some(ref sink) = progress {
+            ProgressReporter::new(sink.clone(), path.clone(), index, total)
+                .emit("starting", Some(0), "Preparing…");
+        }
+
+        let reporter = progress.as_ref().map(|sink| ProgressReporter::new(sink.clone(), path.clone(), index, total));
+        let outcome = transcribe_one(
+            choice,
+            &crispasr,
+            &python,
+            &mut fell_back,
+            path,
+            language,
+            reporter.as_ref(),
+        );
+
+        let result = match outcome {
+            Ok(text) => {
+                if let Some(ref reporter) = reporter {
+                    reporter.emit("writing", Some(96), "Saving transcript…");
+                }
+                match write_sibling_txt(Path::new(path), &text) {
+                    Ok(output) => TranscriptResult { input: path.clone(), output: output.display().to_string(), error: None },
+                    Err(error) => TranscriptResult {
+                        input: path.clone(),
+                        output: String::new(),
+                        error: Some(error.code().to_string()),
+                    },
+                }
+            }
+            Err(error) => TranscriptResult {
+                input: path.clone(),
+                output: String::new(),
+                error: Some(error.code().to_string()),
+            },
+        };
+
+        if let Some(ref reporter) = reporter {
+            if result.error.is_none() {
+                reporter.emit("done", Some(100), "Transcript saved");
+            }
+        }
+
+        if let Some(ref handler) = on_file_complete {
+            handler(TranscribeFileCompleteEvent {
+                path: path.clone(),
+                index,
+                total,
+                result: result.clone(),
+            });
+        }
+        results.push(result);
+    }
+
     if fell_back {
         state.set_fell_back(true);
     }
-    result
+
+    let succeeded = results.iter().filter(|result| result.error.is_none()).count();
+    let failed = results.len().saturating_sub(succeeded);
+    if let Some(handler) = on_batch_complete {
+        handler(TranscribeBatchCompleteEvent { results: results.clone(), succeeded, failed });
+    }
+
+    Ok(results)
+}
+
+fn transcribe_one(
+    choice: BackendChoice,
+    crispasr: &CrispasrBackend,
+    python: &PythonBackend,
+    fell_back: &mut bool,
+    path: &str,
+    language: &str,
+    reporter: Option<&ProgressReporter>,
+) -> Result<String, SttError> {
+    let audio = PathBuf::from(path);
+    match choice {
+        BackendChoice::Python => python.transcribe(&audio, language),
+        BackendChoice::Crispasr => crispasr.transcribe_with_progress(&audio, language, reporter),
+        BackendChoice::PreferCrispasr => match crispasr.transcribe_with_progress(&audio, language, reporter) {
+            Ok(text) => Ok(text),
+            Err(error) if is_engine_down(error) => {
+                crate::stt::log_stt(&format!(
+                    "crispasr unhealthy ({}); switching file to python fallback",
+                    error.code()
+                ));
+                *fell_back = true;
+                if let Some(reporter) = reporter {
+                    reporter.emit("transcribing", Some(10), "Using Python fallback…");
+                }
+                python.transcribe(&audio, language)
+            }
+            Err(error) => Err(error),
+        },
+    }
 }
 
 pub fn dispatch<C, P>(

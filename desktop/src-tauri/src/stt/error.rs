@@ -28,7 +28,9 @@ impl SttError {
 
     pub fn user_message(&self) -> &'static str {
         match self {
-            SttError::ModelMissing => "Transcription model isn't installed yet.",
+            SttError::ModelMissing => {
+                "Transcription model isn't installed yet. Re-run the installer or npm run fetch:crispasr."
+            }
             SttError::ModelCorrupt => "Model file failed verification.",
             SttError::BadLang => "That language isn't supported.",
             SttError::Oom => "Ran out of memory while transcribing.",

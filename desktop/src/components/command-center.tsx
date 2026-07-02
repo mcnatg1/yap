@@ -78,7 +78,7 @@ export function CommandCenter({
         <CommandGroup heading="System">
           <CommandItem onSelect={() => run(() => onAction("details"))}>
             <Settings2 />
-            Setup details
+            Settings
           </CommandItem>
           <CommandItem onSelect={() => run(() => onAction("help"))}>
             <HelpCircle />

@@ -50,8 +50,50 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), SttError> {
     }
 }
 
+fn verified_marker_path(model: &Path) -> PathBuf {
+    model.with_extension("verified")
+}
+
+fn trusted_cache(model: &Path, expected_hash: &str) -> bool {
+    let marker = verified_marker_path(model);
+    let Ok(contents) = std::fs::read_to_string(&marker) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(model) else {
+        return false;
+    };
+    let mut lines = contents.lines();
+    let Some(hash) = lines.next() else {
+        return false;
+    };
+    let Some(size) = lines.next() else {
+        return false;
+    };
+    hash.eq_ignore_ascii_case(expected_hash)
+        && size.parse::<u64>().ok() == Some(metadata.len())
+}
+
+fn write_verified_marker(model: &Path, expected_hash: &str) -> Result<(), SttError> {
+    let metadata = std::fs::metadata(model).map_err(|_| SttError::ModelMissing)?;
+    let marker = verified_marker_path(model);
+    std::fs::write(marker, format!("{expected_hash}\n{}\n", metadata.len())).map_err(|_| SttError::ModelMissing)
+}
+
+fn verify_or_trust(model: &Path, expected_hash: &str) -> Result<(), SttError> {
+    if trusted_cache(model, expected_hash) {
+        return Ok(());
+    }
+    verify_sha256(model, expected_hash)?;
+    write_verified_marker(model, expected_hash)
+}
+
 pub fn hf_resolve_url(repo: &str, revision: &str, file: &str) -> String {
     format!("https://huggingface.co/{repo}/resolve/{revision}/{file}")
+}
+
+pub fn is_installed(pin: &CrispasrPin) -> bool {
+    let dest = models_dir().join(&pin.gguf_file);
+    verify_or_trust(&dest, &pin.gguf_sha256).is_ok()
 }
 
 pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, mut download: D) -> Result<PathBuf, SttError>
@@ -60,11 +102,11 @@ where
 {
     let dest = dir.join(&pin.gguf_file);
     if dest.exists() {
-        match verify_sha256(&dest, &pin.gguf_sha256) {
+        match verify_or_trust(&dest, &pin.gguf_sha256) {
             Ok(()) => return Ok(dest),
             Err(SttError::ModelCorrupt) => {
                 let _ = std::fs::remove_file(&dest);
-                // ponytail: fall through to download path — same repair as post-download mismatch
+                let _ = std::fs::remove_file(verified_marker_path(&dest));
             }
             Err(err) => return Err(err),
         }
@@ -73,9 +115,13 @@ where
     let url = hf_resolve_url(&pin.gguf_repo, &pin.gguf_revision, &pin.gguf_file);
     download(&url, &dest)?;
     match verify_sha256(&dest, &pin.gguf_sha256) {
-        Ok(()) => Ok(dest),
+        Ok(()) => {
+            write_verified_marker(&dest, &pin.gguf_sha256)?;
+            Ok(dest)
+        }
         Err(err) => {
             let _ = std::fs::remove_file(&dest);
+            let _ = std::fs::remove_file(verified_marker_path(&dest));
             Err(err)
         }
     }
@@ -153,13 +199,39 @@ mod tests {
 
     fn sample_pin(gguf_sha256: &str) -> crate::stt::pin::CrispasrPin {
         crate::stt::pin::CrispasrPin {
-            crispasr_version: "0.4.6".into(),
+            crispasr_version: "0.6.12".into(),
             binary_sha256: "a".repeat(64),
             gguf_repo: "owner/repo".into(),
             gguf_revision: "rev".into(),
             gguf_file: "m.gguf".into(),
             gguf_sha256: gguf_sha256.into(),
         }
+    }
+
+    #[test]
+    fn is_installed_accepts_verified_cache() {
+        let dir = std::env::temp_dir().join(format!("yap-installed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("m.gguf");
+        std::fs::write(&model, b"hello").unwrap();
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        write_verified_marker(&model, hello).unwrap();
+        let pin = sample_pin(hello);
+        std::env::set_var("YAP_MODELS_DIR", &dir);
+        assert!(is_installed(&pin));
+        std::env::remove_var("YAP_MODELS_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn is_installed_rejects_missing_model() {
+        let dir = std::env::temp_dir().join(format!("yap-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pin = sample_pin(&"0".repeat(64));
+        std::env::set_var("YAP_MODELS_DIR", &dir);
+        assert!(!is_installed(&pin));
+        std::env::remove_var("YAP_MODELS_DIR");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -219,6 +291,18 @@ mod tests {
         assert_eq!(download_calls, 1, "must re-download after deleting corrupt cache");
         assert!(dest.exists());
         assert!(verify_sha256(&dest, hello).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trusted_cache_skips_full_hash_on_repeat() {
+        let dir = std::env::temp_dir().join(format!("yap-trusted-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("m.gguf");
+        std::fs::write(&model, b"hello").unwrap();
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        write_verified_marker(&model, hello).unwrap();
+        assert!(trusted_cache(&model, hello));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

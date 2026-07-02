@@ -1,15 +1,69 @@
+use std::sync::Arc;
+
 pub mod stt;
+
+#[tauri::command]
+fn get_app_settings() -> stt::settings::AppSettings {
+    stt::settings::load_settings()
+}
+
+#[tauri::command]
+fn save_app_settings(
+    state: tauri::State<'_, stt::dispatch::SttState>,
+    settings: stt::settings::AppSettings,
+) -> Result<(), String> {
+    if state.is_transcribing() {
+        return Err("Cannot change settings while transcribing.".into());
+    }
+    stt::settings::save_settings(&settings)?;
+    state.reset_sidecar();
+    Ok(())
+}
+
+#[tauri::command]
+fn polish_num_gpu() -> u32 {
+    stt::settings::polish_num_gpu_layers()
+}
+
+#[tauri::command]
+fn install_engine(app: tauri::AppHandle) -> Result<String, String> {
+    stt::bootstrap::run_blocking(&app)?;
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let path =
+        stt::binary::resolve_for_spawn(&exe_dir).map_err(|error| error.user_message().to_string())?;
+    Ok(path.display().to_string())
+}
 
 #[tauri::command]
 fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
     let root = project_root();
     let python = python_path(&root);
     let script = root.join("transcribe.py");
-    let engine_ready = stt::dispatch::engine_ready();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let binary_status = stt::binary::binary_install_status(&exe_dir).unwrap_or(stt::binary::BinaryInstallStatus::Unsupported);
+    let pin = stt::pin::load_pin().ok();
+    let model_installed = pin
+        .as_ref()
+        .map(|pin| stt::model::is_installed(pin))
+        .unwrap_or(false);
     let using_fallback = state.fell_back();
+    let engine_ready = pin.is_some()
+        && matches!(
+            binary_status,
+            stt::binary::BinaryInstallStatus::Installed | stt::binary::BinaryInstallStatus::Downloadable
+        )
+        && !using_fallback;
     let readiness = stt::dispatch::engine_readiness(engine_ready, using_fallback);
+    let gpu = stt::gpu::GpuStatus::resolve();
     log_line(&format!(
-        "setup_status engine_ready={engine_ready} using_fallback={using_fallback}"
+        "setup_status engine_ready={engine_ready} using_fallback={using_fallback} binary={binary_status:?} gpu_layers={}",
+        gpu.layers
     ));
 
     SetupStatus {
@@ -20,8 +74,43 @@ fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus
         script_ready: script.exists(),
         python: python.display().to_string(),
         engine_ready,
+        engine_binary_status: stt::dispatch::engine_binary_status_label(binary_status).to_string(),
+        model_installed,
         using_fallback,
-        engine_status: stt::dispatch::engine_status_label(readiness).to_string(),
+        engine_status: compose_engine_status(binary_status, model_installed, using_fallback, readiness),
+        gpu_available: gpu.available,
+        gpu_adapter: gpu.adapter_name.clone().unwrap_or_default(),
+        gpu_layers: gpu.layers,
+        runner: gpu.runner_label().to_string(),
+        use_gpu: stt::settings::load_settings().use_gpu,
+    }
+}
+
+fn compose_engine_status(
+    binary_status: stt::binary::BinaryInstallStatus,
+    model_installed: bool,
+    using_fallback: bool,
+    readiness: stt::dispatch::EngineReadiness,
+) -> String {
+    if using_fallback {
+        return stt::dispatch::engine_status_label(stt::dispatch::EngineReadiness::Fallback).to_string();
+    }
+    match binary_status {
+        stt::binary::BinaryInstallStatus::Installed if model_installed => {
+            stt::dispatch::engine_status_label(stt::dispatch::EngineReadiness::Ready).to_string()
+        }
+        stt::binary::BinaryInstallStatus::Installed => {
+            "Model missing — re-run the installer".into()
+        }
+        stt::binary::BinaryInstallStatus::Downloadable => {
+            "Transcription engine and model install with the app installer".into()
+        }
+        stt::binary::BinaryInstallStatus::Invalid => {
+            "Engine failed verification — re-run the installer".into()
+        }
+        stt::binary::BinaryInstallStatus::Unsupported => {
+            stt::dispatch::engine_status_label(readiness).to_string()
+        }
     }
 }
 
@@ -32,6 +121,64 @@ fn transcribe_files(
 ) -> Result<Vec<stt::dispatch::TranscriptResult>, stt::dispatch::SttCommandError> {
     log_line(&format!("transcribe_files count={}", paths.len()));
     stt::dispatch::transcribe_paths(&state, project_root(), paths, "en")
+}
+
+#[tauri::command]
+fn start_transcribe(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, stt::dispatch::SttState>,
+    paths: Vec<String>,
+) -> Result<(), stt::dispatch::SttCommandError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if state.is_transcribing() {
+        return Err(stt::dispatch::SttCommandError {
+            code: stt::error::SttError::Busy.code().to_string(),
+            message: stt::error::SttError::Busy.user_message().to_string(),
+        });
+    }
+
+    log_line(&format!("start_transcribe count={}", paths.len()));
+    let root = project_root();
+    std::thread::spawn(move || {
+        use tauri::{Emitter, Manager};
+
+        let progress = stt::progress::ProgressSink::new({
+            let app = app.clone();
+            move |event| {
+                let _ = app.emit("transcribe-progress", event);
+            }
+        });
+        let on_file_complete = {
+            let app = app.clone();
+            Arc::new(move |event: stt::dispatch::TranscribeFileCompleteEvent| {
+                let _ = app.emit("transcribe-file-complete", event);
+            })
+        };
+        let on_batch_complete = {
+            let app = app.clone();
+            Arc::new(move |event: stt::dispatch::TranscribeBatchCompleteEvent| {
+                let _ = app.emit("transcribe-complete", event);
+            })
+        };
+
+        let state = app.state::<stt::dispatch::SttState>();
+        let result = stt::dispatch::transcribe_paths_with_callbacks(
+            &state,
+            root,
+            paths,
+            "en",
+            Some(progress),
+            Some(on_file_complete),
+            Some(on_batch_complete),
+        );
+        if let Err(error) = result {
+            let _ = app.emit("transcribe-error", error);
+        }
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -89,8 +236,15 @@ struct SetupStatus {
     script_ready: bool,
     python: String,
     engine_ready: bool,
+    engine_binary_status: String,
+    model_installed: bool,
     using_fallback: bool,
     engine_status: String,
+    gpu_available: bool,
+    gpu_adapter: String,
+    gpu_layers: u32,
+    runner: String,
+    use_gpu: stt::settings::GpuSetting,
 }
 
 fn project_root() -> std::path::PathBuf {
@@ -104,24 +258,7 @@ fn python_path(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn log_line(message: &str) {
-    use std::io::Write;
-
-    let log_path = project_root().join("local-transcribe.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        let _ = writeln!(
-            file,
-            "{} {}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or_default(),
-            message
-        );
-    }
+    stt::log_yap(message);
 }
 
 #[cfg(test)]
@@ -137,16 +274,29 @@ mod tests {
             script_ready: true,
             python: "python.exe".into(),
             engine_ready: true,
+            engine_binary_status: "Installed".into(),
+            model_installed: true,
             using_fallback: false,
             engine_status: "Transcription engine ready".into(),
+            gpu_available: true,
+            gpu_adapter: "NVIDIA RTX".into(),
+            gpu_layers: 0,
+            runner: "CPU (GPU available)".into(),
+            use_gpu: stt::settings::GpuSetting::Cpu,
         })
         .unwrap();
 
         assert_eq!(value["pythonReady"], true);
         assert_eq!(value["scriptReady"], true);
         assert_eq!(value["engineReady"], true);
+        assert_eq!(value["engineBinaryStatus"], "Installed");
+        assert_eq!(value["modelInstalled"], true);
         assert_eq!(value["usingFallback"], false);
         assert_eq!(value["engineStatus"], "Transcription engine ready");
+        assert_eq!(value["gpuAvailable"], true);
+        assert_eq!(value["gpuLayers"], 0);
+        assert_eq!(value["runner"], "CPU (GPU available)");
+        assert_eq!(value["useGpu"], "cpu");
         assert!(value.get("python_ready").is_none());
     }
 
@@ -172,9 +322,13 @@ pub fn run() {
     let stt_state = stt::dispatch::SttState::new();
     let sidecar_for_monitor = std::sync::Arc::clone(&stt_state.sidecar);
     let sidecar_for_exit = std::sync::Arc::clone(&stt_state.sidecar);
+    let transcribing_for_monitor = stt_state.transcribing_flag();
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
+        if transcribing_for_monitor.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
         if let Ok(mut sidecar) = sidecar_for_monitor.lock() {
             sidecar.unload_if_idle();
         }
@@ -184,9 +338,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(stt_state)
+        .setup(|app| {
+            stt::bootstrap::spawn(app.handle().clone());
+            stt::prewarm::spawn_background(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             setup_status,
+            install_engine,
+            get_app_settings,
+            save_app_settings,
+            polish_num_gpu,
             transcribe_files,
+            start_transcribe,
             read_text_file,
             write_polished_text,
             open_devtools

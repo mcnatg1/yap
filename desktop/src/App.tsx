@@ -2,14 +2,14 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
 import { AppSidebar } from "@/components/app/app-sidebar";
 import { openDevtools } from "@/components/app/window-actions";
 import { CommandCenter } from "@/components/command-center";
-import { DetailsSheet, HelpSheet } from "@/components/panels/app-sheets";
+import { HelpSheet, SettingsSheet } from "@/components/panels/app-sheets";
 import { DropHero } from "@/components/panels/drop-hero";
 import { HomePanel } from "@/components/panels/home-panel";
 import { HistoryPanel } from "@/components/panels/history-panel";
@@ -41,7 +41,16 @@ import {
 } from "@/lib/app-types";
 import { historyEntryToUploadItem } from "@/lib/history-utils";
 import { cn } from "@/lib/utils";
-import { SttInvokeError, transcribeFiles, transcriptFileError } from "@/stt";
+import { installEngine, listenEngineBootstrap, saveAppSettings, type GpuSetting } from "@/settings";
+import {
+  listenTranscribeEvents,
+  SttInvokeError,
+  startTranscribe,
+  transcriptFileError,
+  type TranscribeBatchCompleteEvent,
+  type TranscribeFileCompleteEvent,
+  type TranscribeProgressEvent,
+} from "@/stt";
 
 type SetupStatus = {
   model: string;
@@ -50,8 +59,15 @@ type SetupStatus = {
   scriptReady: boolean;
   python: string;
   engineReady: boolean;
+  engineBinaryStatus: string;
+  modelInstalled: boolean;
   usingFallback: boolean;
   engineStatus: string;
+  gpuAvailable: boolean;
+  gpuAdapter: string;
+  gpuLayers: number;
+  runner: string;
+  useGpu: GpuSetting;
 };
 
 export default function App() {
@@ -63,6 +79,14 @@ export default function App() {
   const [status, setStatus] = useState("Starting");
   const [model, setModel] = useState("Cohere Transcribe");
   const [auth, setAuth] = useState("Checking");
+  const [runner, setRunner] = useState("CPU");
+  const [gpuAdapter, setGpuAdapter] = useState("");
+  const [gpuAvailable, setGpuAvailable] = useState(false);
+  const [useGpu, setUseGpu] = useState<GpuSetting>("cpu");
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
+  const [engineInstalling, setEngineInstalling] = useState(false);
+  const [modelInstalled, setModelInstalled] = useState(false);
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
@@ -76,6 +100,7 @@ export default function App() {
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
+  const pathToItemId = useRef<Map<string, number>>(new Map());
 
   const hasRunnable = useMemo(
     () => queue.some((item) => item.status === "queued" || item.status === "error"),
@@ -100,19 +125,146 @@ export default function App() {
   const showPolish = workspaceView === "polish";
 
   useEffect(() => {
-    loadStatus();
+    if (!isTauri()) return;
 
-    if (isTauri()) {
-      getCurrentWebview().onDragDropEvent((event) => {
-        if (event.payload.type === "enter") setDragging(true);
-        if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
-        if (event.payload.type === "drop") addPaths(event.payload.paths);
-      });
+    let unlisten: (() => void) | undefined;
+
+    void listenTranscribeEvents({
+      onProgress: (event) => {
+        updateItemProgress(event);
+      },
+      onFileComplete: (event) => {
+        applyFileResult(event);
+      },
+      onComplete: (event) => {
+        finishBatch(event);
+      },
+      onError: (error) => {
+        setRunning(false);
+        setRunningSince(undefined);
+        setStatus("Needs attention");
+        setAuth(error.message.includes("Hugging Face") ? "Run hf auth login" : "Check runner output");
+        toast.error(error.message || "Transcription failed");
+      },
+    }).then((stop) => {
+      unlisten = stop;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  function updateQueueItem(path: string, updater: (item: UploadItem) => UploadItem) {
+    setQueue((items) =>
+      items.map((entry) => (entry.path === path ? updater(entry) : entry)),
+    );
+  }
+
+  function updateItemProgress(event: TranscribeProgressEvent) {
+    updateQueueItem(event.path, (entry) => ({
+      ...entry,
+      status: "running",
+      progressPhase: event.phase,
+      progressPercent: event.percent,
+      progressMessage: event.message,
+      error: undefined,
+    }));
+    setStatus(event.message);
+    const itemId = pathToItemId.current.get(event.path);
+    if (itemId !== undefined) setSelectedId(itemId);
+  }
+
+  function applyFileResult(event: TranscribeFileCompleteEvent) {
+    const { result } = event;
+    const itemId = pathToItemId.current.get(event.path);
+
+    if (result.error) {
+      const message = transcriptFileError(result) ?? "Transcription failed.";
+      updateQueueItem(event.path, (entry) => ({
+        ...entry,
+        status: "error",
+        error: message,
+        progressPhase: undefined,
+        progressPercent: undefined,
+        progressMessage: undefined,
+      }));
+      toast.error(`${basename(event.path)}: ${message}`);
       return;
     }
 
-    setStatus("Preview");
-    setAuth("Tauri bridge");
+    updateQueueItem(event.path, (entry) => ({
+      ...entry,
+      output: result.output,
+      status: "done",
+      error: undefined,
+      progressPhase: "done",
+      progressPercent: 100,
+      progressMessage: "Transcript saved",
+    }));
+    recordHistoryEntries([
+      {
+        createdAt: new Date().toISOString(),
+        name: basename(event.path),
+        outputPath: result.output,
+        sourcePath: event.path,
+      },
+    ]);
+    void loadTranscriptText(result.output).catch(() => undefined);
+    if (itemId !== undefined) setSelectedId(itemId);
+  }
+
+  function finishBatch(event: TranscribeBatchCompleteEvent) {
+    setStatus(event.failed ? "Needs attention" : "Ready");
+    setAuth("Authorized");
+    if (event.succeeded) {
+      toast.success(`Transcribed ${event.succeeded} file${event.succeeded === 1 ? "" : "s"}`);
+    }
+    setRunning(false);
+    setRunningSince(undefined);
+    pathToItemId.current.clear();
+  }
+
+  useEffect(() => {
+    void loadStatus();
+
+    if (!isTauri()) {
+      setStatus("Preview");
+      setAuth("Tauri bridge");
+      return;
+    }
+
+    let unlistenBootstrap: (() => void) | undefined;
+
+    void listenEngineBootstrap({
+      onProgress: (event) => {
+        setStatus(event.message);
+        setEngineInstalling(true);
+      },
+      onComplete: () => {
+        setEngineInstalling(false);
+        void loadStatus();
+      },
+      onError: (event) => {
+        setEngineInstalling(false);
+        setStatus(event.message);
+        toast.error(event.message);
+        void loadStatus();
+      },
+    }).then((stop) => {
+      unlistenBootstrap = stop;
+    });
+
+    const unlistenDrag = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "enter") setDragging(true);
+      if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
+      if (event.payload.type === "drop") addPaths(event.payload.paths);
+    });
+
+    return () => {
+      unlistenBootstrap?.();
+      void unlistenDrag.then((fn) => fn());
+    };
   }, []);
 
   useEffect(() => {
@@ -180,6 +332,12 @@ export default function App() {
           : "Setup missing",
       );
       setAuth(setup.pythonReady ? "Authorized" : setup.python);
+      setRunner(setup.runner);
+      setGpuAdapter(setup.gpuAdapter);
+      setGpuAvailable(setup.gpuAvailable);
+      setUseGpu(setup.useGpu);
+      setEngineBinaryStatus(setup.engineBinaryStatus);
+      setModelInstalled(setup.modelInstalled);
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
@@ -238,11 +396,43 @@ export default function App() {
     }
   }
 
+  async function handleInstallEngine() {
+    if (!isTauri() || engineInstalling) return;
+
+    setEngineInstalling(true);
+    try {
+      await installEngine();
+      await loadStatus();
+      toast.success("Transcription engine installed");
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setEngineInstalling(false);
+    }
+  }
+
+  async function handleUseGpuChange(next: GpuSetting) {
+    if (!isTauri() || next === useGpu) return;
+
+    setSettingsSaving(true);
+    try {
+      await saveAppSettings({ useGpu: next });
+      setUseGpu(next);
+      await loadStatus();
+      toast.success(next === "auto" ? "GPU enabled for transcription and polish" : "Using CPU for transcription and polish");
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
   function handleRailAction(action: RailAction) {
     setActiveRail(action);
 
     if (action === "details") {
       setDetailsOpen(true);
+      void loadStatus();
       return;
     }
     if (action === "help") {
@@ -258,88 +448,41 @@ export default function App() {
   }
 
   async function transcribeItems(pending: UploadItem[]) {
-    if (!pending.length || running) return;
+    if (!pending.length || running || !isTauri()) return;
 
+    pathToItemId.current = new Map(pending.map((item) => [item.path, item.id]));
     setRunning(true);
     setRunningSince(Date.now());
-    setStatus("Transcribing locally");
-    setSelectedId(pending[0].id);
-    setQueue((items) =>
-      items.map((item) =>
-        pending.some((pendingItem) => pendingItem.id === item.id)
-          ? { ...item, status: "running", error: undefined }
-          : item,
-      ),
-    );
+    setStatus(`Transcribing 0/${pending.length}`);
+
+    for (const [index, item] of pending.entries()) {
+      if (index === 0) setSelectedId(item.id);
+      setQueue((items) =>
+        items.map((entry) =>
+          entry.id === item.id
+            ? {
+                ...entry,
+                status: index === 0 ? "running" : "queued",
+                error: undefined,
+                progressPhase: index === 0 ? "starting" : undefined,
+                progressPercent: index === 0 ? 0 : undefined,
+                progressMessage: index === 0 ? "Preparing…" : undefined,
+              }
+            : entry,
+        ),
+      );
+    }
 
     try {
-      const results = await transcribeFiles(pending.map((item) => item.path));
-      const succeeded = results.filter((result) => !result.error);
-      const failed = results.filter((result) => result.error);
-      const outputs = new Map(succeeded.map((result) => [result.input, result.output]));
-      const failedInputs = new Set(failed.map((result) => result.input));
-      const texts: Record<string, string> = {};
-
-      for (const result of succeeded) {
-        try {
-          texts[result.output] = await invoke<string>("read_text_file", { path: result.output });
-        } catch {
-          // ponytail: transcript can still be revealed if eager preview read fails.
-        }
-      }
-
-      setQueue((items) =>
-        items.map((item) => {
-          if (outputs.has(item.path)) {
-            return { ...item, output: outputs.get(item.path), status: "done" };
-          }
-          if (failedInputs.has(item.path)) {
-            return { ...item, status: "error", error: "Transcription failed" };
-          }
-          return item;
-        }),
-      );
-      recordHistoryEntries(
-        pending.flatMap((item) => {
-          const output = outputs.get(item.path);
-          return output
-            ? [
-                {
-                  createdAt: new Date().toISOString(),
-                  name: item.name,
-                  outputPath: output,
-                  sourcePath: item.path,
-                },
-              ]
-            : [];
-        }),
-      );
-      setTranscriptText((current) => ({ ...current, ...texts }));
-      for (const result of failed) {
-        toast.error(transcriptFileError(result) ?? "Transcription failed.");
-      }
-      setStatus(failed.length ? "Needs attention" : "Ready");
-      setAuth("Authorized");
-      if (succeeded.length) {
-        toast.success(`Transcribed ${succeeded.length} file${succeeded.length === 1 ? "" : "s"}`);
-      }
+      await startTranscribe(pending.map((item) => item.path));
     } catch (error) {
       const failure = error instanceof SttInvokeError ? error : undefined;
       const message = failure?.message ?? String(error || "Transcription failed");
-      const detail = failure?.detail ?? message;
-      setQueue((items) =>
-        items.map((item) =>
-          pending.some((pendingItem) => pendingItem.id === item.id)
-            ? { ...item, status: "error", error: message }
-            : item,
-        ),
-      );
-      setStatus("Needs attention");
-      setAuth(detail.includes("Hugging Face") ? "Run hf auth login" : "Check runner output");
-      toast.error(message);
-    } finally {
       setRunning(false);
       setRunningSince(undefined);
+      pathToItemId.current.clear();
+      setStatus("Needs attention");
+      toast.error(message);
     }
   }
 
@@ -615,15 +758,25 @@ export default function App() {
           {appWorkspace}
         </div>
       </SidebarInset>
-      <DetailsSheet
+      <SettingsSheet
         auth={auth}
+        engineBinaryStatus={engineBinaryStatus}
+        engineInstalling={engineInstalling}
+        gpuAdapter={gpuAdapter}
+        gpuAvailable={gpuAvailable}
         model={model}
+        modelInstalled={modelInstalled}
+        onInstallEngine={() => void handleInstallEngine()}
         onOpenChange={(open) => {
           setDetailsOpen(open);
           if (!open && activeRail === "details") setActiveRail(workspaceView);
         }}
+        onUseGpuChange={(next) => void handleUseGpuChange(next)}
         open={detailsOpen}
+        runner={runner}
+        saving={settingsSaving}
         status={status}
+        useGpu={useGpu}
       />
       <HelpSheet
         onOpenChange={(open) => {

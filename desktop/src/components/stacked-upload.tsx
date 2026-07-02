@@ -41,6 +41,9 @@ export type UploadItem = {
   status: UploadStatus;
   output?: string;
   error?: string;
+  progressPhase?: string;
+  progressPercent?: number;
+  progressMessage?: string;
 };
 
 type Props = {
@@ -156,9 +159,10 @@ function UploadCard({
     (item.status === "done"
       ? "Transcript saved"
       : item.status === "running"
-        ? elapsedSeconds
-          ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
-          : "Transcribing locally…"
+        ? item.progressMessage ??
+          (elapsedSeconds
+            ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
+            : "Transcribing locally…")
         : item.status === "queued"
           ? "Ready to transcribe"
           : "Needs attention");
@@ -268,13 +272,13 @@ function UploadCard({
 
         <AttachmentTrigger aria-label={`Select ${item.name}`} onClick={() => onSelect(item.id)} />
       </Attachment>
-      {meta.progress === null ? (
+      {item.status === "running" && item.progressPercent === undefined ? (
         <div aria-hidden className="mt-3 h-1.5 overflow-hidden rounded-full bg-primary/20">
           <div className="h-full w-1/3 animate-pulse motion-reduce:animate-none rounded-full bg-primary" />
         </div>
-      ) : (
-        <Progress className="mt-3 h-1.5" value={meta.progress} />
-      )}
+      ) : item.status === "running" || meta.progress !== null ? (
+        <Progress className="mt-3 h-1.5" value={item.progressPercent ?? meta.progress ?? 0} />
+      ) : null}
     </motion.li>
   );
 }

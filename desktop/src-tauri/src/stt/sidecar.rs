@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::stt::binary;
 use crate::stt::error::SttError;
-
+use crate::stt::progress::ProgressReporter;
 pub const PORT_RANGE: RangeInclusive<u16> = 8765..=8775;
-pub const READY_BUDGET: Duration = Duration::from_secs(10);
+pub const READY_BUDGET: Duration = Duration::from_secs(300);
 pub const IDLE_UNLOAD: Duration = Duration::from_secs(600);
 const HOST: &str = "127.0.0.1";
 const ENV_ALLOWLIST: [&str; 4] = ["PATH", "SYSTEMROOT", "TEMP", "TMP"];
@@ -33,16 +34,25 @@ where
         .collect()
 }
 
-pub fn build_launch_args(gguf: &Path, port: u16) -> Vec<String> {
-    vec![
+pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String> {
+    let mut args = vec![
         "--server".to_string(),
+        "--backend".to_string(),
+        "cohere".to_string(),
         "-m".to_string(),
         gguf.to_string_lossy().to_string(),
         "--host".to_string(),
         HOST.to_string(),
         "--port".to_string(),
         port.to_string(),
-    ]
+    ];
+    if gpu_layers == 0 {
+        args.push("-ng".to_string());
+    } else {
+        args.push("--gpu-backend".to_string());
+        args.push("auto".to_string());
+    }
+    args
 }
 
 pub fn health_is_ready(json: &str) -> bool {
@@ -68,18 +78,9 @@ pub fn resolve_binary<F>(env: F, exe_dir: &Path) -> Result<PathBuf, SttError>
 where
     F: Fn(&str) -> Option<String>,
 {
-    if let Some(dev) = env("YAP_CRISPASR_BIN") {
-        let path = PathBuf::from(dev);
-        return if path.exists() { Ok(path) } else { Err(SttError::SidecarUnreachable) };
-    }
-    let bundled = sidecar_binary_path(exe_dir);
-    if bundled.exists() {
-        Ok(bundled)
-    } else {
-        Err(SttError::SidecarUnreachable)
-    }
+    let _ = env;
+    binary::resolve_for_spawn(exe_dir)
 }
-
 pub struct CrispasrSidecar {
     child: Option<Child>,
     pub(crate) port: Option<u16>,
@@ -115,34 +116,113 @@ impl CrispasrSidecar {
     }
 
     pub fn ensure_ready(&mut self) -> Result<String, SttError> {
+        self.ensure_ready_with_progress(None)
+    }
+
+    pub fn ensure_ready_with_progress(
+        &mut self,
+        reporter: Option<&ProgressReporter>,
+    ) -> Result<String, SttError> {
+        let started = Instant::now();
         if self.is_running() {
             if let Some(url) = self.base_url() {
                 self.mark_used();
+                crate::stt::log_stt_timed("ensure_ready", started.elapsed(), "sidecar already running");
                 return Ok(url);
             }
         }
         self.shutdown();
 
-        let binary = resolve_binary(|key| std::env::var(key).ok(), &current_exe_dir())?;
-        let pin = crate::stt::pin::load_pin().map_err(|_| SttError::ModelCorrupt)?;
-        if crate::stt::model::verify_sha256(&binary, &pin.binary_sha256).is_err() {
-            crate::stt::log_stt("crispasr binary failed SHA-256 verification; refusing to spawn");
-            return Err(SttError::SidecarUnreachable);
+        if let Some(report) = reporter {
+            report.emit("loading_model", Some(3), "Preparing transcription engine…");
         }
-        let model = crate::stt::model::ensure_model()?;
+        crate::stt::log_stt("ensure_ready: resolving binary");
+
+        let binary = match binary::binary_install_status(&current_exe_dir())? {
+            binary::BinaryInstallStatus::Installed => {
+                binary::resolve_for_spawn(&current_exe_dir())?
+            }
+            binary::BinaryInstallStatus::Downloadable | binary::BinaryInstallStatus::Invalid => {
+                if let Some(report) = reporter {
+                    report.emit("loading_model", Some(5), "Downloading transcription engine…");
+                }
+                crate::stt::log_stt("ensure_ready: downloading binary (fallback)");
+                binary::ensure_binary()?
+            }
+            binary::BinaryInstallStatus::Unsupported => {
+                crate::stt::log_stt("crispasr auto-install unsupported on this platform");
+                return Err(SttError::SidecarUnreachable);
+            }
+        };
+        crate::stt::log_stt_timed(
+            "ensure_ready",
+            started.elapsed(),
+            &format!("binary ready at {}", binary.display()),
+        );
+
+        if let Some(report) = reporter {
+            report.emit("loading_model", Some(8), "Loading transcription model…");
+        }
+
+        let model_started = Instant::now();
+        let pin = crate::stt::pin::load_pin().map_err(|_| SttError::ModelCorrupt)?;
+        let model = if crate::stt::model::is_installed(&pin) {
+            let path = crate::stt::model::models_dir().join(&pin.gguf_file);
+            let size_gb = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) as f64 / 1e9;
+            crate::stt::log_stt_timed(
+                "ensure_ready",
+                model_started.elapsed(),
+                &format!("using cached model {:.2} GB at {}", size_gb, path.display()),
+            );
+            path
+        } else {
+            if let Some(report) = reporter {
+                report.emit(
+                    "loading_model",
+                    Some(6),
+                    "Downloading transcription model (fallback)…",
+                );
+            }
+            crate::stt::log_stt("ensure_ready: downloading model (fallback)");
+            crate::stt::model::ensure_model_at(
+                &crate::stt::model::models_dir(),
+                &pin,
+                crate::stt::model::download_file,
+            )?
+        };
         let port = probe_port().ok_or(SttError::SidecarUnreachable)?;
 
-        let child = spawn_child(&binary, &model, port)?;
+        let gpu = crate::stt::gpu::GpuStatus::resolve();
+        crate::stt::log_stt(&format!(
+            "crispasr spawn binary={} model={} port={} gpu_available={} layers={} adapter={}",
+            binary.display(),
+            model.display(),
+            port,
+            gpu.available,
+            gpu.layers,
+            gpu.adapter_name.as_deref().unwrap_or("none")
+        ));
+        let spawn_started = Instant::now();
+        let child = spawn_child(&binary, &model, port, gpu.layers)?;
         self.child = Some(child);
         self.port = Some(port);
+        crate::stt::log_stt_timed("ensure_ready", spawn_started.elapsed(), "sidecar process spawned");
 
         let url = self.base_url().ok_or(SttError::SidecarUnreachable)?;
-        if wait_ready(&url) {
+        if wait_ready_with_progress(&url, reporter, started) {
             self.mark_used();
-            crate::stt::log_stt(&format!("crispasr sidecar ready on {url}"));
+            crate::stt::log_stt_timed(
+                "ensure_ready",
+                started.elapsed(),
+                &format!("sidecar ready on {url}"),
+            );
             Ok(url)
         } else {
-            crate::stt::log_stt("crispasr sidecar failed the 10s ready-gate");
+            crate::stt::log_stt_timed(
+                "ensure_ready",
+                started.elapsed(),
+                &format!("sidecar failed ready-gate after {}s", READY_BUDGET.as_secs()),
+            );
             self.shutdown();
             Err(SttError::SidecarUnreachable)
         }
@@ -183,33 +263,79 @@ fn current_exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn spawn_child(binary: &Path, model: &Path, port: u16) -> Result<Child, SttError> {
+fn spawn_child(binary: &Path, model: &Path, port: u16, gpu_layers: u32) -> Result<Child, SttError> {
+    let stderr_path = crate::stt::sidecar_stderr_log_path();
+    if let Some(parent) = stderr_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)
+        .map_err(|_| SttError::SidecarUnreachable)?;
+    crate::stt::log_stt(&format!(
+        "spawning sidecar stderr_log={} args={:?}",
+        stderr_path.display(),
+        build_launch_args(model, port, gpu_layers)
+    ));
+
     let mut command = Command::new(binary);
-    command.args(build_launch_args(model, port));
+    command.args(build_launch_args(model, port, gpu_layers));
     command.env_clear();
     command.envs(sidecar_env(std::env::vars()));
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::from(stderr_file));
     crate::stt::hide_child_console(&mut command);
-    command.spawn().map_err(|_| SttError::SidecarUnreachable)
+    command.spawn().map_err(|err| {
+        crate::stt::log_stt(&format!("sidecar spawn failed: {err}"));
+        SttError::SidecarUnreachable
+    })
 }
 
-fn wait_ready(base_url: &str) -> bool {
+fn wait_ready_with_progress(
+    base_url: &str,
+    reporter: Option<&ProgressReporter>,
+    started: Instant,
+) -> bool {
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return false,
+        Err(err) => {
+            crate::stt::log_stt(&format!("health client build failed: {err}"));
+            return false;
+        }
     };
     let deadline = Instant::now() + READY_BUDGET;
+    let mut last_logged_secs = 0u64;
     while Instant::now() < deadline {
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= last_logged_secs + 5 {
+            last_logged_secs = elapsed;
+            crate::stt::log_stt(&format!(
+                "health wait {elapsed}s / {}s (loading model into memory…)",
+                READY_BUDGET.as_secs()
+            ));
+            if let Some(report) = reporter {
+                let pct = (8 + elapsed.min(READY_BUDGET.as_secs()).saturating_mul(82) / READY_BUDGET.as_secs()) as u8;
+                report.emit(
+                    "loading_model",
+                    Some(pct.min(90)),
+                    &format!("Loading model into memory ({elapsed}s)…"),
+                );
+            }
+        }
+
         if let Ok(response) = client.get(format!("{base_url}/health")).send() {
             if response.status().is_success() {
                 if let Ok(body) = response.text() {
                     if health_is_ready(&body) {
                         return true;
+                    }
+                    if elapsed >= last_logged_secs.saturating_sub(4) {
+                        crate::stt::log_stt(&format!("health not ready yet: {body}"));
                     }
                 }
             }
@@ -246,12 +372,23 @@ mod tests {
 
     #[test]
     fn launch_args_bind_loopback_only() {
-        let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765);
+        let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 0);
         assert_eq!(args[0], "--server");
+        assert_eq!(args[1], "--backend");
+        assert_eq!(args[2], "cohere");
         let host = args.iter().position(|a| a == "--host").unwrap();
         assert_eq!(args[host + 1], "127.0.0.1");
         let port = args.iter().position(|a| a == "--port").unwrap();
         assert_eq!(args[port + 1], "8765");
+        assert!(args.contains(&"-ng".to_string()));
+    }
+
+    #[test]
+    fn launch_args_requests_gpu_when_layers_nonzero() {
+        let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 99);
+        assert!(args.contains(&"--gpu-backend".to_string()));
+        assert!(args.contains(&"auto".to_string()));
+        assert!(!args.contains(&"-ng".to_string()));
     }
 
     #[test]
@@ -269,9 +406,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_binary_missing_dev_override_is_unreachable() {
-        let err = resolve_binary(|_| Some("C:/definitely/not/here.exe".into()), std::path::Path::new("C:/app"));
-        assert_eq!(err.unwrap_err(), SttError::SidecarUnreachable);
+    fn resolve_binary_rejects_invalid_dev_override() {
+        let dir = std::env::temp_dir().join(format!("yap-bin-dev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("bad.exe");
+        std::fs::write(&stub, vec![0u8; 32]).unwrap();
+        std::env::set_var("YAP_CRISPASR_BIN", &stub);
+        let err = resolve_binary(|_| None, std::path::Path::new("C:/app")).unwrap_err();
+        std::env::remove_var("YAP_CRISPASR_BIN");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(err, SttError::SidecarUnreachable);
     }
 
     #[test]

@@ -31,11 +31,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Stub crispasr sidecar for tauri-build
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path binaries | Out-Null
-          New-Item -ItemType File -Force -Path binaries/crispasr-x86_64-pc-windows-msvc.exe | Out-Null
       - run: cargo build --locked
       - run: cargo test --locked
       - name: cargo audit

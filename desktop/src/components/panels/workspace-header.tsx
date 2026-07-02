@@ -62,7 +62,7 @@ export function WorkspaceHeader({
         >
           Help
         </Button>
-        <Button aria-label="Open setup details" onClick={onOpenDetails} size="icon-sm" type="button" variant="outline">
+        <Button aria-label="Open settings" onClick={onOpenDetails} size="icon-sm" type="button" variant="outline">
           <Settings2 />
         </Button>
       </div>

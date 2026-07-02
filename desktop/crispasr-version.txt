@@ -1,6 +1,6 @@
 # CrispASR Phase-1 pins. All values are integrity-critical; verification is fail-closed.
-crispasr_version=0.4.6
-binary_sha256=7d450884dad6757a525ad1fe62b315ac37b1f3657a479f5ed8df12e68dab1634
+crispasr_version=0.6.12
+binary_sha256=48bfc1c3ff9a86c85e0e611738740e43fe07084783196ca99f91fc96d94cfd37
 gguf_repo=cstr/cohere-transcribe-03-2026-GGUF
 gguf_revision=2242638d5dfecc6f1dbe6c3a8713b97deb2e150f
 gguf_file=cohere-transcribe-q4_k.gguf

@@ -1,12 +1,82 @@
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::stt::backend::SttBackend;
 use crate::stt::error::SttError;
+use crate::stt::progress::ProgressReporter;
 use crate::stt::sidecar::CrispasrSidecar;
 
 pub const MAX_AUDIO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MIN_INFERENCE_TIMEOUT_SECS: u64 = 600;
+const MAX_INFERENCE_TIMEOUT_SECS: u64 = 10_800;
+const INFERENCE_TIMEOUT_BUFFER_SECS: u64 = 300;
+const WAV_BYTES_PER_SECOND: u64 = 176_400;
+
+pub fn estimate_audio_seconds(path: &Path, file_len: u64) -> u64 {
+    if let Some(secs) = wav_duration_seconds(path) {
+        return secs.max(1);
+    }
+    (file_len / WAV_BYTES_PER_SECOND).max(1)
+}
+
+pub fn inference_timeout_for(path: &Path) -> Duration {
+    let file_len = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let audio_secs = estimate_audio_seconds(path, file_len);
+    let timeout_secs = audio_secs
+        .saturating_mul(3)
+        .saturating_add(INFERENCE_TIMEOUT_BUFFER_SECS)
+        .clamp(MIN_INFERENCE_TIMEOUT_SECS, MAX_INFERENCE_TIMEOUT_SECS);
+    Duration::from_secs(timeout_secs)
+}
+
+fn wav_duration_seconds(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut byte_rate = None;
+    let mut data_bytes = None;
+    let mut chunk = [0u8; 8];
+    while file.read_exact(&mut chunk).is_ok() {
+        let chunk_id = &chunk[0..4];
+        let chunk_size = u32::from_le_bytes(chunk[4..8].try_into().ok()?) as u64;
+        if chunk_id == b"fmt " {
+            let mut fmt = vec![0u8; chunk_size as usize];
+            file.read_exact(&mut fmt).ok()?;
+            if fmt.len() >= 16 {
+                byte_rate = Some(u32::from_le_bytes(fmt[8..12].try_into().ok()?) as u64);
+            }
+        } else if chunk_id == b"data" {
+            data_bytes = Some(chunk_size);
+            break;
+        } else {
+            let mut remaining = chunk_size + (chunk_size % 2);
+            let mut skip = [0u8; 4096];
+            while remaining > 0 {
+                let chunk = remaining.min(skip.len() as u64) as usize;
+                let read = file.read(&mut skip[..chunk]).ok()?;
+                if read == 0 {
+                    break;
+                }
+                remaining -= read as u64;
+            }
+        }
+    }
+
+    let rate = byte_rate?;
+    let bytes = data_bytes?;
+    if rate == 0 {
+        return None;
+    }
+    Some(bytes / rate)
+}
 
 pub fn parse_transcription_json(body: &str) -> Result<String, SttError> {
     let value: serde_json::Value = serde_json::from_str(body).map_err(|_| SttError::SidecarCrash)?;
@@ -56,28 +126,49 @@ impl CrispasrBackend {
     pub fn new(sidecar: Arc<Mutex<CrispasrSidecar>>) -> Self {
         Self { sidecar, inflight: Arc::new(Mutex::new(())) }
     }
-}
 
-impl SttBackend for CrispasrBackend {
-    fn transcribe(&self, audio: &Path, language: &str) -> Result<String, SttError> {
+    pub fn transcribe_with_progress(
+        &self,
+        audio: &Path,
+        language: &str,
+        reporter: Option<&ProgressReporter>,
+    ) -> Result<String, SttError> {
         let _inflight = self.inflight.try_lock().map_err(|_| SttError::Busy)?;
         validate_audio_input(audio)?;
 
         let sidecar = Arc::clone(&self.sidecar);
         let ensure = || -> Result<String, SttError> {
-            sidecar.lock().map_err(|_| SttError::SidecarCrash)?.ensure_ready()
+            sidecar
+                .lock()
+                .map_err(|_| SttError::SidecarCrash)?
+                .ensure_ready_with_progress(reporter)
         };
         let restart = || -> Result<String, SttError> {
             sidecar.lock().map_err(|_| SttError::SidecarCrash)?.restart()
         };
 
-        let result = run_with_retry(ensure, restart, |url| post_transcription(url, audio, language));
+        if let Some(report) = reporter {
+            report.emit("transcribing", Some(12), "Starting transcription…");
+        }
+
+        let result = run_with_retry(ensure, restart, |url| {
+            post_transcription_with_progress(url, audio, language, reporter)
+        });
         if result.is_ok() {
             if let Ok(mut guard) = self.sidecar.lock() {
                 guard.mark_used();
             }
+            if let Some(report) = reporter {
+                report.emit("transcribing", Some(95), "Transcription complete.");
+            }
         }
         result
+    }
+}
+
+impl SttBackend for CrispasrBackend {
+    fn transcribe(&self, audio: &Path, language: &str) -> Result<String, SttError> {
+        self.transcribe_with_progress(audio, language, None)
     }
 }
 
@@ -113,9 +204,55 @@ where
     }
 }
 
-fn post_transcription(base_url: &str, audio: &Path, language: &str) -> Result<String, SttError> {
+fn transcribe_progress_estimate_secs(audio: &Path) -> u64 {
+    let file_len = std::fs::metadata(audio).map(|meta| meta.len()).unwrap_or(0);
+    let audio_secs = estimate_audio_seconds(audio, file_len);
+    // CrispASR cohere q4_k on CPU runs ~0.6–0.7× realtime (see sidecar slice logs).
+    ((audio_secs as f64) * 1.55).max(30.0) as u64
+}
+
+fn post_transcription_with_progress(
+    base_url: &str,
+    audio: &Path,
+    language: &str,
+    reporter: Option<&ProgressReporter>,
+) -> Result<String, SttError> {
+    let timeout = inference_timeout_for(audio);
+    let audio_secs = estimate_audio_seconds(audio, std::fs::metadata(audio).map(|meta| meta.len()).unwrap_or(0));
+    let estimated_secs = transcribe_progress_estimate_secs(audio);
+
+    crate::stt::log_stt(&format!(
+        "crispasr transcribe {} audio={}s est_cpu={}s timeout={}s",
+        audio.display(),
+        audio_secs,
+        estimated_secs,
+        timeout.as_secs()
+    ));
+
+    let done = Arc::new(AtomicBool::new(false));
+    let progress_handle = reporter.map(|report| {
+        let report = report.clone();
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            while !done.load(Ordering::Relaxed) {
+                let elapsed = start.elapsed().as_secs();
+                let ratio = (elapsed as f64 / estimated_secs as f64).clamp(0.0, 0.95);
+                let percent = (15.0 + ratio * 75.0) as u8;
+                let mins = elapsed / 60;
+                let secs = elapsed % 60;
+                report.emit(
+                    "transcribing",
+                    Some(percent),
+                    &format!("Transcribing on CPU ({mins}m {secs:02}s)…"),
+                );
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        })
+    });
+
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(600))
+        .timeout(timeout)
         .build()
         .map_err(|_| SttError::SidecarUnreachable)?;
     let form = reqwest::blocking::multipart::Form::new()
@@ -129,6 +266,12 @@ fn post_transcription(base_url: &str, audio: &Path, language: &str) -> Result<St
         .map_err(|err| if err.is_timeout() { SttError::Timeout } else { SttError::SidecarCrash })?;
     let status = response.status();
     let body = response.text().map_err(|_| SttError::SidecarCrash)?;
+
+    done.store(true, Ordering::Relaxed);
+    if let Some(handle) = progress_handle {
+        let _ = handle.join();
+    }
+
     if status.is_success() {
         parse_transcription_json(&body)
     } else {
@@ -175,6 +318,30 @@ mod tests {
         assert!(check_audio_size(1, MAX_AUDIO_BYTES).is_ok());
         assert_eq!(check_audio_size(0, MAX_AUDIO_BYTES).unwrap_err(), SttError::AudioDecode);
         assert_eq!(check_audio_size(MAX_AUDIO_BYTES + 1, MAX_AUDIO_BYTES).unwrap_err(), SttError::AudioDecode);
+    }
+
+    #[test]
+    fn transcribe_progress_estimate_uses_cpu_realtime_factor() {
+        let dir = std::env::temp_dir().join(format!("yap-progress-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.wav");
+        std::fs::write(&path, vec![0u8; 176_400 * 120]).unwrap();
+        let est = transcribe_progress_estimate_secs(&path);
+        assert!(est >= 120);
+        assert!(est <= 240);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inference_timeout_scales_with_estimated_duration() {
+        let dir = std::env::temp_dir().join(format!("yap-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.wav");
+        std::fs::write(&path, vec![0u8; 176_400 * 120]).unwrap();
+        let timeout = inference_timeout_for(&path);
+        assert!(timeout.as_secs() >= 600);
+        assert!(timeout.as_secs() <= 10_800);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
