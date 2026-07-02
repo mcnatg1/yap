@@ -70,7 +70,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const [model, setModel] = useState("Cohere Transcribe");
+  const [model, setModel] = useState("Moonshine tiny");
   const [auth, setAuth] = useState("Checking");
   const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
   const [selectedId, setSelectedId] = useState<number>();
@@ -289,7 +289,7 @@ export default function App() {
 
     try {
       const setup = await invoke<SetupStatus>("setup_status");
-      setModel(setup.model.replace("CohereLabs/", "").replace("ZoOtMcNoOt/", ""));
+      setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
       setStatus(
         setup.engineReady || (setup.pythonReady && setup.scriptReady)
           ? setup.engineStatus

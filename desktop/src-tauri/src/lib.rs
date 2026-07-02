@@ -36,8 +36,10 @@ fn setup_status(state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus
     ));
 
     SetupStatus {
-        model: std::env::var("YAP_MODEL_ID")
-            .unwrap_or_else(|_| "ZoOtMcNoOt/yap-cohere-transcribe-03-2026".into()),
+        model: pin
+            .as_ref()
+            .map(|pin| pin.gguf_file.clone())
+            .unwrap_or_else(|| "moonshine-streaming-tiny-q4_k.gguf".into()),
         root: root.display().to_string(),
         python_ready: python.exists(),
         script_ready: script.exists(),

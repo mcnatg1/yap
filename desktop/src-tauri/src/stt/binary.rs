@@ -314,6 +314,8 @@ mod tests {
             gguf_revision: "rev".into(),
             gguf_file: "m.gguf".into(),
             gguf_sha256: "b".repeat(64),
+            tokenizer_file: "tokenizer.bin".into(),
+            tokenizer_sha256: "c".repeat(64),
         };
 
         let archive = bin_dir.join("crispasr-windows-x86_64-cpu.zip");

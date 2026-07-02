@@ -10,6 +10,7 @@ pub const PORT_RANGE: RangeInclusive<u16> = 8765..=8775;
 pub const READY_BUDGET: Duration = Duration::from_secs(300);
 pub const IDLE_UNLOAD: Duration = Duration::from_secs(600);
 const HOST: &str = "127.0.0.1";
+const LOCAL_FALLBACK_BACKEND: &str = "moonshine-streaming";
 const ENV_ALLOWLIST: [&str; 4] = ["PATH", "SYSTEMROOT", "TEMP", "TMP"];
 
 pub fn first_free_port(range: RangeInclusive<u16>, mut is_free: impl FnMut(u16) -> bool) -> Option<u16> {
@@ -34,32 +35,27 @@ where
         .collect()
 }
 
-pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String> {
-    let mut args = vec![
+pub fn build_launch_args(gguf: &Path, port: u16, _gpu_layers: u32) -> Vec<String> {
+    vec![
         "--server".to_string(),
         "--backend".to_string(),
-        "cohere".to_string(),
+        LOCAL_FALLBACK_BACKEND.to_string(),
         "-m".to_string(),
         gguf.to_string_lossy().to_string(),
         "--host".to_string(),
         HOST.to_string(),
         "--port".to_string(),
         port.to_string(),
-    ];
-    if gpu_layers == 0 {
-        args.push("-ng".to_string());
-    } else {
-        args.push("--gpu-backend".to_string());
-        args.push("auto".to_string());
-    }
-    args
+        "-ng".to_string(),
+    ]
 }
 
 pub fn health_is_ready(json: &str) -> bool {
     match serde_json::from_str::<serde_json::Value>(json) {
         Ok(value) => {
+            let backend = value.get("backend").and_then(serde_json::Value::as_str);
             value.get("status").and_then(serde_json::Value::as_str) == Some("ok")
-                && value.get("backend").and_then(serde_json::Value::as_str) == Some("cohere")
+                && matches!(backend, Some("moonshine-streaming" | "moonshine_streaming"))
         }
         Err(_) => false,
     }
@@ -375,7 +371,7 @@ mod tests {
         let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 0);
         assert_eq!(args[0], "--server");
         assert_eq!(args[1], "--backend");
-        assert_eq!(args[2], "cohere");
+        assert_eq!(args[2], "moonshine-streaming");
         let host = args.iter().position(|a| a == "--host").unwrap();
         assert_eq!(args[host + 1], "127.0.0.1");
         let port = args.iter().position(|a| a == "--port").unwrap();
@@ -384,18 +380,18 @@ mod tests {
     }
 
     #[test]
-    fn launch_args_requests_gpu_when_layers_nonzero() {
+    fn launch_args_stay_cpu_for_tiny_fallback() {
         let args = build_launch_args(std::path::Path::new("C:/models/m.gguf"), 8765, 99);
-        assert!(args.contains(&"--gpu-backend".to_string()));
-        assert!(args.contains(&"auto".to_string()));
-        assert!(!args.contains(&"-ng".to_string()));
+        assert!(!args.contains(&"--gpu-backend".to_string()));
+        assert!(args.contains(&"-ng".to_string()));
     }
 
     #[test]
-    fn health_ready_requires_ok_and_cohere() {
-        assert!(health_is_ready(r#"{"status":"ok","backend":"cohere"}"#));
+    fn health_ready_requires_ok_and_moonshine_streaming() {
+        assert!(health_is_ready(r#"{"status":"ok","backend":"moonshine-streaming"}"#));
+        assert!(health_is_ready(r#"{"status":"ok","backend":"moonshine_streaming"}"#));
         assert!(!health_is_ready(r#"{"status":"ok","backend":"whisper"}"#));
-        assert!(!health_is_ready(r#"{"status":"loading","backend":"cohere"}"#));
+        assert!(!health_is_ready(r#"{"status":"loading","backend":"moonshine-streaming"}"#));
         assert!(!health_is_ready("not json"));
     }
 

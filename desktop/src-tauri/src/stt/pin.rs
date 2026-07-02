@@ -6,6 +6,8 @@ pub struct CrispasrPin {
     pub gguf_revision: String,
     pub gguf_file: String,
     pub gguf_sha256: String,
+    pub tokenizer_file: String,
+    pub tokenizer_sha256: String,
 }
 
 pub const PIN_TEXT: &str = include_str!("../../../crispasr-version.txt");
@@ -21,6 +23,8 @@ pub fn parse_pin(text: &str) -> Result<CrispasrPin, String> {
     let mut revision = None;
     let mut file = None;
     let mut gguf_sha = None;
+    let mut tokenizer_file = None;
+    let mut tokenizer_sha = None;
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -38,6 +42,8 @@ pub fn parse_pin(text: &str) -> Result<CrispasrPin, String> {
             "gguf_revision" => revision = Some(value),
             "gguf_file" => file = Some(value),
             "gguf_sha256" => gguf_sha = Some(value),
+            "tokenizer_file" => tokenizer_file = Some(value),
+            "tokenizer_sha256" => tokenizer_sha = Some(value),
             other => return Err(format!("crispasr-version.txt: unknown key: {other}")),
         }
     }
@@ -47,11 +53,15 @@ pub fn parse_pin(text: &str) -> Result<CrispasrPin, String> {
     };
     let binary_sha256 = require(binary_sha, "binary_sha256")?;
     let gguf_sha256 = require(gguf_sha, "gguf_sha256")?;
+    let tokenizer_sha256 = require(tokenizer_sha, "tokenizer_sha256")?;
     if !is_sha256(&binary_sha256) {
         return Err("crispasr-version.txt: binary_sha256 must be 64 hex chars".into());
     }
     if !is_sha256(&gguf_sha256) {
         return Err("crispasr-version.txt: gguf_sha256 must be 64 hex chars".into());
+    }
+    if !is_sha256(&tokenizer_sha256) {
+        return Err("crispasr-version.txt: tokenizer_sha256 must be 64 hex chars".into());
     }
 
     Ok(CrispasrPin {
@@ -61,6 +71,8 @@ pub fn parse_pin(text: &str) -> Result<CrispasrPin, String> {
         gguf_revision: require(revision, "gguf_revision")?,
         gguf_file: require(file, "gguf_file")?,
         gguf_sha256,
+        tokenizer_file: require(tokenizer_file, "tokenizer_file")?,
+        tokenizer_sha256,
     })
 }
 
@@ -76,18 +88,21 @@ mod tests {
 # comment line
 crispasr_version=0.4.6
 binary_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-gguf_repo=cstr/cohere-transcribe-03-2026-GGUF
+gguf_repo=cstr/moonshine-streaming-tiny-GGUF
 gguf_revision=1111111111111111111111111111111111111111
-gguf_file=cohere-transcribe-q4_k.gguf
+gguf_file=moonshine-streaming-tiny-q4_k.gguf
 gguf_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+tokenizer_file=tokenizer.bin
+tokenizer_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 ";
 
     #[test]
     fn parses_valid_pin() {
         let pin = parse_pin(SAMPLE).unwrap();
         assert_eq!(pin.crispasr_version, "0.4.6");
-        assert_eq!(pin.gguf_repo, "cstr/cohere-transcribe-03-2026-GGUF");
-        assert_eq!(pin.gguf_file, "cohere-transcribe-q4_k.gguf");
+        assert_eq!(pin.gguf_repo, "cstr/moonshine-streaming-tiny-GGUF");
+        assert_eq!(pin.gguf_file, "moonshine-streaming-tiny-q4_k.gguf");
+        assert_eq!(pin.tokenizer_file, "tokenizer.bin");
     }
 
     #[test]

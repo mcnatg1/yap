@@ -1,7 +1,9 @@
-# CrispASR Phase-1 pins. All values are integrity-critical; verification is fail-closed.
+# CrispASR optional local fallback pins. All values are integrity-critical; verification is fail-closed.
 crispasr_version=0.6.12
 binary_sha256=48bfc1c3ff9a86c85e0e611738740e43fe07084783196ca99f91fc96d94cfd37
-gguf_repo=cstr/cohere-transcribe-03-2026-GGUF
-gguf_revision=2242638d5dfecc6f1dbe6c3a8713b97deb2e150f
-gguf_file=cohere-transcribe-q4_k.gguf
-gguf_sha256=2931fc0ac6d6708eef5389aadf1ebd5eec7b8e764bac385be585e910c0e7b410
+gguf_repo=cstr/moonshine-streaming-tiny-GGUF
+gguf_revision=56e0ac359fe5b44674cb4f6e8adee0b4f2baaec1
+gguf_file=moonshine-streaming-tiny-q4_k.gguf
+gguf_sha256=46bf62ab1323da8ff3cf3936b62c08980590396a324bb822c91e38e821d972cc
+tokenizer_file=tokenizer.bin
+tokenizer_sha256=0e90e02b765a10f0fa35b7d67877df29dd22a1fd4890899c9b1b203a19bc8999

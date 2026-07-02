@@ -207,7 +207,7 @@ where
 fn transcribe_progress_estimate_secs(audio: &Path) -> u64 {
     let file_len = std::fs::metadata(audio).map(|meta| meta.len()).unwrap_or(0);
     let audio_secs = estimate_audio_seconds(audio, file_len);
-    // CrispASR cohere q4_k on CPU runs ~0.6–0.7× realtime (see sidecar slice logs).
+    // Moonshine tiny is a degraded local fallback; keep a generous timeout for noisy clips.
     ((audio_secs as f64) * 1.55).max(30.0) as u64
 }
 
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn parse_reads_text_and_ignores_unknown_fields() {
-        let body = r#"{"text":"hello world","segments":[{"start":0.0}],"backend":"cohere","extra":42}"#;
+        let body = r#"{"text":"hello world","segments":[{"start":0.0}],"backend":"moonshine-streaming","extra":42}"#;
         assert_eq!(parse_transcription_json(body).unwrap(), "hello world");
     }
 

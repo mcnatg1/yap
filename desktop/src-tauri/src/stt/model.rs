@@ -92,17 +92,48 @@ pub fn hf_resolve_url(repo: &str, revision: &str, file: &str) -> String {
 }
 
 pub fn is_installed(pin: &CrispasrPin) -> bool {
-    let dest = models_dir().join(&pin.gguf_file);
-    verify_or_trust(&dest, &pin.gguf_sha256).is_ok()
+    let dir = models_dir();
+    verify_or_trust(&dir.join(&pin.gguf_file), &pin.gguf_sha256).is_ok()
+        && verify_or_trust(&dir.join(&pin.tokenizer_file), &pin.tokenizer_sha256).is_ok()
 }
 
 pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, mut download: D) -> Result<PathBuf, SttError>
 where
     D: FnMut(&str, &Path) -> Result<(), SttError>,
 {
-    let dest = dir.join(&pin.gguf_file);
+    let dest = ensure_artifact_at(
+        dir,
+        &pin.gguf_repo,
+        &pin.gguf_revision,
+        &pin.gguf_file,
+        &pin.gguf_sha256,
+        &mut download,
+    )?;
+    ensure_artifact_at(
+        dir,
+        &pin.gguf_repo,
+        &pin.gguf_revision,
+        &pin.tokenizer_file,
+        &pin.tokenizer_sha256,
+        &mut download,
+    )?;
+    Ok(dest)
+}
+
+fn ensure_artifact_at<D>(
+    dir: &Path,
+    repo: &str,
+    revision: &str,
+    file: &str,
+    expected_hash: &str,
+    download: &mut D,
+) -> Result<PathBuf, SttError>
+where
+    D: FnMut(&str, &Path) -> Result<(), SttError>,
+{
+    let dest = dir.join(file);
     if dest.exists() {
-        match verify_or_trust(&dest, &pin.gguf_sha256) {
+        match verify_or_trust(&dest, expected_hash) {
             Ok(()) => return Ok(dest),
             Err(SttError::ModelCorrupt) => {
                 let _ = std::fs::remove_file(&dest);
@@ -112,11 +143,11 @@ where
         }
     }
     std::fs::create_dir_all(dir).map_err(|_| SttError::ModelMissing)?;
-    let url = hf_resolve_url(&pin.gguf_repo, &pin.gguf_revision, &pin.gguf_file);
+    let url = hf_resolve_url(repo, revision, file);
     download(&url, &dest)?;
-    match verify_sha256(&dest, &pin.gguf_sha256) {
+    match verify_sha256(&dest, expected_hash) {
         Ok(()) => {
-            write_verified_marker(&dest, &pin.gguf_sha256)?;
+            write_verified_marker(&dest, expected_hash)?;
             Ok(dest)
         }
         Err(err) => {
@@ -205,6 +236,8 @@ mod tests {
             gguf_revision: "rev".into(),
             gguf_file: "m.gguf".into(),
             gguf_sha256: gguf_sha256.into(),
+            tokenizer_file: "tokenizer.bin".into(),
+            tokenizer_sha256: gguf_sha256.into(),
         }
     }
 
@@ -213,9 +246,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yap-installed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let model = dir.join("m.gguf");
+        let tokenizer = dir.join("tokenizer.bin");
         std::fs::write(&model, b"hello").unwrap();
+        std::fs::write(&tokenizer, b"hello").unwrap();
         let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         write_verified_marker(&model, hello).unwrap();
+        write_verified_marker(&tokenizer, hello).unwrap();
         let pin = sample_pin(hello);
         std::env::set_var("YAP_MODELS_DIR", &dir);
         assert!(is_installed(&pin));
@@ -244,6 +280,7 @@ mod tests {
         })
         .unwrap();
         assert!(dest.exists());
+        assert!(dir.join("tokenizer.bin").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -265,6 +302,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yap-dl-cache-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("m.gguf"), b"hello").unwrap();
+        std::fs::write(dir.join("tokenizer.bin"), b"hello").unwrap();
         let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let pin = sample_pin(hello);
         let dest = ensure_model_at(&dir, &pin, |_url, _path| {
@@ -288,8 +326,9 @@ mod tests {
             std::fs::write(path, b"hello").map_err(|_| SttError::ModelMissing)
         })
         .unwrap();
-        assert_eq!(download_calls, 1, "must re-download after deleting corrupt cache");
+        assert_eq!(download_calls, 2, "must re-download corrupt model and missing tokenizer");
         assert!(dest.exists());
+        assert!(dir.join("tokenizer.bin").exists());
         assert!(verify_sha256(&dest, hello).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
