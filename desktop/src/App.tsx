@@ -7,8 +7,6 @@ import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
 import { AppSidebar } from "@/components/app/app-sidebar";
-import { openDevtools } from "@/components/app/window-actions";
-import { CommandCenter } from "@/components/command-center";
 import { HelpSheet, SettingsSheet } from "@/components/panels/app-sheets";
 import { DropHero } from "@/components/panels/drop-hero";
 import { HomePanel } from "@/components/panels/home-panel";
@@ -75,7 +73,6 @@ export default function App() {
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [commandOpen, setCommandOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
@@ -225,23 +222,6 @@ export default function App() {
     return () => {
       void unlistenDrag.then((fn) => fn());
     };
-  }, []);
-
-  useEffect(() => {
-    function onKeyDown(event: globalThis.KeyboardEvent) {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setCommandOpen((open) => !open);
-      }
-
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "i") {
-        event.preventDefault();
-        void openDevtools();
-      }
-    }
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -494,7 +474,7 @@ export default function App() {
       try {
         writeTranscriptHistory(next);
       } catch {
-        // ponytail: transcripts are already saved; history can be rebuilt manually if localStorage is full.
+        // ponytail: best-effort localStorage index, replace with file-backed history when transcripts need sync/search.
       }
       return next;
     });
@@ -506,7 +486,7 @@ export default function App() {
       try {
         writeTranscriptHistory(next);
       } catch {
-        // ponytail: removal is UI-only if localStorage refuses the write.
+        // ponytail: best-effort localStorage removal, replace with file-backed history when deletion must persist.
       }
       return next;
     });
@@ -619,7 +599,6 @@ export default function App() {
         auth={auth}
         description={workspace.description}
         historyCount={history.length}
-        onOpenCommand={() => setCommandOpen(true)}
         onOpenDetails={() => handleRailAction("details")}
         onOpenHelp={() => handleRailAction("help")}
         status={status}
@@ -695,14 +674,6 @@ export default function App() {
           if (!open && activeRail === "help") setActiveRail(workspaceView);
         }}
         open={helpOpen}
-      />
-      <CommandCenter
-        history={history}
-        onAction={handleRailAction}
-        onOpenChange={setCommandOpen}
-        onPickFiles={() => void pickFiles()}
-        onPreview={(entry) => void previewHistoryEntry(entry)}
-        open={commandOpen}
       />
       <TranscriptPreviewDialog
         entry={previewEntry}

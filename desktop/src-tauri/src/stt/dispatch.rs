@@ -92,48 +92,6 @@ impl Default for SttState {
     }
 }
 
-pub fn engine_status_for_binary(status: crate::stt::binary::BinaryInstallStatus) -> &'static str {
-    match status {
-        crate::stt::binary::BinaryInstallStatus::Installed => "Transcription engine ready",
-        crate::stt::binary::BinaryInstallStatus::Downloadable => {
-            "Installing transcription engine..."
-        }
-        crate::stt::binary::BinaryInstallStatus::Invalid => "Re-installing transcription engine...",
-        crate::stt::binary::BinaryInstallStatus::Unsupported => {
-            "Transcription engine requires manual install"
-        }
-    }
-}
-
-pub fn engine_ready() -> bool {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let binary_ok = crate::stt::binary::binary_install_status(&exe_dir)
-        .map(|status| {
-            matches!(
-                status,
-                crate::stt::binary::BinaryInstallStatus::Installed
-                    | crate::stt::binary::BinaryInstallStatus::Downloadable
-            )
-        })
-        .unwrap_or(false);
-    crate::stt::pin::load_pin().is_ok() && binary_ok
-}
-
-pub fn engine_binary_status_label(status: crate::stt::binary::BinaryInstallStatus) -> &'static str {
-    status.label()
-}
-
-pub fn transcribe_paths(
-    state: &SttState,
-    paths: Vec<String>,
-    language: &str,
-) -> Result<Vec<TranscriptResult>, SttCommandError> {
-    transcribe_paths_with_callbacks(state, paths, language, None, None, None)
-}
-
 pub fn transcribe_paths_with_callbacks(
     state: &SttState,
     paths: Vec<String>,
@@ -242,7 +200,8 @@ mod tests {
     #[test]
     fn empty_batch_returns_without_starting() {
         let state = SttState::new();
-        let results = transcribe_paths(&state, Vec::new(), "en").unwrap();
+        let results =
+            transcribe_paths_with_callbacks(&state, Vec::new(), "en", None, None, None).unwrap();
         assert!(results.is_empty());
         assert!(!state.is_transcribing());
     }

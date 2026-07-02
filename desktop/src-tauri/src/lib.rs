@@ -35,7 +35,7 @@ fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatu
             .unwrap_or_else(|| "moonshine-streaming-tiny-q4_k.gguf".into()),
         root: root.display().to_string(),
         engine_ready,
-        engine_binary_status: stt::dispatch::engine_binary_status_label(binary_status).to_string(),
+        engine_binary_status: binary_status.label().to_string(),
         model_installed,
         engine_status: compose_engine_status(binary_status, model_installed),
     }
@@ -56,15 +56,6 @@ fn compose_engine_status(
             "Transcription engine requires manual install".into()
         }
     }
-}
-
-#[tauri::command]
-fn transcribe_files(
-    state: tauri::State<'_, stt::dispatch::SttState>,
-    paths: Vec<String>,
-) -> Result<Vec<stt::dispatch::TranscriptResult>, stt::dispatch::SttCommandError> {
-    log_line(&format!("transcribe_files count={}", paths.len()));
-    stt::dispatch::transcribe_paths(&state, paths, "en")
 }
 
 #[tauri::command]
@@ -154,11 +145,6 @@ fn write_polished_text(path: String, text: String) -> Result<String, String> {
     std::fs::write(&output, text)
         .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
     Ok(output.display().to_string())
-}
-
-#[tauri::command]
-fn open_devtools(window: tauri::WebviewWindow) {
-    window.open_devtools();
 }
 
 fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
@@ -256,11 +242,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             setup_status,
             polish_num_gpu,
-            transcribe_files,
             start_transcribe,
             read_text_file,
-            write_polished_text,
-            open_devtools
+            write_polished_text
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

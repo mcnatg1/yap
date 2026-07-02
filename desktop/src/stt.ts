@@ -125,15 +125,6 @@ function toFailure(raw: unknown): SttFailure {
   return { code: "", message: typeof raw === "string" ? raw : String(raw) };
 }
 
-export async function transcribeFiles(paths: string[]): Promise<TranscriptResult[]> {
-  try {
-    return await invoke<TranscriptResult[]>("transcribe_files", { paths });
-  } catch (raw) {
-    const failure = toFailure(raw);
-    throw new SttInvokeError(failure.code, failure.message);
-  }
-}
-
 export async function startTranscribe(paths: string[]): Promise<void> {
   try {
     await invoke("start_transcribe", { paths });

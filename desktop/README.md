@@ -1,11 +1,11 @@
 # Yap Desktop
 
-Tauri drag-and-drop UI for `..\transcribe.py`.
+Tauri desktop app for the local Moonshine fallback sidecar.
 
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
 npm install
+npm test
+npm run build
 npm run tauri dev
 ```
-
-The packaged Windows build currently uses the local LLVM-MinGW/Rust GNU toolchain.

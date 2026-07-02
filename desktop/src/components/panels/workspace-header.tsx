@@ -1,15 +1,13 @@
-import { Search, Settings2 } from "lucide-react";
+import { Settings2 } from "lucide-react";
 
 import { PrivacyStatus } from "@/components/app/privacy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Kbd, KbdGroup } from "@/components/ui/kbd";
 
 export function WorkspaceHeader({
   auth,
   description,
   historyCount,
-  onOpenCommand,
   onOpenDetails,
   onOpenHelp,
   status,
@@ -18,7 +16,6 @@ export function WorkspaceHeader({
   auth: string;
   description: string;
   historyCount: number;
-  onOpenCommand: () => void;
   onOpenDetails: () => void;
   onOpenHelp: () => void;
   status: string;
@@ -38,21 +35,6 @@ export function WorkspaceHeader({
             {historyCount} saved
           </Badge>
         ) : null}
-        <Button
-          aria-label="Open command menu"
-          className="px-2"
-          onClick={onOpenCommand}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          <Search data-icon="inline-start" />
-          <span className="hidden xl:inline">Search</span>
-          <KbdGroup className="hidden xl:inline-flex">
-            <Kbd>Ctrl</Kbd>
-            <Kbd>K</Kbd>
-          </KbdGroup>
-        </Button>
         <Button
           className="h-auto px-1 text-muted-foreground"
           onClick={onOpenHelp}
