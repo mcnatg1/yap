@@ -287,7 +287,7 @@ flowchart TB
 
     subgraph L6["L6 — ecosystem gateways · Phase 7e+"]
         MCP["MCP server"]
-        IDE["Cursor / VS Code open folder"]
+        IDE["IDE open folder"]
         Vec["Vector search / embeddings"]
     end
 

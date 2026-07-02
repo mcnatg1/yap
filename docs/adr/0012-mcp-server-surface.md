@@ -7,7 +7,7 @@
 
 ## Context
 
-L6 lists "MCP" as an ecosystem gateway so external tools (Cursor, Claude, other MCP clients) can query the user's transcripts/knowledge base. No tools, resources, or transport were defined. This ADR pins a **minimal, read-mostly** MCP surface over the OKF + index.
+L6 lists "MCP" as an ecosystem gateway so external MCP clients can query the user's transcripts/knowledge base. No tools, resources, or transport were defined. This ADR pins a **minimal, read-mostly** MCP surface over the OKF + index.
 
 ## Decision
 
@@ -42,7 +42,7 @@ Yap ships an **MCP server** exposing the local knowledge base. Local-first: loca
 ## Consequences
 
 ### Positive
-- Transcripts become usable from Cursor/Claude without copy-paste.
+- Transcripts become usable from external MCP clients without copy-paste.
 - Thin layer over existing retrieval ([ADR 0011](0011-vector-rag-retrieval.md)); little new logic.
 - Read-mostly + opt-in keeps the local-first trust model intact.
 

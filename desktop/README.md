@@ -1,6 +1,6 @@
 # Yap Desktop
 
-Tauri desktop app for the local Moonshine fallback sidecar.
+Tauri desktop app for the local Moonshine fallback sidecar. See `..\README.md` for the repo map.
 
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
