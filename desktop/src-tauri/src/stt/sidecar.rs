@@ -11,6 +11,8 @@ pub const READY_BUDGET: Duration = Duration::from_secs(300);
 pub const IDLE_UNLOAD: Duration = Duration::from_secs(600);
 const HOST: &str = "127.0.0.1";
 const LOCAL_FALLBACK_BACKEND: &str = "moonshine-streaming";
+const LOCAL_FALLBACK_THREADS: &str = "8";
+const LOCAL_FALLBACK_PROCESSORS: &str = "2";
 const ENV_ALLOWLIST: [&str; 4] = ["PATH", "SYSTEMROOT", "TEMP", "TMP"];
 
 pub fn first_free_port(
@@ -53,6 +55,11 @@ pub fn build_launch_args(gguf: &Path, port: u16, gpu_layers: u32) -> Vec<String>
         HOST.to_string(),
         "--port".to_string(),
         port.to_string(),
+        "--no-punctuation".to_string(),
+        "-t".to_string(),
+        LOCAL_FALLBACK_THREADS.to_string(),
+        "-p".to_string(),
+        LOCAL_FALLBACK_PROCESSORS.to_string(),
     ];
     if gpu_layers > 0 {
         args.push("--gpu-backend".to_string());
@@ -413,6 +420,11 @@ mod tests {
         assert_eq!(args[host + 1], "127.0.0.1");
         let port = args.iter().position(|a| a == "--port").unwrap();
         assert_eq!(args[port + 1], "8765");
+        assert!(args.contains(&"--no-punctuation".to_string()));
+        let threads = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[threads + 1], "8");
+        let processors = args.iter().position(|a| a == "-p").unwrap();
+        assert_eq!(args[processors + 1], "2");
         assert!(args.contains(&"-ng".to_string()));
         assert!(!args.contains(&"--gpu-backend".to_string()));
     }

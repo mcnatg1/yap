@@ -244,7 +244,7 @@ fn post_transcription_with_progress(
                 report.emit(
                     "transcribing",
                     Some(percent),
-                    &format!("Transcribing on CPU ({mins}m {secs:02}s)…"),
+                    &format!("Transcribing locally ({mins}m {secs:02}s)…"),
                 );
                 std::thread::sleep(Duration::from_secs(2));
             }
