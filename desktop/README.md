@@ -4,8 +4,8 @@ Tauri desktop app for the local Moonshine fallback sidecar. See `..\README.md` f
 
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
-npm install
-npm test
-npm run build
-npm run tauri dev
+pnpm install
+pnpm test
+pnpm build
+pnpm tauri dev
 ```

@@ -26,6 +26,6 @@ Live/offline fallback uses local Moonshine. Larger recordings should use the DGX
 ## Checks
 
 - `cargo test --locked`
-- `npm test`
-- `npm run build`
+- `pnpm test`
+- `pnpm build`
 - Sidecar smoke: unauthenticated request returns `401`; bearer-authenticated request returns `200`.

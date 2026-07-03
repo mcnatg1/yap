@@ -31,7 +31,7 @@ DGX/server Cohere connector work, not in this local fallback branch.
 |   `-- superpowers/plans/            Historical implementation plans.
 `-- desktop/
     |-- README.md                     Desktop-only quick commands.
-    |-- package.json                  npm scripts and frontend deps.
+    |-- package.json                  pnpm scripts and frontend deps.
     |-- vite.config.ts                Vite/Tauri dev server config.
     |-- crispasr-version.txt          Pinned CrispASR/model/tokenizer/punctuation artifacts.
     |-- src/                          React app.
@@ -78,11 +78,11 @@ DGX/server Cohere connector work, not in this local fallback branch.
 
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
-npm install
-npm test
-npm run build
+pnpm install
+pnpm test
+pnpm build
 cargo test --locked --manifest-path .\src-tauri\Cargo.toml
-npm run tauri dev
+pnpm tauri dev
 ```
 
 Useful narrow checks:

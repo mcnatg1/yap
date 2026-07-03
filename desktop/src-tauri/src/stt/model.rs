@@ -93,6 +93,10 @@ pub fn hf_resolve_url(repo: &str, revision: &str, file: &str) -> String {
 
 pub fn is_installed(pin: &CrispasrPin) -> bool {
     let dir = models_dir();
+    is_installed_at(&dir, pin)
+}
+
+fn is_installed_at(dir: &Path, pin: &CrispasrPin) -> bool {
     verify_or_trust(&dir.join(&pin.gguf_file), &pin.gguf_sha256).is_ok()
         && verify_or_trust(&dir.join(&pin.tokenizer_file), &pin.tokenizer_sha256).is_ok()
         && verify_or_trust(&dir.join(&pin.punc_file), &pin.punc_sha256).is_ok()
@@ -269,9 +273,7 @@ mod tests {
         write_verified_marker(&tokenizer, hello).unwrap();
         write_verified_marker(&punc, hello).unwrap();
         let pin = sample_pin(hello);
-        std::env::set_var("YAP_MODELS_DIR", &dir);
-        assert!(is_installed(&pin));
-        std::env::remove_var("YAP_MODELS_DIR");
+        assert!(is_installed_at(&dir, &pin));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -280,9 +282,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yap-missing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pin = sample_pin(&"0".repeat(64));
-        std::env::set_var("YAP_MODELS_DIR", &dir);
-        assert!(!is_installed(&pin));
-        std::env::remove_var("YAP_MODELS_DIR");
+        assert!(!is_installed_at(&dir, &pin));
         std::fs::remove_dir_all(&dir).ok();
     }
 
