@@ -518,7 +518,7 @@ export default function App() {
   async function openTranscript(path: string) {
     try {
       await openPath(path);
-      toast.success("Opened transcript");
+      toast.success("Opened file");
     } catch {
       toast.error("Open failed");
     }
@@ -664,7 +664,7 @@ export default function App() {
       className={cn(
         "grid w-full min-w-0 gap-5",
         workspaceView === "transcribe" || workspaceView === "polish" || workspaceView === "transcripts"
-          ? "grid-cols-[minmax(0,1fr)_minmax(320px,0.78fr)]"
+          ? "grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]"
           : "grid-cols-1",
       )}
     >
@@ -673,7 +673,7 @@ export default function App() {
     </div>
   );
   const appWorkspace = (
-    <section className="surface-workspace scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-card p-[15px]">
+    <section className="surface-workspace scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-card p-4">
       <WorkspaceHeader
         auth={auth}
         description={workspace.description}
@@ -732,7 +732,7 @@ export default function App() {
       <AppSidebar active={activeRail} onAction={handleRailAction} />
       <SidebarInset className="flex min-h-0 flex-col overflow-hidden">
         <AppChrome onAction={handleRailAction} />
-        <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background pb-[15px] pr-[15px] pt-0">
+        <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background pb-4 pr-4 pt-0">
           {appWorkspace}
         </div>
       </SidebarInset>
