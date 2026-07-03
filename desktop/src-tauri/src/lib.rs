@@ -286,6 +286,20 @@ mod tests {
         let path = polished_path(std::path::Path::new("C:/recordings/take.txt")).unwrap();
         assert_eq!(path.file_name().unwrap(), "take.polished.txt");
     }
+
+    #[test]
+    fn opener_capability_allows_opening_paths() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("capabilities")
+            .join("default.json");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let permissions = value["permissions"].as_array().unwrap();
+
+        assert!(permissions
+            .iter()
+            .any(|permission| permission.as_str() == Some("opener:allow-open-path")));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
