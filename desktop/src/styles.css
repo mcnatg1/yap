@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 @theme inline {
   --font-sans:
@@ -161,6 +162,16 @@
     display: none;
   }
 
+  .scroll-fade-x {
+    mask-image: linear-gradient(
+      to right,
+      transparent,
+      var(--foreground) 1rem,
+      var(--foreground) calc(100% - 1rem),
+      transparent
+    );
+  }
+
   .hit-target {
     position: relative;
   }
@@ -183,7 +194,7 @@
   }
 
   .surface-workspace-inset {
-    border-radius: 13px;
+    border-radius: 12px;
   }
 
   .cn-sidebar-gap {
