@@ -1,22 +1,14 @@
-import { CircleUserRound, Minus, Square, X } from "lucide-react";
+import { Minus, Square, X } from "lucide-react";
 
 import { runWindowAction } from "@/components/app/window-actions";
 import { Button } from "@/components/ui/button";
-import { SidebarTrigger } from "@/components/ui/sidebar";
-import type { RailAction } from "@/lib/app-types";
 
-export function AppChrome({ onAction }: { onAction: (action: RailAction) => void }) {
+export function AppChrome() {
   return (
     <div
       className="flex h-10 shrink-0 select-none items-center bg-background text-foreground"
       data-tauri-drag-region
     >
-      <div className="flex items-center gap-2 px-4">
-        <SidebarTrigger aria-label="Toggle sidebar" className="bg-secondary" size="icon-xs" />
-        <Button aria-label="Account" onClick={() => onAction("details")} size="icon-xs" type="button" variant="ghost">
-          <CircleUserRound data-icon="inline-start" />
-        </Button>
-      </div>
       <div className="min-w-4 flex-1" data-tauri-drag-region />
       <div className="flex h-full">
         <Button

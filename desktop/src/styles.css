@@ -198,7 +198,7 @@
   }
 
   .cn-sidebar-gap {
-    @apply transition-[width] duration-200 ease-linear;
+    @apply transition-[width] duration-150 ease-out;
   }
 
   .cn-sidebar-inner {

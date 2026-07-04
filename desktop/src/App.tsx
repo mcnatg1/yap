@@ -731,7 +731,7 @@ export default function App() {
     >
       <AppSidebar active={activeRail} onAction={handleRailAction} />
       <SidebarInset className="flex min-h-0 flex-col overflow-hidden">
-        <AppChrome onAction={handleRailAction} />
+        <AppChrome />
         <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background pb-4 pr-4 pt-0">
           {appWorkspace}
         </div>

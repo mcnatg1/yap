@@ -1,5 +1,6 @@
-import { type ElementType } from "react";
+import { useEffect, useRef, type ElementType } from "react";
 import {
+  CircleUserRound,
   FileText,
   Grid2X2,
   HelpCircle,
@@ -9,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { AppIcon } from "@/components/app/app-icon";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarContent,
@@ -19,6 +20,8 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarSeparator,
+  SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import type { RailAction } from "@/lib/app-types";
 
@@ -41,21 +44,78 @@ export function AppSidebar({
   active: RailAction;
   onAction: (action: RailAction) => void;
 }) {
+  const { state } = useSidebar();
+  const brandIconRef = useRef<HTMLDivElement>(null);
+  const wordmarkRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let killTweens: (() => void) | undefined;
+
+    void import("gsap").then(({ default: gsap }) => {
+      const icon = brandIconRef.current;
+      const wordmark = wordmarkRef.current;
+
+      if (cancelled || !icon || !wordmark) {
+        return;
+      }
+
+      const collapsed = state === "collapsed";
+      killTweens = () => {
+        gsap.killTweensOf(icon);
+        gsap.killTweensOf(wordmark);
+      };
+      killTweens();
+
+      gsap.to(icon, {
+        duration: 0.14,
+        ease: "power2.out",
+        overwrite: "auto",
+        scale: collapsed ? 0.96 : 1,
+      });
+      gsap.to(wordmark, {
+        autoAlpha: collapsed ? 0 : 1,
+        duration: 0.12,
+        ease: "power2.out",
+        overwrite: "auto",
+        x: collapsed ? -6 : 0,
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      killTweens?.();
+    };
+  }, [state]);
+
   return (
     <Sidebar collapsible="icon">
-      <SidebarHeader className="px-3 pb-2 pt-4">
-        <div className="flex items-center gap-2 overflow-hidden px-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
-          <AppIcon className="size-6 shrink-0 rounded-md" />
-          <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-xl font-semibold tracking-tight">Yap</span>
-              <Badge
-                className="h-6 shrink-0 bg-accent-soft px-2 text-xs text-accent-ink hover:bg-accent-soft"
-                variant="secondary"
-              >
-                Local
-              </Badge>
+      <SidebarHeader className="gap-0 px-3 pb-0 pt-4">
+        <div className="flex flex-col">
+          <div className="flex h-7 items-center gap-2 px-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
+            <SidebarTrigger aria-label="Toggle sidebar" className="bg-secondary" size="icon-xs" />
+            <Button
+              aria-label="Account"
+              className="text-muted-foreground group-data-[collapsible=icon]:hidden"
+              onClick={() => onAction("details")}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
+              <CircleUserRound data-icon="inline-start" />
+            </Button>
+          </div>
+
+          <div className="flex h-[3.75rem] items-center gap-2 overflow-hidden px-1">
+            <div ref={brandIconRef} className="size-6 shrink-0 will-change-transform">
+              <AppIcon className="size-6 rounded-md" />
             </div>
+            <span
+              ref={wordmarkRef}
+              className="min-w-0 truncate text-xl font-semibold tracking-tight will-change-[opacity,transform]"
+            >
+              Yap
+            </span>
           </div>
         </div>
       </SidebarHeader>
