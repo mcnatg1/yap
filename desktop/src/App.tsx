@@ -60,6 +60,13 @@ type SetupStatus = {
 
 const setupSkipKey = "yap-local-fallback-setup-skipped";
 
+type ReviewMorphOrigin = {
+  height: number;
+  left: number;
+  top: number;
+  width: number;
+};
+
 export default function App() {
   const [queue, setQueue] = useState<UploadItem[]>([]);
   const [nextId, setNextId] = useState(1);
@@ -84,6 +91,7 @@ export default function App() {
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
+  const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
   const pathToItemId = useRef<Map<string, number>>(new Map());
@@ -561,9 +569,19 @@ export default function App() {
     toast.success("Removed from history");
   }
 
-  function selectHistoryEntry(entry: TranscriptHistoryEntry) {
+  function selectHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
     setSelectedId(undefined);
     setSelectedHistoryOutput(entry.outputPath);
+    setReviewMorphOrigin(
+      origin
+        ? {
+            height: origin.height,
+            left: origin.left,
+            top: origin.top,
+            width: origin.width,
+          }
+        : undefined,
+    );
     setActiveRail("home");
     setWorkspaceView("home");
   }
@@ -737,10 +755,14 @@ export default function App() {
       <TranscriptReviewDialog
         elapsedSeconds={elapsedSeconds}
         item={selectedHistoryItem}
+        morphOrigin={reviewMorphOrigin}
         onCopy={copyTranscript}
         onOpen={(path) => void openTranscript(path)}
         onOpenChange={(open) => {
-          if (!open) setSelectedHistoryOutput(undefined);
+          if (!open) {
+            setSelectedHistoryOutput(undefined);
+            setReviewMorphOrigin(undefined);
+          }
         }}
         onOpenHelp={() => handleRailAction("help")}
         onRetry={(id) => void retryItem(id)}

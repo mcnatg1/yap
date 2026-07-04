@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type MouseEvent } from "react";
 import { Copy, FileText, FolderOpen, MoreHorizontal, Search, Trash2 } from "lucide-react";
 
 import { HistoryEntryPreview } from "@/components/panels/history-entry-preview";
@@ -159,7 +159,7 @@ export function HistoryPanel({
   onPreview: (entry: TranscriptHistoryEntry) => void;
   onRemove: (outputPath: string) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
-  onSelect: (entry: TranscriptHistoryEntry) => void;
+  onSelect: (entry: TranscriptHistoryEntry, origin?: DOMRect) => void;
   selectedOutputPath?: string;
 }) {
   const [searchFilter, setSearchFilter] = useState("");
@@ -224,8 +224,9 @@ export function HistoryPanel({
                           {group.entries.map((entry) => {
                             const selected = entry.outputPath === selectedOutputPath;
 
-                            function selectEntry() {
-                              onSelect(entry);
+                            function selectEntry(event: MouseEvent<HTMLElement>) {
+                              const row = event.currentTarget.closest("[data-history-entry-row]");
+                              onSelect(entry, row?.getBoundingClientRect());
                             }
 
                             return (
@@ -236,6 +237,7 @@ export function HistoryPanel({
                                   selected && "border-primary/30 bg-[var(--primary-soft)]/40 hover:bg-[var(--primary-soft)]/40",
                                 )}
                                 data-state={selected ? "selected" : undefined}
+                                data-history-entry-row
                               >
                                 <TableCell
                                   className="max-w-0 cursor-pointer whitespace-normal"
