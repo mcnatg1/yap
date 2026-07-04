@@ -178,13 +178,13 @@ export function HistoryPanel({
       <CardHeader className="p-4 sm:p-5">
         <div className="min-w-0">
           <CardTitle className="flex items-center gap-2 text-xl">
-            History
+            Recordings
             <Badge className="tabular-nums" variant="secondary">
               {entries.length}
             </Badge>
           </CardTitle>
           <CardDescription>
-            Saved transcripts stay on this computer. Select a row or focus a name to preview.
+            Saved recordings and transcripts stay on this computer. Select a row to review it.
           </CardDescription>
         </div>
       </CardHeader>
@@ -193,9 +193,9 @@ export function HistoryPanel({
           <>
             <InputGroup>
               <InputGroupInput
-                aria-label="Search transcripts"
+                aria-label="Search recordings"
                 onChange={(event) => setSearchFilter(event.target.value)}
-                placeholder="Search transcripts"
+                placeholder="Search recordings"
                 type="search"
                 value={searchFilter}
               />
@@ -294,7 +294,7 @@ export function HistoryPanel({
                   ))}
                 </div>
               ) : (
-                <p className="py-8 text-center text-sm text-muted-foreground">No transcripts match that search.</p>
+                <p className="py-8 text-center text-sm text-muted-foreground">No recordings match that search.</p>
               )}
             </ScrollArea>
           </>
@@ -304,7 +304,7 @@ export function HistoryPanel({
               <FileText />
             </EmptyMedia>
             <div>
-              <EmptyTitle>No saved transcripts yet</EmptyTitle>
+              <EmptyTitle>No recordings yet</EmptyTitle>
               <EmptyDescription>Finished transcriptions will appear here, grouped by day.</EmptyDescription>
               {onOpenHelp ? (
                 <Button

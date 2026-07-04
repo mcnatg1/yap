@@ -1,7 +1,6 @@
 import { useEffect, useRef, type ElementType } from "react";
 import {
   CircleUserRound,
-  FileText,
   Grid2X2,
   HelpCircle,
   Mic,
@@ -28,7 +27,6 @@ import type { RailAction } from "@/lib/app-types";
 const mainNav: { action: RailAction; icon: ElementType; label: string }[] = [
   { action: "home", icon: Grid2X2, label: "Home" },
   { action: "transcribe", icon: Mic, label: "Transcribe" },
-  { action: "transcripts", icon: FileText, label: "Transcripts" },
   { action: "polish", icon: Sparkles, label: "Polish" },
 ];
 

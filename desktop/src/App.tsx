@@ -9,7 +9,6 @@ import { AppChrome } from "@/components/app/app-chrome";
 import { AppSidebar } from "@/components/app/app-sidebar";
 import { HelpSheet, SettingsSheet } from "@/components/panels/app-sheets";
 import { DropHero } from "@/components/panels/drop-hero";
-import { HomePanel } from "@/components/panels/home-panel";
 import { HistoryPanel } from "@/components/panels/history-panel";
 import { PolishPanel } from "@/components/panels/polish-panel";
 import { QueuePanel } from "@/components/panels/queue-panel";
@@ -34,7 +33,6 @@ import {
   extension,
   type RailAction,
   type WorkspaceView,
-  groupHistoryByDay,
   workspaceCopy,
 } from "@/lib/app-types";
 import { historyEntryToUploadItem } from "@/lib/history-utils";
@@ -108,8 +106,11 @@ export default function App() {
     queue[0];
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
-  const showHistory = workspaceView === "transcripts";
-  const showTranscript = workspaceView === "transcribe" || workspaceView === "transcripts" || workspaceView === "polish";
+  const showHistory = workspaceView === "home";
+  const showTranscript =
+    workspaceView === "transcribe" ||
+    workspaceView === "polish" ||
+    (workspaceView === "home" && Boolean(selectedHistoryOutput));
   const showPolish = workspaceView === "polish";
 
   useEffect(() => {
@@ -257,17 +258,6 @@ export default function App() {
       void loadTranscriptText(selectedItem.output).catch(() => toast.error("Preview unavailable"));
     }
   }, [selectedItem?.output, transcriptText]);
-
-  useEffect(() => {
-    if (workspaceView !== "home" || !isTauri()) return;
-
-    const todayEntries = groupHistoryByDay(history).find((group) => group.label === "Today")?.entries ?? [];
-    for (const entry of todayEntries.slice(0, 10)) {
-      if (!transcriptText[entry.outputPath]) {
-        void loadTranscriptText(entry.outputPath).catch(() => undefined);
-      }
-    }
-  }, [history, transcriptText, workspaceView]);
 
   async function loadStatus() {
     if (!isTauri()) return;
@@ -576,8 +566,8 @@ export default function App() {
   function selectHistoryEntry(entry: TranscriptHistoryEntry) {
     setSelectedId(undefined);
     setSelectedHistoryOutput(entry.outputPath);
-    setActiveRail("transcripts");
-    setWorkspaceView("transcripts");
+    setActiveRail("home");
+    setWorkspaceView("home");
   }
 
   async function previewHistoryEntry(entry: TranscriptHistoryEntry) {
@@ -624,7 +614,7 @@ export default function App() {
           onRemove={removeHistoryEntry}
           onReveal={(entry) => void revealPath(entry.outputPath)}
           onSelect={selectHistoryEntry}
-          selectedOutputPath={selectedHistoryOutput ?? selectedItem?.output}
+          selectedOutputPath={selectedHistoryOutput}
         />
       ) : null}
 
@@ -663,7 +653,7 @@ export default function App() {
     <div
       className={cn(
         "grid w-full min-w-0 gap-5",
-        workspaceView === "transcribe" || workspaceView === "polish" || workspaceView === "transcripts"
+        showTranscript
           ? "grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]"
           : "grid-cols-1",
       )}
@@ -684,42 +674,27 @@ export default function App() {
         title={workspace.title}
       />
 
-      {workspaceView === "home" ? (
-        <HomePanel
-          history={history}
-          onOpenTranscribe={goToTranscribe}
+      {workspaceView === "transcribe" ? (
+        <DropHero
+          dragging={dragging}
+          onDragLeave={() => setDragging(false)}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+            if (!isTauri()) toast.info("Preview only");
+          }}
+          onOpenHelp={() => handleRailAction("help")}
           onPickFiles={() => void pickFiles()}
-          onSelectEntry={selectHistoryEntry}
-          onViewAll={() => handleRailAction("transcripts")}
-          previewSnippet={(entry) => transcriptText[entry.outputPath]}
-          queueCount={queue.length}
-          running={running}
         />
-      ) : (
-        <>
-          {workspaceView === "transcribe" ? (
-            <DropHero
-              dragging={dragging}
-              onDragLeave={() => setDragging(false)}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragging(true);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragging(false);
-                if (!isTauri()) toast.info("Preview only");
-              }}
-              onOpenHelp={() => handleRailAction("help")}
-              onPickFiles={() => void pickFiles()}
-            />
-          ) : null}
+      ) : null}
 
-          <section className="mt-7 w-full min-w-0">
-            {workspaceMain}
-          </section>
-        </>
-      )}
+      <section className="mt-7 w-full min-w-0">
+        {workspaceMain}
+      </section>
     </section>
   );
 

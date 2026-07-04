@@ -1,19 +1,15 @@
-export type WorkspaceView = "home" | "transcribe" | "transcripts" | "polish";
+export type WorkspaceView = "home" | "transcribe" | "polish";
 
 export type RailAction = WorkspaceView | "details" | "help";
 
 export const workspaceCopy: Record<WorkspaceView, { title: string; description: string }> = {
   home: {
     title: "Welcome back",
-    description: "Recent transcripts and a quick path back into transcribing.",
+    description: "Past recordings and transcripts on this device.",
   },
   transcribe: {
     title: "Transcribe",
     description: "Add audio or video files, transcribe locally, and review the text here.",
-  },
-  transcripts: {
-    title: "Transcripts",
-    description: "Past transcriptions, grouped by day.",
   },
   polish: {
     title: "Polish",
