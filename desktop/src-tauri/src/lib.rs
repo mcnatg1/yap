@@ -296,9 +296,22 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let permissions = value["permissions"].as_array().unwrap();
 
-        assert!(permissions
+        let open_path = permissions.iter().find(|permission| {
+            permission["identifier"].as_str() == Some("opener:allow-open-path")
+        });
+        assert!(open_path.is_some());
+
+        let allowed_paths: Vec<&str> = open_path
+            .unwrap()["allow"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|permission| permission.as_str() == Some("opener:allow-open-path")));
+            .filter_map(|entry| entry["path"].as_str())
+            .collect();
+
+        for path in ["$AUDIO/**", "$VIDEO/**", "$DESKTOP/**", "$DOWNLOAD/**", "$DOCUMENT/**"] {
+            assert!(allowed_paths.contains(&path));
+        }
     }
 }
 

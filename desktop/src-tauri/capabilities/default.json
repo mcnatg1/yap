@@ -11,6 +11,15 @@
     "core:window:allow-toggle-maximize",
     "dialog:default",
     "opener:default",
-    "opener:allow-open-path"
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "$AUDIO/**" },
+        { "path": "$VIDEO/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DOCUMENT/**" }
+      ]
+    }
   ]
 }
