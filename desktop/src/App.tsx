@@ -16,6 +16,7 @@ import { TranscriptPanel } from "@/components/panels/transcript-panel";
 import { WorkspaceHeader } from "@/components/panels/workspace-header";
 import { type UploadItem } from "@/components/stacked-upload";
 import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog";
+import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import {
@@ -107,10 +108,7 @@ export default function App() {
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
   const showHistory = workspaceView === "home";
-  const showTranscript =
-    workspaceView === "transcribe" ||
-    workspaceView === "polish" ||
-    (workspaceView === "home" && Boolean(selectedHistoryOutput));
+  const showTranscript = workspaceView === "transcribe" || workspaceView === "polish";
   const showPolish = workspaceView === "polish";
 
   useEffect(() => {
@@ -571,7 +569,6 @@ export default function App() {
   }
 
   async function previewHistoryEntry(entry: TranscriptHistoryEntry) {
-    selectHistoryEntry(entry);
     setPreviewEntry(entry);
     setPreviewText("");
 
@@ -736,6 +733,21 @@ export default function App() {
           if (!open && activeRail === "help") setActiveRail(workspaceView);
         }}
         open={helpOpen}
+      />
+      <TranscriptReviewDialog
+        elapsedSeconds={elapsedSeconds}
+        item={selectedHistoryItem}
+        onCopy={copyTranscript}
+        onOpen={(path) => void openTranscript(path)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedHistoryOutput(undefined);
+        }}
+        onOpenHelp={() => handleRailAction("help")}
+        onRetry={(id) => void retryItem(id)}
+        onReveal={(path) => void revealPath(path)}
+        open={workspaceView === "home" && Boolean(selectedHistoryItem)}
+        running={running}
+        text={selectedHistoryItem?.output ? transcriptText[selectedHistoryItem.output] : undefined}
       />
       <TranscriptPreviewDialog
         entry={previewEntry}

@@ -20,6 +20,7 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatElapsed } from "@/lib/app-types";
+import { cn } from "@/lib/utils";
 
 const WAVEFORM_BAR_COUNT = 64;
 const FALLBACK_WAVEFORM_BARS = [
@@ -438,6 +439,7 @@ function RecordingPlayer({
 }
 
 export function TranscriptPanel({
+  className,
   elapsedSeconds,
   item,
   onCopy,
@@ -448,6 +450,7 @@ export function TranscriptPanel({
   running,
   text,
 }: {
+  className?: string;
   elapsedSeconds: number;
   item?: UploadItem;
   onCopy: (item: UploadItem) => void;
@@ -480,7 +483,12 @@ export function TranscriptPanel({
   }, [isDone, item, onCopy]);
 
   return (
-    <Card className="surface-workspace-inset flex min-h-[420px] min-w-0 flex-col bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]">
+    <Card
+      className={cn(
+        "surface-workspace-inset flex min-h-[420px] min-w-0 flex-col bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]",
+        className,
+      )}
+    >
       <CardHeader className="gap-3 border-b p-4 sm:p-5">
         <div className="min-w-0">
           <CardTitle className="truncate text-lg">{item?.name ?? "Transcript"}</CardTitle>
@@ -617,7 +625,7 @@ export function TranscriptPanel({
                 <div>
                   <EmptyTitle>No transcript selected</EmptyTitle>
                   <EmptyDescription>
-                    Drop a recording on Transcribe or pick one from Transcripts.
+                    Drop a recording on Transcribe or pick one from Home.
                   </EmptyDescription>
                   <p className="mt-2 text-sm text-muted-foreground">
                     <KbdGroup className="inline-flex align-middle">
