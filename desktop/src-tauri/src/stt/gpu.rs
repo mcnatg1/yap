@@ -101,7 +101,7 @@ fn nvidia_gpu_name() -> Option<String> {
 fn platform_gpu_name() -> Option<String> {
     #[cfg(windows)]
     {
-        return windows_gpu_name();
+        windows_gpu_name()
     }
     #[cfg(not(windows))]
     {

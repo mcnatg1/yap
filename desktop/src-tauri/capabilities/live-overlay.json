@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "live-overlay",
+  "description": "Capability for the live overlay window",
+  "windows": ["live-overlay"],
+  "permissions": ["core:default"]
+}

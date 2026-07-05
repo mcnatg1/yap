@@ -1,12 +1,19 @@
 # ADR 0013: Global hotkey + cross-app text injection (L1)
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7+)
+**Status:** Accepted (roadmap — overlay/hotkey foundation in Phase 3; injection in Phase 7+)
 **Builds on:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) (STT sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [live spec](../specs/phase-3-live-ux-audio.md)
 
 ## Context
 
-L1 of the Voice OS is a **global hotkey** that opens the mic from any app and **injects** the transcribed text into the focused field — the Wispr-Flow-style surface. ADR 0003 left open: "Does global hotkey/injector share the Yap Tauri process or a second tray app?" This is the **last and most ambitious** surface; it is **Phase 7+** and must not be promised on v1 ([ADR 0002](0002-crispasr-unified-stt-runtime.md), `PRODUCT.md` anti-references).
+L1 of the Voice OS is a **global hotkey** that opens the mic from any app and **injects** the transcribed text into the focused field — the Wispr-Flow-style surface. ADR 0003 left open: "Does global hotkey/injector share the Yap Tauri process or a second tray app?"
+
+The implementation now splits this surface into two deliverable layers:
+
+- **Phase 3 foundation:** live overlay, configurable capture hotkey, mic settings, and live session state. This supports in-app/overlay live recording but does not inject text into other apps.
+- **Phase 7+ injection:** OS accessibility/input permissions, focus detection, text insertion, and clipboard fallback.
+
+Text injection remains the **last and most ambitious** surface and must not be promised on v1 ([ADR 0002](0002-crispasr-unified-stt-runtime.md), `PRODUCT.md` anti-references).
 
 ## Decision
 
@@ -15,10 +22,10 @@ L1 of the Voice OS is a **global hotkey** that opens the mic from any app and **
 | Concern | Decision |
 |---------|----------|
 | Host | Existing Yap Tauri process, running in **tray/background** mode; no second binary |
-| Hotkey | `tauri-plugin-global-shortcut` registers a user-configurable chord |
+| Hotkey | `tauri-plugin-global-shortcut` registers a user-configurable chord; capture controls can ship before text injection |
 | Mic/STT | Reuses the warm **crispasr moonshine** path + orchestrator pre-warm ([ADR 0006](0006-silero-agents-state-machine.md)) — no second STT stack |
-| Overlay | Small always-on-top webview (ghost preview) summoned at the cursor/active display |
-| Injection | OS-level text insertion (e.g. `enigo`/platform APIs): paste-style insert into the focused field |
+| Overlay | Small always-on-top webview (ghost preview), currently specified as a top-positioned translucent overlay in the Phase 3 foundation |
+| Injection | Phase 7+ OS-level text insertion (e.g. `enigo`/platform APIs): paste-style insert into the focused field |
 
 Reusing one process keeps **one STT sidecar, one orchestrator, one model residency** — the whole point of ADR 0006. A separate tray app would duplicate sidecar management and risk dual model loads.
 

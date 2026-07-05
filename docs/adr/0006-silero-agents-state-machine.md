@@ -75,7 +75,7 @@ AppRuntimeState:
   Idle                 # no STT model loaded; sidecars may be up empty
   FallbackReady        # crispasr: Moonshine tiny fallback loaded
   FallbackRunning      # local degraded/offline transcription active
-  ServerQueued         # batch file queued for DGX/server Cohere path
+  ServerQueued         # batch file queued for GB-class server Cohere path
   ServerUploading      # server batch upload/job active
   LiveReady            # mic path ready
   LiveActive           # mic open, streaming
@@ -88,7 +88,7 @@ AppRuntimeState:
 | From | Event | To | Side effects |
 |------|-------|-----|--------------|
 | Idle | User queues larger recording | ServerQueued | Prepare server job; do not load local Cohere |
-| ServerQueued | Server available + user runs queue | ServerUploading | Upload/job through DGX/server Cohere path |
+| ServerQueued | Server available + user runs queue | ServerUploading | Upload/job through GB-class server Cohere path |
 | ServerQueued | Server unavailable | Idle | Queue/block; do not silently degrade larger recordings |
 | Idle | User opens Live or explicit offline fallback | FallbackReady | Load pinned **Moonshine tiny** fallback |
 | LiveReady | Start mic | LiveActive | Pre-warm llama-server (Scribe) |

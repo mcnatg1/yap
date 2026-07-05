@@ -12,9 +12,11 @@ const CLOSE_DELAY_MS = 80;
 export function HistoryEntryPreview({
   entry,
   onLoadPreviewText,
+  onReview,
 }: {
   entry: TranscriptHistoryEntry;
   onLoadPreviewText?: (entry: TranscriptHistoryEntry) => Promise<string>;
+  onReview?: (origin?: DOMRect) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [preview, setPreview] = useState<string>();
@@ -75,11 +77,16 @@ export function HistoryEntryPreview({
     <Popover modal={false} open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <button
-          aria-label={`Preview ${entry.name}`}
+          aria-label={`Review recording ${entry.name}`}
           className={cn(
             "min-w-0 truncate text-left font-medium hover:underline",
             "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
           )}
+          onClick={(event) => {
+            event.stopPropagation();
+            const row = event.currentTarget.closest("[data-history-entry-row]");
+            onReview?.(row?.getBoundingClientRect());
+          }}
           onFocus={openImmediately}
           onPointerEnter={scheduleOpen}
           onPointerLeave={scheduleClose}

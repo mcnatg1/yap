@@ -1,21 +1,20 @@
 # Yap
 
-Yap is a Tauri desktop app for local transcription fallback work. This branch is scoped to the
-local Moonshine tiny sidecar foundation: one managed CrispASR process, pinned model artifacts,
-loopback bearer auth, progress events, and transcript files written beside source audio.
+Yap is a staged monorepo for the MVP: one desktop app, one future server tier, and the docs that keep the architecture honest.
 
-The old local Python/Cohere runner is gone. Larger recording transcription belongs in the
-DGX/server Cohere connector work, not in this local fallback branch.
+The desktop is a Tauri app with a local Moonshine tiny fallback. Larger recording transcription belongs on the GB-class server path once `yap-server` exists. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
 
 ## Current Posture
 
 - Local/live fallback: Moonshine tiny through a CrispASR sidecar.
 - Local fallback install: explicit setup/settings action; runtime never silently downloads models.
-- Batch/large recordings: future DGX/server Cohere path.
+- Client workflow: typed recording-job state for setup, local fallback, future server routing, preprocessing, and diarization.
+- Batch/large recordings: future GB-class server Cohere path.
 - Offline without a suitable server/GPU path: queue or block instead of producing low-confidence
   official-looking transcripts.
 - Punctuation stays enabled through the pinned FireRed punctuation companion.
 - Editor-specific config is not tracked. Use whichever editor you want.
+- MVP repo posture: staged monorepo, no Nx/Turborepo, no separate `yap-contracts` yet.
 
 ## Repository Layout
 
@@ -28,7 +27,12 @@ DGX/server Cohere connector work, not in this local fallback branch.
 |   |-- VOICE-OS-ARCHITECTURE.md      Current architecture narrative.
 |   |-- adr/                          Architecture decisions.
 |   |-- specs/                        Phase specs and testing notes.
+|   |-- runbooks/                     Operational setup notes.
 |   `-- superpowers/plans/            Historical implementation plans.
+|-- infra/
+|   `-- yap-server-node/              GB-class node setup script and env example.
+|-- server/
+|   `-- README.md                     MVP staging area for future yap-server work.
 `-- desktop/
     |-- README.md                     Desktop-only quick commands.
     |-- package.json                  pnpm scripts and frontend deps.
@@ -93,6 +97,17 @@ git diff --check
 rg -n "transcribe.py|CommandCenter" -g "!node_modules" -g "!target"
 ```
 
+## MVP Monorepo Rule
+
+Keep code here until the first server path is real enough to split:
+
+- `desktop/` owns the installed client and local fallback.
+- `server/` stages the Phase 8 `yap-server` contract and first service code.
+- `infra/yap-server-node/` owns host/bootstrap setup for GB-class server nodes.
+- `docs/` stays authoritative while the architecture is still moving.
+
+Do not add monorepo tooling until two packages actually need shared commands or dependency graphing. `pnpm -C desktop ...` and direct server commands are enough for now.
+
 ## Local Files
 
 These are intentionally local and ignored:
@@ -112,4 +127,4 @@ These are intentionally local and ignored:
 - No runtime backend selector.
 - No command palette or generated UI drawer.
 - No editor-specific project config.
-- No DGX/server connector yet.
+- No production `yap-server` connector yet.

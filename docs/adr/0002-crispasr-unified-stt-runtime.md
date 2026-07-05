@@ -2,8 +2,8 @@
 
 **Date:** 2026-06-30
 **Status:** Accepted
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and the moonshine-XOR-cohere exclusivity rule move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. CrispASR on the client is demoted to an **offline/degraded-mode fallback** (local Moonshine tiny) for the team profile. The on-prem DGX Spark server is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles. PR3 implements the client fallback slice only: one local Moonshine tiny sidecar, not a local Cohere batch default.
-**Supersedes:** Implementation details in [ADR 0001](0001-dual-stt-backends.md) (PyTorch `transcribe.py`, `moonshine-voice` ONNX, per-invocation subprocess, “no GGUF” rule). The product split from ADR 0001 remains: Moonshine-class streaming for live/offline fallback, Cohere for larger recordings through the DGX/server path.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and the moonshine-XOR-cohere exclusivity rule move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. CrispASR on the client is demoted to an **offline/degraded-mode fallback** (local Moonshine tiny) for the team profile. The on-prem GB-class server node is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles. PR3 implements the client fallback slice only: one local Moonshine tiny sidecar, not a local Cohere batch default.
+**Supersedes:** Implementation details in [ADR 0001](0001-dual-stt-backends.md) (PyTorch `transcribe.py`, `moonshine-voice` ONNX, per-invocation subprocess, “no GGUF” rule). The product split from ADR 0001 remains: Moonshine-class streaming for live/offline fallback, Cohere for larger recordings through the GB-class server path.
 
 ## Context
 
@@ -27,7 +27,7 @@ CrispASR is the **engine**, not the model. Yap still chooses **which GGUF files*
 
 ## Decision
 
-Adopt **CrispASR as the local STT fallback runtime**, backed by a pinned **Moonshine tiny GGUF** and a **long-lived sidecar daemon** that stays warm across sessions. Larger recording transcription moves to the DGX/server Cohere connector instead of the PR3 client fallback.
+Adopt **CrispASR as the local STT fallback runtime**, backed by a pinned **Moonshine tiny GGUF** and a **long-lived sidecar daemon** that stays warm across sessions. Larger recording transcription moves to the GB-class server Cohere connector instead of the PR3 client fallback.
 
 ### Runtime
 
@@ -42,18 +42,18 @@ Adopt **CrispASR as the local STT fallback runtime**, backed by a pinned **Moons
 | Mode | CrispASR backend | Default GGUF | Approx. size | Role |
 |------|------------------|--------------|--------------|------|
 | **Live / offline fallback** | `moonshine-streaming` | `moonshine-streaming-tiny-q4_k.gguf` ([cstr/moonshine-streaming-tiny-GGUF](https://huggingface.co/cstr/moonshine-streaming-tiny-GGUF)) | small | Low-latency English fallback; target speed over official transcript quality |
-| **Batch / larger recordings** | Server Cohere pool | Server-managed Cohere artifact | server-managed | Multilingual file transcription; export-quality transcripts when DGX/server path is available |
+| **Batch / larger recordings** | Server Cohere pool | Server-managed Cohere artifact | server-managed | Multilingual file transcription; export-quality transcripts when GB-class server path is available |
 
-Quantization policy: **Q4_K as default** for the local fallback. The client does not expose a runtime backend selector in PR3; server Cohere quality/runtime choices belong to the DGX/server connector work.
+Quantization policy: **Q4_K as default** for the local fallback. The client does not expose a runtime backend selector in PR3; server Cohere quality/runtime choices belong to the GB-class server connector work.
 
 ### Language policy (v1)
 
-**Live/offline fallback transcription is English-only for now.** Batch file transcription remains multilingual via Cohere (14 languages) when routed through the DGX/server path.
+**Live/offline fallback transcription is English-only for now.** Batch file transcription remains multilingual via Cohere (14 languages) when routed through the GB-class server path.
 
 | Mode | Languages | User control |
 |------|-----------|--------------|
 | **Live / offline fallback** | **English (`en`) only** | No model-size or language picker in PR3. |
-| **Batch / larger recordings** | Cohere’s 14 (see table below) | Server connector UX; language gate belongs with the DGX/server batch path. |
+| **Batch / larger recordings** | Cohere’s 14 (see table below) | Server connector UX; language gate belongs with the GB-class server batch path. |
 
 **Live implementation rules:**
 
@@ -88,7 +88,7 @@ Quantization policy: **Q4_K as default** for the local fallback. The client does
 ### Residency rules (from ADR 0001, unchanged)
 
 1. PR3 client fallback loads **Moonshine tiny only**.
-2. Cohere residency is a server workload-router concern once the DGX/server connector lands.
+2. Cohere residency is a server workload-router concern once the GB-class server connector lands.
 3. **Unload or idle-evict** local fallback sidecars after a configurable idle timeout (mirror llama-server / sidecar keep-warm semantics; today Ollama `keep_alive` in `desktop/src/polish.ts` until ADR 0005 migration).
 4. GGUF files live on disk under a stable cache dir; mmap + OS page cache make repeat loads fast even after process restart.
 
@@ -110,7 +110,7 @@ Prefer CrispASR **server / streaming interfaces** over spawning a new `crispasr`
 | Operation | Interface (target) |
 |-----------|-------------------|
 | **Health / version** | HTTP or CLI ping on sidecar port |
-| **Batch file** | DGX/server Cohere connector; local PR3 fallback should queue/block rather than produce low-confidence official-looking large-recording output |
+| **Batch file** | GB-class server Cohere connector; local PR3 fallback should queue/block rather than produce low-confidence official-looking large-recording output |
 | **Live mic** | `crispasr --live --stream-json --backend moonshine-streaming -l en …` with VAD; desktop consumes structured partial/final events (**English fixed**) |
 | **Mode switch** | Sidecar command to unload current backend and load the other (exclusive residency) |
 
@@ -150,7 +150,7 @@ Honest assessment of this decision — revisit when Phase 2 ships or CrispASR pi
 
 - Removes Python cold start from the production hot path.
 - GGUF + warm sidecar matches llama-server sidecar pattern for polish/agents ([ADR 0005](0005-llama-server-agents.md)).
-- Recordings stay on Cohere through the DGX/server path where the product already invested (WER, 14 languages).
+- Recordings stay on Cohere through the GB-class server path where the product already invested (WER, 14 languages).
 - English-only live avoids a 14-backend streaming matrix in v1.
 - Lazy single-backend residency keeps RAM predictable on 8–16 GB machines.
 
@@ -159,7 +159,7 @@ Honest assessment of this decision — revisit when Phase 2 ships or CrispASR pi
 - **Vendor coupling on CrispASR** — fast-moving project; we inherit breaking changes.
 - **Verified local artifacts** — download/install UX and checksum discipline are still required for the fallback binary, Moonshine GGUF, tokenizer, and punctuation companion.
 - **Sidecar ops** — second process to start, monitor, and debug; users may blame “Yap” for sidecar crashes.
-- **Server dependency for large recordings** — official-quality batch depends on the DGX/server path; offline client fallback should be clearly labeled as degraded.
+- **Server dependency for large recordings** — official-quality batch depends on the GB-class server path; offline client fallback should be clearly labeled as degraded.
 - **Live/batch asymmetry** — correct technically, confusing if UI copy is weak (mitigated in language policy).
 - **No LID in v1** — users can still pick wrong batch language until ADR 0003 Phase 4.
 
@@ -226,7 +226,7 @@ ASCII equivalent:
 |----------|--------|-------|
 | **Live/offline fallback first result** | Measure on target hardware before UX promises | Moonshine streaming tiny; warm daemon preferred |
 | **Live steady state** | Partial updates while speaking | `--stream-json` partial/final events |
-| **Batch / larger recordings** | Server SLA, not local PR3 fallback | DGX/server Cohere connector owns throughput |
+| **Batch / larger recordings** | Server SLA, not local PR3 fallback | GB-class server Cohere connector owns throughput |
 
 Wispr Flow parity is a **product** goal for live only (hotkey, injection, polish) — not for file drops.
 
@@ -237,7 +237,7 @@ Wispr Flow parity is a **product** goal for live only (hotkey, injection, polish
 | App launch | Start sidecar (or lazy-start on first STT); optional: preload nothing |
 | User opens Live / offline fallback | Load pinned `moonshine-streaming` tiny artifacts; start mic/fallback pipeline |
 | User leaves Live / idle timeout | Unload moonshine-streaming |
-| User queues larger files | Prefer DGX/server Cohere connector; queue/block if unavailable instead of silently using local fallback |
+| User queues larger files | Prefer GB-class server Cohere connector; queue/block if unavailable instead of silently using local fallback |
 | App quit | Stop sidecar gracefully |
 
 ### Phased rollout

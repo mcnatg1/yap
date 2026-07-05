@@ -31,7 +31,7 @@ Keep ADRs focused on one decision (or one tightly related cluster). Prefer updat
 
 **Readable synthesis:** [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md) — layers, roadmap, two deployment profiles, hardening, viability assessment.
 
-ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 introduce the **team / server profile** (DGX Spark server tier, two-pass diarization, auth, KB compiler, repo topology). Both profiles are normative; solo profile is the baseline for all users.
+ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 introduce the **team / server profile** (GB-class server node, two-pass diarization, auth, KB compiler, repo topology). Both profiles are normative; solo profile is the baseline for all users.
 
 ## Index
 
@@ -50,7 +50,7 @@ ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 intr
 | [0011](0011-vector-rag-retrieval.md) | Vector index + RAG retrieval (L6–L7) | Accepted (roadmap — 7e) |
 | [0012](0012-mcp-server-surface.md) | MCP server surface | Accepted (roadmap — 7e) |
 | [0013](0013-global-hotkey-injection.md) | Global hotkey + cross-app injection (L1) | Accepted (roadmap — 7+) |
-| [0014](0014-server-tier-compute-topology.md) | Server-tier compute topology — thin client + DGX Spark workload router | Accepted (roadmap — Phase 8) |
+| [0014](0014-server-tier-compute-topology.md) | Server-tier compute topology — thin client + GB-class workload router | Accepted (roadmap — Phase 8) |
 | [0015](0015-two-pass-diarization-speaker-identity.md) | Two-pass diarization and speaker identity (ECAPA-TDNN + VBx) | Accepted (roadmap — Phase 10) |
 | [0016](0016-auth-identity-bridge.md) | Authentication and voice identity bridge (Entra ID + MSAL) | Accepted (roadmap — Phase 9) |
 | [0017](0017-knowledge-base-compiler.md) | Team knowledge base — source-of-truth, compiled disposable indexes, permission model | Accepted (roadmap — Phase 11) |

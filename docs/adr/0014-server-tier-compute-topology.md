@@ -1,4 +1,4 @@
-# ADR 0014: Server-tier compute topology — thin client + DGX Spark workload router
+# ADR 0014: Server-tier compute topology — thin client + GB-class workload router
 
 **Date:** 2026-07-01
 **Status:** Accepted (roadmap — Phase 8)
@@ -15,7 +15,7 @@ Yap's existing architecture is **local-first**: the CrispASR STT sidecar, llama-
 | Moonshine medium, batch use | ~0.55× realtime | Not a batch win; slower than real speed |
 | Concurrent batch workers | 1 (CPU serialised) | No per-user throughput scaling |
 
-At the same time, the organisation has access to an **on-prem NVIDIA DGX Spark GPU server** on a network it controls and owns. This is explicitly **not a public cloud service** — it is org-owned hardware inside an org-controlled LAN/VPN. There is no conflict with Yap's "local-first / no cloud STT" principle: **"our hardware, our network"** extends the trust boundary of the local-first stance to the org's private infrastructure.
+At the same time, the organisation has access to an **on-prem NVIDIA GB-class GPU server node** on a network it controls and owns. The first supported profile is DGX Spark GB10; a later GB300-class node should keep the same `yap-server` contract and change only host-specific config and capacity. This is explicitly **not a public cloud service** — it is org-owned hardware inside an org-controlled LAN/VPN. There is no conflict with Yap's "local-first / no cloud STT" principle: **"our hardware, our network"** extends the trust boundary of the local-first stance to the org's private infrastructure.
 
 This ADR records the pivot to a **two-profile architecture** that preserves the solo/offline experience while enabling a GPU-accelerated team profile.
 
@@ -27,14 +27,14 @@ Yap supports two deployment profiles. Neither profile is deleted. The team profi
 
 | Attribute | Solo / fallback profile | Team / server profile |
 |-----------|---------------------------|----------------------|
-| Target | Individual users with local live fallback | Org teams on a shared DGX Spark |
+| Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
 | STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server-hosted Moonshine GPU (streaming ASR pool) |
 | STT (batch) | Queue/block larger recordings when offline; no local Cohere default in PR3 | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
 | Diarization | Server-less (L3 worker, Phase 7b) | Two-pass server pipeline (ADR 0015, Phase 10) |
 | Knowledge base | Local OKF markdown (Phase 7c) | `yap-knowledge` Git repo + KB compiler (ADR 0017, Phase 11) |
 | Auth | None / local | Entra ID / MSAL (ADR 0016, Phase 9) |
-| Network | None required for live fallback; DGX/server required for official recordings | LAN/VPN to DGX Spark |
+| Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
 ### Client-side responsibilities (both profiles)
 
@@ -51,7 +51,7 @@ The Tauri desktop app (`yap-desktop`) retains everything that cannot be delegate
 | **Server connector** | Manages WSS (live) and HTTP/job (batch) connections to `yap-server` |
 | **Offline / solo fallback** | Local Moonshine tiny; larger recordings should queue/block when server unreachable |
 
-### Server-side architecture (`yap-server` on DGX Spark)
+### Server-side architecture (`yap-server` on a GB-class server node)
 
 The server is the compute brain. It runs inside the org's private network and is never exposed to the public internet.
 
@@ -59,7 +59,7 @@ The server is the compute brain. It runs inside the org's private network and is
 flowchart TB
     Client["yap-desktop client\n(mic · VAD · Opus · hotkey · UI)"]
 
-    subgraph Server["yap-server — DGX Spark (org LAN/VPN)"]
+    subgraph Server["yap-server - GB-class node (org LAN/VPN)"]
         Router["Workload Router\n(per-tenant queues · fairness · backpressure)"]
 
         subgraph Pools["Model Pools"]
@@ -85,6 +85,85 @@ flowchart TB
     KB -->|"permission-filtered KB view"| Client
 ```
 
+#### Experimental C4/container view
+
+```mermaid
+C4Container
+    title Yap team/server profile
+
+    Person(user, "User", "Records, reviews, and edits transcripts")
+
+    System_Boundary(desktopBoundary, "yap-desktop") {
+        Container(desktop, "Desktop app", "Tauri + React", "Mic, UI, playback, settings")
+        Container(connector, "Server connector", "Rust/Tauri", "WSS live and HTTP batch")
+        Container(fallback, "Moonshine tiny fallback", "CrispASR", "Offline/degraded live transcription")
+    }
+
+    System_Boundary(serverBoundary, "yap-server") {
+        Container(router, "Workload router", "Service", "Queues, fairness, backpressure")
+        Container(asr, "Streaming ASR pool", "Moonshine GPU", "Live WSS tokens")
+        Container(batch, "Cohere batch pool", "GPU workers", "Large recording jobs")
+        Container(llm, "LLM pool", "GPU workers", "Scribe, polish, agents")
+        Container(kbCompiler, "KB compiler", "Service", "Permission-filtered OKF view")
+        ContainerDb(storage, "Compiled stores", "Postgres, Redis, vector DB, S3", "Identity, jobs, permissions, retrieval")
+    }
+
+    System_Ext(knowledge, "yap-knowledge", "Git source-of-truth")
+
+    Rel(user, desktop, "Uses")
+    Rel(desktop, connector, "Streams audio and uploads files")
+    Rel(connector, router, "WSS + HTTP over LAN/VPN")
+    Rel(connector, fallback, "Falls back when server is unreachable")
+    Rel(router, asr, "Dispatches live streams")
+    Rel(router, batch, "Dispatches batch jobs")
+    Rel(router, llm, "Requests polish and agent work")
+    Rel(router, kbCompiler, "Requests KB views")
+    Rel(kbCompiler, knowledge, "Reads Lane 2")
+    Rel(kbCompiler, storage, "Writes compiled layers")
+```
+
+#### Experimental C4/deployment view
+
+```mermaid
+C4Deployment
+    title Yap deployment view
+
+    Deployment_Node(userMachine, "End-user machine", "Windows/macOS") {
+        Container(desktop, "yap-desktop", "Tauri + React", "Mic, UI, playback, settings")
+        Container(connector, "Server connector", "Rust/Tauri", "WSS live and HTTP batch")
+        Container(fallback, "Moonshine tiny fallback", "CrispASR", "Offline/degraded live transcription")
+    }
+
+    Deployment_Node(gbNode, "GB-class server node", "DGX Spark GB10 now; GB300-class later") {
+        Container(router, "Workload router", "Service", "Queues, fairness, backpressure")
+        Container(asr, "Streaming ASR pool", "Moonshine GPU", "Live WSS tokens")
+        Container(batch, "Cohere batch pool", "GPU workers", "Large recording jobs")
+        Container(llm, "LLM pool", "GPU workers", "Scribe, polish, agents")
+        Container(kbCompiler, "KB compiler", "Service", "Permission-filtered OKF view")
+        ContainerDb(postgres, "Postgres", "Database", "Identity, jobs, permissions")
+        ContainerDb(redis, "Redis", "Cache", "Hot queues and permission cache")
+        ContainerDb(vectorDb, "Vector DB", "Index", "Semantic retrieval")
+        ContainerDb(objectStore, "S3 blobs", "Object store", "Audio, backups, snapshots")
+    }
+
+    Deployment_Node(gitHost, "Org Git host", "LAN/VPN") {
+        ContainerDb(okfRepo, "yap-knowledge", "Git repo", "OKF source-of-truth")
+    }
+
+    Rel(desktop, connector, "Streams audio and uploads files")
+    Rel(connector, router, "WSS + HTTP", "LAN/VPN")
+    Rel(connector, fallback, "Falls back when server is unreachable")
+    Rel(router, asr, "Dispatches live streams")
+    Rel(router, batch, "Dispatches batch jobs")
+    Rel(router, llm, "Requests polish and agent work")
+    Rel(router, kbCompiler, "Requests KB views")
+    Rel(kbCompiler, okfRepo, "Reads Lane 2")
+    Rel(kbCompiler, postgres, "Writes identity/jobs")
+    Rel(kbCompiler, redis, "Writes hot cache")
+    Rel(kbCompiler, vectorDb, "Writes semantic index")
+    Rel(batch, objectStore, "Stores blobs")
+```
+
 #### Workload router responsibilities
 
 | Concern | Mechanism |
@@ -102,6 +181,39 @@ flowchart TB
 | **Cohere batch pool** | Cohere Transcribe (GPU) | File / queue jobs | Multiple concurrent workers; GPU throughput removes the 26-min CPU bottleneck |
 | **LLM pool** | Scribe/polish + agent models (GPU) | Scribe polish, Student/Curator/Analyst/Coordinator | Multi-tenant; `-ngl` not 0 on GPU |
 
+#### Client/server protocol shape
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Desktop as yap-desktop
+    participant Connector as Server connector
+    participant Router as Workload router
+    participant ASR as Streaming ASR pool
+    participant Batch as Cohere batch pool
+    participant Fallback as Local Moonshine tiny
+
+    User->>Desktop: start live dictation
+    Desktop->>Connector: mic frames + vad_segments
+    Connector->>Router: WSS auth + Opus chunks
+    Router->>ASR: enqueue live stream
+    ASR-->>Router: partial/final tokens
+    Router-->>Connector: tokens + labels
+    Connector-->>Desktop: render preview / transcript
+
+    alt server unreachable
+        Connector->>Fallback: local live fallback
+        Fallback-->>Desktop: degraded English tokens
+    else larger recording
+        Desktop->>Connector: file upload request
+        Connector->>Router: HTTP upload + metadata
+        Router->>Batch: batch job
+        Batch-->>Router: transcript JSON
+        Router-->>Connector: job complete
+    end
+```
+
 ### Live path options
 
 | Path | When used | Notes |
@@ -113,9 +225,10 @@ flowchart TB
 
 ### On-prem is not cloud
 
-The DGX Spark server:
+The GB-class server node:
 
 - Is **org-owned hardware** on the org's physical or virtualised network.
+- Currently means DGX Spark GB10; GB300-class nodes are an allowed future profile.
 - Is **not** a third-party cloud SaaS (AWS, Azure, GCP, etc.).
 - Audio and transcripts stay inside the org's network perimeter.
 - Aligns with Yap's "no cloud STT" principle for regulated/clinical orgs: the constraint is "no third-party cloud processing," not "no GPU compute." An on-prem GPU satisfies that constraint.
@@ -173,19 +286,28 @@ The server URL is set in Settings (org onboarding). Missing or unreachable → s
 
 ### Client connector state machine (team profile)
 
-```
-Disconnected → Connecting → Connected
-                              │
-              ┌───────────────┴──────────────────┐
-              ▼                                   ▼
-     LiveStreaming (WSS)                 BatchUploading (HTTP)
+```mermaid
+stateDiagram-v2
+    [*] --> Disconnected
+    Disconnected --> Connecting: server_url present
+    Connecting --> Connected: health + auth ok
+    Connecting --> LocalFallback: timeout / auth fail
+    Connected --> LiveStreaming: live mic
+    Connected --> BatchUploading: larger recording
+    LiveStreaming --> Connected: stream final
+    BatchUploading --> Connected: job accepted
+    LiveStreaming --> LocalFallback: socket loss
+    BatchUploading --> QueuedOffline: network loss
+    QueuedOffline --> Connecting: retry
+    LocalFallback --> Connecting: server retry
+    Connected --> Disconnected: user disables server
 ```
 
 On `Connected` loss → switch to solo/local fallback; toast "Using local transcription (server unreachable)."
 
 ### Phase 8 deliverables
 
-- [ ] `yap-server` repo scaffolded (ADR 0018)
+- [ ] `server/` staging area and Phase 8 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in Phase 12)
 - [ ] Workload router: per-user queues, priority, pool dispatch
 - [ ] Streaming ASR pool: Moonshine GPU, WSS endpoint
 - [ ] Cohere batch pool: concurrent GPU workers, job queue
@@ -195,14 +317,14 @@ On `Connected` loss → switch to solo/local fallback; toast "Using local transc
 ## Open questions
 
 1. **E2E audio encryption** — TLS in transit is required. Does the org require E2E (audio encrypted client-to-GPU, not decryptable on the server host)? This would require a different key architecture.
-2. **LAN vs VPN topology** — Is the DGX Spark reachable over a corporate VPN for remote workers, or LAN-only? Affects offline-fallback frequency.
+2. **LAN vs VPN topology** — Is the server node reachable over a corporate VPN for remote workers, or LAN-only? Affects offline-fallback frequency.
 3. **Server auth for audio endpoints** — WSS and batch upload endpoints require auth tokens (ADR 0016); exact token format (JWT, Entra access token) TBD.
 
 ## Alternatives considered
 
 ### GPU cloud (AWS/Azure/GCP)
 
-**Rejected.** Violates the "no third-party cloud STT" principle that is core to Yap's trust positioning with regulated/clinical orgs. The DGX Spark is org-owned hardware; cloud is not.
+**Rejected.** Violates the "no third-party cloud STT" principle that is core to Yap's trust positioning with regulated/clinical orgs. The GB-class server node is org-owned hardware; cloud is not.
 
 ### Upgrade client hardware targets (require GPU)
 
@@ -214,4 +336,4 @@ On `Connected` loss → switch to solo/local fallback; toast "Using local transc
 
 ### Separate GPU client add-on
 
-**Rejected.** A CUDA-equipped plugin for the client would help only users who happen to have a GPU; the org already owns a DGX Spark.
+**Rejected.** A CUDA-equipped plugin for the client would help only users who happen to have a GPU; the org already owns a GB-class server node.

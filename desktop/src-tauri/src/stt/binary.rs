@@ -66,11 +66,11 @@ struct PlatformRelease<'a> {
 fn platform_release() -> Option<PlatformRelease<'static>> {
     #[cfg(windows)]
     {
-        return Some(PlatformRelease {
+        Some(PlatformRelease {
             asset: "crispasr-windows-x86_64-vulkan.zip",
             dir: "crispasr-windows-x86_64-vulkan",
             member: "crispasr-windows-x86_64-vulkan/crispasr.exe",
-        });
+        })
     }
     #[cfg(target_os = "macos")]
     {
@@ -260,7 +260,7 @@ fn extract_release(
 ) -> Result<(), SttError> {
     #[cfg(windows)]
     {
-        return extract_release_from_zip(archive, dir, member, dest_dir, dest);
+        extract_release_from_zip(archive, dir, member, dest_dir, dest)
     }
     #[cfg(not(windows))]
     {

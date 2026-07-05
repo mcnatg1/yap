@@ -65,6 +65,17 @@ export function AppSidebar({
       };
       killTweens();
 
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        gsap.set(icon, {
+          scale: collapsed ? 0.96 : 1,
+        });
+        gsap.set(wordmark, {
+          autoAlpha: collapsed ? 0 : 1,
+          x: collapsed ? -6 : 0,
+        });
+        return;
+      }
+
       gsap.to(icon, {
         duration: 0.14,
         ease: "power2.out",

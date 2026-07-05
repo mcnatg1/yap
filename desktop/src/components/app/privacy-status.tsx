@@ -12,7 +12,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 
 export function PrivacyStatus({ auth, status }: { auth: string; status: string }) {
-  const label = auth === "Authorized" ? "Ready" : status;
+  const label = auth === "Ready" || auth === "Authorized" ? "Ready" : status;
   const checking = auth === "Checking" || status === "Starting";
 
   return (
@@ -27,7 +27,7 @@ export function PrivacyStatus({ auth, status }: { auth: string; status: string }
         <PopoverHeader>
           <PopoverTitle>{checking ? "Checking setup" : label}</PopoverTitle>
           <PopoverDescription>
-            {auth === "Authorized" ? "Files stay on this device. Transcripts save locally." : status}
+            {label === "Ready" ? "Fallback ready." : status}
           </PopoverDescription>
         </PopoverHeader>
       </PopoverContent>

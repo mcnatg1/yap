@@ -127,6 +127,12 @@
     overflow: hidden;
   }
 
+  body:has(.live-glass),
+  body:has(.live-glass) #root {
+    background: transparent;
+    min-height: 0;
+  }
+
   h1,
   h2,
   h3,
@@ -197,8 +203,14 @@
     border-radius: 12px;
   }
 
+  .live-glass {
+    background: color-mix(in srgb, var(--card) 82%, transparent);
+    backdrop-filter: blur(18px) saturate(150%);
+    color: var(--foreground);
+  }
+
   .cn-sidebar-gap {
-    @apply transition-[width] duration-150 ease-out;
+    @apply transition-[width] duration-150 ease-out motion-reduce:transition-none;
   }
 
   .cn-sidebar-inner {
@@ -258,7 +270,7 @@
   }
 
   .cn-sidebar-menu-button {
-    @apply gap-2 rounded-md p-2 text-left text-sm ring-sidebar-ring outline-hidden transition-[width,height,padding] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground;
+    @apply gap-2 rounded-md p-2 text-left text-sm ring-sidebar-ring outline-hidden transition-[width,height,padding] duration-150 ease-out motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground;
   }
 
   .cn-sidebar-menu-button-variant-default {

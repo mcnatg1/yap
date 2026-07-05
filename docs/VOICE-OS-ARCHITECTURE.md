@@ -3,7 +3,7 @@
 **Status:** Living document (2026-07-01)
 **Authority:** Decisions are normative in [ADR 0001–0018](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
-> **2026-07-01 — Major pivot:** Yap now targets a thin desktop client with an on-prem DGX Spark server tier for heavy transcription. The client keeps a local Moonshine tiny sidecar as live/offline fallback; larger recordings belong on the DGX/server Cohere path. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
+> **2026-07-01 — Major pivot:** Yap now targets a thin desktop client with an on-prem NVIDIA GB-class server tier for heavy transcription. DGX Spark GB10 is the first node profile; GB300-class nodes should keep the same server contract. The client keeps a local Moonshine tiny sidecar as live/offline fallback; larger recordings belong on the server Cohere path. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
 
 ---
 
@@ -16,7 +16,7 @@
 | Principle | Why it works |
 |-----------|--------------|
 | **Local-first (solo profile)** | Offline, privacy-max; no cloud STT lock-in for individual users. |
-| **On-prem GPU (team profile)** | DGX Spark is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
+| **On-prem GPU (team profile)** | The GB-class server node is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
 | **Critical path isolation** | Live stays fast; heavy work (diarization, OKF, agents) never blocks typing. |
 | **Right model per job** | Moonshine tiny for live/offline fallback; server Cohere for recordings; **LLM pool** for polish/agents — not one model for everything. |
 | **Two-pass diarization** | ECAPA-TDNN live labels + AHC/VBx post-meeting accuracy; rolling centroid improves speaker recognition over time. |
@@ -31,8 +31,8 @@
 | **Scope creep** | Ship Yap batch → CrispASR → live EN → LID → L3 OKF in that order. |
 | **Three processes** | crispasr + llama-server + knowledge worker; worker idles out after 5 min. |
 | **CrispASR dependency** | Pin version; verified companions; loopback auth; CI smoke tests. |
-| **Wispr comparison on v1** | Don’t promise global hotkey + inject until Phase 7+; compete on batch + local first. |
-| **OKF/agents before core STT** | Transcripts history first; OKF Phase 7c. |
+| **Wispr comparison on v1** | Don’t promise global hotkey + inject until later desktop OS integration; compete on batch + local first. |
+| **OKF/agents before core STT** | Transcripts history first; OKF Phase 9. |
 
 ### Verdict
 
@@ -60,18 +60,18 @@
 
 | Attribute | **Solo / fallback** | **Team / server** |
 |-----------|------------------------|-------------------|
-| Target | Individual users with local live fallback | Org teams on a shared DGX Spark |
+| Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
 | STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server Moonshine GPU (streaming ASR pool, WSS) |
 | STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
-| Diarization | WeSpeaker + vault (Phase 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 10, ADR 0015) |
+| Diarization | WeSpeaker + vault (old 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 8, ADR 0015) |
 | Identity | None | Entra ID / MSAL (ADR 0016) |
-| Knowledge base | Local OKF markdown (Phase 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 11, ADR 0017) |
-| Network | None required for live fallback; DGX/server required for official recordings | LAN/VPN to DGX Spark |
+| Knowledge base | Local OKF markdown (old 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
+| Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
 The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In PR3, the local path is a Moonshine tiny fallback for live/offline degraded use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
-The on-prem DGX Spark is **org-owned hardware on an org-controlled LAN** — not a public cloud service. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
+The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
 Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0015](adr/0015-two-pass-diarization-speaker-identity.md) (diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos)
 
@@ -96,7 +96,7 @@ Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-u
 
 ## Pipeline charts
 
-Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Moonshine tiny fallback, and DGX/server model pools for official large-recording work. PR3 implements the local fallback slice only. Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
+Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Moonshine tiny fallback, and server model pools for official large-recording work. PR3 implements the local fallback slice only. Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
 
 **Read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
 
@@ -120,7 +120,7 @@ flowchart TB
         KW["yap-knowledge-worker<br/>align · diarize · OKF"]
     end
 
-    subgraph L1["L1 — OS + pre-warm · Phase 7+"]
+    subgraph L1["L1 — OS + pre-warm · future"]
         L1n["Hotkey · focus detect · warm sidecars + mic"]
     end
 
@@ -135,10 +135,10 @@ flowchart TB
         L3n["Align raw · WeSpeaker vault · word→speaker · stitch"]
     end
 
-    L4["L4 — OKF knowledge_base/ · Phase 7c+"]
-    L5["L5 — feedback agents · Phase 7d+<br/>Student · Curator · Auditor"]
-    L6["L6 — gateways · Phase 7e+<br/>MCP · IDE folder · vector search"]
-    L7["L7 — ask KB · Phase 7e+<br/>Librarian · Analyst · Coordinator"]
+    L4["L4 — OKF knowledge_base/ · Phase 9"]
+    L5["L5 — feedback agents · Phase 9<br/>Student · Curator · Auditor"]
+    L6["L6 — gateways · Phase 9<br/>MCP · IDE folder · vector search"]
+    L7["L7 — ask KB · Phase 9<br/>Librarian · Analyst · Coordinator"]
 
     User --> UI --> Orch
     Orch --> Sidecars
@@ -147,7 +147,7 @@ flowchart TB
     UI --> Live
     UI --> Batch
     Live --> CR & LL
-    Batch --> CR
+    Batch -.->|degraded fallback only| CR
     UI -.->|Polish panel| LL
     Live --> Handoff
     Batch --> Handoff
@@ -160,7 +160,7 @@ flowchart TB
 
 ### Team / server profile — high-level
 
-Thin client shell + DGX Spark server. The client-side STT sidecars are replaced by server model pools; the client connector streams Opus audio and receives tokens/labels. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
+Thin client shell + GB-class server node. The client-side STT sidecars are replaced by server model pools; the client connector streams Opus audio and receives tokens/labels. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
 
 ```mermaid
 flowchart TB
@@ -174,7 +174,7 @@ flowchart TB
         LocalFB["Local fallback sidecar\n(offline / degraded)"]
     end
 
-    subgraph Server["yap-server — DGX Spark (org LAN/VPN)"]
+    subgraph Server["yap-server - GB-class node (org LAN/VPN)"]
         Router["Workload router\n(per-tenant queues · fairness)"]
         ASR["Streaming ASR pool\n(Moonshine GPU · WSS)"]
         Batch["Cohere batch pool\n(concurrent GPU workers)"]
@@ -210,18 +210,18 @@ Full Voice OS flowchart reconciled for Yap — **live + batch**, orchestrator, s
 ```mermaid
 flowchart TB
     User["User"]
-    Hotkey["Global hotkey / text-field focus<br/>(Phase 7+)"]
+    Hotkey["Global hotkey / text-field focus<br/>(future)"]
 
     subgraph UI["Yap UI — Tauri + React"]
         Transcribe["Transcribe / queue panel"]
         LiveUI["Live EN panel"]
         PolishUI["Polish panel"]
         History["Transcripts history"]
-        AgentsUI["KB Q&A · Phase 7e"]
+        AgentsUI["KB Q&A · Phase 9"]
     end
 
     subgraph Orch["RuntimeOrchestrator — Rust"]
-        States["Idle · FallbackReady · FallbackRunning · ServerQueued · ServerRunning · DegradedBackground"]
+        States["Idle · FallbackReady · FallbackRunning · ServerQueued · ServerUploading · DegradedBackground"]
         Inv["Moonshine local fallback · server ASR request · 1 HOT Scribe · 1 bg LLM queue · worker 1 chunk · FIFO ≤ 3"]
     end
 
@@ -231,7 +231,7 @@ flowchart TB
         KW["yap-knowledge-worker<br/>BELOW_NORMAL · ORT 2 threads · idle exit 5 min"]
     end
 
-    subgraph L1["L1 — OS listeners + pre-warm · Phase 7+"]
+    subgraph L1["L1 — OS listeners + pre-warm · future"]
         OSHooks["Global listeners · Tauri/Rust"]
         PreWarm["Pre-warm crispasr + llama-server · open mic · Silero ready"]
     end
@@ -243,13 +243,13 @@ flowchart TB
         MS["Moonshine streaming · crispasr · -l en"]
         ScribeL["Scribe · llama-server · ≤ 400 ms · dual-track raw+polished"]
         Ghost["Ghost / in-app preview · v1"]
-        Injector["Cross-app text inject · Phase 7+"]
+        Injector["Cross-app text inject · future"]
     end
 
     subgraph L2Batch["L2 batch — server path · Yap recording quality"]
         Drop["File drop / queue"]
         LID["SpeechBrain LID gate · user confirms lang · Phase 4"]
-        COH["DGX/server Cohere · job API · 14 langs"]
+        COH["GB-class server Cohere · job API · 14 langs"]
         Save["Write .txt · append Transcripts/ history"]
         ScribeB["Polish panel · optional Scribe on saved text"]
     end
@@ -270,7 +270,7 @@ flowchart TB
         Quarantine["quarantine/ on write fail"]
     end
 
-    subgraph L4["L4 — OKF knowledge base · Phase 7c+"]
+    subgraph L4["L4 — OKF knowledge base · Phase 9"]
         KB["knowledge_base/"]
         Conv["conversations/"]
         Gloss["jargon_glossary/"]
@@ -279,19 +279,19 @@ flowchart TB
         Media["media_cache/"]
     end
 
-    subgraph L5["L5 — agentic feedback · Phase 7d+"]
+    subgraph L5["L5 — agentic feedback · Phase 9"]
         Student["Student · flag unknown terms"]
         Curator["Curator · glossary · wiki-links"]
         Auditor["Auditor · weekly contradictions · IDLE_ONLY"]
     end
 
-    subgraph L6["L6 — ecosystem gateways · Phase 7e+"]
+    subgraph L6["L6 — ecosystem gateways · Phase 9"]
         MCP["MCP server"]
         IDE["IDE open folder"]
         Vec["Vector search / embeddings"]
     end
 
-    subgraph L7["L7 — ask your KB · Phase 7e+"]
+    subgraph L7["L7 — ask your KB · Phase 9"]
         Lib["Librarian · hybrid retrieve · no LLM"]
         Analyst["Analyst · grounded answer · citations"]
         Coord["Coordinator · action items · todos"]
@@ -309,7 +309,6 @@ flowchart TB
     ScribeL --> LL
 
     Transcribe --> Drop --> LID --> COH --> Save --> History
-    COH --> CR
     PolishUI --> ScribeB --> LL
     ScribeB --> Save
 
@@ -351,28 +350,28 @@ Everything from the original 7-layer flowchart and master spec is captured below
 
 | Original flowchart node | Documented? | Where | Yap decision (if changed) |
 |-------------------------|-------------|-------|---------------------------|
-| **L1** Global OS listeners (pynput, UI automation) | ✅ | § Layer model, Phase 7+ | Future — not v1 |
+| **L1** Global OS listeners (pynput, UI automation) | ✅ | § Layer model | Future — not v1 |
 | **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005 | Warm **crispasr** + **llama-server** + mic |
 | **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Optional AGC; Silero required |
 | **L2** Silero VAD | ✅ | ADR 0004 §3, §10 | Shared `vad_segments` → L3 |
 | **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2 v1**; batch gate Phase 4 |
-| **L2** Cohere ASR (llama.cpp) | ✅ Reconciled | ADR 0001–0002/0014 | **Moonshine local fallback**; **server Cohere recordings** via DGX/server connector |
+| **L2** Cohere ASR (llama.cpp) | ✅ Reconciled | ADR 0001–0002/0014 | **Moonshine local fallback**; **server Cohere recordings** via GB-class server connector |
 | **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | **llama-server** ~2B Q4, `-ngl 0` |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
-| **L2** Cross-app injector | ✅ | Phase 7+ | Deferred |
+| **L2** Cross-app injector | ✅ | Future desktop OS integration | Deferred |
 | **L2** Silence chunker → FIFO | ✅ | ADR 0004 §3, §10 | Async writer; max queue 3 |
 | **L3** Handoff audio + raw text | ✅ | ADR 0004 chunk manifest | `text_raw` frozen at boundary |
 | **L3** Wav2Vec2 / MMS align | ✅ | ADR 0004 §5 | Align **raw** only; canary-ctc-aligner default |
 | **L3** WeSpeaker + spectral cluster | ✅ | ADR 0004 §4 | **Vault-first**; cluster unmatched only |
 | **L3** Speaker Vault (>0.70) | ✅ | ADR 0004 §4, §10 | Merge centroids ≥0.85 |
 | **L3** Word→speaker intersection | ✅ | ADR 0004 §5 | >50% overlap rule |
-| **L3** OKF parser | ✅ | ADR 0004 §6 | Phase 7c |
+| **L3** OKF parser | ✅ | ADR 0004 §6 | Phase 9 |
 | **L3** Python thread worker | ✅ Reconciled | ADR 0004 §7 | **`yap-knowledge-worker` subprocess** (not thread) |
 | **L4** knowledge_base dirs | ✅ | § Process layout | + `team_knowledge/` in long-term OKF |
 | **L5** Student, Curator, Watcher loop | ✅ | § Agents | Three-strike + git opt-in |
-| **L5** Auditor | ✅ | § Agents | Weekly cron; Phase 7d |
+| **L5** Auditor | ✅ | § Agents | Weekly cron; Phase 9 |
 | **L5** Rewriter → Post prompt cache | ✅ | § Agents | Updates Scribe system prompt |
-| **L6** IDE, MCP, VectorDB | ✅ | Phase 7e | Open-folder KB |
+| **L6** IDE, MCP, VectorDB | ✅ | Phase 9 | Open-folder KB |
 | **L7** Librarian, Analyst, Coordinator | ✅ | § Agents | RAG + citations + todos |
 | **Failure states** (Scribe, Archivist, …) | ✅ | § Failure states | Full spec below |
 | **Bottleneck / thread caps** | ✅ | § Resource profiling | ORT/torch 2 threads in worker |
@@ -507,7 +506,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 ```
 Idle ↔ FallbackReady ↔ FallbackRunning  (local Moonshine tiny)
-Idle ↔ ServerQueued ↔ ServerRunning     (DGX/server Cohere)
+Idle ↔ ServerQueued ↔ ServerUploading   (GB-class server Cohere)
          client does not load local Cohere in PR3
 ```
 
@@ -552,7 +551,7 @@ Yap (Tauri)  [yap-desktop]
 %LOCALAPPDATA%/Yap/
   models/                      GGUF cache
   Transcripts/                 Yap history (ship first)
-  knowledge_base/              OKF (Phase 7c+)
+  knowledge_base/              OKF (Phase 9)
     conversations/
     jargon_glossary/
     work_artifacts/
@@ -571,7 +570,7 @@ yap-desktop (Tauri) — thin client shell
   ├─ crispasr sidecar          Offline fallback only (Moonshine tiny)
   └─ Server connector          WSS (live) + HTTP (batch) to yap-server
 
-yap-server (DGX Spark, org LAN/VPN)
+yap-server (GB-class server node, org LAN/VPN)
   ├─ Workload router            per-tenant queues, fairness, backpressure
   ├─ Streaming ASR pool         Moonshine GPU, WSS endpoint
   ├─ Cohere batch pool          concurrent GPU workers
@@ -596,35 +595,59 @@ yap-knowledge (Git repo, org LAN)
 
 ## Master roadmap
 
-Two phase tracks run in parallel: a **numbered/lettered** product track (STT → live → LID → voice OS, including LLM A–D) and a **server track** (phases 8–12) for the team profile. There is **no Phase 6**; multilingual live is a future ADR, not a numbered slot.
+The canonical roadmap is now organized around the product boundary: **desktop thin client → server brain → enterprise/network layer**. Older ADR/spec phase labels remain as aliases until a rename is worth the churn.
 
-| Phase | Track | Deliverable | Spec / ADR |
-|-------|-------|-------------|------------|
-| **0** | product | Historical Python batch path (removed from PR3 runtime) | — |
-| **1–2** | product | Local Moonshine tiny fallback sidecar + pinned artifacts | [STT spec](specs/phase-1-2-stt-sidecar.md) · [0001](adr/0001-dual-stt-backends.md)/[0002](adr/0002-crispasr-unified-stt-runtime.md) |
-| **A** | LLM | Bundle llama-server + Rust manager | [LLM spec](specs/phase-a-d-llm-sidecar.md) · [0005](adr/0005-llama-server-agents.md) |
-| **B–C** | LLM | Migrate Polish off Ollama; default llama | [LLM spec](specs/phase-a-d-llm-sidecar.md) |
-| **3** | product | Live English (Moonshine) + Scribe bypass + Silero | [Live spec](specs/phase-3-live-ux-audio.md) · [0006](adr/0006-silero-agents-state-machine.md) |
-| **D** | LLM | Live Scribe on shared client (with Phase 3) | [LLM spec](specs/phase-a-d-llm-sidecar.md) |
-| **4** | product | SpeechBrain batch LID + language gate | [0008](adr/0008-speechbrain-lid-gate.md) |
-| **5** | product | Save live WAV → server Cohere re-pass | — |
-| **7a** | voice OS | Knowledge worker + alignment | [0009](adr/0009-knowledge-worker-protocol.md) · [0007](adr/0007-forced-alignment-engine.md) |
-| **7b** | voice OS | Diarization + Speaker Vault | [0004](adr/0004-background-diarization-okf-agents.md) |
-| **7c** | voice OS | OKF Archivist + stitch | [0010](adr/0010-okf-conversation-schema.md) |
-| **7d** | voice OS | Student / Curator (git opt-in) | [0004](adr/0004-background-diarization-okf-agents.md)/[0006](adr/0006-silero-agents-state-machine.md) |
-| **7e** | voice OS | Librarian / Analyst / RAG / MCP | [0011](adr/0011-vector-rag-retrieval.md) · [0012](adr/0012-mcp-server-surface.md) |
-| **7+** | voice OS | Global hotkey + cross-app inject (L1) | [0013](adr/0013-global-hotkey-injection.md) |
-| **8** | **server** | Server tier stand-up: DGX Spark, workload router, streaming ASR pool (Moonshine GPU), Cohere batch pool; thin-client server connector | [0014](adr/0014-server-tier-compute-topology.md) · [0018](adr/0018-three-repo-topology.md) |
-| **9** | **server** | Auth: Entra ID / MSAL sign-in, objectId→voice-centroid DB bridge, KB permission gating | [0016](adr/0016-auth-identity-bridge.md) |
-| **10** | **server** | Two-pass diarization: ECAPA-TDNN live pass, AHC+VBx post-meeting, rolling centroid | [0015](adr/0015-two-pass-diarization-speaker-identity.md) |
-| **11** | **server** | KB compiler: Lane 1 append store, Lane 2 Git, Postgres + Redis + vector DB, permission-filtered OKF view | [0017](adr/0017-knowledge-base-compiler.md) |
-| **12** | **repo** | Three-repo migration: `yap-desktop` / `yap-server` / `yap-knowledge`; `yap-contracts` deferred | [0018](adr/0018-three-repo-topology.md) |
+```mermaid
+timeline
+    title Client/server roadmap
+    0 : Architecture reset
+    1 : Desktop thin client
+    2 : Local live fallback
+    3 : Server contract
+    4 : GB-class server node
+    5 : Remote STT and upload queue
+    6 : Preprocessing pipeline
+    7 : Identity and access
+    8 : Diarization and enrichment
+    9 : Knowledge, agents, MCP
+    10 : Enterprise hardening and repo split
+```
 
-**Phases 0–7+ (solo/local-first track)** and **phases 8–12 (team/server track)** run independently. Solo profile does not require any server phase to ship.
+| Phase | Boundary | Deliverable | Old refs |
+|-------|----------|-------------|----------|
+| **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
+| **1** | desktop | Recordings home, playback, queue, settings, setup flow, and server connection state. | Phase 3 UI work |
+| **2** | desktop fallback | Local Moonshine tiny live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002 |
+| **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; Phase 8 spec |
+| **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
+| **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server Cohere/Moonshine routing. | Old Phase 5/8 |
+| **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
+| **7** | identity/access | Entra/MSAL bridge, consent, voice identity DB, and permission hooks needed by speaker identity and KB. | Old Phase 9; ADR 0016 |
+| **8** | diarization | Solo fallback diarization plus server two-pass ECAPA/VBx, speaker vault/centroids, and post-meeting correction. | Old 7b/10; ADR 0004/0015 |
+| **9** | knowledge | OKF, KB compiler, agents, RAG, MCP, and permission-filtered views. | Old 7c-7e/11; ADR 0010/0011/0012/0017 |
+| **10** | enterprise/release | Zscaler/corporate access hardening, audit/deploy runbooks, packaging, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
+
+### Current phase status
+
+| Phase | Status | Where we are now |
+|-------|--------|------------------|
+| **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
+| **1** | In progress | Desktop has recordings/playback; a typed recording-job workflow is the next required refactor before server connector wiring. |
+| **2** | In progress | Local Moonshine tiny fallback is the active local path; install/remove/disable is explicit and UI copy stays terse. |
+| **3** | Starting now | `server/` exists as a small staging area; the real API/WSS contract still needs to be written. |
+| **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
+| **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
+| **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
+| **7** | Planned | Auth/identity bridge design exists; implementation waits for a server entrypoint. |
+| **8** | Planned, not optional | Diarization remains first-class: solo fallback plus server two-pass speaker identity. |
+| **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
+| **10** | Later | Corporate access hardening, release packaging, and repo split come after the MVP server is real. |
+
+Solo/local fallback and team/server mode share concepts, but the server path is now canonical for the main roadmap.
 
 **Future (unnumbered):** multilingual live router — its own ADR once per-language streaming backends are chosen; server GPU removes the latency excuse.
 
-**Build specs:** [STT 1–2](specs/phase-1-2-stt-sidecar.md) · [LLM A–D](specs/phase-a-d-llm-sidecar.md) · [Live 3](specs/phase-3-live-ux-audio.md) · [Testing](specs/testing-strategy.md). LID/L3 are ADR-scoped; their build specs come when the phase starts. Server phases (8–12) build specs TBD.
+**Build specs:** [Client state machine](specs/client-state-machine.md) · [STT 1-2](specs/phase-1-2-stt-sidecar.md) · [LLM A-D](specs/phase-a-d-llm-sidecar.md) · [Live 3](specs/phase-3-live-ux-audio.md) · [Phase 8 server](specs/phase-8-yap-server.md) · [Testing](specs/testing-strategy.md). Spec filenames still use historical phase labels. Preprocessing, diarization, and server phases get build specs when implementation begins.
 
 ---
 
@@ -634,17 +657,16 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
-| **1–2** STT sidecar | Local Moonshine fallback sidecar | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; Setup status copy |
-| **A–D** llama-server | Polish off Ollama → llama-server | New LLM sidecar spec; `polish.ts` notes; dev-only Ollama docs |
-| **3** Live EN | Moonshine + Scribe bypass + Silero | **PRODUCT.md**: add live entry, soften “not dictation” → “not global dictation *yet*”; new Live UX spec |
-| **4** LID gate | SpeechBrain batch detect | Resolve [ADR 0003 open questions](adr/0003-long-term-voice-architecture.md); language-memory UX |
-| **7a–7c** L3 | Worker, diarize, OKF (solo) | OKF schema spec; worker IPC protocol; aligner final pick |
-| **7d–7e** Agents/KB | Student…Coordinator, MCP (solo) | RAG/vector ADR; MCP surface spec; per-agent prompt registry |
-| **8** Server tier | Workload router + model pools + client connector | Build spec TBD; [ADR 0014](adr/0014-server-tier-compute-topology.md) |
-| **9** Auth | Entra sign-in + identity DB | MSAL integration; consent UI; biometric enrollment UX |
-| **10** Two-pass diarization | ECAPA-TDNN + VBx + rolling centroid | ECAPA model pinned; Pass 1 + Pass 2 services |
-| **11** KB compiler | Lane 1+2 + Postgres + Redis + vector + OKF view | IaC migrations; permission compile SLA |
-| **12** Three-repo split | `yap-desktop` / `yap-server` / `yap-knowledge` | CI/CD migration; cross-repo link update |
+| **1** Desktop thin client | Recordings home, playback, recording-job workflow, setup/settings | Product copy; setup flow; connected/offline states |
+| **2** Local fallback | Moonshine tiny live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; setup download docs |
+| **3** Server contract | Health, jobs, WSS, errors, client connector | [Phase 8 server spec](specs/phase-8-yap-server.md); OpenAPI/WSS docs |
+| **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
+| **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
+| **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
+| **7** Identity/access | Entra sign-in, consent, identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
+| **8** Diarization | Solo fallback + server two-pass diarization | [ADR 0004](adr/0004-background-diarization-okf-agents.md); [ADR 0015](adr/0015-two-pass-diarization-speaker-identity.md) |
+| **9** Knowledge/agents | OKF, KB compiler, RAG, MCP | KB compiler spec; permission compile SLA |
+| **10** Enterprise/release | Zscaler/corp access, packaging, repo split | CI/CD migration; cross-repo link update |
 
 ---
 
@@ -711,9 +733,11 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 | Spec | Phase |
 |------|-------|
+| [Client state machine](specs/client-state-machine.md) | 1–2 |
 | [STT sidecar](specs/phase-1-2-stt-sidecar.md) | 1–2 |
 | [LLM sidecar](specs/phase-a-d-llm-sidecar.md) | A–D |
 | [Live UX + audio](specs/phase-3-live-ux-audio.md) | 3 |
+| [Yap server](specs/phase-8-yap-server.md) | 3–4 server |
 | [Testing strategy](specs/testing-strategy.md) | all |
 
 ## Related documents

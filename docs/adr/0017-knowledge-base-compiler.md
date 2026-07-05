@@ -298,7 +298,7 @@ The compiler expands group membership from Entra ID (ADR 0016) to individual `ob
 ## Open questions
 
 1. **Lane 1 migration threshold** — What specific metric (e.g. transcript commits/day, repo size, CI time) triggers migration from the Git-compatible Lane 1 design to a dedicated content-addressed store? Monitoring-driven; not a fixed number.
-2. **Vector DB choice** — Milvus vs pgvector vs Qdrant? Evaluate at Phase 11 build time against the DGX Spark hardware profile (RAM, storage IOPS, GPU-accelerated ANN). Record the decision in an ADR amendment.
+2. **Vector DB choice** — Milvus vs pgvector vs Qdrant? Evaluate at Phase 11 build time against the GB-class server node profile (RAM, storage IOPS, GPU-accelerated ANN). Record the decision in an ADR amendment.
 3. **Permission compile latency SLA** — How quickly must a permission change propagate to all users? (Seconds? Minutes?) This drives the compile pipeline design (incremental vs full rebuild).
 4. **`yap-knowledge` repo host** — Self-hosted Gitea on the org LAN vs GitHub Enterprise? Must be reachable from `yap-server`; must satisfy the org's data-residency requirements.
 

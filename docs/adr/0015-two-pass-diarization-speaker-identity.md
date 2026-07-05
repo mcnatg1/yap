@@ -7,7 +7,7 @@
 
 ## Context
 
-[ADR 0004](0004-background-diarization-okf-agents.md) specified a CPU diarizer (WeSpeaker ResNet34 ONNX + spectral clustering + Rolling Speaker Vault) appropriate for the solo/local-first profile on a 16 GB laptop. The pivot to a server tier (ADR 0014) opens the design space: the DGX Spark GPU can run more accurate models with lower latency.
+[ADR 0004](0004-background-diarization-okf-agents.md) specified a CPU diarizer (WeSpeaker ResNet34 ONNX + spectral clustering + Rolling Speaker Vault) appropriate for the solo/local-first profile on a 16 GB laptop. The pivot to a server tier (ADR 0014) opens the design space: the GB-class server node can run more accurate models with lower latency.
 
 Three unresolved problems with the ADR 0004 design at team scale:
 
@@ -153,7 +153,7 @@ ADR 0004's WeSpeaker + spectral clustering pipeline is **retained as-is for the 
 - **Two passes = two latency windows** — Pass 1 is immediate; Pass 2 adds post-meeting processing time (minutes, not hours on GPU).
 - **Identity DB required** — Pass 1 k-NN match is only meaningful if the employee centroid pool is populated; new enrollees get `SESSION_XX` until their centroid matures (~2–3 meetings).
 - **Privacy** — voice biometrics are sensitive personal data; ADR 0016 addresses consent and compliance.
-- **Server dependency** — two-pass diarization requires the DGX Spark server; solo profile falls back to ADR 0004 pipeline.
+- **Server dependency** — two-pass diarization requires the GB-class server node; solo profile falls back to ADR 0004 pipeline.
 
 ### Neutral
 
@@ -207,7 +207,7 @@ session_end event
 
 ### pyannote/NeMo full pipelines
 
-**Reconsidered for server profile.** ADR 0004 rejected these due to 8 GB RAM cost on laptops. On the DGX Spark GPU server, the RAM constraint is lifted; evaluate pyannote 3.x against ECAPA-TDNN + VBx at Phase 10 build time and document the decision in an amendment.
+**Reconsidered for server profile.** ADR 0004 rejected these due to 8 GB RAM cost on laptops. On the GB-class server node, the RAM constraint is lifted; evaluate pyannote 3.x against ECAPA-TDNN + VBx at Phase 10 build time and document the decision in an amendment.
 
 ### Single-pass post-meeting diarization only
 

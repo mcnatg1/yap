@@ -248,6 +248,7 @@ export function HistoryPanel({
                                     <HistoryEntryPreview
                                       entry={entry}
                                       onLoadPreviewText={onLoadPreviewText}
+                                      onReview={(origin) => onSelect(entry, origin)}
                                     />
                                   </div>
                                 </TableCell>

@@ -2,7 +2,6 @@ import { useState, type KeyboardEvent } from "react";
 import { ChevronDown, Copy, Save, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
-import { type UploadItem } from "@/components/stacked-upload";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,7 +21,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { basename } from "@/lib/app-types";
+import { basename, isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
 import {
   polishToneHints,
   polishToneLabels,
@@ -82,15 +81,15 @@ export function PolishPanel({
   originalText,
   polishedText,
 }: {
-  item?: UploadItem;
+  item?: RecordingJobView;
   onLoadText: (path: string) => Promise<string>;
   onOpenHelp?: () => void;
   onPolished: (outputPath: string, text: string) => void;
-  onSave: (item: UploadItem, text: string) => Promise<string>;
+  onSave: (item: RecordingJobView, text: string) => Promise<string>;
   originalText?: string;
   polishedText?: string;
 }) {
-  const ready = item?.status === "done";
+  const ready = Boolean(item?.output && isRecordingFinished(item.status));
   const [tone, setTone] = useState<PolishTone>("light");
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);

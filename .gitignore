@@ -2,6 +2,13 @@
 __pycache__/
 *.py[cod]
 *.log
+.env
+.env.*
+*.env
+!*.env.example
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 desktop/node_modules/
 desktop/dist/
@@ -11,6 +18,26 @@ desktop/src-tauri/target/
 .tools/
 .xwin-cache/
 .xwin-sdk/
+.codex-screenshots/
+
+server/data/
+server/logs/
+server/models/
+server/volumes/
+server/.runtime/
+
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.sqlite*
+*.db
+*.pem
+*.key
+*.p12
+*.pfx
 
 *.local
 .DS_Store

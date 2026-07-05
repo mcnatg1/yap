@@ -14,6 +14,15 @@ export default defineConfig(async () => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    // ponytail: desktop shell is one app surface; split further when startup profiling says it matters.
+    chunkSizeWarningLimit: 650,
+    rolldownOptions: {
+      checks: {
+        pluginTimings: false,
+      },
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

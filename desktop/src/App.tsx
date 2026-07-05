@@ -1,7 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -14,7 +13,6 @@ import { PolishPanel } from "@/components/panels/polish-panel";
 import { QueuePanel } from "@/components/panels/queue-panel";
 import { TranscriptPanel } from "@/components/panels/transcript-panel";
 import { WorkspaceHeader } from "@/components/panels/workspace-header";
-import { type UploadItem } from "@/components/stacked-upload";
 import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog";
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
@@ -31,13 +29,42 @@ import {
   audioExtensions,
   audioExts,
   basename,
+  createInitialPipelineState,
+  deriveSetupState,
   extension,
+  isRecordingActive,
+  isRecordingFinished,
+  isRecordingRetryable,
+  isRecordingRunnable,
+  recordingStatusForStartFailure,
+  serverConnectionLabel,
+  setupStateLabel,
+  type LiveCaptureMode,
+  type LiveInputDeviceView,
+  type LiveSessionView,
   type RailAction,
+  type RecordingJobView,
+  type ServerConnectionState,
+  type SetupState,
   type WorkspaceView,
   workspaceCopy,
 } from "@/lib/app-types";
-import { historyEntryToUploadItem } from "@/lib/history-utils";
+import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import { cn } from "@/lib/utils";
+import {
+  clearLiveHotkey,
+  listInputDevices,
+  listenLiveSession,
+  liveStatus,
+  preflightInputDevice,
+  setInputDevice,
+  setLiveCaptureMode,
+  setLiveHotkey,
+  setLiveOverlayEnabled,
+  showLiveOverlay,
+  startLiveSession,
+  stopLiveSession,
+} from "@/live";
 import {
   listenTranscribeEvents,
   SttInvokeError,
@@ -59,6 +86,16 @@ type SetupStatus = {
 };
 
 const setupSkipKey = "yap-local-fallback-setup-skipped";
+const defaultLiveHotkey = "Ctrl+Shift+Space";
+const batchServerUnavailableMessage = "Server batch transcription is not wired yet.";
+
+const initialLiveView: LiveSessionView = {
+  captureMode: "pushToTalk",
+  hotkey: defaultLiveHotkey,
+  route: "none",
+  status: "idle",
+  visibility: "enabled",
+};
 
 type ReviewMorphOrigin = {
   height: number;
@@ -68,7 +105,7 @@ type ReviewMorphOrigin = {
 };
 
 export default function App() {
-  const [queue, setQueue] = useState<UploadItem[]>([]);
+  const [queue, setQueue] = useState<RecordingJobView[]>([]);
   const [nextId, setNextId] = useState(1);
   const [dragging, setDragging] = useState(false);
   const [running, setRunning] = useState(false);
@@ -80,7 +117,14 @@ export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [fallbackEnabled, setFallbackEnabled] = useState(true);
   const [modelInstalled, setModelInstalled] = useState(false);
+  const [setupState, setSetupState] = useState<SetupState>("checking");
+  const [serverState] = useState<ServerConnectionState>("not_set");
+  const [setupRoot, setSetupRoot] = useState("");
   const [setupBusy, setSetupBusy] = useState(false);
+  const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
+  const [liveInputDevices, setLiveInputDevices] = useState<LiveInputDeviceView[]>([]);
+  const [liveBusy, setLiveBusy] = useState(false);
+  const [liveSettingsError, setLiveSettingsError] = useState("");
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
@@ -98,20 +142,22 @@ export default function App() {
   const setupPrompted = useRef(false);
 
   const hasRunnable = useMemo(
-    () => queue.some((item) => item.status === "queued" || item.status === "error"),
+    () => queue.some((item) => isRecordingRunnable(item.status)),
     [queue],
   );
-  const completed = queue.filter((item) => item.status === "done").length;
+  const completed = queue.filter((item) => isRecordingFinished(item.status)).length;
   const queueProgress = queue.length ? Math.round((completed / queue.length) * 100) : 0;
-  const runningItem = queue.find((item) => item.status === "running");
+  const runningItem = queue.find((item) => isRecordingActive(item.status));
   const elapsedSeconds = useElapsedSeconds(runningSince);
+  const serverLabel = serverConnectionLabel(serverState);
+  const setupLabel = setupStateLabel(setupState);
   const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
-  const selectedHistoryItem = selectedHistoryEntry ? historyEntryToUploadItem(selectedHistoryEntry) : undefined;
+  const selectedHistoryItem = selectedHistoryEntry ? historyEntryToRecordingJob(selectedHistoryEntry) : undefined;
   const selectedItem =
     queue.find((item) => item.id === selectedId) ??
     selectedHistoryItem ??
-    [...queue].reverse().find((item) => item.status === "done") ??
-    (history[0] ? historyEntryToUploadItem(history[0]) : undefined) ??
+    [...queue].reverse().find((item) => isRecordingFinished(item.status)) ??
+    (history[0] ? historyEntryToRecordingJob(history[0]) : undefined) ??
     queue[0];
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
@@ -122,7 +168,9 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
 
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let unlistenLive: (() => void) | undefined;
 
     void listenTranscribeEvents({
       onProgress: (event) => {
@@ -135,22 +183,57 @@ export default function App() {
         finishBatch(event);
       },
       onError: (error) => {
+        const message = error.message || "Transcription failed";
+        const pendingIds = new Set(pathToItemId.current.values());
+        setQueue((items) =>
+          items.map((entry) =>
+            pendingIds.has(entry.id) && !isRecordingFinished(entry.status)
+              ? {
+                  ...entry,
+                  error: message,
+                  pipeline: {
+                    ...entry.pipeline,
+                    transcription: "error",
+                  },
+                  progressMessage: undefined,
+                  progressPercent: undefined,
+                  progressPhase: undefined,
+                  status: "failed",
+                }
+              : entry,
+          ),
+        );
         setRunning(false);
         setRunningSince(undefined);
+        pathToItemId.current.clear();
         setStatus("Needs attention");
         setAuth("Check local engine");
-        toast.error(error.message || "Transcription failed");
+        toast.error(message);
       },
     }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
       unlisten = stop;
     });
 
+    void listenLiveSession(setLiveView).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlistenLive = stop;
+    });
+
     return () => {
+      cancelled = true;
       unlisten?.();
+      unlistenLive?.();
     };
   }, []);
 
-  function updateQueueItem(path: string, updater: (item: UploadItem) => UploadItem) {
+  function updateQueueItem(path: string, updater: (item: RecordingJobView) => RecordingJobView) {
     setQueue((items) =>
       items.map((entry) => (entry.path === path ? updater(entry) : entry)),
     );
@@ -159,11 +242,17 @@ export default function App() {
   function updateItemProgress(event: TranscribeProgressEvent) {
     updateQueueItem(event.path, (entry) => ({
       ...entry,
-      status: "running",
+      error: undefined,
+      pipeline: {
+        ...entry.pipeline,
+        intake: "done",
+        transcription: "running",
+      },
       progressPhase: event.phase,
       progressPercent: event.percent,
       progressMessage: event.message,
-      error: undefined,
+      route: "localFallback",
+      status: event.phase === "writing" ? "saving" : "local_transcribing",
     }));
     setStatus(event.message);
     const itemId = pathToItemId.current.get(event.path);
@@ -178,11 +267,15 @@ export default function App() {
       const message = transcriptFileError(result) ?? "Transcription failed.";
       updateQueueItem(event.path, (entry) => ({
         ...entry,
-        status: "error",
         error: message,
+        pipeline: {
+          ...entry.pipeline,
+          transcription: "error",
+        },
         progressPhase: undefined,
         progressPercent: undefined,
         progressMessage: undefined,
+        status: "failed",
       }));
       toast.error(`${basename(event.path)}: ${message}`);
       return;
@@ -191,11 +284,17 @@ export default function App() {
     updateQueueItem(event.path, (entry) => ({
       ...entry,
       output: result.output,
-      status: "done",
       error: undefined,
+      pipeline: {
+        ...entry.pipeline,
+        intake: "done",
+        transcription: "done",
+        postprocessing: "done",
+      },
       progressPhase: "done",
       progressPercent: 100,
       progressMessage: "Transcript saved",
+      status: "complete",
     }));
     recordHistoryEntries([
       {
@@ -211,7 +310,7 @@ export default function App() {
 
   function finishBatch(event: TranscribeBatchCompleteEvent) {
     setStatus(event.failed ? "Needs attention" : "Ready");
-    setAuth("Authorized");
+    setAuth("Ready");
     if (event.succeeded) {
       toast.success(`Transcribed ${event.succeeded} file${event.succeeded === 1 ? "" : "s"}`);
     }
@@ -271,20 +370,53 @@ export default function App() {
     try {
       const setup = await invoke<SetupStatus>("setup_status");
       applySetupStatus(setup);
+      await loadLiveControls();
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
     }
   }
 
+  async function loadLiveControls() {
+    const [live, devices] = await Promise.all([liveStatus(), listInputDevices()]);
+    setLiveView(live);
+    setLiveInputDevices(devices);
+  }
+
   function applySetupStatus(setup: SetupStatus) {
+    const nextSetupState = deriveSetupState({
+      engineReady: setup.engineReady,
+      fallbackEnabled: setup.fallbackEnabled,
+      modelInstalled: setup.modelInstalled,
+    });
+
     setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
-    setStatus(setup.engineReady ? setup.engineStatus : "Setup missing");
-    setAuth(setup.engineReady ? "Authorized" : "Local engine unavailable");
+    setStatus(setup.engineReady ? setup.engineStatus : "Setup");
+    setAuth(setup.engineReady ? "Ready" : "Setup");
     setEngineBinaryStatus(setup.engineBinaryStatus);
     setEngineReady(setup.engineReady);
     setFallbackEnabled(setup.fallbackEnabled);
     setModelInstalled(setup.modelInstalled);
+    setSetupRoot(setup.root);
+    setSetupState(nextSetupState);
+
+    if (nextSetupState === "fallback_ready") {
+      setQueue((items) =>
+        items.map((item) =>
+          item.status === "blocked_setup_required"
+            ? {
+                ...item,
+                error: undefined,
+                pipeline: {
+                  ...item.pipeline,
+                  transcription: "notStarted",
+                },
+                status: "queued_local_fallback",
+              }
+            : item,
+        ),
+      );
+    }
 
     if (!setup.engineReady && !setupPrompted.current && localStorage.getItem(setupSkipKey) !== "true") {
       setupPrompted.current = true;
@@ -297,6 +429,7 @@ export default function App() {
     if (!isTauri() || setupBusy) return;
 
     setSetupBusy(true);
+    setSetupState("fallback_installing");
     setStatus("Installing local fallback");
     try {
       const setup = await invoke<SetupStatus>("install_local_fallback");
@@ -304,6 +437,7 @@ export default function App() {
       applySetupStatus(setup);
       toast.success("Local fallback installed");
     } catch (error) {
+      setSetupState("setup_error");
       toast.error(`Install failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -320,6 +454,7 @@ export default function App() {
       applySetupStatus(setup);
       toast.success("Local fallback files removed");
     } catch (error) {
+      setSetupState("setup_error");
       toast.error(`Remove failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -337,6 +472,7 @@ export default function App() {
       applySetupStatus(setup);
       toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
     } catch (error) {
+      setSetupState("setup_error");
       toast.error(`Update failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -350,6 +486,65 @@ export default function App() {
     if (activeRail === "details") setActiveRail(workspaceView);
   }
 
+  async function updateLive(action: () => Promise<LiveSessionView>, message?: string) {
+    if (!isTauri() || liveBusy) return;
+
+    setLiveBusy(true);
+    try {
+      setLiveSettingsError("");
+      const view = await action();
+      setLiveView(view);
+      setLiveInputDevices(await listInputDevices());
+      if (message) toast.success(message);
+    } catch (error) {
+      const message = String(error);
+      setLiveSettingsError(message);
+      toast.error(message);
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
+  function updateLiveOverlay(enabled: boolean) {
+    void updateLive(() => setLiveOverlayEnabled(enabled), enabled ? "Live overlay enabled" : "Live overlay hidden");
+  }
+
+  function updateLiveHotkey(hotkey: string) {
+    const next = hotkey.trim();
+    void updateLive(next ? () => setLiveHotkey(next) : clearLiveHotkey, next ? "Live shortcut updated" : "Live shortcut cleared");
+  }
+
+  function resetLiveHotkey() {
+    void updateLive(() => setLiveHotkey(defaultLiveHotkey), "Live shortcut reset");
+  }
+
+  function clearLiveShortcut() {
+    void updateLive(clearLiveHotkey, "Live shortcut cleared");
+  }
+
+  function updateLiveCaptureMode(captureMode: LiveCaptureMode) {
+    void updateLive(() => setLiveCaptureMode(captureMode));
+  }
+
+  function updateInputDevice(deviceId?: string) {
+    void updateLive(() => setInputDevice(deviceId));
+  }
+
+  function preflightLiveInput() {
+    void updateLive(preflightInputDevice);
+  }
+
+  function startLive() {
+    void updateLive(async () => {
+      await showLiveOverlay();
+      return startLiveSession();
+    });
+  }
+
+  function stopLive() {
+    void updateLive(stopLiveSession);
+  }
+
   function addPaths(paths: string[]) {
     setQueue((current) => {
       const existing = new Set(current.map((item) => item.path));
@@ -359,11 +554,15 @@ export default function App() {
         return current;
       }
 
-      const newItems = accepted.map((path, index) => ({
+      const newItems: RecordingJobView[] = accepted.map((path, index) => ({
+        error: batchServerUnavailableMessage,
         id: nextId + index,
-        path,
+        intent: "recording",
         name: basename(path),
-        status: "queued" as const,
+        path,
+        pipeline: createInitialPipelineState(),
+        route: "serverBatch",
+        status: "blocked_server_unavailable",
       }));
       setNextId((id) => id + newItems.length);
       if (newItems.length) {
@@ -418,12 +617,16 @@ export default function App() {
     setWorkspaceView(action);
 
     if (action === "polish") {
-      setStatus(selectedItem?.status === "done" ? "Transcript ready" : "Transcribe a file first");
+      setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
     }
   }
 
-  async function transcribeItems(pending: UploadItem[]) {
+  async function transcribeItems(pending: RecordingJobView[]) {
     if (!pending.length || running || !isTauri()) return;
+    if (pending.some((item) => item.intent === "recording")) {
+      toast.error(batchServerUnavailableMessage);
+      return;
+    }
 
     pathToItemId.current = new Map(pending.map((item) => [item.path, item.id]));
     setRunning(true);
@@ -437,11 +640,17 @@ export default function App() {
           entry.id === item.id
             ? {
                 ...entry,
-                status: index === 0 ? "running" : "queued",
                 error: undefined,
+                pipeline: {
+                  ...entry.pipeline,
+                  intake: "done",
+                  transcription: index === 0 ? "running" : "queued",
+                },
                 progressPhase: index === 0 ? "starting" : undefined,
                 progressPercent: index === 0 ? 0 : undefined,
-                progressMessage: index === 0 ? "Preparing…" : undefined,
+                progressMessage: index === 0 ? "Preparing..." : undefined,
+                route: "localFallback",
+                status: index === 0 ? "local_transcribing" : "queued_local_fallback",
               }
             : entry,
         ),
@@ -453,6 +662,26 @@ export default function App() {
     } catch (error) {
       const failure = error instanceof SttInvokeError ? error : undefined;
       const message = failure?.message ?? String(error || "Transcription failed");
+      const status = recordingStatusForStartFailure(failure?.code);
+      const pendingIds = new Set(pending.map((entry) => entry.id));
+      setQueue((items) =>
+        items.map((entry) =>
+          pendingIds.has(entry.id)
+            ? {
+                ...entry,
+                error: message,
+                pipeline: {
+                  ...entry.pipeline,
+                  transcription: status === "failed" ? "error" : "notStarted",
+                },
+                progressMessage: undefined,
+                progressPercent: undefined,
+                progressPhase: undefined,
+                status,
+              }
+            : entry,
+        ),
+      );
       setRunning(false);
       setRunningSince(undefined);
       pathToItemId.current.clear();
@@ -462,20 +691,41 @@ export default function App() {
   }
 
   async function runQueue() {
-    const pending = queue.filter((item) => item.status === "queued" || item.status === "error");
+    const pending = queue.filter((item) => isRecordingRunnable(item.status));
     await transcribeItems(pending);
   }
 
   async function retryItem(id: number) {
     const item = queue.find((entry) => entry.id === id);
-    if (!item || item.status !== "error" || running) return;
+    if (!item || !isRecordingRetryable(item.status) || running) return;
 
     setSelectedId(id);
-    await transcribeItems([{ ...item, status: "queued", error: undefined }]);
+    await transcribeItems([{ ...item, status: "queued_local_fallback", error: undefined }]);
   }
 
   function removeItem(id: number) {
-    setQueue((items) => items.filter((item) => item.id !== id));
+    setQueue((items) => {
+      const item = items.find((entry) => entry.id === id);
+      if (!item || isRecordingActive(item.status)) return items;
+      if (item.status === "cancelled") return items.filter((entry) => entry.id !== id);
+
+      return items.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              error: undefined,
+              pipeline: {
+                ...entry.pipeline,
+                transcription: entry.pipeline.transcription === "running" ? "skipped" : entry.pipeline.transcription,
+              },
+              progressMessage: undefined,
+              progressPercent: undefined,
+              progressPhase: undefined,
+              status: "cancelled",
+            }
+          : entry,
+      );
+    });
   }
 
   function selectQueueItem(id: number) {
@@ -499,7 +749,7 @@ export default function App() {
     return text;
   }
 
-  async function copyTranscript(item: UploadItem) {
+  async function copyTranscript(item: RecordingJobView) {
     if (!item.output) return;
 
     try {
@@ -511,9 +761,9 @@ export default function App() {
     }
   }
 
-  async function openTranscript(path: string) {
+  async function openAppPath(path: string) {
     try {
-      await openPath(path);
+      await invoke("open_app_path", { path });
       toast.success("Opened file");
     } catch {
       toast.error("Open failed");
@@ -522,13 +772,13 @@ export default function App() {
 
   async function revealPath(path: string) {
     try {
-      await revealItemInDir(path);
+      await invoke("reveal_app_path", { path });
     } catch {
       toast.error("Reveal failed");
     }
   }
 
-  async function savePolishedTranscript(item: UploadItem, text: string) {
+  async function savePolishedTranscript(item: RecordingJobView, text: string) {
     if (!item.output || !text.trim()) return "";
 
     try {
@@ -621,9 +871,9 @@ export default function App() {
       {showHistory ? (
         <HistoryPanel
           entries={history}
-          onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
+          onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
           onLoadPreviewText={(entry) => loadTranscriptText(entry.outputPath)}
-          onOpen={(entry) => void openTranscript(entry.outputPath)}
+          onOpen={(entry) => void openAppPath(entry.outputPath)}
           onOpenHelp={() => handleRailAction("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
           onRemove={removeHistoryEntry}
@@ -655,7 +905,7 @@ export default function App() {
         elapsedSeconds={elapsedSeconds}
         item={selectedItem}
         onCopy={copyTranscript}
-        onOpen={(path) => void openTranscript(path)}
+        onOpen={(path) => void openAppPath(path)}
         onOpenHelp={() => handleRailAction("help")}
         onRetry={(id) => void retryItem(id)}
         onReveal={(path) => void revealPath(path)}
@@ -669,7 +919,7 @@ export default function App() {
       className={cn(
         "grid w-full min-w-0 gap-5",
         showTranscript
-          ? "grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]"
+          ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]"
           : "grid-cols-1",
       )}
     >
@@ -734,15 +984,31 @@ export default function App() {
         fallbackEnabled={fallbackEnabled}
         model={model}
         modelInstalled={modelInstalled}
+        liveBusy={liveBusy}
+        liveInputDevices={liveInputDevices}
+        liveSettingsError={liveSettingsError}
+        liveView={liveView}
+        onClearLiveHotkey={clearLiveShortcut}
         onInstallFallback={() => void installFallback()}
+        onPreflightLiveInput={preflightLiveInput}
+        onResetLiveHotkey={resetLiveHotkey}
         onOpenChange={(open) => {
           setDetailsOpen(open);
           if (!open && activeRail === "details") setActiveRail(workspaceView);
         }}
         onRemoveFallback={() => void removeFallback()}
+        onSetInputDevice={updateInputDevice}
         onSetFallbackEnabled={(enabled) => void setFallbackEnabledSetting(enabled)}
+        onSetLiveCaptureMode={updateLiveCaptureMode}
+        onSetLiveHotkey={updateLiveHotkey}
+        onSetLiveOverlayEnabled={updateLiveOverlay}
         onSkipSetup={skipSetup}
+        onStartLive={startLive}
+        onStopLive={stopLive}
         open={detailsOpen}
+        serverLabel={serverLabel}
+        setupLabel={setupLabel}
+        setupRoot={setupRoot}
         status={status}
       />
       <HelpSheet
@@ -757,7 +1023,7 @@ export default function App() {
         item={selectedHistoryItem}
         morphOrigin={reviewMorphOrigin}
         onCopy={copyTranscript}
-        onOpen={(path) => void openTranscript(path)}
+        onOpen={(path) => void openAppPath(path)}
         onOpenChange={(open) => {
           if (!open) {
             setSelectedHistoryOutput(undefined);
@@ -773,8 +1039,8 @@ export default function App() {
       />
       <TranscriptPreviewDialog
         entry={previewEntry}
-        onCopy={(entry) => void copyTranscript(historyEntryToUploadItem(entry))}
-        onOpen={(entry) => void openTranscript(entry.outputPath)}
+        onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
+        onOpen={(entry) => void openAppPath(entry.outputPath)}
         onOpenChange={(open) => {
           if (!open) setPreviewEntry(undefined);
         }}

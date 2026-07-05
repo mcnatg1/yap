@@ -2,7 +2,6 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { Copy, FileAudio, FileText, FolderOpen, HelpCircle, Pause, Play, RotateCcw } from "lucide-react";
 
-import { type UploadItem } from "@/components/stacked-upload";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,7 +18,13 @@ import {
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatElapsed } from "@/lib/app-types";
+import {
+  formatElapsed,
+  isRecordingActive,
+  isRecordingFinished,
+  type RecordingJobStatus,
+  type RecordingJobView,
+} from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
 const WAVEFORM_BAR_COUNT = 64;
@@ -61,12 +66,29 @@ export function waveformPeaks(audioBuffer: AudioBuffer, count = WAVEFORM_BAR_COU
   return peaks.map((peak) => Math.round(16 + (peak / loudest) * 84));
 }
 
+function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: number) {
+  switch (status) {
+    case "uploading":
+      return "Uploading";
+    case "server_processing_cohere":
+      return "Processing on server";
+    case "diarization_running":
+      return "Finding speakers";
+    case "saving":
+      return "Saving";
+    case "local_transcribing":
+      return elapsedSeconds ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}` : "Transcribing locally...";
+    default:
+      return "Working";
+  }
+}
+
 function RecordingPlayer({
   item,
   onOpen,
   onReveal,
 }: {
-  item: UploadItem;
+  item: RecordingJobView;
   onOpen: (path: string) => void;
   onReveal: (path: string) => void;
 }) {
@@ -88,11 +110,11 @@ function RecordingPlayer({
   const recordingSrc = useMemo(() => (isTauri() ? convertFileSrc(item.path) : undefined), [item.path]);
   const recordingStatus = failed
     ? "Playback unavailable"
-    : item.status === "done"
+    : isRecordingFinished(item.status)
       ? "Transcript saved"
-      : item.status === "running"
-        ? "Transcribing locally"
-        : item.status === "error"
+      : isRecordingActive(item.status)
+        ? recordingActivityLabel(item.status)
+        : item.status === "failed"
           ? "Transcription failed"
           : "Queued";
   const canSeek = !failed && durationSeconds !== undefined && durationSeconds > 0;
@@ -452,8 +474,8 @@ export function TranscriptPanel({
 }: {
   className?: string;
   elapsedSeconds: number;
-  item?: UploadItem;
-  onCopy: (item: UploadItem) => void;
+  item?: RecordingJobView;
+  onCopy: (item: RecordingJobView) => void;
   onOpen: (path: string) => void;
   onOpenHelp?: () => void;
   onRetry: (id: number) => void;
@@ -462,9 +484,9 @@ export function TranscriptPanel({
   text?: string;
 }) {
   const output = item?.output;
-  const isDone = item?.status === "done";
-  const isRunning = item?.status === "running";
-  const isError = item?.status === "error";
+  const isDone = isRecordingFinished(item?.status);
+  const isRunning = item ? isRecordingActive(item.status) : false;
+  const isError = item?.status === "failed";
 
   useEffect(() => {
     if (!isDone || !item?.output) return;
@@ -511,9 +533,7 @@ export function TranscriptPanel({
               )
               : isRunning
                 ? item?.progressMessage ??
-                  (elapsedSeconds
-                    ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
-                    : "Transcribing locally…")
+                  (item ? recordingActivityLabel(item.status, elapsedSeconds) : "Working")
                 : isError
                   ? "Transcription failed"
                   : item
@@ -627,13 +647,6 @@ export function TranscriptPanel({
                   <EmptyDescription>
                     Drop a recording on Transcribe or pick one from Home.
                   </EmptyDescription>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    <KbdGroup className="inline-flex align-middle">
-                      <Kbd>Ctrl</Kbd>
-                      <Kbd>K</Kbd>
-                    </KbdGroup>{" "}
-                    opens search and quick actions.
-                  </p>
                   {onOpenHelp ? (
                     <Button
                       className="mt-2 h-auto px-0 text-muted-foreground"

@@ -3,7 +3,9 @@
 **Status:** Draft (2026-06-30)
 **Implements:** [ADR 0001](../adr/0001-dual-stt-backends.md), [ADR 0002](../adr/0002-crispasr-unified-stt-runtime.md) (live endpoint), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (Silero, orchestrator)
 **Depends on:** [STT sidecar spec](phase-1-2-stt-sidecar.md) (live WS), [LLM sidecar spec](phase-a-d-llm-sidecar.md) (Scribe)
-**Scope:** Ship **English-only live transcription** — mic capture, Silero VAD, Moonshine streaming, optional Scribe polish, in-app preview. No diarization/L3 (Phase 7), no global hotkey (Phase 7+).
+**Scope:** Ship **English-only live transcription** — mic capture, Silero VAD, Moonshine streaming, optional Scribe polish, in-app preview, and the live overlay/hotkey foundation. No diarization/L3 (Phase 7), no cross-app text injection (Phase 7+).
+
+> **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).
 
 ---
 
@@ -11,6 +13,8 @@
 
 ### In scope
 - Mic permission + device selection.
+- Top-positioned live overlay foundation and typed live session state.
+- Configurable capture hotkey for in-app/overlay live recording.
 - Rust audio thread: capture → ring buffer → Silero VAD → frames to crispasr live WS.
 - Live partial/final tokens rendered in an in-app panel (ghost preview).
 - Optional Scribe polish on finals with 400 ms bypass + raw-mode indicator.
@@ -18,7 +22,7 @@
 - Orchestrator states wired to UI.
 
 ### Out of scope
-- Cross-app text injection, global hotkey ([ADR 0013](../adr/0013-global-hotkey-injection.md)).
+- Cross-app text injection ([ADR 0013](../adr/0013-global-hotkey-injection.md)).
 - L3 enrichment / chunk manifests (Phase 7) — but the **chunker hook** is built (writes `vad_segments`), just not consumed.
 - Multilingual live (future ADR).
 - LID on live (Phase 4 is batch-only).

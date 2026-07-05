@@ -1,6 +1,6 @@
 import { Sparkles, Trash2 } from "lucide-react";
 
-import { StackedUpload, type UploadItem } from "@/components/stacked-upload";
+import { StackedUpload } from "@/components/stacked-upload";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,7 +26,7 @@ import {
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Progress } from "@/components/ui/progress";
 import { Spinner } from "@/components/ui/spinner";
-import { formatElapsed } from "@/lib/app-types";
+import { formatElapsed, type RecordingJobView } from "@/lib/app-types";
 
 export function QueuePanel({
   completed,
@@ -53,10 +53,10 @@ export function QueuePanel({
   onReveal: (path: string) => void;
   onRun: () => void;
   onSelect: (id: number) => void;
-  queue: UploadItem[];
+  queue: RecordingJobView[];
   queueProgress: number;
   running: boolean;
-  runningItem?: UploadItem;
+  runningItem?: RecordingJobView;
   selectedId?: number;
 }) {
   const TranscribeIcon = running ? Spinner : Sparkles;
@@ -95,7 +95,7 @@ export function QueuePanel({
                 <span className="tabular-nums">{completed}</span> transcript{completed === 1 ? "" : "s"} ready
               </>
             ) : (
-              "Drop files on Transcribe and run them in place"
+              "Drop files to run"
             )}
           </CardDescription>
         </div>

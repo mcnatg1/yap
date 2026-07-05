@@ -9,6 +9,7 @@ export type SttErrorCode =
   | "AUDIO_DECODE"
   | "SIDECAR_CRASH"
   | "SIDECAR_UNREACHABLE"
+  | "SERVER_UNAVAILABLE"
   | "FALLBACK_DISABLED"
   | "BUSY"
   | "TIMEOUT";
@@ -68,6 +69,7 @@ const sttErrorCodes: readonly SttErrorCode[] = [
   "AUDIO_DECODE",
   "SIDECAR_CRASH",
   "SIDECAR_UNREACHABLE",
+  "SERVER_UNAVAILABLE",
   "FALLBACK_DISABLED",
   "BUSY",
   "TIMEOUT",
@@ -93,6 +95,8 @@ export function sttErrorMessage(code: SttErrorCode): string {
       return "Transcription engine crashed.";
     case "SIDECAR_UNREACHABLE":
       return "Transcription engine didn't start.";
+    case "SERVER_UNAVAILABLE":
+      return "Server transcription is unavailable.";
     case "FALLBACK_DISABLED":
       return "Local fallback is disabled.";
     case "BUSY":

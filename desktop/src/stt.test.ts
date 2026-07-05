@@ -6,7 +6,7 @@ describe("stt error mapping", () => {
   it("maps every known code to a non-empty message", () => {
     const codes = [
       "MODEL_MISSING", "MODEL_CORRUPT", "BAD_LANG", "OOM", "AUDIO_DECODE",
-      "SIDECAR_CRASH", "SIDECAR_UNREACHABLE", "BUSY", "TIMEOUT",
+      "SIDECAR_CRASH", "SIDECAR_UNREACHABLE", "SERVER_UNAVAILABLE", "FALLBACK_DISABLED", "BUSY", "TIMEOUT",
     ] as const;
     for (const code of codes) {
       expect(sttErrorMessage(code).length).toBeGreaterThan(0);

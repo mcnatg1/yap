@@ -28,26 +28,18 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  formatElapsed,
+  isRecordingActive,
+  isRecordingRetryable,
+  type RecordingJobStatus,
+  type RecordingJobView,
+} from "@/lib/app-types";
 import { cn } from "@/lib/utils";
-import { formatElapsed } from "@/lib/app-types";
-
-export type UploadStatus = "queued" | "running" | "done" | "error";
-
-export type UploadItem = {
-  id: number;
-  path: string;
-  name: string;
-  status: UploadStatus;
-  output?: string;
-  error?: string;
-  progressPhase?: string;
-  progressPercent?: number;
-  progressMessage?: string;
-};
 
 type Props = {
   elapsedSeconds?: number;
-  items: UploadItem[];
+  items: RecordingJobView[];
   onRemove: (id: number) => void;
   onRetry: (id: number) => void;
   onReveal: (path: string) => void;
@@ -56,38 +48,136 @@ type Props = {
 };
 
 const statusMeta = {
-  queued: {
-    label: "Queued",
+  accepted: {
+    label: "Ready",
+    icon: Clock3,
+    progress: 8,
+    variant: "secondary" as const,
+  },
+  preflighting: {
+    label: "Checking",
+    icon: Loader2,
+    progress: 12,
+    variant: "outline" as const,
+  },
+  blocked_setup_required: {
+    label: "Setup",
+    icon: XCircle,
+    progress: 0,
+    variant: "secondary" as const,
+  },
+  blocked_server_unavailable: {
+    label: "Server",
+    icon: XCircle,
+    progress: 0,
+    variant: "secondary" as const,
+  },
+  blocked_sign_in_required: {
+    label: "Sign in",
+    icon: XCircle,
+    progress: 0,
+    variant: "secondary" as const,
+  },
+  queued_local_fallback: {
+    label: "Fallback",
     icon: Clock3,
     progress: 16,
     variant: "secondary" as const,
   },
-  running: {
-    label: "Running",
+  queued_server: {
+    label: "Server queued",
+    icon: Clock3,
+    progress: 16,
+    variant: "secondary" as const,
+  },
+  preprocessing: {
+    label: "Preparing",
     icon: Loader2,
     progress: null,
     variant: "outline" as const,
   },
-  done: {
+  uploading: {
+    label: "Uploading",
+    icon: Loader2,
+    progress: null,
+    variant: "outline" as const,
+  },
+  server_processing_cohere: {
+    label: "Server",
+    icon: Loader2,
+    progress: null,
+    variant: "outline" as const,
+  },
+  local_transcribing: {
+    label: "Fallback",
+    icon: Loader2,
+    progress: null,
+    variant: "outline" as const,
+  },
+  saving: {
+    label: "Saving",
+    icon: Loader2,
+    progress: 92,
+    variant: "outline" as const,
+  },
+  diarization_queued: {
+    label: "Speakers queued",
+    icon: Clock3,
+    progress: 100,
+    variant: "secondary" as const,
+  },
+  diarization_running: {
+    label: "Speakers",
+    icon: Loader2,
+    progress: null,
+    variant: "outline" as const,
+  },
+  complete: {
     label: "Done",
     icon: CheckCircle2,
     progress: 100,
     variant: "default" as const,
   },
-  error: {
+  partial: {
+    label: "Partial",
+    icon: CheckCircle2,
+    progress: 100,
+    variant: "secondary" as const,
+  },
+  failed: {
     label: "Error",
     icon: XCircle,
     progress: 100,
     variant: "destructive" as const,
   },
+  cancelled: {
+    label: "Cancelled",
+    icon: XCircle,
+    progress: 0,
+    variant: "secondary" as const,
+  },
 };
 
 const attachmentState = {
-  queued: "idle",
-  running: "processing",
-  done: "done",
-  error: "error",
-} as const satisfies Record<UploadStatus, "idle" | "uploading" | "processing" | "error" | "done">;
+  accepted: "idle",
+  preflighting: "processing",
+  blocked_setup_required: "idle",
+  blocked_server_unavailable: "idle",
+  blocked_sign_in_required: "idle",
+  queued_local_fallback: "idle",
+  queued_server: "idle",
+  preprocessing: "processing",
+  uploading: "uploading",
+  server_processing_cohere: "processing",
+  local_transcribing: "processing",
+  saving: "processing",
+  diarization_queued: "idle",
+  diarization_running: "processing",
+  complete: "done",
+  partial: "done",
+  failed: "error",
+  cancelled: "idle",
+} as const satisfies Record<RecordingJobStatus, "idle" | "uploading" | "processing" | "error" | "done">;
 
 export function StackedUpload({ elapsedSeconds, items, onRemove, onRetry, onReveal, onSelect, selectedId }: Props) {
   if (!items.length) {
@@ -109,7 +199,7 @@ export function StackedUpload({ elapsedSeconds, items, onRemove, onRetry, onReve
       <ul className="flex flex-col gap-2">
         {items.map((item, index) => (
           <UploadCard
-            elapsedSeconds={item.status === "running" ? elapsedSeconds : undefined}
+            elapsedSeconds={isRecordingActive(item.status) ? elapsedSeconds : undefined}
             isSelected={selectedId === item.id}
             item={item}
             key={item.id}
@@ -137,7 +227,7 @@ function UploadCard({
 }: {
   elapsedSeconds?: number;
   isSelected: boolean;
-  item: UploadItem;
+  item: RecordingJobView;
   offset: number;
   onRemove: (id: number) => void;
   onRetry: (id: number) => void;
@@ -146,17 +236,24 @@ function UploadCard({
 }) {
   const meta = statusMeta[item.status];
   const Icon = meta.icon;
+  const isActive = isRecordingActive(item.status);
   const detail =
     item.error ??
-    (item.status === "done"
-      ? "Transcript saved"
-      : item.status === "running"
+    (item.status === "complete"
+      ? "Saved"
+      : item.status === "partial"
+        ? "Partial"
+      : item.status === "cancelled"
+        ? "Cancelled"
+      : isActive
         ? item.progressMessage ??
           (elapsedSeconds
-            ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}`
-            : "Transcribing locally…")
-        : item.status === "queued"
-          ? "Ready to transcribe"
+            ? `${meta.label} · ${formatElapsed(elapsedSeconds)}`
+            : meta.label)
+        : item.status === "queued_local_fallback" || item.status === "accepted"
+          ? "Ready"
+          : item.status.startsWith("blocked_")
+            ? "Waiting"
           : "Needs attention");
 
   return (
@@ -182,17 +279,17 @@ function UploadCard({
         <AttachmentActions className="gap-2">
           <Badge variant={meta.variant}>
             <Icon
-              className={cn(item.status === "running" && "animate-spin motion-reduce:animate-none")}
+              className={cn(isActive && "animate-spin motion-reduce:animate-none")}
               data-icon="inline-start"
             />
-            {item.status === "running" && elapsedSeconds !== undefined ? (
+            {isActive && elapsedSeconds !== undefined ? (
               <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
             ) : (
               meta.label
             )}
           </Badge>
 
-          {item.status === "error" ? (
+          {isRecordingRetryable(item.status) ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <AttachmentAction
@@ -235,7 +332,7 @@ function UploadCard({
               <TooltipTrigger asChild>
                 <AttachmentAction
                   aria-label="Remove file"
-                  disabled={item.status === "running"}
+                  disabled={isActive}
                   onClick={(event) => {
                     event.stopPropagation();
                     onRemove(item.id);
@@ -253,11 +350,11 @@ function UploadCard({
 
         <AttachmentTrigger aria-label={`Select ${item.name}`} onClick={() => onSelect(item.id)} />
       </Attachment>
-      {item.status === "running" && item.progressPercent === undefined ? (
+      {isActive && item.progressPercent === undefined ? (
         <div aria-hidden className="mt-3 h-1.5 overflow-hidden rounded-full bg-primary/20">
           <div className="h-full w-1/3 animate-pulse motion-reduce:animate-none rounded-full bg-primary" />
         </div>
-      ) : item.status === "running" || meta.progress !== null ? (
+      ) : isActive || meta.progress !== null ? (
         <Progress className="mt-3 h-1.5" value={item.progressPercent ?? meta.progress ?? 0} />
       ) : null}
     </li>

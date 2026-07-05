@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
-import { type UploadItem } from "@/components/stacked-upload";
 import { TranscriptPanel } from "@/components/panels/transcript-panel";
 import {
   Dialog,
@@ -10,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import type { RecordingJobView } from "@/lib/app-types";
 
 type MorphRect = {
   height: number;
@@ -51,9 +51,9 @@ export function TranscriptReviewDialog({
   text,
 }: {
   elapsedSeconds: number;
-  item?: UploadItem;
+  item?: RecordingJobView;
   morphOrigin?: MorphRect;
-  onCopy: (item: UploadItem) => void;
+  onCopy: (item: RecordingJobView) => void;
   onOpen: (path: string) => void;
   onOpenChange: (open: boolean) => void;
   onOpenHelp?: () => void;
@@ -89,7 +89,7 @@ export function TranscriptReviewDialog({
     const target = dialogTargetRect();
     const start = phase === "opening" ? morphOrigin : target;
     const end = phase === "opening" ? target : morphOrigin;
-    const duration = phase === "opening" ? 0.28 : 0.2;
+    const duration = phase === "opening" ? 0.22 : 0.16;
     let cancelled = false;
     let tween: { kill: () => void } | undefined;
 
@@ -105,7 +105,6 @@ export function TranscriptReviewDialog({
         y: 0,
       });
       tween = gsap.to(layer, {
-        borderRadius: phase === "opening" ? 28 : 10,
         duration,
         ease: phase === "opening" ? "power3.out" : "power2.inOut",
         opacity: phase === "closing" ? 0.45 : 1,
@@ -191,7 +190,7 @@ export function TranscriptReviewDialog({
       {phase && morphStyle ? (
         <div
           aria-hidden="true"
-          className="fixed z-[60] rounded-[10px] bg-card/90 shadow-[0_0_0_1px_rgba(255,255,255,0.56),0_24px_80px_rgba(0,0,0,0.18)] backdrop-blur-2xl will-change-transform"
+          className="fixed z-[60] rounded-[22px] bg-card/90 shadow-[0_0_0_1px_rgba(255,255,255,0.56),0_18px_52px_rgba(0,0,0,0.14)] will-change-transform"
           ref={morphLayerRef}
           style={morphStyle}
         />

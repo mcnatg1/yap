@@ -10,7 +10,7 @@ Today the entire codebase lives in a single monorepo (`cohere-transcribe-local`)
 
 | Concern | Single-repo problem |
 |---------|---------------------|
-| **yap-server** is a backend service deployed on DGX Spark | It has a different release cadence, runtime (Python/Rust services), and deployment target than the desktop app |
+| **yap-server** is a backend service deployed on a GB-class server node | It has a different release cadence, runtime (Python/Rust services), and deployment target than the desktop app |
 | **yap-knowledge** is a data repo, not code | It is written by the KB compiler and edited by humans/agents; it must never ship build artifacts |
 | **Desktop installers and server containers** have different CI/CD pipelines | A monorepo requires complex path-based CI filtering or a monorepo build tool; for two services this is unnecessary overhead |
 | **Per-repo access control** is simpler | `yap-knowledge` should be readable only by the KB compiler; a mixed repo cannot enforce this at the repo level |
@@ -18,6 +18,18 @@ Today the entire codebase lives in a single monorepo (`cohere-transcribe-local`)
 ## Decision
 
 Split the codebase into **three repositories**, each with a single, clear deployment identity.
+
+This is the **long-term Phase 12 target**, not the MVP working layout. Through MVP and early server phases, keep a staged monorepo:
+
+```text
+cohere-transcribe-local/
+  desktop/              # installed Tauri client; future yap-desktop
+  server/               # Phase 8 yap-server staging area
+  infra/yap-server-node/ # GB-class host setup, independent of app code
+  docs/                 # authoritative ADRs, specs, and runbooks
+```
+
+Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types should start inside `server/` and move only when type drift becomes real.
 
 ### Repo 1: `yap-desktop`
 
@@ -35,12 +47,12 @@ Split the codebase into **three repositories**, each with a single, clear deploy
 
 | Attribute | Value |
 |-----------|-------|
-| **Contents** | DGX Spark server: workload router, model pools, KB compiler, auth middleware, APIs |
+| **Contents** | GB-class server node: workload router, model pools, KB compiler, auth middleware, APIs |
 | **Primary language** | Python (ML inference services) + Rust (router / API server) |
-| **Deployment** | Docker Compose / Kubernetes on DGX Spark (org-managed) |
+| **Deployment** | Docker Compose / Kubernetes on org-managed GB-class hardware |
 | **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); Streaming ASR pool (Moonshine GPU, WSS); Cohere batch pool (concurrent GPU workers); LLM pool (Scribe/polish/agents); ECAPA-TDNN + two-pass diarization service (ADR 0015); KB compiler service (ADR 0017); Auth middleware + identity DB (ADR 0016); APIs: live WSS, batch job queue, KB query |
-| **Infrastructure-as-code** | `yap-server/infra/` contains Postgres migrations, Redis config, vector index config, S3 bucket/lifecycle policy, docker-compose/k8s manifests. The storage **data** lives on the running DGX; the repo holds migrations + IaC only. |
-| **Maps from** | New repo; no direct predecessor in `cohere-transcribe-local` |
+| **Infrastructure-as-code** | `yap-server/infra/` contains Postgres migrations, Redis config, vector index config, S3 bucket/lifecycle policy, docker-compose/k8s manifests. The storage **data** lives on the running server node; the repo holds migrations + IaC only. |
+| **Maps from** | `cohere-transcribe-local/server/` plus `infra/yap-server-node/` after MVP staging |
 
 `yap-server` is never installed on end-user machines. Its Docker images are built and deployed by the org's infrastructure team. The `infra/` subdirectory is the single source of truth for all storage infrastructure — do **not** create a separate `yap-infra` repo.
 
@@ -66,11 +78,11 @@ Split the codebase into **three repositories**, each with a single, clear deploy
 flowchart TB
     subgraph Repos["Git repositories"]
         Desktop["yap-desktop\n(Tauri thin client)\nships as NSIS installer"]
-        Server["yap-server\n(DGX brain + IaC)\nships as Docker images"]
+        Server["yap-server\n(GB-class server + IaC)\nships as Docker images"]
         KB["yap-knowledge\n(Git KB source-of-truth)\nno build artifacts"]
     end
 
-    subgraph Runtime["Runtime on DGX Spark"]
+    subgraph Runtime["Runtime on GB-class node"]
         Router["Workload router"]
         Pools["Model pools"]
         Compiler["KB compiler"]
@@ -96,10 +108,12 @@ The current `cohere-transcribe-local` workspace maps as follows:
 | Current path | Destination repo |
 |--------------|-----------------|
 | `desktop/` | `yap-desktop` |
-| `docs/` | Move to `yap-desktop/docs/` (client ADRs) + shared `docs/` in a docs-umbrella or keep in `yap-desktop` |
+| `server/` | MVP staging area for `yap-server`; split in Phase 12 |
+| `infra/yap-server-node/` | `yap-server` host/bootstrap docs and scripts |
+| `docs/` | Stay in the monorepo through MVP; split or copy with repo ownership in Phase 12 |
 | Historical `transcribe.py`, `requirements.txt` | Not migrated; removed from the PR3 runtime after the local Moonshine fallback sidecar replaced the Python path |
 | `PRODUCT.md`, `DESIGN.md` | `yap-desktop` (product docs) |
-| *New server code* | `yap-server` (new repo) |
+| *New server code* | `server/` now; `yap-server` repo in Phase 12 |
 | *Knowledge data* | `yap-knowledge` (new repo) |
 
 The migration is **not** Phase 12's only scope; it also includes updating all CI/CD pipelines, cross-repo references, and the ADR cross-links. Phase 12 is a logistics phase, not a feature phase.
@@ -139,7 +153,7 @@ Extracting prematurely adds a third dependency to manage without a proven need.
 
 ### Phase 12 deliverables
 
-- [ ] Create `yap-server` repo; scaffold router, pool stubs, KB compiler stub, IaC structure
+- [ ] Create/extract `yap-server` repo from `server/` and `infra/yap-server-node/`; preserve router, pool stubs, KB compiler stub, and IaC structure
 - [ ] Create `yap-knowledge` repo; initial permission schema, placeholder OKF directories
 - [ ] Migrate `desktop/` to `yap-desktop` repo (with full Git history via `git filter-repo`)
 - [ ] Update CI pipelines for all three repos

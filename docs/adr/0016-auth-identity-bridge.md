@@ -105,7 +105,7 @@ Authentication drives the knowledge-base permission model (ADR 0017):
 |-------------|----------------|
 | **Data minimisation** | Store only the 256-D centroid vector (mathematical average), not raw audio snippets used to derive it. The source audio is not retained for enrollment purposes beyond the session retention period. |
 | **Access control** | `voice_vector` column is readable only by the diarization service within `yap-server`; not exposed via the API to clients or agents. |
-| **Encryption at rest** | The identity DB must be encrypted at rest on the DGX Spark server (OS-level disk encryption or Postgres transparent data encryption). |
+| **Encryption at rest** | The identity DB must be encrypted at rest on the GB-class server node (OS-level disk encryption or Postgres transparent data encryption). |
 | **Isolation** | Voice vectors never leave `yap-server`; they are not copied to `yap-knowledge`, S3, or any external service. |
 
 ### Retention and deletion
@@ -126,7 +126,7 @@ This system is designed for **on-prem org-controlled deployments only**. The fol
 | **No third-party cloud processing** | Audio and voice vectors never leave the org's network. Satisfies "no cloud biometrics" requirements common in healthcare and government. |
 | **Org controls the data** | Entra ID stores only text metadata; voice vectors are in the org's own database on the org's own hardware. |
 | **Auditability** | Postgres audit log (ADR 0017) records all identity and permission changes. |
-| **Data residency** | All processing happens on the DGX Spark inside the org's physical perimeter. |
+| **Data residency** | All processing happens on the GB-class server node inside the org's physical perimeter. |
 
 **For HIPAA-covered orgs:** voice biometrics of patients or patient-adjacent staff may be PHI or de-identified PHI depending on context. A covered entity must conduct a HIPAA Privacy/Security risk assessment before deploying the voice enrollment feature for roles where conversations include patient information. Yap provides the technical controls (isolation, deletion, audit); the org provides the administrative safeguards and BAA if applicable.
 
@@ -221,4 +221,4 @@ The access token is stored in Tauri's secure storage (OS keychain); refreshed si
 
 ### Cloud biometric service (Azure Speaker Recognition, AWS Transcribe Speaker ID)
 
-**Rejected.** Sends voice biometrics to a third-party cloud service; conflicts with on-prem trust model and defeats the purpose of running on DGX Spark.
+**Rejected.** Sends voice biometrics to a third-party cloud service; conflicts with on-prem trust model and defeats the purpose of running on an org-owned server node.
