@@ -6,7 +6,9 @@ import { LiveOverlayHost } from "@/components/live/live-overlay-host";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-const Root = new URLSearchParams(window.location.search).get("window") === "live-overlay" ? LiveOverlayHost : App;
+const isLiveOverlay = new URLSearchParams(window.location.search).get("window") === "live-overlay";
+document.documentElement.dataset.window = isLiveOverlay ? "live-overlay" : "main";
+const Root = isLiveOverlay ? LiveOverlayHost : App;
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

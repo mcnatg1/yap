@@ -1,20 +1,12 @@
-import { Mic, MicOff, Save, Settings, Square } from "lucide-react";
+import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
+import { Check, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import {
-  currentMonitor,
-  getCurrentWindow,
-  LogicalPosition,
-  LogicalSize,
-} from "@tauri-apps/api/window";
 
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { liveRouteLabel, liveStatusLabel, type LiveSessionView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
 type LiveOverlayProps = {
-  onOpenSettings?: () => void;
-  onSave?: () => void;
   onStart?: () => void;
   onStop?: () => void;
   view: LiveSessionView;
@@ -23,19 +15,21 @@ type LiveOverlayProps = {
 const startedStatuses = new Set<LiveSessionView["status"]>(["armed", "listening", "speaking", "settling"]);
 const micHotStatuses = new Set<LiveSessionView["status"]>(["listening", "speaking", "settling"]);
 const compactWindow = { width: 96, height: 44 };
-const controlsWindow = { width: 180, height: 86 };
+const controlsWindow = { width: 120, height: 56 };
 
-export function LiveOverlay({ onOpenSettings, onSave, onStart, onStop, view }: LiveOverlayProps) {
+export function LiveOverlay({ onStart, onStop, view }: LiveOverlayProps) {
   const [hovered, setHovered] = useState(false);
+  const [locked, setLocked] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const windowModeRef = useRef<"compact" | "controls" | null>(null);
   const started = startedStatuses.has(view.status);
   const micHot = micHotStatuses.has(view.status);
-  const blocked = view.status === "blocked";
-  const finalText = view.finalText?.trim();
-  const partialText = view.partialText?.trim();
-  const transcriptText = [finalText, partialText].filter(Boolean).join(" ");
-  const statusText = view.error ?? (transcriptText || liveRouteLabel(view.route));
+  const controlsOpen = hovered || locked;
+  const statusText = view.error ?? ([view.finalText, view.partialText].filter(Boolean).join(" ") || liveRouteLabel(view.route));
+
+  useEffect(() => {
+    if (view.visibility === "hidden") setLocked(false);
+  }, [view.visibility]);
 
   useEffect(() => {
     const node = rootRef.current;
@@ -46,78 +40,88 @@ export function LiveOverlay({ onOpenSettings, onSave, onStart, onStop, view }: L
       if (cancelled) return;
       gsap.fromTo(
         node,
-        { scaleX: started ? 0.82 : 1.08, scaleY: started ? 0.72 : 1.16 },
-        { scaleX: 1, scaleY: 1, duration: 0.16, ease: "power2.out" },
+        { scaleX: controlsOpen ? 0.78 : 1.08, scaleY: controlsOpen ? 0.74 : 1.1 },
+        { scaleX: 1, scaleY: 1, duration: 0.14, ease: "power2.out" },
       );
     });
 
     return () => {
       cancelled = true;
     };
-  }, [started, view.status]);
+  }, [controlsOpen, started, view.status]);
 
   useEffect(() => {
     if (view.visibility === "hidden") return;
 
-    const nextMode = hovered ? "controls" : "compact";
+    const nextMode = controlsOpen ? "controls" : "compact";
     if (windowModeRef.current === nextMode) return;
     windowModeRef.current = nextMode;
 
-    void resizeOverlayWindow(nextMode === "controls");
-  }, [hovered, view.visibility]);
+    void resizeOverlayWindow(controlsOpen);
+  }, [controlsOpen, view.visibility]);
 
   if (view.visibility === "hidden") return null;
 
   return (
-    <div className="live-overlay-root pointer-events-none flex h-full items-start justify-center bg-transparent pt-2">
+    <div className="live-overlay-root pointer-events-none flex h-full items-center justify-center bg-transparent">
       <div
-        ref={rootRef}
+        className="pointer-events-auto"
         onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget)) {
-            setHovered(false);
-          }
+          if (!event.currentTarget.contains(event.relatedTarget)) setHovered(false);
+        }}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          setLocked((value) => !value);
         }}
         onFocus={() => setHovered(true)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        className={cn(
-          "group/live pointer-events-auto flex flex-col items-center",
-          hovered ? "z-10" : "",
-        )}
+        ref={rootRef}
       >
-        <button
-          aria-label={`${started ? "Stop" : "Start"} live. ${liveStatusLabel(view.status)}.`}
-          className={cn(
-            "hit-target flex items-center justify-center overflow-hidden rounded-full bg-neutral-950/90 shadow-[0_8px_24px_rgba(0,0,0,0.22)] ring-1 ring-white/55 outline-none transition-[width,height,background-color,box-shadow,transform] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-white/80 active:scale-[0.96] motion-reduce:transition-none",
-            started ? "h-4 w-[74px] px-2" : "h-2.5 w-[58px]",
-            blocked ? "bg-destructive/90 ring-destructive/40" : "",
-          )}
-          onClick={started ? onStop : onStart}
-          type="button"
-        >
-          {started ? <LiveWaveform level={view.level ?? 0} hot={micHot} /> : null}
-        </button>
+        {controlsOpen ? (
+          <div
+            aria-label={`${liveStatusLabel(view.status)}. ${statusText}`}
+            className="flex h-10 w-[100px] items-center gap-1 rounded-full bg-neutral-950 p-1 text-white shadow-[0_8px_20px_rgba(0,0,0,0.24)] ring-1 ring-white/20 transition-[width,height,background-color,box-shadow] duration-150 ease-out motion-reduce:transition-none"
+            role="group"
+          >
+            <OverlayIconButton label={started ? "Cancel live" : "Close live controls"} onClick={started ? onStop : () => setLocked(false)}>
+              <X />
+            </OverlayIconButton>
+            <button
+              aria-label={started ? "Live waveform" : "Start live"}
+              className="flex h-8 min-w-0 flex-1 items-center justify-center rounded-full text-white/85 outline-none transition-[color,opacity] duration-150 hover:text-white focus-visible:ring-2 focus-visible:ring-white/55 active:scale-[0.96] motion-reduce:transition-none"
+              onClick={(event) => {
+                if (event.detail > 1) return;
+                if (!started) onStart?.();
+              }}
+              type="button"
+            >
+              <LiveDots hot={micHot} level={view.level ?? 0} />
+            </button>
+            <OverlayIconButton label={started ? "Finish live" : "Start live"} onClick={started ? onStop : onStart} variant="light">
+              <Check />
+            </OverlayIconButton>
+          </div>
+        ) : (
+          <button
+            aria-label={`${started ? "Stop" : "Start"} live. ${liveStatusLabel(view.status)}.`}
+            className={cn(
+              "hit-target flex items-center justify-center overflow-hidden rounded-full bg-neutral-950/90 shadow-[0_8px_20px_rgba(0,0,0,0.22)] ring-1 ring-white/50 outline-none transition-[width,height,background-color,box-shadow,transform] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-white/80 active:scale-[0.96] motion-reduce:transition-none",
+              started ? "h-4 w-[74px] px-2" : "h-2.5 w-[58px]",
+              view.status === "blocked" ? "bg-destructive/90 ring-destructive/40" : "",
+            )}
+            onClick={(event) => {
+              if (event.detail > 1) return;
+              (started ? onStop : onStart)?.();
+            }}
+            type="button"
+          >
+            {started ? <LiveWaveform hot={micHot} level={view.level ?? 0} /> : null}
+          </button>
+        )}
         <span className="sr-only" role="status" aria-live="polite">
           {liveStatusLabel(view.status)}. {statusText}
         </span>
-        <div className="pointer-events-none mt-3 flex translate-y-1 scale-95 items-center gap-1.5 opacity-0 transition-[opacity,transform] duration-150 ease-out group-focus-within/live:pointer-events-auto group-focus-within/live:translate-y-0 group-focus-within/live:scale-100 group-focus-within/live:opacity-100 group-hover/live:pointer-events-auto group-hover/live:translate-y-0 group-hover/live:scale-100 group-hover/live:opacity-100 motion-reduce:transition-none">
-          <LiveIconButton
-            label={started ? "Stop live" : "Start live"}
-            onClick={started ? onStop : onStart}
-          >
-            {started ? <Square /> : micHot ? <Mic /> : <MicOff />}
-          </LiveIconButton>
-          {onSave && view.finalText ? (
-            <LiveIconButton label="Save live session" onClick={onSave}>
-              <Save />
-            </LiveIconButton>
-          ) : null}
-          {onOpenSettings ? (
-            <LiveIconButton label="Open live settings" onClick={onOpenSettings}>
-              <Settings />
-            </LiveIconButton>
-          ) : null}
-        </div>
       </div>
     </div>
   );
@@ -138,31 +142,46 @@ async function resizeOverlayWindow(showControls: boolean) {
   );
 }
 
-function LiveIconButton({
+function OverlayIconButton({
   children,
   label,
   onClick,
+  variant = "dark",
 }: {
   children: ReactNode;
   label: string;
   onClick?: () => void;
+  variant?: "dark" | "light";
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          aria-label={label}
-          className="flex size-11 items-center justify-center rounded-full bg-neutral-950 text-white shadow-[0_10px_24px_rgba(0,0,0,0.26)] ring-1 ring-white/10 transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-neutral-900 focus-visible:ring-2 focus-visible:ring-white/80 active:scale-[0.96] motion-reduce:transition-none [&_svg]:size-5"
-          onClick={onClick}
-          type="button"
-        >
-          {children}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="top" sideOffset={8}>
-        {label}
-      </TooltipContent>
-    </Tooltip>
+    <button
+      aria-label={label}
+      className={cn(
+        "flex size-8 shrink-0 items-center justify-center rounded-full outline-none transition-[background-color,color,transform] duration-150 focus-visible:ring-2 focus-visible:ring-white/65 active:scale-[0.96] motion-reduce:transition-none [&_svg]:size-4",
+        variant === "light"
+          ? "bg-white text-neutral-950 hover:text-primary"
+          : "bg-white/18 text-white hover:bg-white/24 hover:text-white/85",
+      )}
+      onClick={(event) => {
+        if (event.detail > 1) return;
+        onClick?.();
+      }}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
+
+function LiveDots({ hot, level }: { hot: boolean; level: number }) {
+  const opacity = hot ? 0.95 : 0.72 + Math.min(0.2, level * 0.2);
+
+  return (
+    <span aria-hidden="true" className="flex items-center justify-center gap-1">
+      {Array.from({ length: 8 }).map((_, index) => (
+        <span className="size-0.5 rounded-full bg-current" key={index} style={{ opacity }} />
+      ))}
+    </span>
   );
 }
 
