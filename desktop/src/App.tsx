@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -171,6 +172,7 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     let unlistenLive: (() => void) | undefined;
+    let unlistenLiveSettings: (() => void) | undefined;
 
     void listenTranscribeEvents({
       onProgress: (event) => {
@@ -226,10 +228,23 @@ export default function App() {
       unlistenLive = stop;
     });
 
+    void listen("open-live-settings", () => {
+      setActiveRail("details");
+      setDetailsOpen(true);
+      void loadStatus();
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlistenLiveSettings = stop;
+    });
+
     return () => {
       cancelled = true;
       unlisten?.();
       unlistenLive?.();
+      unlistenLiveSettings?.();
     };
   }, []);
 

@@ -1,6 +1,9 @@
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 96.0;
+const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 44.0;
+
 pub mod live;
 pub mod runtime;
 pub mod stt;
@@ -563,19 +566,25 @@ fn block_live_for_setup(
 
 fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("live-overlay") {
+        window
+            .set_size(tauri::LogicalSize::new(
+                LIVE_OVERLAY_COMPACT_WIDTH,
+                LIVE_OVERLAY_COMPACT_HEIGHT,
+            ))
+            .map_err(|err| format!("Failed to size live overlay: {err}"))?;
         position_live_overlay(app, &window)?;
         window.show().map_err(|err| format!("Failed to show live overlay: {err}"))?;
         return Ok(());
     }
 
-    let (x, y) = live_overlay_position(app, 420.0);
+    let (x, y) = live_overlay_position(app, LIVE_OVERLAY_COMPACT_WIDTH);
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "live-overlay",
         tauri::WebviewUrl::App("index.html?window=live-overlay".into()),
     )
     .title("Yap Live")
-    .inner_size(420.0, 110.0)
+    .inner_size(LIVE_OVERLAY_COMPACT_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
     .position(x, y)
     .decorations(false)
     .resizable(false)
@@ -593,7 +602,7 @@ fn position_live_overlay(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
 ) -> Result<(), String> {
-    let (x, y) = live_overlay_position(app, 420.0);
+    let (x, y) = live_overlay_position(app, LIVE_OVERLAY_COMPACT_WIDTH);
     window
         .set_position(tauri::LogicalPosition::new(x, y))
         .map_err(|err| format!("Failed to position live overlay: {err}"))

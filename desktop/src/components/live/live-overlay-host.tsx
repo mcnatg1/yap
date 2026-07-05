@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
 import { LiveOverlay } from "@/components/live/live-overlay";
@@ -41,6 +42,7 @@ export function LiveOverlayHost() {
 
   return (
     <LiveOverlay
+      onOpenSettings={() => void emit("open-live-settings")}
       onSave={() => void saveLiveSession().then(setView)}
       onStart={() => void startLiveSession().then(setView)}
       onStop={() => void stopLiveSession().then(setView)}

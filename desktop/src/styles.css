@@ -128,7 +128,9 @@
   }
 
   body:has(.live-glass),
-  body:has(.live-glass) #root {
+  body:has(.live-glass) #root,
+  body:has(.live-overlay-root),
+  body:has(.live-overlay-root) #root {
     background: transparent;
     min-height: 0;
   }
