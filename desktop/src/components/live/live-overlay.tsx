@@ -22,6 +22,10 @@ export function LiveOverlay({ onOpenSettings, onSave, onStart, onStop, view }: L
   const started = startedStatuses.has(view.status);
   const micHot = micHotStatuses.has(view.status);
   const blocked = view.status === "blocked";
+  const finalText = view.finalText?.trim();
+  const partialText = view.partialText?.trim();
+  const transcriptText = [finalText, partialText].filter(Boolean).join(" ");
+  const statusText = view.error ?? (transcriptText || liveRouteLabel(view.route));
 
   useEffect(() => {
     const node = rootRef.current;
@@ -83,7 +87,7 @@ export function LiveOverlay({ onOpenSettings, onSave, onStart, onStop, view }: L
           )}
         </button>
         <span className="sr-only" role="status" aria-live="polite">
-          {liveStatusLabel(view.status)}. {view.error ?? view.partialText ?? view.finalText ?? liveRouteLabel(view.route)}
+          {liveStatusLabel(view.status)}. {statusText}
         </span>
 
         {expanded ? (
@@ -94,9 +98,18 @@ export function LiveOverlay({ onOpenSettings, onSave, onStart, onStop, view }: L
                 style={{ width: `${Math.round(Math.max(0, Math.min(1, view.level ?? 0)) * 100)}%` }}
               />
             </div>
-            <p className="min-h-5 truncate text-sm text-muted-foreground">
-              {view.error ?? view.partialText ?? view.finalText ?? view.inputDeviceLabel ?? view.hotkey}
-            </p>
+            {view.error ? (
+              <p className="min-h-5 text-sm text-destructive">{view.error}</p>
+            ) : finalText || partialText ? (
+              <div className="grid max-h-28 gap-1 overflow-hidden text-sm leading-5">
+                {finalText ? <p className="line-clamp-3 text-foreground">{finalText}</p> : null}
+                {partialText ? <p className="line-clamp-2 text-muted-foreground">{partialText}</p> : null}
+              </div>
+            ) : (
+              <p className="min-h-5 truncate text-sm text-muted-foreground">
+                {view.inputDeviceLabel ?? view.hotkey}
+              </p>
+            )}
             <div className="flex items-center justify-between gap-2">
               <Button onClick={started ? onStop : onStart} size="sm" type="button" variant={started ? "outline" : "default"}>
                 {started ? <Square /> : <Mic />}

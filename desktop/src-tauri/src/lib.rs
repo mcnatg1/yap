@@ -187,20 +187,21 @@ fn preflight_input_device(
 fn start_live_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
+    stt_state: tauri::State<'_, stt::dispatch::SttState>,
+    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> live::state::LiveSessionView {
-    let view = start_live_intent(&state);
-    emit_live(&app, &view);
-    view
+    start_live_runtime(app, &state, &live_runtime, &stt_state, &runtime_state)
 }
 
 #[tauri::command]
 fn stop_live_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
+    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> live::state::LiveSessionView {
-    let view = state.stop();
-    emit_live(&app, &view);
-    view
+    stop_live_runtime(app, &state, &live_runtime, &runtime_state)
 }
 
 #[tauri::command]
@@ -480,28 +481,84 @@ fn emit_live(app: &tauri::AppHandle, view: &live::state::LiveSessionView) {
     let _ = app.emit("live-session", view);
 }
 
-fn start_live_intent(state: &live::LiveSessionState) -> live::state::LiveSessionView {
-    let setup = current_setup_status().runtime_setup_state();
-    if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
-        return state.start(setup, false);
+fn start_live_runtime(
+    app: tauri::AppHandle,
+    live: &live::LiveSessionState,
+    live_runtime: &live::runtime::LiveRuntime,
+    stt: &stt::dispatch::SttState,
+    orchestrator: &runtime::RuntimeOrchestratorState,
+) -> live::state::LiveSessionView {
+    if stt.is_transcribing() {
+        let view = live.block_with_error(stt::error::SttError::Busy.user_message());
+        emit_live(&app, &view);
+        return view;
     }
 
-    match live::devices::preflight_input_device(state.snapshot().input_device_id.as_deref()) {
-        Ok(resolved) => state.update(|view| {
-            view.error = resolved.recovered.then(|| "Selected microphone unavailable. Using default.".into());
-            view.input_device_id = resolved.id;
-            view.input_device_label = resolved.label;
-            view.level = Some(0.0);
-            view.route = live::state::live_route_for(setup, false);
-            view.status = live::state::LiveSessionStatus::Armed;
-        }),
-        Err(message) => state.update(|view| {
-            view.error = Some(message);
-            view.level = Some(0.0);
-            view.route = live::state::LiveRoute::Blocked;
-            view.status = live::state::LiveSessionStatus::Blocked;
-        }),
+    let setup = current_setup_status().runtime_setup_state();
+    orchestrator.with(|orchestrator| orchestrator.set_setup(setup));
+    if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
+        let view = block_live_for_setup(live, setup);
+        emit_live(&app, &view);
+        return view;
     }
+
+    if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
+        let view = live.block_with_error(&runtime_error_to_stt(error).message);
+        emit_live(&app, &view);
+        return view;
+    }
+
+    let resolved = match live::devices::preflight_input_device(live.snapshot().input_device_id.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            orchestrator.with(|orchestrator| orchestrator.finish_active_work());
+            let view = live.block_with_error(&message);
+            emit_live(&app, &view);
+            return view;
+        }
+    };
+
+    let view = live.update(|view| {
+        view.error = resolved
+            .recovered
+            .then(|| "Selected microphone unavailable. Using default.".into());
+        view.input_device_id = resolved.id.clone();
+        view.input_device_label = resolved.label.clone();
+        view.level = Some(0.0);
+        view.route = live::state::LiveRoute::LocalFallback;
+        view.status = live::state::LiveSessionStatus::Armed;
+    });
+    emit_live(&app, &view);
+
+    match live_runtime.start_local(app.clone(), resolved.id) {
+        Ok(()) => live.snapshot(),
+        Err(message) => {
+            orchestrator.with(|orchestrator| orchestrator.finish_active_work());
+            let view = live.block_with_error(&message);
+            emit_live(&app, &view);
+            view
+        }
+    }
+}
+
+fn stop_live_runtime(
+    app: tauri::AppHandle,
+    live: &live::LiveSessionState,
+    live_runtime: &live::runtime::LiveRuntime,
+    orchestrator: &runtime::RuntimeOrchestratorState,
+) -> live::state::LiveSessionView {
+    live_runtime.stop();
+    orchestrator.with(|orchestrator| orchestrator.finish_active_work());
+    let view = live.stop();
+    emit_live(&app, &view);
+    view
+}
+
+fn block_live_for_setup(
+    live: &live::LiveSessionState,
+    setup: runtime::state::SetupState,
+) -> live::state::LiveSessionView {
+    live.start(setup, false)
 }
 
 fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
@@ -567,13 +624,17 @@ pub fn run() {
     let live_settings = live::settings::load();
     let live_shortcut = live_settings.hotkey.clone();
     let runtime_state = runtime::RuntimeOrchestratorState::new();
+    let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
     let sidecar_for_monitor = std::sync::Arc::clone(&stt_state.sidecar);
     let sidecar_for_exit = std::sync::Arc::clone(&stt_state.sidecar);
     let transcribing_for_monitor = stt_state.transcribing_flag();
+    let live_runtime_for_monitor = live_runtime.clone();
+    let live_runtime_for_exit = live_runtime.clone();
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
+        live_runtime_for_monitor.unload_if_idle(std::time::Duration::from_secs(600));
         if transcribing_for_monitor.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
@@ -586,27 +647,41 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(stt_state)
         .manage(live_state)
+        .manage(live_runtime)
         .manage(runtime_state)
         .setup(move |app| {
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, _shortcut, event| {
                         let live = app.state::<live::LiveSessionState>();
+                        let live_runtime = app.state::<live::runtime::LiveRuntime>();
+                        let stt = app.state::<stt::dispatch::SttState>();
+                        let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
                         match event.state() {
                             ShortcutState::Pressed => {
                                 let view = if live.snapshot().capture_mode == live::state::LiveCaptureMode::Toggle
                                     && live::state::is_live_session_started(live.snapshot().status)
                                 {
-                                    live.stop()
+                                    stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator)
                                 } else {
-                                    start_live_intent(&live)
+                                    start_live_runtime(
+                                        app.clone(),
+                                        &live,
+                                        &live_runtime,
+                                        &stt,
+                                        &orchestrator,
+                                    )
                                 };
-                                emit_live(app, &view);
+                                let _ = view;
                             }
                             ShortcutState::Released => {
                                 if live.snapshot().capture_mode == live::state::LiveCaptureMode::PushToTalk {
-                                    let view = live.stop();
-                                    emit_live(app, &view);
+                                    let _ = stop_live_runtime(
+                                        app.clone(),
+                                        &live,
+                                        &live_runtime,
+                                        &orchestrator,
+                                    );
                                 }
                             }
                         }
@@ -666,6 +741,7 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(move |_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                live_runtime_for_exit.shutdown();
                 if let Ok(mut sidecar) = sidecar_for_exit.lock() {
                     sidecar.shutdown();
                 }
@@ -753,6 +829,22 @@ mod tests {
             runtime_error_to_stt(runtime::RuntimeError::SetupRequired).code,
             stt::error::SttError::ModelMissing.code()
         );
+    }
+
+    #[test]
+    fn start_live_setup_missing_blocks_without_claiming_server() {
+        let live = live::LiveSessionState::new(live::settings::LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+
+        let view = block_live_for_setup(&live, runtime::state::SetupState::FallbackMissing);
+
+        assert_eq!(view.status, live::state::LiveSessionStatus::Blocked);
+        assert_eq!(view.route, live::state::LiveRoute::Blocked);
+        assert_eq!(view.error.as_deref(), Some("Local fallback is not ready."));
     }
 
     #[test]
