@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { LiveOverlay } from "@/components/live/live-overlay";
 import {
+  hideLiveOverlay,
   listenLiveSession,
   liveStatus,
   startLiveSession,
@@ -40,6 +41,7 @@ export function LiveOverlayHost() {
 
   return (
     <LiveOverlay
+      onHide={() => void hideLiveOverlay().then(setView)}
       onStart={() => void startLiveSession().then(setView)}
       onStop={() => void stopLiveSession().then(setView)}
       view={view}

@@ -1,8 +1,16 @@
+use tauri::{
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 96.0;
 const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 44.0;
+const TRAY_SHOW_APP: &str = "show_app";
+const TRAY_SHOW_PILL: &str = "show_pill";
+const TRAY_HIDE_PILL: &str = "hide_pill";
+const TRAY_QUIT: &str = "quit";
 
 pub mod live;
 pub mod runtime;
@@ -484,6 +492,80 @@ fn emit_live(app: &tauri::AppHandle, view: &live::state::LiveSessionView) {
     let _ = app.emit("live-session", view);
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn show_live_overlay_from_app(app: &tauri::AppHandle) {
+    let live = app.state::<live::LiveSessionState>();
+    let view = live.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
+    let _ = persist_live_view(&view);
+    if let Err(error) = ensure_live_overlay(app) {
+        log_line(&format!("live overlay show failed: {error}"));
+    }
+    emit_live(app, &view);
+}
+
+fn hide_live_overlay_from_app(app: &tauri::AppHandle) {
+    let live = app.state::<live::LiveSessionState>();
+    if live::state::is_live_session_started(live.snapshot().status) {
+        return;
+    }
+    let view = live.update(|view| view.visibility = live::state::LiveOverlayVisibility::Hidden);
+    let _ = persist_live_view(&view);
+    if let Some(window) = app.get_webview_window("live-overlay") {
+        let _ = window.hide();
+    }
+    emit_live(app, &view);
+}
+
+fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let menu = MenuBuilder::new(app)
+        .text(TRAY_SHOW_APP, "Show Yap")
+        .text(TRAY_SHOW_PILL, "Show Pill")
+        .text(TRAY_HIDE_PILL, "Hide Pill")
+        .separator()
+        .text(TRAY_QUIT, "Quit")
+        .build()?;
+
+    let mut tray = TrayIconBuilder::with_id("yap")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("Yap")
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_SHOW_APP => show_main_window(app),
+            TRAY_SHOW_PILL => show_live_overlay_from_app(app),
+            TRAY_HIDE_PILL => hide_live_overlay_from_app(app),
+            TRAY_QUIT => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
 fn start_live_runtime(
     app: tauri::AppHandle,
     live: &live::LiveSessionState,
@@ -530,7 +612,12 @@ fn start_live_runtime(
         view.level = Some(0.0);
         view.route = live::state::LiveRoute::LocalFallback;
         view.status = live::state::LiveSessionStatus::Armed;
+        view.visibility = live::state::LiveOverlayVisibility::Enabled;
     });
+    let _ = persist_live_view(&view);
+    if let Err(error) = ensure_live_overlay(&app) {
+        log_line(&format!("live overlay start show failed: {error}"));
+    }
     emit_live(&app, &view);
 
     match live_runtime.start_local(app.clone(), resolved.id) {
@@ -711,6 +798,7 @@ pub fn run() {
                     }
                 }
             }
+            install_tray(app.handle())?;
             if app.state::<live::LiveSessionState>().snapshot().visibility
                 == live::state::LiveOverlayVisibility::Enabled
             {
@@ -748,13 +836,24 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(move |_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(move |app_handle, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            tauri::RunEvent::Exit => {
                 live_runtime_for_exit.shutdown();
                 if let Ok(mut sidecar) = sidecar_for_exit.lock() {
                     sidecar.shutdown();
                 }
             }
+            _ => {}
         });
 }
 

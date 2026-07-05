@@ -7,6 +7,7 @@ import { liveRouteLabel, liveStatusLabel, type LiveSessionView } from "@/lib/app
 import { cn } from "@/lib/utils";
 
 type LiveOverlayProps = {
+  onHide?: () => void;
   onStart?: () => void;
   onStop?: () => void;
   view: LiveSessionView;
@@ -17,7 +18,7 @@ const micHotStatuses = new Set<LiveSessionView["status"]>(["listening", "speakin
 const compactWindow = { width: 96, height: 44 };
 const controlsWindow = { width: 120, height: 56 };
 
-export function LiveOverlay({ onStart, onStop, view }: LiveOverlayProps) {
+export function LiveOverlay({ onHide, onStart, onStop, view }: LiveOverlayProps) {
   const [hovered, setHovered] = useState(false);
   const [locked, setLocked] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -76,6 +77,11 @@ export function LiveOverlay({ onStart, onStop, view }: LiveOverlayProps) {
         onFocus={() => setHovered(true)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
+        onContextMenu={(event) => {
+          if (started) return;
+          event.preventDefault();
+          onHide?.();
+        }}
         ref={rootRef}
       >
         {controlsOpen ? (
