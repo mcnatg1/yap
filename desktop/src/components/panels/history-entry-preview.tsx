@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { TranscriptHistoryEntry } from "@/history";
@@ -76,11 +77,10 @@ export function HistoryEntryPreview({
   return (
     <Popover modal={false} open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <button
+        <Button
           aria-label={`Review recording ${entry.name}`}
           className={cn(
-            "min-w-0 truncate text-left font-medium hover:underline",
-            "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+            "h-auto min-w-0 justify-start truncate rounded-sm p-0 text-left font-medium hover:bg-transparent hover:underline",
           )}
           onClick={(event) => {
             event.stopPropagation();
@@ -90,10 +90,12 @@ export function HistoryEntryPreview({
           onFocus={openImmediately}
           onPointerEnter={scheduleOpen}
           onPointerLeave={scheduleClose}
+          size="sm"
           type="button"
+          variant="ghost"
         >
           {entry.name}
-        </button>
+        </Button>
       </PopoverTrigger>
       <PopoverContent
         align="start"
