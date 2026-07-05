@@ -1,3 +1,4 @@
+import gsap from "gsap";
 import { useEffect, useRef, type ElementType } from "react";
 import {
   CircleUserRound,
@@ -47,53 +48,43 @@ export function AppSidebar({
   const wordmarkRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    let killTweens: (() => void) | undefined;
+    const icon = brandIconRef.current;
+    const wordmark = wordmarkRef.current;
 
-    void import("gsap").then(({ default: gsap }) => {
-      const icon = brandIconRef.current;
-      const wordmark = wordmarkRef.current;
+    if (!icon || !wordmark) return;
 
-      if (cancelled || !icon || !wordmark) {
-        return;
-      }
+    const collapsed = state === "collapsed";
+    gsap.killTweensOf(icon);
+    gsap.killTweensOf(wordmark);
 
-      const collapsed = state === "collapsed";
-      killTweens = () => {
-        gsap.killTweensOf(icon);
-        gsap.killTweensOf(wordmark);
-      };
-      killTweens();
-
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        gsap.set(icon, {
-          scale: collapsed ? 0.96 : 1,
-        });
-        gsap.set(wordmark, {
-          autoAlpha: collapsed ? 0 : 1,
-          x: collapsed ? -6 : 0,
-        });
-        return;
-      }
-
-      gsap.to(icon, {
-        duration: 0.14,
-        ease: "power2.out",
-        overwrite: "auto",
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      gsap.set(icon, {
         scale: collapsed ? 0.96 : 1,
       });
-      gsap.to(wordmark, {
+      gsap.set(wordmark, {
         autoAlpha: collapsed ? 0 : 1,
-        duration: 0.12,
-        ease: "power2.out",
-        overwrite: "auto",
         x: collapsed ? -6 : 0,
       });
+      return;
+    }
+
+    gsap.to(icon, {
+      duration: 0.14,
+      ease: "power2.out",
+      overwrite: "auto",
+      scale: collapsed ? 0.96 : 1,
+    });
+    gsap.to(wordmark, {
+      autoAlpha: collapsed ? 0 : 1,
+      duration: 0.12,
+      ease: "power2.out",
+      overwrite: "auto",
+      x: collapsed ? -6 : 0,
     });
 
     return () => {
-      cancelled = true;
-      killTweens?.();
+      gsap.killTweensOf(icon);
+      gsap.killTweensOf(wordmark);
     };
   }, [state]);
 

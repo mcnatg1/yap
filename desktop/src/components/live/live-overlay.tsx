@@ -1,8 +1,10 @@
 import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
+import gsap from "gsap";
 import { Check, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { liveRouteLabel, liveStatusLabel, type LiveSessionView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
@@ -15,51 +17,86 @@ type LiveOverlayProps = {
 
 const startedStatuses = new Set<LiveSessionView["status"]>(["armed", "listening", "speaking", "settling"]);
 const micHotStatuses = new Set<LiveSessionView["status"]>(["listening", "speaking", "settling"]);
-const compactWindow = { width: 96, height: 44 };
-const controlsWindow = { width: 120, height: 56 };
+const overlaySizes = {
+  idle: { pill: { width: 58, height: 10 }, window: { width: 64, height: 18 } },
+  active: { pill: { width: 74, height: 16 }, window: { width: 80, height: 24 } },
+  controls: { pill: { width: 100, height: 40 }, window: { width: 104, height: 44 } },
+} as const;
+type OverlayMode = keyof typeof overlaySizes;
 
 export function LiveOverlay({ onHide, onStart, onStop, view }: LiveOverlayProps) {
   const [hovered, setHovered] = useState(false);
   const [locked, setLocked] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const windowModeRef = useRef<"compact" | "controls" | null>(null);
+  const pillRef = useRef<HTMLDivElement>(null);
+  const compactRef = useRef<HTMLButtonElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const windowModeRef = useRef<OverlayMode | null>(null);
   const started = startedStatuses.has(view.status);
   const micHot = micHotStatuses.has(view.status);
   const controlsOpen = hovered || locked;
+  const mode: OverlayMode = controlsOpen ? "controls" : started ? "active" : "idle";
   const statusText = view.error ?? ([view.finalText, view.partialText].filter(Boolean).join(" ") || liveRouteLabel(view.route));
 
   useEffect(() => {
     if (view.visibility === "hidden") setLocked(false);
   }, [view.visibility]);
 
-  useEffect(() => {
-    const node = rootRef.current;
-    if (!node || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  useLayoutEffect(() => {
+    const pill = pillRef.current;
+    const compact = compactRef.current;
+    const controls = controlsRef.current;
+    if (!pill || !compact || !controls) return;
 
-    let cancelled = false;
-    void import("gsap").then(({ gsap }) => {
-      if (cancelled) return;
-      gsap.fromTo(
-        node,
-        { scaleX: controlsOpen ? 0.78 : 1.08, scaleY: controlsOpen ? 0.74 : 1.1 },
-        { scaleX: 1, scaleY: 1, duration: 0.14, ease: "power2.out" },
-      );
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const size = overlaySizes[mode].pill;
+    const duration = reduce ? 0 : 0.18;
+    const targets = [pill, compact, controls];
+
+    gsap.killTweensOf(targets);
+    gsap.to(pill, {
+      width: size.width,
+      height: size.height,
+      duration,
+      ease: "power3.out",
+      overwrite: "auto",
+    });
+    gsap.to(compact, {
+      autoAlpha: controlsOpen ? 0 : 1,
+      scale: controlsOpen ? 0.92 : 1,
+      duration: reduce ? 0 : 0.1,
+      ease: "power2.out",
+      overwrite: "auto",
+    });
+    gsap.to(controls, {
+      autoAlpha: controlsOpen ? 1 : 0,
+      scale: controlsOpen ? 1 : 0.94,
+      duration: reduce ? 0 : 0.12,
+      ease: "power2.out",
+      overwrite: "auto",
     });
 
     return () => {
-      cancelled = true;
+      gsap.killTweensOf(targets);
     };
-  }, [controlsOpen, started, view.status]);
+  }, [controlsOpen, mode]);
 
   useEffect(() => {
     if (view.visibility === "hidden") return;
 
-    const nextMode = controlsOpen ? "controls" : "compact";
-    if (windowModeRef.current === nextMode) return;
-    windowModeRef.current = nextMode;
+    const previousMode = windowModeRef.current;
+    if (windowModeRef.current === mode) return;
+    windowModeRef.current = mode;
 
-    void resizeOverlayWindow(controlsOpen);
-  }, [controlsOpen, view.visibility]);
+    const previousArea = previousMode ? overlaySizes[previousMode].window.width * overlaySizes[previousMode].window.height : 0;
+    const nextArea = overlaySizes[mode].window.width * overlaySizes[mode].window.height;
+    const delay = previousArea > nextArea ? 120 : 0;
+    const resizeTimer = window.setTimeout(() => {
+      void resizeOverlayWindow(mode);
+    }, delay);
+
+    return () => window.clearTimeout(resizeTimer);
+  }, [mode, view.visibility]);
 
   if (view.visibility === "hidden") return null;
 
@@ -84,47 +121,68 @@ export function LiveOverlay({ onHide, onStart, onStop, view }: LiveOverlayProps)
         }}
         ref={rootRef}
       >
-        {controlsOpen ? (
-          <div
-            aria-label={`${liveStatusLabel(view.status)}. ${statusText}`}
-            className="flex h-10 w-[100px] items-center gap-1 rounded-full bg-neutral-950 p-1 text-white shadow-[0_8px_20px_rgba(0,0,0,0.24)] ring-1 ring-white/20 transition-[width,height,background-color,box-shadow] duration-150 ease-out motion-reduce:transition-none"
-            role="group"
-          >
-            <OverlayIconButton label={started ? "Cancel live" : "Close live controls"} onClick={started ? onStop : () => setLocked(false)}>
-              <X />
-            </OverlayIconButton>
-            <button
-              aria-label={started ? "Live waveform" : "Start live"}
-              className="flex h-8 min-w-0 flex-1 items-center justify-center rounded-full text-white/85 outline-none transition-[color,opacity] duration-150 hover:text-white focus-visible:ring-2 focus-visible:ring-white/55 active:scale-[0.96] motion-reduce:transition-none"
-              onClick={(event) => {
-                if (event.detail > 1) return;
-                if (!started) onStart?.();
-              }}
-              type="button"
-            >
-              <LiveDots hot={micHot} level={view.level ?? 0} />
-            </button>
-            <OverlayIconButton label={started ? "Finish live" : "Start live"} onClick={started ? onStop : onStart} variant="light">
-              <Check />
-            </OverlayIconButton>
-          </div>
-        ) : (
-          <button
+        <div
+          aria-label={`${liveStatusLabel(view.status)}. ${statusText}`}
+          className={cn(
+            "relative overflow-hidden rounded-full bg-neutral-950/90 text-white shadow-[0_8px_20px_rgba(0,0,0,0.22)] ring-1 ring-white/35",
+            view.status === "blocked" ? "bg-destructive/90 ring-destructive/40" : "",
+          )}
+          ref={pillRef}
+          role={controlsOpen ? "group" : undefined}
+          style={{
+            height: overlaySizes.idle.pill.height,
+            width: overlaySizes.idle.pill.width,
+          }}
+        >
+          <Button
+            aria-hidden={controlsOpen}
             aria-label={`${started ? "Stop" : "Start"} live. ${liveStatusLabel(view.status)}.`}
             className={cn(
-              "hit-target flex items-center justify-center overflow-hidden rounded-full bg-neutral-950/90 shadow-[0_8px_20px_rgba(0,0,0,0.22)] ring-1 ring-white/50 outline-none transition-[width,height,background-color,box-shadow,transform] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-white/80 active:scale-[0.96] motion-reduce:transition-none",
-              started ? "h-4 w-[74px] px-2" : "h-2.5 w-[58px]",
-              view.status === "blocked" ? "bg-destructive/90 ring-destructive/40" : "",
+              "absolute inset-0 h-full w-full overflow-hidden rounded-full bg-transparent p-0 text-white hover:bg-transparent hover:text-white focus-visible:ring-white/80",
+              controlsOpen ? "pointer-events-none" : "pointer-events-auto",
             )}
             onClick={(event) => {
               if (event.detail > 1) return;
               (started ? onStop : onStart)?.();
             }}
+            ref={compactRef}
+            size="sm"
+            tabIndex={controlsOpen ? -1 : 0}
             type="button"
+            variant="ghost"
           >
             {started ? <LiveWaveform hot={micHot} level={view.level ?? 0} /> : null}
-          </button>
-        )}
+          </Button>
+          <div
+            aria-hidden={!controlsOpen}
+            className={cn(
+              "invisible absolute inset-0 flex items-center gap-1 p-1 opacity-0",
+              controlsOpen ? "pointer-events-auto" : "pointer-events-none",
+            )}
+            ref={controlsRef}
+          >
+            <OverlayIconButton label={started ? "Cancel live" : "Close live controls"} onClick={started ? onStop : () => setLocked(false)} tabIndex={controlsOpen ? 0 : -1}>
+              <X />
+            </OverlayIconButton>
+            <Button
+              aria-label={started ? "Live waveform" : "Start live"}
+              className="h-8 min-w-0 flex-1 rounded-full bg-transparent p-0 text-white/85 hover:bg-white/8 hover:text-white focus-visible:ring-white/55"
+              onClick={(event) => {
+                if (event.detail > 1) return;
+                if (!started) onStart?.();
+              }}
+              size="sm"
+              tabIndex={controlsOpen ? 0 : -1}
+              type="button"
+              variant="ghost"
+            >
+              <LiveDots hot={micHot} level={view.level ?? 0} />
+            </Button>
+            <OverlayIconButton label={started ? "Finish live" : "Start live"} onClick={started ? onStop : onStart} tabIndex={controlsOpen ? 0 : -1} variant="light">
+              <Check />
+            </OverlayIconButton>
+          </div>
+        </div>
         <span className="sr-only" role="status" aria-live="polite">
           {liveStatusLabel(view.status)}. {statusText}
         </span>
@@ -133,8 +191,8 @@ export function LiveOverlay({ onHide, onStart, onStop, view }: LiveOverlayProps)
   );
 }
 
-async function resizeOverlayWindow(showControls: boolean) {
-  const next = showControls ? controlsWindow : compactWindow;
+async function resizeOverlayWindow(mode: OverlayMode) {
+  const next = overlaySizes[mode].window;
   const window = getCurrentWindow();
   await window.setSize(new LogicalSize(next.width, next.height));
 
@@ -152,18 +210,20 @@ function OverlayIconButton({
   children,
   label,
   onClick,
+  tabIndex,
   variant = "dark",
 }: {
   children: ReactNode;
   label: string;
   onClick?: () => void;
+  tabIndex?: number;
   variant?: "dark" | "light";
 }) {
   return (
-    <button
+    <Button
       aria-label={label}
       className={cn(
-        "flex size-8 shrink-0 items-center justify-center rounded-full outline-none transition-[background-color,color,transform] duration-150 focus-visible:ring-2 focus-visible:ring-white/65 active:scale-[0.96] motion-reduce:transition-none [&_svg]:size-4",
+        "size-8 shrink-0 rounded-full p-0 focus-visible:ring-white/65 [&_svg]:size-4",
         variant === "light"
           ? "bg-white text-neutral-950 hover:text-primary"
           : "bg-white/18 text-white hover:bg-white/24 hover:text-white/85",
@@ -172,10 +232,13 @@ function OverlayIconButton({
         if (event.detail > 1) return;
         onClick?.();
       }}
+      size="icon-sm"
+      tabIndex={tabIndex}
       type="button"
+      variant="ghost"
     >
       {children}
-    </button>
+    </Button>
   );
 }
 

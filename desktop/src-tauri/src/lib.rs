@@ -5,8 +5,8 @@ use tauri::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 96.0;
-const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 44.0;
+const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 64.0;
+const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 18.0;
 const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_SHOW_PILL: &str = "show_pill";
 const TRAY_HIDE_PILL: &str = "hide_pill";

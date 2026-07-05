@@ -1,3 +1,4 @@
+import gsap from "gsap";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { TranscriptPanel } from "@/components/panels/transcript-panel";
@@ -90,42 +91,34 @@ export function TranscriptReviewDialog({
     const start = phase === "opening" ? morphOrigin : target;
     const end = phase === "opening" ? target : morphOrigin;
     const duration = phase === "opening" ? 0.22 : 0.16;
-    let cancelled = false;
-    let tween: { kill: () => void } | undefined;
-
-    void import("gsap").then(({ default: gsap }) => {
-      if (cancelled) return;
-
-      gsap.set(layer, {
-        opacity: 1,
-        scaleX: 1,
-        scaleY: 1,
-        transformOrigin: "top left",
-        x: 0,
-        y: 0,
-      });
-      tween = gsap.to(layer, {
-        duration,
-        ease: phase === "opening" ? "power3.out" : "power2.inOut",
-        opacity: phase === "closing" ? 0.45 : 1,
-        scaleX: end.width / Math.max(1, start.width),
-        scaleY: end.height / Math.max(1, start.height),
-        x: end.left - start.left,
-        y: end.top - start.top,
-        onComplete: () => {
-          if (phase === "opening") {
-            setPhase(undefined);
-          } else {
-            setPhase(undefined);
-            onOpenChangeRef.current(false);
-          }
-        },
-      });
+    gsap.set(layer, {
+      opacity: 1,
+      scaleX: 1,
+      scaleY: 1,
+      transformOrigin: "top left",
+      x: 0,
+      y: 0,
+    });
+    const tween = gsap.to(layer, {
+      duration,
+      ease: phase === "opening" ? "power3.out" : "power2.inOut",
+      opacity: phase === "closing" ? 0.45 : 1,
+      scaleX: end.width / Math.max(1, start.width),
+      scaleY: end.height / Math.max(1, start.height),
+      x: end.left - start.left,
+      y: end.top - start.top,
+      onComplete: () => {
+        if (phase === "opening") {
+          setPhase(undefined);
+        } else {
+          setPhase(undefined);
+          onOpenChangeRef.current(false);
+        }
+      },
     });
 
     return () => {
-      cancelled = true;
-      tween?.kill();
+      tween.kill();
     };
   }, [morphOrigin, phase]);
 
