@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Date:** 2026-07-05
-**Scope:** Turn the existing live overlay/hotkey foundation into real local live transcription by streaming selected microphone audio to the pinned CrispASR Moonshine tiny fallback. This is a client-only **Phase 3a bridge**, not completion of the full Phase 3 audio spec. It does not implement the Phase 8 server WSS connector, Cohere batch upload, Scribe, diarization, or cross-app text injection. It must keep the live stream process warm across sessions and leave explicit seams for Rust Silero `vad_segments`, Opus upload, and saved live audio.
+**Scope:** Turn the existing live overlay/hotkey foundation into real local live transcription by streaming selected microphone audio to the pinned CrispASR Moonshine tiny fallback. This is a client-only **Phase 3a bridge**, not completion of the full Phase 3 audio spec. It does not implement the Phase 8 server WSS connector, Cohere batch upload, Scribe, diarization, or cross-app text injection. It must keep the local live stream session-owned until CrispASR exposes a reset/ack boundary, and leave explicit seams for Rust Silero `vad_segments`, Opus upload, and saved live audio.
 **Canonical specs:** [../../specs/phase-3-live-ux-audio.md](../../specs/phase-3-live-ux-audio.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0002-crispasr-unified-stt-runtime.md](../../adr/0002-crispasr-unified-stt-runtime.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
 
 ## Problem
@@ -42,7 +42,7 @@ sequenceDiagram
 
 Use the pinned `crispasr` binary and pinned artifacts already installed through the local fallback setup flow.
 
-`ponytail:` CrispASR 0.6.12 exposes the live JSON stream over stdio, while the existing app sidecar uses HTTP server mode for file transcription. This branch uses one managed stdio child owned by `LiveRuntime`, started on first local live use and kept warm until idle timeout or app exit. Live sessions attach/detach microphone capture to that warm child. This is not per-utterance spawning.
+`ponytail:` CrispASR 0.6.12 exposes the live JSON stream over stdio, while the existing app sidecar uses HTTP server mode for file transcription. This branch uses a managed stdio child owned by `LiveRuntime`. For safety, each start owns a fresh stream child and stop retires it, because the stream JSON protocol does not currently expose a reset/ack or session tag that can prove delayed stdout belongs to a new session. Warm reuse is a follow-on optimization once that boundary exists.
 
 ```text
 crispasr --stream --stream-json --backend moonshine-streaming -m <moonshine-tiny.gguf> -l en --punc-model <fireredpunc.gguf>
@@ -72,7 +72,7 @@ Add one runtime owner beside `LiveSessionState`:
 LiveRuntime
   owns current session token
   owns optional CPAL stream
-  owns optional warm CrispASR stream child
+  owns optional session-bound CrispASR stream child
   owns cancellation flag
   owns writer/reader/level worker handles
   owns in-memory vad segment recorder seam
@@ -99,7 +99,7 @@ Use a monotonically increasing session token. Background reader/writer threads m
 | Start live while file transcription is active | Set `blocked` or return busy; do not run dual STT. |
 | Speak | Update `level`; stream JSON partial text into `partialText`; switch status to `speaking` when text or level indicates speech. |
 | Phrase finalizes | Move text from `partialText` into accumulated `finalText`; briefly use `settling`, then return to `listening`. |
-| Stop | Close mic stream, stop sending PCM, keep the warm CrispASR child alive, set status `idle`, keep `finalText` until a new session starts. |
+| Stop | Close mic stream, stop sending PCM, retire the session stream child, set status `idle`, keep `finalText` until a new session starts. |
 | Stream crashes | Stop capture, set `blocked`, keep existing final text visible. |
 
 ## Audio Path
@@ -115,7 +115,7 @@ Minimum viable path:
 5. Send PCM chunks over a standard channel to a writer thread.
 6. Writer thread writes to CrispASR stdin.
 7. Reader thread parses CrispASR stdout JSONL and emits live snapshots.
-8. Stop detaches the mic stream and leaves the warm stream child alive until idle timeout/app exit.
+8. Stop detaches the mic stream and retires the session stream child so stale stdout cannot update a later session.
 
 `ponytail:` Linear resampling is enough for the fallback MVP. Replace it with a dedicated resampler only if measured accuracy/latency is bad on real mics.
 
@@ -164,11 +164,11 @@ Until then:
 - [ ] `start_live_session` opens the selected/default mic and starts a local Moonshine streaming process when fallback is ready.
 - [ ] `start_live_session` rejects file-transcription busy state and cannot run dual local STT work.
 - [ ] A `LiveRuntime` or equivalent owner holds capture/process/thread handles; `LiveSessionState` remains a snapshot.
-- [ ] The local Moonshine stream process is kept warm across stop/start sessions and is cleaned up only on idle timeout, crash, or app exit.
+- [ ] The local Moonshine stream process is session-bound and retired on stop/crash/app exit until a CrispASR reset/ack boundary supports safe warm reuse.
 - [ ] Live overlay receives `listening`, `speaking`, `settling`, `blocked`, and `idle` snapshots from real runtime events.
 - [ ] Partial and final text from CrispASR JSONL appear in `partialText` and `finalText`.
 - [ ] Punctuation stays enabled through `--punc-model`; no `--no-punctuation` flag is used.
-- [ ] Stop closes capture, stops sending PCM, and leaves the warm stream child alive until idle timeout, crash, or app exit.
+- [ ] Stop closes capture, stops sending PCM, retires the session stream child, and prevents stale stdout from reaching later sessions.
 - [ ] Stop does not erase `finalText`; a new session clears prior text.
 - [ ] File/batch transcription remains server-only/blocked when server is unavailable.
 - [ ] Tests cover command construction, JSONL event parsing, mono/resample conversion, and live state transitions.
@@ -183,3 +183,4 @@ Until then:
 - Scribe polish.
 - Diarization and speaker labels.
 - Text injection into other apps.
+- Warm stream-child reuse across stop/start sessions without a CrispASR reset/ack or session-tag boundary.

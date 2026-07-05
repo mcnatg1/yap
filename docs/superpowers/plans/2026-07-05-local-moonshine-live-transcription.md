@@ -6,7 +6,7 @@
 
 **Spec:** [../specs/2026-07-05-local-moonshine-live-transcription.md](../specs/2026-07-05-local-moonshine-live-transcription.md)
 
-**Architecture:** Keep React as a view layer. Tauri Rust owns route checks, mic capture, the warm local stream child, and live-session events. This branch uses a warm `crispasr --stream-json` stdio child for local fallback; server WSS, Opus, Rust Silero inference, save-audio, and diarization remain separate phases.
+**Architecture:** Keep React as a view layer. Tauri Rust owns route checks, mic capture, the local stream child, and live-session events. This branch uses a session-bound `crispasr --stream-json` stdio child for local fallback; stop retires the child until CrispASR exposes a reset/ack boundary for safe warm reuse. Server WSS, Opus, Rust Silero inference, save-audio, and diarization remain separate phases.
 
 **Tech Stack:** Tauri 2, Rust 2021, `cpal` already installed, existing `serde_json`, existing pinned CrispASR/Moonshine setup, React 19 live overlay.
 
@@ -17,7 +17,7 @@
 - Modify `docs/specs/phase-3-live-ux-audio.md`: add Phase 3a amendment that this branch ships local live text but not full Silero/save-audio completion.
 - Modify `desktop/src-tauri/src/live/mod.rs`: export new modules.
 - Create `desktop/src-tauri/src/live/stream.rs`: CrispASR stream command builder, stream event parser, child launch helpers.
-- Create `desktop/src-tauri/src/live/runtime.rs`: `LiveRuntime`, CPAL capture, mono/resample/PCM conversion, session tokens, warm child lifecycle.
+- Create `desktop/src-tauri/src/live/runtime.rs`: `LiveRuntime`, CPAL capture, mono/resample/PCM conversion, session tokens, session-bound child lifecycle.
 - Modify `desktop/src-tauri/src/live/state.rs`: preserve final text on stop, add helpers for partial/final/level/error updates.
 - Modify `desktop/src-tauri/src/lib.rs`: manage `LiveRuntime`, wire start/stop with `SttState` and `RuntimeOrchestratorState`, run idle cleanup.
 - Modify `desktop/src/components/live/live-overlay.tsx`: show final text plus partial text instead of one truncated line.
@@ -322,7 +322,7 @@ Implement `downmix_to_mono`, `f32_to_i16_le_bytes`, `rms_level`, and simple 16 k
 
 - [ ] **Step 5: Implement capture bridge**
 
-Use `cpal` to open the resolved input device at start time. The callback sends PCM bytes and level over channels. A writer thread writes bytes to the warm child stdin. A level thread throttles level snapshots, calls `LiveSessionState::update_level`, and emits `live-session` events. A reader thread reads stdout lines, calls `parse_stream_event`, and updates `LiveSessionState` via `app.state::<LiveSessionState>()`.
+Use `cpal` to open the resolved input device at start time. The callback does a bounded handoff only; an audio worker performs mono/resample/PCM conversion and sends session-tagged PCM to the writer. A writer thread writes bytes to the session child stdin. A level thread throttles level snapshots, calls `LiveSessionState::update_level`, and emits `live-session` events. A reader thread reads stdout lines, calls `parse_stream_event`, and updates `LiveSessionState` via `app.state::<LiveSessionState>()`.
 
 Use a session token before emitting snapshots.
 
@@ -331,7 +331,7 @@ On stdout EOF, read error, stdin write failure, or child exit, the runtime must:
 1. Verify the session token is still current.
 2. Drop the active CPAL stream so the mic is cold.
 3. Stop/retire writer, reader, and level workers for that session.
-4. Retire the crashed `LiveStreamProcess` so the next start creates a fresh warm child.
+4. Retire the crashed `LiveStreamProcess` so the next start creates a fresh session child.
 5. Call `LiveSessionState::block_with_error("Live stream stopped.")`.
 6. Emit the blocked snapshot without clearing `final_text`.
 
@@ -465,7 +465,7 @@ Run the app locally, start live from the overlay/settings path, speak one short 
 
 - status reaches `listening`/`speaking`
 - partial or final text appears
-- stop makes the mic cold while the warm CrispASR process remains managed until idle/shutdown
+- stop makes the mic cold and retires the session CrispASR stream child
 - final text remains visible after stop
 - no batch/file transcription starts
 
@@ -474,7 +474,7 @@ Run the app locally, start live from the overlay/settings path, speak one short 
 Add a short note to the PR/body or final report:
 
 ```text
-Live smoke: <CPU/GPU path>, first text in <rough seconds>, latency acceptable: yes/no, stop made mic cold: yes/no, warm process managed until idle/shutdown: yes/no.
+Live smoke: <CPU/GPU path>, first text in <rough seconds>, latency acceptable: yes/no, stop made mic cold: yes/no, session stream retired safely: yes/no.
 ```
 
 ## Spec Coverage Review
@@ -482,7 +482,7 @@ Live smoke: <CPU/GPU path>, first text in <rough seconds>, latency acceptable: y
 | Spec area | Covered by plan |
 |-----------|-----------------|
 | Phase 3a docs amendment | Task 1 |
-| Warm local Moonshine stream child | Tasks 2-4 |
+| Session-bound local Moonshine stream child | Tasks 2-4 |
 | Selected/default mic capture | Task 3 |
 | PCM conversion/resampling | Task 3 |
 | Partial/final JSONL parsing | Task 2 |
@@ -498,4 +498,4 @@ Live smoke: <CPU/GPU path>, first text in <rough seconds>, latency acceptable: y
 - No task adds server WSS, Opus, diarization, Scribe, save-audio, or text injection.
 - The plan adds two Rust files because the current `state.rs` is only a snapshot and the existing HTTP sidecar cannot handle stdio streaming.
 - Tests are focused on command construction, parser behavior, audio conversion, and state transitions.
-- The plan keeps the stream child warm to match ADR 0002 instead of spawning per utterance/session.
+- The plan originally targeted warm stream reuse, but implementation review found no safe CrispASR reset/ack boundary for delayed stdout. The shipped Phase 3a path retires the stream child on stop/start boundaries and leaves warm reuse as a follow-on optimization.
