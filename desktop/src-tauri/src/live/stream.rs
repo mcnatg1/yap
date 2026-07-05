@@ -19,10 +19,6 @@ pub struct LiveStreamProcess {
 }
 
 impl LiveStreamProcess {
-    pub fn child_mut(&mut self) -> &mut Child {
-        &mut self.child
-    }
-
     pub fn take_stdin(&mut self) -> Option<ChildStdin> {
         self.child.stdin.take()
     }

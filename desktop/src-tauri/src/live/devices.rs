@@ -35,7 +35,9 @@ pub fn list_input_devices(selected_id: Option<&str>) -> Vec<LiveInputDeviceView>
             id: device.id.clone(),
             label: device.label,
             is_default: device.is_default,
-            selected: selected.as_ref().is_some_and(|selected| selected.id == device.id),
+            selected: selected
+                .as_ref()
+                .is_some_and(|selected| selected.id == device.id),
         })
         .collect()
 }
@@ -50,7 +52,8 @@ fn resolve_input_device_from_infos(
     selected_id: Option<&str>,
 ) -> ResolvedInputDevice {
     let selected = select_input_device(devices, selected_id);
-    let recovered = selected_id.is_some() && selected.as_ref().map(|device| device.id.as_str()) != selected_id;
+    let recovered =
+        selected_id.is_some() && selected.as_ref().map(|device| device.id.as_str()) != selected_id;
 
     ResolvedInputDevice {
         id: selected.as_ref().map(|device| device.id.clone()),
@@ -127,10 +130,7 @@ fn device_id(index: usize, label: &str) -> String {
     format!("{index}:{label}")
 }
 
-fn select_input_device(
-    devices: &[DeviceInfo],
-    selected_id: Option<&str>,
-) -> Option<DeviceInfo> {
+fn select_input_device(devices: &[DeviceInfo], selected_id: Option<&str>) -> Option<DeviceInfo> {
     if let Some(selected) = selected_id {
         if let Some(device) = devices.iter().find(|device| device.id == selected) {
             return Some(device.clone());

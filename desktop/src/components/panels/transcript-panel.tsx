@@ -112,6 +112,7 @@ function RecordingPlayer({
       }),
       waveSurfer.on("timeupdate", setDisplaySeconds),
       waveSurfer.on("seeking", setDisplaySeconds),
+      waveSurfer.on("interaction", setDisplaySeconds),
       waveSurfer.on("play", () => setPlaying(true)),
       waveSurfer.on("pause", () => setPlaying(false)),
       waveSurfer.on("finish", () => {

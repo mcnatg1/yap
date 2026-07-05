@@ -13,7 +13,11 @@ fn edit_distance(a: &[&str], b: &[&str]) -> usize {
     for (i, a_word) in a.iter().enumerate() {
         curr[0] = i + 1;
         for (j, b_word) in b.iter().enumerate() {
-            let cost = if a_word.eq_ignore_ascii_case(b_word) { 0 } else { 1 };
+            let cost = if a_word.eq_ignore_ascii_case(b_word) {
+                0
+            } else {
+                1
+            };
             curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
@@ -40,8 +44,13 @@ pub fn parse_verbose_json_has_timestamps(body: &str) -> bool {
 }
 
 fn has_start_end(item: &serde_json::Value) -> bool {
-    item.get("start").and_then(serde_json::Value::as_f64).is_some()
-        && item.get("end").and_then(serde_json::Value::as_f64).is_some()
+    item.get("start")
+        .and_then(serde_json::Value::as_f64)
+        .is_some()
+        && item
+            .get("end")
+            .and_then(serde_json::Value::as_f64)
+            .is_some()
 }
 
 #[cfg(test)]
@@ -50,12 +59,17 @@ mod tests {
 
     #[test]
     fn wer_zero_for_identical() {
-        assert_eq!(word_error_rate("the quick brown fox", "the quick brown fox"), 0.0);
+        assert_eq!(
+            word_error_rate("the quick brown fox", "the quick brown fox"),
+            0.0
+        );
     }
 
     #[test]
     fn wer_counts_one_substitution() {
-        assert!((word_error_rate("the quick brown fox", "the quick green fox") - 0.25).abs() < 1e-9);
+        assert!(
+            (word_error_rate("the quick brown fox", "the quick green fox") - 0.25).abs() < 1e-9
+        );
     }
 
     #[test]

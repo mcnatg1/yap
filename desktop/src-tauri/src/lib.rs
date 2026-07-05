@@ -5,11 +5,12 @@ use tauri::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 64.0;
-const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 18.0;
+const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 92.0;
+const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 38.0;
+const LIVE_OVERLAY_TOP_BEZEL_OFFSET: f64 = 0.0;
 const TRAY_SHOW_APP: &str = "show_app";
-const TRAY_SHOW_PILL: &str = "show_pill";
-const TRAY_HIDE_PILL: &str = "hide_pill";
+const TRAY_START_DICTATING: &str = "start_dictating";
+const TRAY_STOP_RECORDING: &str = "stop_recording";
 const TRAY_QUIT: &str = "quit";
 
 pub mod live;
@@ -29,8 +30,11 @@ fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatu
 #[tauri::command]
 fn live_status(state: tauri::State<'_, live::LiveSessionState>) -> live::state::LiveSessionView {
     state.update(|view| {
-        let resolved = live::devices::resolve_input_device(view.input_device_id.as_deref());
-        view.input_device_id = resolved.id;
+        let requested_id = view.input_device_id.clone();
+        let resolved = live::devices::resolve_input_device(requested_id.as_deref());
+        if requested_id.is_some() {
+            view.input_device_id = resolved.id;
+        }
         view.input_device_label = resolved.label;
         if resolved.recovered {
             view.error = Some("Selected microphone unavailable. Using default.".into());
@@ -45,7 +49,9 @@ async fn show_live_overlay(
 ) -> Result<live::state::LiveSessionView, String> {
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
     persist_live_view(&view)?;
-    ensure_live_overlay(&app)?;
+    if view.status != live::state::LiveSessionStatus::Idle {
+        ensure_live_overlay(&app)?;
+    }
     emit_live(&app, &view);
     Ok(view)
 }
@@ -55,10 +61,15 @@ fn hide_live_overlay(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<live::state::LiveSessionView, String> {
+    if live::state::is_live_session_started(state.snapshot().status) {
+        return Err("Stop live before hiding the pill.".into());
+    }
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Hidden);
     persist_live_view(&view)?;
     if let Some(window) = app.get_webview_window("live-overlay") {
-        window.hide().map_err(|err| format!("Failed to hide live overlay: {err}"))?;
+        window
+            .hide()
+            .map_err(|err| format!("Failed to hide live overlay: {err}"))?;
     }
     emit_live(&app, &view);
     Ok(view)
@@ -132,6 +143,9 @@ fn set_live_capture_mode(
     state: tauri::State<'_, live::LiveSessionState>,
     capture_mode: live::state::LiveCaptureMode,
 ) -> Result<live::state::LiveSessionView, String> {
+    if live::state::is_live_session_started(state.snapshot().status) {
+        return Err("Stop live before changing live mode.".into());
+    }
     let view = state.update(|view| view.capture_mode = capture_mode);
     persist_live_view(&view)?;
     emit_live(&app, &view);
@@ -152,10 +166,13 @@ fn set_input_device(
     state: tauri::State<'_, live::LiveSessionState>,
     device_id: Option<String>,
 ) -> Result<live::state::LiveSessionView, String> {
+    if live::state::is_live_session_started(state.snapshot().status) {
+        return Err("Stop live before changing microphones.".into());
+    }
     let resolved = live::devices::resolve_input_device(device_id.as_deref());
     let recovered = resolved.recovered;
     let view = state.update(|view| {
-        view.input_device_id = if device_id.is_none() { None } else { resolved.id };
+        view.input_device_id = device_id.clone();
         view.input_device_label = resolved.label;
         view.error = recovered.then(|| "Selected microphone unavailable. Using default.".into());
     });
@@ -169,19 +186,21 @@ fn preflight_input_device(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> live::state::LiveSessionView {
-    let selected = state.snapshot().input_device_id;
+    let snapshot = state.snapshot();
+    if live::state::is_live_session_started(snapshot.status) {
+        return snapshot;
+    }
+    let selected = snapshot.input_device_id;
     let view = match live::devices::preflight_input_device(selected.as_deref()) {
         Ok(resolved) => state.update(|view| {
-            view.input_device_id = resolved.id;
+            view.input_device_id = selected.clone();
             view.input_device_label = resolved.label;
             view.level = Some(0.0);
-            if live::state::is_live_session_started(view.status) {
-                view.error = resolved.recovered.then(|| "Selected microphone unavailable. Using default.".into());
-            } else {
-                view.error = resolved.recovered.then(|| "Selected microphone unavailable. Using default.".into());
-                view.route = live::state::LiveRoute::None;
-                view.status = live::state::LiveSessionStatus::Idle;
-            }
+            view.error = resolved
+                .recovered
+                .then(|| "Selected microphone unavailable. Using default.".into());
+            view.route = live::state::LiveRoute::None;
+            view.status = live::state::LiveSessionStatus::Idle;
         }),
         Err(message) => state.update(|view| {
             view.error = Some(message);
@@ -228,7 +247,12 @@ fn save_live_session(
 }
 
 #[tauri::command]
-async fn install_local_fallback() -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+async fn install_local_fallback(
+    live_state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+    if live::state::is_live_session_started(live_state.snapshot().status) {
+        return Err(live_setup_busy_error());
+    }
     tauri::async_runtime::spawn_blocking(|| {
         stt::settings::set_local_fallback_enabled(true)?;
         stt::binary::ensure_binary()?;
@@ -242,7 +266,11 @@ async fn install_local_fallback() -> Result<SetupStatus, stt::dispatch::SttComma
 #[tauri::command]
 fn remove_local_fallback(
     state: tauri::State<'_, stt::dispatch::SttState>,
+    live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+    if live::state::is_live_session_started(live_state.snapshot().status) {
+        return Err(live_setup_busy_error());
+    }
     if let Ok(mut sidecar) = state.sidecar.lock() {
         sidecar.shutdown();
     }
@@ -252,8 +280,12 @@ fn remove_local_fallback(
 
 #[tauri::command]
 fn set_local_fallback_enabled(
+    live_state: tauri::State<'_, live::LiveSessionState>,
     enabled: bool,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
+    if live::state::is_live_session_started(live_state.snapshot().status) {
+        return Err(live_setup_busy_error());
+    }
     stt::settings::set_local_fallback_enabled(enabled)?;
     Ok(current_setup_status())
 }
@@ -266,10 +298,7 @@ fn current_setup_status() -> SetupStatus {
     let binary_status = stt::binary::binary_install_status(&exe_dir)
         .unwrap_or(stt::binary::BinaryInstallStatus::Unsupported);
     let pin = stt::pin::load_pin().ok();
-    let model_installed = pin
-        .as_ref()
-        .map(stt::model::is_installed)
-        .unwrap_or(false);
+    let model_installed = pin.as_ref().map(stt::model::is_installed).unwrap_or(false);
     let fallback_enabled = stt::settings::local_fallback_enabled();
     let engine_ready = fallback_enabled
         && pin.is_some()
@@ -360,29 +389,50 @@ fn start_transcribe(
             orchestrator.route_recording(true)
         })
         .map_err(runtime_error_to_stt)?;
-    log_line(&format!("start_transcribe blocked count={} reason=server_batch_unwired", paths.len()));
-    Err(runtime_error_to_stt(runtime::RuntimeError::ServerUnavailable))
+    log_line(&format!(
+        "start_transcribe blocked count={} reason=server_batch_unwired",
+        paths.len()
+    ));
+    Err(runtime_error_to_stt(
+        runtime::RuntimeError::ServerUnavailable,
+    ))
 }
 
 #[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
+fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    read_text_file_at(path)
+}
+
+fn read_text_file_at(path: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
 
     if !is_transcript_path(&path) {
         return Err("Only transcript text files can be read.".into());
     }
 
+    let path = canonical_existing_path(&path)?;
     std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
 }
 
 #[tauri::command]
-fn write_polished_text(path: String, text: String) -> Result<String, String> {
+fn write_polished_text(
+    window: tauri::WebviewWindow,
+    path: String,
+    text: String,
+) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    write_polished_text_at(path, text)
+}
+
+fn write_polished_text_at(path: String, text: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
 
     if !is_transcript_path(&path) {
         return Err("Only transcript text files can be polished.".into());
     }
 
+    let path = canonical_existing_path(&path)?;
     let output = polished_path(&path)?;
     std::fs::write(&output, text)
         .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
@@ -399,14 +449,16 @@ fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
 }
 
 #[tauri::command]
-fn open_app_path(path: String) -> Result<(), String> {
+fn open_app_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let path = openable_app_path(path)?;
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|err| format!("Failed to open file: {err}"))
 }
 
 #[tauri::command]
-fn reveal_app_path(path: String) -> Result<(), String> {
+fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let path = openable_app_path(path)?;
     tauri_plugin_opener::reveal_item_in_dir(path)
         .map_err(|err| format!("Failed to reveal file: {err}"))
@@ -417,10 +469,27 @@ fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
     if !is_yap_media_or_transcript_path(&path) {
         return Err("Only Yap recording and transcript files can be opened.".into());
     }
+    let path = canonical_existing_path(&path)?;
+    if !is_yap_media_or_transcript_path(&path) {
+        return Err("Only Yap recording and transcript files can be opened.".into());
+    }
+    Ok(path)
+}
+
+fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
     if !path.exists() {
         return Err("File no longer exists.".into());
     }
-    Ok(path)
+    path.canonicalize()
+        .map_err(|err| format!("Failed to resolve file path: {err}"))
+}
+
+fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("This file action is only available from the main window.".into())
+    }
 }
 
 fn is_transcript_path(path: &std::path::Path) -> bool {
@@ -428,13 +497,20 @@ fn is_transcript_path(path: &std::path::Path) -> bool {
 }
 
 fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
-    has_extension(path, &["txt", "mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"])
+    has_extension(
+        path,
+        &["txt", "mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"],
+    )
 }
 
 fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| allowed.iter().any(|allowed| extension.eq_ignore_ascii_case(allowed)))
+        .is_some_and(|extension| {
+            allowed
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
 }
 
 #[derive(serde::Serialize)]
@@ -475,6 +551,13 @@ fn runtime_error_to_stt(error: runtime::RuntimeError) -> stt::dispatch::SttComma
     stt_error.into()
 }
 
+fn live_setup_busy_error() -> stt::dispatch::SttCommandError {
+    stt::dispatch::SttCommandError {
+        code: stt::error::SttError::Busy.code().to_string(),
+        message: "Stop live before changing local fallback.".into(),
+    }
+}
+
 fn log_line(message: &str) {
     stt::log_yap(message);
 }
@@ -499,34 +582,26 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-fn show_live_overlay_from_app(app: &tauri::AppHandle) {
+fn start_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
-    let view = live.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
-    let _ = persist_live_view(&view);
-    if let Err(error) = ensure_live_overlay(app) {
-        log_line(&format!("live overlay show failed: {error}"));
-    }
-    emit_live(app, &view);
+    let live_runtime = app.state::<live::runtime::LiveRuntime>();
+    let stt = app.state::<stt::dispatch::SttState>();
+    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
+    let _ = start_live_runtime(app.clone(), &live, &live_runtime, &stt, &orchestrator);
 }
 
-fn hide_live_overlay_from_app(app: &tauri::AppHandle) {
+fn stop_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
-    if live::state::is_live_session_started(live.snapshot().status) {
-        return;
-    }
-    let view = live.update(|view| view.visibility = live::state::LiveOverlayVisibility::Hidden);
-    let _ = persist_live_view(&view);
-    if let Some(window) = app.get_webview_window("live-overlay") {
-        let _ = window.hide();
-    }
-    emit_live(app, &view);
+    let live_runtime = app.state::<live::runtime::LiveRuntime>();
+    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
+    let _ = stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator);
 }
 
 fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text(TRAY_SHOW_APP, "Show Yap")
-        .text(TRAY_SHOW_PILL, "Show Pill")
-        .text(TRAY_HIDE_PILL, "Hide Pill")
+        .text(TRAY_START_DICTATING, "Start Dictating")
+        .text(TRAY_STOP_RECORDING, "Stop Recording")
         .separator()
         .text(TRAY_QUIT, "Quit")
         .build()?;
@@ -537,8 +612,8 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip("Yap")
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_SHOW_APP => show_main_window(app),
-            TRAY_SHOW_PILL => show_live_overlay_from_app(app),
-            TRAY_HIDE_PILL => hide_live_overlay_from_app(app),
+            TRAY_START_DICTATING => start_live_from_app(app),
+            TRAY_STOP_RECORDING => stop_live_from_app(app),
             TRAY_QUIT => app.exit(0),
             _ => {}
         })
@@ -573,8 +648,15 @@ fn start_live_runtime(
     stt: &stt::dispatch::SttState,
     orchestrator: &runtime::RuntimeOrchestratorState,
 ) -> live::state::LiveSessionView {
+    if live::state::is_live_session_started(live.snapshot().status) || live_runtime.is_active() {
+        return live.snapshot();
+    }
+
     if stt.is_transcribing() {
         let view = live.block_with_error(stt::error::SttError::Busy.user_message());
+        if let Err(error) = ensure_live_overlay(&app) {
+            log_line(&format!("live overlay busy show failed: {error}"));
+        }
         emit_live(&app, &view);
         return view;
     }
@@ -583,31 +665,30 @@ fn start_live_runtime(
     orchestrator.with(|orchestrator| orchestrator.set_setup(setup));
     if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
         let view = block_live_for_setup(live, setup);
+        if let Err(error) = ensure_live_overlay(&app) {
+            log_line(&format!("live overlay blocked show failed: {error}"));
+        }
         emit_live(&app, &view);
         return view;
     }
 
     if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
         let view = live.block_with_error(&runtime_error_to_stt(error).message);
+        if let Err(error) = ensure_live_overlay(&app) {
+            log_line(&format!("live overlay route error show failed: {error}"));
+        }
         emit_live(&app, &view);
         return view;
     }
 
-    let resolved = match live::devices::preflight_input_device(live.snapshot().input_device_id.as_deref()) {
-        Ok(resolved) => resolved,
-        Err(message) => {
-            orchestrator.with(|orchestrator| orchestrator.finish_active_work());
-            let view = live.block_with_error(&message);
-            emit_live(&app, &view);
-            return view;
-        }
-    };
+    let requested_device_id = live.snapshot().input_device_id;
+    let resolved = live::devices::resolve_input_device(requested_device_id.as_deref());
 
     let view = live.update(|view| {
         view.error = resolved
             .recovered
             .then(|| "Selected microphone unavailable. Using default.".into());
-        view.input_device_id = resolved.id.clone();
+        view.input_device_id = requested_device_id.clone();
         view.input_device_label = resolved.label.clone();
         view.level = Some(0.0);
         view.route = live::state::LiveRoute::LocalFallback;
@@ -620,7 +701,7 @@ fn start_live_runtime(
     }
     emit_live(&app, &view);
 
-    match live_runtime.start_local(app.clone(), resolved.id) {
+    match live_runtime.start_local(app.clone(), requested_device_id) {
         Ok(()) => live.snapshot(),
         Err(message) => {
             orchestrator.with(|orchestrator| orchestrator.finish_active_work());
@@ -640,6 +721,9 @@ fn stop_live_runtime(
     live_runtime.stop();
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();
+    if let Some(window) = app.get_webview_window("live-overlay") {
+        let _ = window.hide();
+    }
     emit_live(&app, &view);
     view
 }
@@ -659,8 +743,13 @@ fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
                 LIVE_OVERLAY_COMPACT_HEIGHT,
             ))
             .map_err(|err| format!("Failed to size live overlay: {err}"))?;
+        window
+            .set_shadow(false)
+            .map_err(|err| format!("Failed to hide live overlay shadow: {err}"))?;
         position_live_overlay(app, &window)?;
-        window.show().map_err(|err| format!("Failed to show live overlay: {err}"))?;
+        window
+            .show()
+            .map_err(|err| format!("Failed to show live overlay: {err}"))?;
         return Ok(());
     }
 
@@ -676,6 +765,7 @@ fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     .decorations(false)
     .resizable(false)
     .transparent(true)
+    .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
@@ -704,9 +794,12 @@ fn live_overlay_position(app: &tauri::AppHandle, width: f64) -> (f64, f64) {
         let scale = monitor.scale_factor();
         let position = monitor.position().to_logical::<f64>(scale);
         let size = monitor.size().to_logical::<f64>(scale);
-        return (position.x + ((size.width - width) / 2.0).max(8.0), position.y + 8.0);
+        return (
+            position.x + ((size.width - width) / 2.0).max(0.0),
+            position.y + LIVE_OVERLAY_TOP_BEZEL_OFFSET,
+        );
     }
-    (8.0, 8.0)
+    (8.0, LIVE_OVERLAY_TOP_BEZEL_OFFSET)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -755,10 +848,23 @@ pub fn run() {
                         let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
                         match event.state() {
                             ShortcutState::Pressed => {
-                                let view = if live.snapshot().capture_mode == live::state::LiveCaptureMode::Toggle
-                                    && live::state::is_live_session_started(live.snapshot().status)
+                                let snapshot = live.snapshot();
+                                if live::state::is_live_session_started(snapshot.status)
+                                    && snapshot.capture_mode
+                                        == live::state::LiveCaptureMode::PushToTalk
                                 {
-                                    stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator)
+                                    return;
+                                }
+                                let view = if snapshot.capture_mode
+                                    == live::state::LiveCaptureMode::Toggle
+                                    && live::state::is_live_session_started(snapshot.status)
+                                {
+                                    stop_live_runtime(
+                                        app.clone(),
+                                        &live,
+                                        &live_runtime,
+                                        &orchestrator,
+                                    )
                                 } else {
                                     start_live_runtime(
                                         app.clone(),
@@ -771,7 +877,9 @@ pub fn run() {
                                 let _ = view;
                             }
                             ShortcutState::Released => {
-                                if live.snapshot().capture_mode == live::state::LiveCaptureMode::PushToTalk {
+                                if live.snapshot().capture_mode
+                                    == live::state::LiveCaptureMode::PushToTalk
+                                {
                                     let _ = stop_live_runtime(
                                         app.clone(),
                                         &live,
@@ -799,8 +907,9 @@ pub fn run() {
                 }
             }
             install_tray(app.handle())?;
-            if app.state::<live::LiveSessionState>().snapshot().visibility
-                == live::state::LiveOverlayVisibility::Enabled
+            let startup_live = app.state::<live::LiveSessionState>().snapshot();
+            if startup_live.visibility == live::state::LiveOverlayVisibility::Enabled
+                && startup_live.status != live::state::LiveSessionStatus::Idle
             {
                 if let Err(error) = ensure_live_overlay(app.handle()) {
                     log_line(&format!("live overlay startup failed: {error}"));
@@ -957,15 +1066,23 @@ mod tests {
 
     #[test]
     fn read_text_file_rejects_non_transcripts() {
-        assert!(read_text_file("recording.mp3".into()).is_err());
+        assert!(read_text_file_at("recording.mp3".into()).is_err());
     }
 
     #[test]
     fn app_open_path_allows_only_recordings_and_transcripts() {
-        assert!(is_yap_media_or_transcript_path(std::path::Path::new("recording.mp3")));
-        assert!(is_yap_media_or_transcript_path(std::path::Path::new("recording.MP4")));
-        assert!(is_yap_media_or_transcript_path(std::path::Path::new("recording.txt")));
-        assert!(!is_yap_media_or_transcript_path(std::path::Path::new("script.ps1")));
+        assert!(is_yap_media_or_transcript_path(std::path::Path::new(
+            "recording.mp3"
+        )));
+        assert!(is_yap_media_or_transcript_path(std::path::Path::new(
+            "recording.MP4"
+        )));
+        assert!(is_yap_media_or_transcript_path(std::path::Path::new(
+            "recording.txt"
+        )));
+        assert!(!is_yap_media_or_transcript_path(std::path::Path::new(
+            "script.ps1"
+        )));
     }
 
     #[test]
@@ -973,5 +1090,4 @@ mod tests {
         let path = polished_path(std::path::Path::new("C:/recordings/take.txt")).unwrap();
         assert_eq!(path.file_name().unwrap(), "take.polished.txt");
     }
-
 }

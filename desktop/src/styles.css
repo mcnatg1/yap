@@ -138,7 +138,13 @@
   body:has(.live-overlay-root),
   body:has(.live-overlay-root) #root {
     background: transparent;
+    height: 100%;
+    margin: 0;
     min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0;
+    width: 100%;
   }
 
   h1,

@@ -158,6 +158,8 @@ impl LiveRuntime {
             inner.stop_capture();
             inner.retire_stream_detached_reader();
         }
+        app.state::<crate::runtime::RuntimeOrchestratorState>()
+            .with(|orchestrator| orchestrator.finish_active_work());
         let state = app.state::<LiveSessionState>();
         let view = state.block_with_error(message);
         let _ = app.emit("live-session", &view);
@@ -410,13 +412,14 @@ fn open_capture(
     let audio_raw_ready = Arc::clone(&raw_ready);
     let audio = std::thread::spawn(move || {
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE);
+        let mut level_normalizer = LiveAudioLevelNormalizer::new();
         while let Ok(raw) = raw_rx.recv() {
             if raw.session == 0 || audio_active_session.load(Ordering::SeqCst) != raw.session {
                 audio_raw_ready.store(true, Ordering::Release);
                 continue;
             }
             let mono = downmix_to_mono(&raw.samples, channels);
-            let level = rms_level(&mono);
+            let level = level_normalizer.normalized_level(rms_level(&mono));
             let resampled = resampler.push(&mono);
             let bytes = f32_to_i16_le_bytes(&resampled);
             if !bytes.is_empty() {
@@ -591,6 +594,110 @@ pub fn rms_level(samples: &[f32]) -> f32 {
     (sum / samples.len() as f32).sqrt().clamp(0.0, 1.0)
 }
 
+// Ported from zachlatta/freeflow's LiveAudioLevelNormalizer (MIT).
+pub struct LiveAudioLevelNormalizer {
+    noise_floor_db: f32,
+    peak_ceiling_db: f32,
+    display_level: f32,
+}
+
+impl LiveAudioLevelNormalizer {
+    const MINIMUM_RMS: f32 = 0.00001;
+    const MIN_SPAN_DB: f32 = 18.0;
+    const PEAK_HEADROOM_DB: f32 = 8.0;
+    const SPEECH_GATE_MARGIN_DB: f32 = 3.0;
+    const MINIMUM_VISIBLE_ACTIVE_LEVEL: f32 = 0.12;
+    const NOISE_GATE_NORMALIZED_THRESHOLD: f32 = 0.06;
+    const FLOOR_RISE_WINDOW_DB: f32 = 4.0;
+    const FLOOR_FALL_BLEND: f32 = 0.12;
+    const FLOOR_RISE_BLEND: f32 = 0.02;
+    const PEAK_ATTACK_BLEND: f32 = 0.55;
+    const PEAK_RELEASE_BLEND: f32 = 0.04;
+    const DISPLAY_ATTACK_BLEND: f32 = 0.45;
+    const DISPLAY_RELEASE_BLEND: f32 = 0.12;
+
+    pub fn new() -> Self {
+        Self {
+            noise_floor_db: -55.0,
+            peak_ceiling_db: -37.0,
+            display_level: 0.0,
+        }
+    }
+
+    pub fn normalized_level(&mut self, rms: f32) -> f32 {
+        let level_db = 20.0 * rms.max(Self::MINIMUM_RMS).log10();
+
+        self.update_noise_floor(level_db);
+        self.update_peak_ceiling(level_db);
+
+        let display_ceiling_db = self.peak_ceiling_db + Self::PEAK_HEADROOM_DB;
+        let dynamic_span = (display_ceiling_db - self.noise_floor_db)
+            .max(Self::MIN_SPAN_DB + Self::PEAK_HEADROOM_DB);
+        let mut normalized = ((level_db - self.noise_floor_db) / dynamic_span).clamp(0.0, 1.0);
+        let is_active_speech = level_db >= self.noise_floor_db + Self::SPEECH_GATE_MARGIN_DB;
+
+        if normalized < Self::NOISE_GATE_NORMALIZED_THRESHOLD
+            && level_db <= self.noise_floor_db + Self::SPEECH_GATE_MARGIN_DB
+        {
+            normalized = 0.0;
+        } else if is_active_speech {
+            normalized = normalized.max(Self::MINIMUM_VISIBLE_ACTIVE_LEVEL);
+        }
+
+        let blend = if normalized > self.display_level {
+            Self::DISPLAY_ATTACK_BLEND
+        } else {
+            Self::DISPLAY_RELEASE_BLEND
+        };
+        self.display_level = mix(self.display_level, normalized, blend);
+        self.display_level
+    }
+
+    fn update_noise_floor(&mut self, level_db: f32) {
+        let ceiling_limited_level = level_db.min(self.peak_ceiling_db - Self::MIN_SPAN_DB);
+
+        if ceiling_limited_level <= self.noise_floor_db {
+            self.noise_floor_db = mix(
+                self.noise_floor_db,
+                ceiling_limited_level,
+                Self::FLOOR_FALL_BLEND,
+            );
+        } else if ceiling_limited_level <= self.noise_floor_db + Self::FLOOR_RISE_WINDOW_DB {
+            self.noise_floor_db = mix(
+                self.noise_floor_db,
+                ceiling_limited_level,
+                Self::FLOOR_RISE_BLEND,
+            );
+        }
+    }
+
+    fn update_peak_ceiling(&mut self, level_db: f32) {
+        let minimum_ceiling = self.noise_floor_db + Self::MIN_SPAN_DB;
+
+        if level_db >= self.peak_ceiling_db {
+            self.peak_ceiling_db = mix(self.peak_ceiling_db, level_db, Self::PEAK_ATTACK_BLEND);
+        } else {
+            self.peak_ceiling_db = mix(
+                self.peak_ceiling_db,
+                level_db.max(minimum_ceiling),
+                Self::PEAK_RELEASE_BLEND,
+            );
+        }
+
+        self.peak_ceiling_db = self.peak_ceiling_db.max(minimum_ceiling);
+    }
+}
+
+impl Default for LiveAudioLevelNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn mix(current: f32, target: f32, blend: f32) -> f32 {
+    current + (target - current) * blend
+}
+
 pub struct LinearResampler {
     source_rate: u32,
     target_rate: u32,
@@ -710,5 +817,19 @@ mod tests {
         assert!(!claim_raw_audio_slot(&ready));
         ready.store(true, Ordering::Release);
         assert!(claim_raw_audio_slot(&ready));
+    }
+
+    #[test]
+    fn live_level_normalizer_lifts_speech_without_lifting_floor() {
+        let mut normalizer = LiveAudioLevelNormalizer::new();
+
+        for _ in 0..12 {
+            assert_eq!(normalizer.normalized_level(0.00001), 0.0);
+        }
+
+        let speech = normalizer.normalized_level(0.02);
+
+        assert!(speech >= LiveAudioLevelNormalizer::MINIMUM_VISIBLE_ACTIVE_LEVEL);
+        assert!(speech <= 1.0);
     }
 }

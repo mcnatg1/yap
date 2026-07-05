@@ -21,3 +21,10 @@
 | [phase-3-live-ux-audio.md](specs/phase-3-live-ux-audio.md) | Phase 1/2 live UX | Draft — mic, Silero audio thread, ghost UI, state map |
 | [phase-8-yap-server.md](specs/phase-8-yap-server.md) | Phase 3/4 server | Draft — staged monorepo server entrypoint, API contract, host setup |
 | [testing-strategy.md](specs/testing-strategy.md) | all | Draft — fixtures, WER gates, sidecar CI matrix |
+
+## Runbooks
+
+| Runbook | Purpose |
+|---------|---------|
+| [dependency-audit-policy.md](runbooks/dependency-audit-policy.md) | Rust/Node audit expectations, ignored advisories, and warning policy |
+| [yap-server-node-setup.md](runbooks/yap-server-node-setup.md) | Server node setup notes |

@@ -69,14 +69,14 @@ fn trusted_cache(model: &Path, expected_hash: &str) -> bool {
     let Some(size) = lines.next() else {
         return false;
     };
-    hash.eq_ignore_ascii_case(expected_hash)
-        && size.parse::<u64>().ok() == Some(metadata.len())
+    hash.eq_ignore_ascii_case(expected_hash) && size.parse::<u64>().ok() == Some(metadata.len())
 }
 
 fn write_verified_marker(model: &Path, expected_hash: &str) -> Result<(), SttError> {
     let metadata = std::fs::metadata(model).map_err(|_| SttError::ModelMissing)?;
     let marker = verified_marker_path(model);
-    std::fs::write(marker, format!("{expected_hash}\n{}\n", metadata.len())).map_err(|_| SttError::ModelMissing)
+    std::fs::write(marker, format!("{expected_hash}\n{}\n", metadata.len()))
+        .map_err(|_| SttError::ModelMissing)
 }
 
 fn verify_or_trust(model: &Path, expected_hash: &str) -> Result<(), SttError> {
@@ -102,7 +102,11 @@ fn is_installed_at(dir: &Path, pin: &CrispasrPin) -> bool {
         && verify_or_trust(&dir.join(&pin.punc_file), &pin.punc_sha256).is_ok()
 }
 
-pub fn ensure_model_at<D>(dir: &Path, pin: &CrispasrPin, mut download: D) -> Result<PathBuf, SttError>
+pub fn ensure_model_at<D>(
+    dir: &Path,
+    pin: &CrispasrPin,
+    mut download: D,
+) -> Result<PathBuf, SttError>
 where
     D: FnMut(&str, &Path) -> Result<(), SttError>,
 {
@@ -213,7 +217,9 @@ mod tests {
         });
         assert_eq!(
             dir,
-            std::path::PathBuf::from("C:/Users/me/AppData/Local").join("Yap").join("models")
+            std::path::PathBuf::from("C:/Users/me/AppData/Local")
+                .join("Yap")
+                .join("models")
         );
     }
 
@@ -223,14 +229,20 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         assert!(verify_sha256(&path, expected).is_ok());
-        assert_eq!(verify_sha256(&path, &"0".repeat(64)).unwrap_err(), SttError::ModelCorrupt);
+        assert_eq!(
+            verify_sha256(&path, &"0".repeat(64)).unwrap_err(),
+            SttError::ModelCorrupt
+        );
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn verify_sha256_missing_file_is_model_missing() {
         let path = std::env::temp_dir().join("yap-absent-3f9c1a.bin");
-        assert_eq!(verify_sha256(&path, &"0".repeat(64)).unwrap_err(), SttError::ModelMissing);
+        assert_eq!(
+            verify_sha256(&path, &"0".repeat(64)).unwrap_err(),
+            SttError::ModelMissing
+        );
     }
 
     #[test]
@@ -344,7 +356,10 @@ mod tests {
             std::fs::write(path, b"hello").map_err(|_| SttError::ModelMissing)
         })
         .unwrap();
-        assert_eq!(download_calls, 3, "must re-download corrupt model and missing companions");
+        assert_eq!(
+            download_calls, 3,
+            "must re-download corrupt model and missing companions"
+        );
         assert!(dest.exists());
         assert!(dir.join("tokenizer.bin").exists());
         assert!(dir.join("punc.gguf").exists());

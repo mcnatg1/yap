@@ -11,11 +11,20 @@ import {
   Trash2,
   UploadCloud,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { StatusRow } from "@/components/app/status-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Sheet,
   SheetClose,
@@ -25,6 +34,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   liveRouteLabel,
   liveStatusLabel,
@@ -98,6 +108,8 @@ export function SettingsSheet({
 }) {
   const canRemove = modelInstalled || engineBinaryStatus === "Installed";
   const liveActive = ["armed", "listening", "speaking", "settling"].includes(liveView.status);
+  const micLabelId = useId();
+  const modeLabelId = useId();
   const [hotkeyDraft, setHotkeyDraft] = useState(liveView.hotkey);
 
   useEffect(() => {
@@ -109,7 +121,7 @@ export function SettingsSheet({
       <SheetContent className="w-[min(420px,calc(100vw-24px))] sm:max-w-md" side="right">
         <SheetHeader>
           <SheetTitle>Settings</SheetTitle>
-          <SheetDescription>Runtime status.</SheetDescription>
+          <SheetDescription>Status and controls.</SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-6 px-4">
           <div className="flex flex-col gap-3">
@@ -135,7 +147,7 @@ export function SettingsSheet({
               <label className="grid gap-1 text-xs font-medium">
                 Shortcut
                 <Input
-                  disabled={liveBusy}
+                  disabled={liveBusy || liveActive}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") onSetLiveHotkey(hotkeyDraft);
                   }}
@@ -144,56 +156,70 @@ export function SettingsSheet({
                   onChange={(event) => setHotkeyDraft(event.currentTarget.value)}
                 />
               </label>
-              <label className="grid gap-1 text-xs font-medium">
-                Mode
-                <select
-                  className="h-9 rounded-md border border-input bg-transparent px-3 text-sm"
-                  disabled={liveBusy}
-                  onChange={(event) => onSetLiveCaptureMode(event.currentTarget.value as LiveCaptureMode)}
+              <div className="grid gap-1.5">
+                <Label className="text-xs" id={modeLabelId}>
+                  Mode
+                </Label>
+                <ToggleGroup
+                  aria-labelledby={modeLabelId}
+                  className="grid grid-cols-2"
+                  disabled={liveBusy || liveActive}
+                  onValueChange={(value) => {
+                    if (value) onSetLiveCaptureMode(value as LiveCaptureMode);
+                  }}
+                  type="single"
                   value={liveView.captureMode}
                 >
-                  <option value="pushToTalk">Push to talk</option>
-                  <option value="toggle">Toggle</option>
-                </select>
-              </label>
-              <label className="grid gap-1 text-xs font-medium">
-                Microphone
-                <select
-                  className="h-9 rounded-md border border-input bg-transparent px-3 text-sm"
-                  disabled={liveBusy}
-                  onChange={(event) => onSetInputDevice(event.currentTarget.value || undefined)}
-                  value={liveView.inputDeviceId ?? ""}
+                  <ToggleGroupItem value="pushToTalk">Hold</ToggleGroupItem>
+                  <ToggleGroupItem value="toggle">Toggle</ToggleGroupItem>
+                </ToggleGroup>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs" id={micLabelId}>
+                  Microphone
+                </Label>
+                <Select
+                  disabled={liveBusy || liveActive}
+                  onValueChange={(value) => onSetInputDevice(value === "default" ? undefined : value)}
+                  value={liveView.inputDeviceId ?? "default"}
                 >
-                  <option value="">System default</option>
-                  {liveInputDevices.map((device) => (
-                    <option key={device.id} value={device.id}>
-                      {device.label}{device.isDefault ? " (default)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  <SelectTrigger aria-labelledby={micLabelId} className="w-full">
+                    <SelectValue placeholder="System default" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="default">System default</SelectItem>
+                      {liveInputDevices.map((device) => (
+                        <SelectItem key={device.id} value={device.id}>
+                          {device.label}{device.isDefault ? " (default)" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
               {liveSettingsError || liveView.error ? (
                 <p className="text-xs text-destructive">{liveSettingsError || liveView.error}</p>
               ) : null}
               <div className="flex flex-wrap gap-2">
-                <Button disabled={liveBusy} onClick={() => onSetLiveOverlayEnabled(liveView.visibility === "hidden")} size="sm" type="button" variant="outline">
-                  <Mic />
+                <Button disabled={liveBusy || liveActive} onClick={() => onSetLiveOverlayEnabled(liveView.visibility === "hidden")} size="sm" type="button" variant="outline">
+                  <Mic data-icon="inline-start" />
                   {liveView.visibility === "hidden" ? "Show overlay" : "Hide overlay"}
                 </Button>
                 <Button disabled={liveBusy} onClick={liveActive ? onStopLive : onStartLive} size="sm" type="button">
-                  <Mic />
+                  <Mic data-icon="inline-start" />
                   {liveActive ? "Stop" : "Start"}
                 </Button>
-                <Button disabled={liveBusy} onClick={onPreflightLiveInput} size="sm" type="button" variant="outline">
+                <Button disabled={liveBusy || liveActive} onClick={onPreflightLiveInput} size="sm" type="button" variant="outline">
                   Check mic
                 </Button>
-                <Button disabled={liveBusy || hotkeyDraft === liveView.hotkey} onClick={() => onSetLiveHotkey(hotkeyDraft)} size="sm" type="button" variant="outline">
+                <Button disabled={liveBusy || liveActive || hotkeyDraft === liveView.hotkey} onClick={() => onSetLiveHotkey(hotkeyDraft)} size="sm" type="button" variant="outline">
                   Apply
                 </Button>
-                <Button disabled={liveBusy} onClick={onResetLiveHotkey} size="sm" type="button" variant="ghost">
+                <Button disabled={liveBusy || liveActive} onClick={onResetLiveHotkey} size="sm" type="button" variant="ghost">
                   Reset
                 </Button>
-                <Button disabled={liveBusy || !liveView.hotkey} onClick={onClearLiveHotkey} size="sm" type="button" variant="ghost">
+                <Button disabled={liveBusy || liveActive || !liveView.hotkey} onClick={onClearLiveHotkey} size="sm" type="button" variant="ghost">
                   Clear
                 </Button>
               </div>
@@ -205,31 +231,31 @@ export function SettingsSheet({
               Fallback
             </div>
             <p className="mb-3 break-words text-xs leading-5 text-muted-foreground">
-              Installs verified CrispASR, Moonshine tiny, and punctuation files in {setupRoot || "app data"}.
+              Moonshine tiny and punctuation files install to {setupRoot || "app data"}.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button disabled={busy} onClick={onInstallFallback} size="sm" type="button">
-                <Sparkles />
+              <Button disabled={busy || liveActive} onClick={onInstallFallback} size="sm" type="button">
+                <Sparkles data-icon="inline-start" />
                 {busy ? "Working" : engineReady ? "Reinstall" : "Install"}
               </Button>
               <Button
-                disabled={busy || !canRemove}
+                disabled={busy || liveActive || !canRemove}
                 onClick={onRemoveFallback}
                 size="sm"
                 type="button"
                 variant="outline"
               >
-                <Trash2 />
+                <Trash2 data-icon="inline-start" />
                 Remove files
               </Button>
               <Button
-                disabled={busy}
+                disabled={busy || liveActive}
                 onClick={() => onSetFallbackEnabled(!fallbackEnabled)}
                 size="sm"
                 type="button"
                 variant="outline"
               >
-                <Server />
+                <Server data-icon="inline-start" />
                 {fallbackEnabled ? "Disable" : "Enable"}
               </Button>
               {!engineReady ? (
@@ -258,7 +284,7 @@ export function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean
       <SheetContent className="w-[min(420px,calc(100vw-24px))] sm:max-w-md" side="right">
         <SheetHeader>
           <SheetTitle>Help</SheetTitle>
-          <SheetDescription>Quick map of the working controls.</SheetDescription>
+          <SheetDescription>Core controls.</SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-3 px-4">
           <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />

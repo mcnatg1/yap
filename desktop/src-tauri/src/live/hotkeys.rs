@@ -10,7 +10,11 @@ pub fn parse_hotkey(input: &str) -> Result<Shortcut, String> {
 
     let mut modifiers = Modifiers::empty();
     let mut key = None;
-    for part in trimmed.split('+').map(str::trim).filter(|part| !part.is_empty()) {
+    for part in trimmed
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         match part.to_ascii_lowercase().as_str() {
             "ctrl" | "control" | "cmdorctrl" | "commandorcontrol" => {
                 modifiers |= Modifiers::CONTROL;

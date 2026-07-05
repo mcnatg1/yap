@@ -22,7 +22,9 @@ impl ProgressSink {
     where
         F: Fn(TranscribeProgressEvent) + Send + Sync + 'static,
     {
-        Self { callback: Arc::new(callback) }
+        Self {
+            callback: Arc::new(callback),
+        }
     }
 
     pub fn emit(&self, event: TranscribeProgressEvent) {
@@ -40,7 +42,12 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     pub fn new(sink: ProgressSink, path: String, index: usize, total: usize) -> Self {
-        Self { sink, path, index, total }
+        Self {
+            sink,
+            path,
+            index,
+            total,
+        }
     }
 
     pub fn emit(&self, phase: &str, percent: Option<u8>, message: &str) {

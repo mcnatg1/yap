@@ -72,8 +72,13 @@ mod tests {
 
     #[test]
     fn settings_dir_uses_local_app_data() {
-        let dir = settings_dir_from(|key| (key == "LOCALAPPDATA").then(|| "C:/Users/Test/AppData/Local".into()));
+        let dir = settings_dir_from(|key| {
+            (key == "LOCALAPPDATA").then(|| "C:/Users/Test/AppData/Local".into())
+        });
 
-        assert_eq!(dir, PathBuf::from("C:/Users/Test/AppData/Local").join("Yap"));
+        assert_eq!(
+            dir,
+            PathBuf::from("C:/Users/Test/AppData/Local").join("Yap")
+        );
     }
 }
