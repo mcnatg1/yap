@@ -24,6 +24,8 @@ type OverlayModel = {
 };
 
 const dropDownHeight = 38;
+const hoverSensorHeight = 4;
+const retractMs = 180;
 const defaultWidth = 92;
 const toggleWidth = 150;
 const commandModeWidth = 180;
@@ -34,14 +36,20 @@ const maxErrorWidth = 420;
 export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
   const model = modelFromLiveView(view);
   const [entered, setEntered] = useState(false);
+  const [peeked, setPeeked] = useState(false);
+  const [retracting, setRetracting] = useState(false);
   const [showInitializing, setShowInitializing] = useState(false);
   const lockedTranscribingWidthRef = useRef<number | undefined>(undefined);
   const lastNonTranscribingWidthRef = useRef(defaultWidth);
   const previousPhaseRef = useRef<OverlayPhase>("idle");
   const previousEntryPhaseRef = useRef<OverlayPhase>("idle");
-  const width = model.phase === "transcribing"
+  const retractTimerRef = useRef<number | undefined>(undefined);
+  const idlePreviewOpen = model.phase === "idle" && (peeked || retracting);
+  const visiblePhase = idlePreviewOpen ? "recording" : model.phase;
+  const visibleModel = idlePreviewOpen ? { ...model, phase: "recording" as const } : model;
+  const width = visiblePhase === "transcribing"
     ? lockedTranscribingWidthRef.current ?? lastNonTranscribingWidthRef.current
-    : overlayWidth(model);
+    : overlayWidth(visibleModel);
 
   useEffect(() => {
     const previousPhase = previousPhaseRef.current;
@@ -57,7 +65,7 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
   }, [model]);
 
   useEffect(() => {
-    if (model.phase === "idle" || (model.phase === "initializing" && !showInitializing)) {
+    if ((model.phase === "idle" && !peeked) || (model.phase === "initializing" && !showInitializing)) {
       setEntered(false);
       return;
     }
@@ -71,7 +79,7 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
 
     previousEntryPhaseRef.current = model.phase;
     setEntered(true);
-  }, [model.phase, showInitializing]);
+  }, [model.phase, peeked, showInitializing]);
 
   useEffect(() => {
     if (model.phase !== "initializing") {
@@ -84,20 +92,62 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
   }, [model.phase]);
 
   useEffect(() => {
-    if (model.phase === "idle") {
+    if (model.phase === "idle" && !peeked && !retracting) {
       previousEntryPhaseRef.current = "idle";
+      void resizeOverlayWindow(defaultWidth, hoverSensorHeight);
       return;
     }
     void resizeOverlayWindow(width, dropDownHeight);
-  }, [model.phase, width]);
+  }, [model.phase, peeked, retracting, width]);
 
-  if (model.phase === "idle") return null;
+  useEffect(() => {
+    return () => {
+      if (retractTimerRef.current !== undefined) {
+        window.clearTimeout(retractTimerRef.current);
+      }
+    };
+  }, []);
+
+  function cancelRetract() {
+    if (retractTimerRef.current === undefined) return;
+    window.clearTimeout(retractTimerRef.current);
+    retractTimerRef.current = undefined;
+  }
+
+  function openIdlePreview() {
+    cancelRetract();
+    setRetracting(false);
+    setPeeked(true);
+  }
+
+  function closeIdlePreview() {
+    cancelRetract();
+    setPeeked(false);
+    setRetracting(true);
+    retractTimerRef.current = window.setTimeout(() => {
+      retractTimerRef.current = undefined;
+      setRetracting(false);
+    }, retractMs);
+  }
+
+  if (model.phase === "idle" && !peeked && !retracting) {
+    return (
+      <div
+        className="live-overlay-root pointer-events-auto h-full w-full bg-transparent"
+        onMouseEnter={openIdlePreview}
+      />
+    );
+  }
   if (model.phase === "initializing" && !showInitializing) return null;
 
   return (
     <div className="live-overlay-root pointer-events-none h-full w-full overflow-hidden bg-transparent p-0">
       <div
         className="pointer-events-auto h-full w-full overflow-hidden bg-black text-white"
+        onMouseLeave={() => {
+          if (model.phase !== "idle") return;
+          closeIdlePreview();
+        }}
         style={{
           borderBottomLeftRadius: 12,
           borderBottomRightRadius: 12,
@@ -105,7 +155,7 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
           transition: "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
         }}
       >
-        <RecordingOverlayView model={model} onStopButtonPressed={onStop} />
+        <RecordingOverlayView model={visibleModel} onStopButtonPressed={onStop} />
       </div>
     </div>
   );

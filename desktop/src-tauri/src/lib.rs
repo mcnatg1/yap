@@ -7,6 +7,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 92.0;
 const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 38.0;
+const LIVE_OVERLAY_HOVER_SENSOR_HEIGHT: f64 = 4.0;
 const LIVE_OVERLAY_TOP_BEZEL_OFFSET: f64 = 0.0;
 const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_START_DICTATING: &str = "start_dictating";
@@ -49,7 +50,9 @@ async fn show_live_overlay(
 ) -> Result<live::state::LiveSessionView, String> {
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
     persist_live_view(&view)?;
-    if view.status != live::state::LiveSessionStatus::Idle {
+    if view.status == live::state::LiveSessionStatus::Idle {
+        ensure_idle_live_overlay(&app)?;
+    } else {
         ensure_live_overlay(&app)?;
     }
     emit_live(&app, &view);
@@ -721,7 +724,11 @@ fn stop_live_runtime(
     live_runtime.stop();
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();
-    if let Some(window) = app.get_webview_window("live-overlay") {
+    if view.visibility == live::state::LiveOverlayVisibility::Enabled {
+        if let Err(error) = ensure_idle_live_overlay(&app) {
+            log_line(&format!("live overlay idle show failed: {error}"));
+        }
+    } else if let Some(window) = app.get_webview_window("live-overlay") {
         let _ = window.hide();
     }
     emit_live(&app, &view);
@@ -736,31 +743,40 @@ fn block_live_for_setup(
 }
 
 fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
+    ensure_live_overlay_size(app, LIVE_OVERLAY_COMPACT_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
+}
+
+fn ensure_idle_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
+    ensure_live_overlay_size(
+        app,
+        LIVE_OVERLAY_COMPACT_WIDTH,
+        LIVE_OVERLAY_HOVER_SENSOR_HEIGHT,
+    )
+}
+
+fn ensure_live_overlay_size(app: &tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("live-overlay") {
         window
-            .set_size(tauri::LogicalSize::new(
-                LIVE_OVERLAY_COMPACT_WIDTH,
-                LIVE_OVERLAY_COMPACT_HEIGHT,
-            ))
+            .set_size(tauri::LogicalSize::new(width, height))
             .map_err(|err| format!("Failed to size live overlay: {err}"))?;
         window
             .set_shadow(false)
             .map_err(|err| format!("Failed to hide live overlay shadow: {err}"))?;
-        position_live_overlay(app, &window)?;
+        position_live_overlay(app, &window, width)?;
         window
             .show()
             .map_err(|err| format!("Failed to show live overlay: {err}"))?;
         return Ok(());
     }
 
-    let (x, y) = live_overlay_position(app, LIVE_OVERLAY_COMPACT_WIDTH);
+    let (x, y) = live_overlay_position(app, width);
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "live-overlay",
         tauri::WebviewUrl::App("index.html?window=live-overlay".into()),
     )
     .title("Yap Live")
-    .inner_size(LIVE_OVERLAY_COMPACT_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
+    .inner_size(width, height)
     .position(x, y)
     .decorations(false)
     .resizable(false)
@@ -771,15 +787,16 @@ fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     .focused(false)
     .build()
     .map_err(|err| format!("Failed to create live overlay: {err}"))?;
-    position_live_overlay(app, &window)?;
+    position_live_overlay(app, &window, width)?;
     Ok(())
 }
 
 fn position_live_overlay(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
+    width: f64,
 ) -> Result<(), String> {
-    let (x, y) = live_overlay_position(app, LIVE_OVERLAY_COMPACT_WIDTH);
+    let (x, y) = live_overlay_position(app, width);
     window
         .set_position(tauri::LogicalPosition::new(x, y))
         .map_err(|err| format!("Failed to position live overlay: {err}"))
@@ -908,10 +925,13 @@ pub fn run() {
             }
             install_tray(app.handle())?;
             let startup_live = app.state::<live::LiveSessionState>().snapshot();
-            if startup_live.visibility == live::state::LiveOverlayVisibility::Enabled
-                && startup_live.status != live::state::LiveSessionStatus::Idle
-            {
-                if let Err(error) = ensure_live_overlay(app.handle()) {
+            if startup_live.visibility == live::state::LiveOverlayVisibility::Enabled {
+                let result = if startup_live.status == live::state::LiveSessionStatus::Idle {
+                    ensure_idle_live_overlay(app.handle())
+                } else {
+                    ensure_live_overlay(app.handle())
+                };
+                if let Err(error) = result {
                     log_line(&format!("live overlay startup failed: {error}"));
                 }
             }
