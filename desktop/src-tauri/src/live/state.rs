@@ -93,9 +93,7 @@ pub struct LiveSessionState {
 pub fn is_live_capture_active(status: LiveSessionStatus) -> bool {
     matches!(
         status,
-        LiveSessionStatus::Listening
-            | LiveSessionStatus::Speaking
-            | LiveSessionStatus::Settling
+        LiveSessionStatus::Listening | LiveSessionStatus::Speaking | LiveSessionStatus::Settling
     )
 }
 
@@ -139,7 +137,6 @@ impl LiveSessionState {
     pub fn stop(&self) -> LiveSessionView {
         self.update(|view| {
             view.error = None;
-            view.final_text = None;
             view.level = Some(0.0);
             view.partial_text = None;
             view.route = LiveRoute::None;
@@ -170,6 +167,74 @@ impl LiveSessionState {
             }
         })
     }
+
+    pub fn clear_for_new_session(&self) -> LiveSessionView {
+        self.update(|view| {
+            view.error = None;
+            view.final_text = None;
+            view.level = Some(0.0);
+            view.partial_text = None;
+            view.route = LiveRoute::LocalFallback;
+            view.status = LiveSessionStatus::Listening;
+        })
+    }
+
+    pub fn update_level(&self, level: f32) -> LiveSessionView {
+        self.update(|view| {
+            let level = level.clamp(0.0, 1.0);
+            view.level = Some(level);
+            match view.status {
+                LiveSessionStatus::Listening if level >= 0.18 => {
+                    view.status = LiveSessionStatus::Speaking;
+                }
+                LiveSessionStatus::Speaking if level <= 0.08 => {
+                    view.status = LiveSessionStatus::Listening;
+                }
+                _ => {}
+            }
+        })
+    }
+
+    pub fn update_partial(&self, text: &str) -> LiveSessionView {
+        self.update(|view| {
+            view.error = None;
+            view.partial_text = Some(text.to_string());
+            view.status = LiveSessionStatus::Speaking;
+        })
+    }
+
+    pub fn update_final(&self, text: &str) -> LiveSessionView {
+        self.update(|view| {
+            view.error = None;
+            view.partial_text = None;
+            view.final_text = Some(append_final_text(view.final_text.as_deref(), text));
+            view.status = LiveSessionStatus::Settling;
+        })
+    }
+
+    pub fn return_to_listening(&self) -> LiveSessionView {
+        self.update(|view| {
+            if matches!(
+                view.status,
+                LiveSessionStatus::Listening
+                    | LiveSessionStatus::Speaking
+                    | LiveSessionStatus::Settling
+            ) {
+                view.status = LiveSessionStatus::Listening;
+            }
+            view.level = Some(0.0);
+        })
+    }
+
+    pub fn block_with_error(&self, message: &str) -> LiveSessionView {
+        self.update(|view| {
+            view.error = Some(message.to_string());
+            view.level = Some(0.0);
+            view.partial_text = None;
+            view.route = LiveRoute::Blocked;
+            view.status = LiveSessionStatus::Blocked;
+        })
+    }
 }
 
 pub fn live_route_for(setup: runtime::state::SetupState, server_ready: bool) -> LiveRoute {
@@ -187,6 +252,15 @@ fn blocked_message(setup: runtime::state::SetupState) -> &'static str {
         runtime::state::SetupState::FallbackDisabled => "Local fallback is disabled.",
         runtime::state::SetupState::SetupError => "Local fallback needs attention.",
         _ => "Local fallback is not ready.",
+    }
+}
+
+fn append_final_text(existing: Option<&str>, next: &str) -> String {
+    let next = next.trim();
+    match existing.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(existing) if !next.is_empty() => format!("{existing} {next}"),
+        Some(existing) => existing.to_string(),
+        None => next.to_string(),
     }
 }
 
@@ -261,5 +335,70 @@ mod tests {
 
         assert_eq!(view.status, LiveSessionStatus::Armed);
         assert!(!is_live_capture_active(view.status));
+    }
+
+    #[test]
+    fn stop_preserves_final_text() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+        state.update_final("hello.");
+
+        let view = state.stop();
+
+        assert_eq!(view.final_text.as_deref(), Some("hello."));
+    }
+
+    #[test]
+    fn final_event_settles_then_listens() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+        state.update(|view| view.status = LiveSessionStatus::Speaking);
+
+        let view = state.update_final("hello.");
+
+        assert_eq!(view.status, LiveSessionStatus::Settling);
+        let view = state.return_to_listening();
+        assert_eq!(view.status, LiveSessionStatus::Listening);
+        assert_eq!(view.final_text.as_deref(), Some("hello."));
+    }
+
+    #[test]
+    fn stream_crash_blocks_without_losing_final_text() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+        state.update_final("kept.");
+
+        let view = state.block_with_error("Live stream stopped.");
+
+        assert_eq!(view.status, LiveSessionStatus::Blocked);
+        assert_eq!(view.final_text.as_deref(), Some("kept."));
+    }
+
+    #[test]
+    fn level_updates_can_mark_speaking() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+        state.update(|view| view.status = LiveSessionStatus::Listening);
+
+        let view = state.update_level(0.35);
+
+        assert_eq!(view.status, LiveSessionStatus::Speaking);
+        assert_eq!(view.level, Some(0.35));
     }
 }
