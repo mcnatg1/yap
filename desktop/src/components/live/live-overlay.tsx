@@ -243,33 +243,57 @@ function OverlayIconButton({
 }
 
 function LiveDots({ hot, level }: { hot: boolean; level: number }) {
-  const opacity = hot ? 0.95 : 0.72 + Math.min(0.2, level * 0.2);
+  const bars = useLiveLevelBars(level, 8);
 
   return (
     <span aria-hidden="true" className="flex items-center justify-center gap-1">
-      {Array.from({ length: 8 }).map((_, index) => (
-        <span className="size-0.5 rounded-full bg-current" key={index} style={{ opacity }} />
+      {bars.map((height, index) => (
+        <span
+          className={cn(
+            "w-0.5 rounded-full bg-current transition-[height,opacity] duration-75 motion-reduce:transition-none",
+            hot ? "opacity-95" : "opacity-65",
+          )}
+          key={index}
+          style={{ height: `${height}px` }}
+        />
       ))}
     </span>
   );
 }
 
 function LiveWaveform({ hot, level }: { hot: boolean; level: number }) {
-  const clamped = Math.max(0.05, Math.min(1, level));
-  const bars = [0.35, 0.7, 0.48, 0.9, 0.42, 0.68, 0.32];
+  const bars = useLiveLevelBars(level, 9);
 
   return (
     <span aria-hidden="true" className="flex h-3 w-full items-center justify-center gap-1">
-      {bars.map((bar, index) => (
+      {bars.map((height, index) => (
         <span
           className={cn(
             "w-0.5 rounded-full bg-white/90 transition-[height,opacity] duration-75 motion-reduce:transition-none",
             hot ? "opacity-100" : "opacity-55",
           )}
           key={index}
-          style={{ height: `${Math.max(3, Math.round((bar * clamped + 0.18) * 12))}px` }}
+          style={{ height: `${height}px` }}
         />
       ))}
     </span>
   );
+}
+
+function useLiveLevelBars(level: number, count: number) {
+  const [bars, setBars] = useState(() => Array.from({ length: count }, () => 3));
+  const lastRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    const clamped = Math.max(0, Math.min(1, level));
+    if (lastRef.current === clamped) return;
+    lastRef.current = clamped;
+
+    setBars((current) => {
+      const next = Math.max(3, Math.round(3 + clamped * 9));
+      return [...current.slice(1), next];
+    });
+  }, [level]);
+
+  return bars;
 }
