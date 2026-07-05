@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { Copy, FileAudio, FileText, FolderOpen, HelpCircle, Pause, Play, RotateCcw } from "lucide-react";
+import WaveSurfer from "wavesurfer.js";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -26,45 +27,6 @@ import {
   type RecordingJobView,
 } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
-
-const WAVEFORM_BAR_COUNT = 64;
-const FALLBACK_WAVEFORM_BARS = [
-  34, 58, 45, 72, 40, 66, 82, 52, 38, 74, 61, 44, 86, 56, 70, 42,
-  64, 88, 50, 36, 76, 59, 46, 80, 54, 68, 39, 73, 62, 48, 84, 57,
-  43, 71, 90, 53, 37, 78, 60, 45, 83, 55, 69, 41, 75, 63, 49, 87,
-  35, 65, 47, 79, 58, 42, 74, 61, 52, 86, 44, 70, 55, 39, 76, 63,
-];
-
-export function waveformPeaks(audioBuffer: AudioBuffer, count = WAVEFORM_BAR_COUNT) {
-  const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) =>
-    audioBuffer.getChannelData(index),
-  );
-  const samplesPerBar = Math.max(1, Math.floor(audioBuffer.length / count));
-  const peaks: number[] = [];
-  let loudest = 0;
-
-  for (let bar = 0; bar < count; bar += 1) {
-    const start = bar * samplesPerBar;
-    const end = Math.min(audioBuffer.length, start + samplesPerBar);
-    const stride = Math.max(1, Math.floor((end - start) / 512));
-    let sum = 0;
-    let seen = 0;
-
-    for (let sampleIndex = start; sampleIndex < end; sampleIndex += stride) {
-      const mixed = channels.reduce((total, channel) => total + Math.abs(channel[sampleIndex] ?? 0), 0);
-      const sample = mixed / channels.length;
-      sum += sample * sample;
-      seen += 1;
-    }
-
-    const peak = Math.sqrt(sum / Math.max(1, seen));
-    loudest = Math.max(loudest, peak);
-    peaks.push(peak);
-  }
-
-  if (!loudest) return Array.from({ length: count }, () => 16);
-  return peaks.map((peak) => Math.round(16 + (peak / loudest) * 84));
-}
 
 function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: number) {
   switch (status) {
@@ -92,20 +54,14 @@ function RecordingPlayer({
   onOpen: (path: string) => void;
   onReveal: (path: string) => void;
 }) {
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const draggingRef = useRef(false);
   const displayedSecondRef = useRef(0);
-  const waveformFillRef = useRef<HTMLDivElement>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
-  const waveformBoundsRef = useRef<DOMRect | undefined>(undefined);
-  const pendingSeekClientXRef = useRef<number | undefined>(undefined);
-  const seekFrameRef = useRef<number | undefined>(undefined);
+  const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
   const statusId = useId();
   const errorId = useId();
   const [currentSeconds, setCurrentSeconds] = useState(0);
   const [durationSeconds, setDurationSeconds] = useState<number>();
   const [failed, setFailed] = useState(false);
-  const [peaks, setPeaks] = useState(FALLBACK_WAVEFORM_BARS);
   const [playing, setPlaying] = useState(false);
   const recordingSrc = useMemo(() => (isTauri() ? convertFileSrc(item.path) : undefined), [item.path]);
   const recordingStatus = failed
@@ -125,79 +81,57 @@ function RecordingPlayer({
     setFailed(false);
     setPlaying(false);
     setDurationSeconds(undefined);
-    paintProgress(0, 1);
   }, [recordingSrc]);
 
   useEffect(() => {
-    if (!recordingSrc) return;
+    const container = waveformRef.current;
+    if (!container || !recordingSrc) return;
 
-    const src = recordingSrc;
-    let cancelled = false;
-    let audioContext: AudioContext | undefined;
-    setPeaks(FALLBACK_WAVEFORM_BARS);
+    const waveSurfer = WaveSurfer.create({
+      barGap: 2,
+      barMinHeight: 3,
+      barRadius: 999,
+      barWidth: 3,
+      container,
+      cursorWidth: 0,
+      dragToSeek: true,
+      height: 56,
+      hideScrollbar: true,
+      normalize: true,
+      progressColor: "#034f46",
+      url: recordingSrc,
+      waveColor: "rgba(117, 111, 102, 0.28)",
+    });
+    waveSurferRef.current = waveSurfer;
 
-    async function loadWaveform() {
-      try {
-        const AudioContextCtor =
-          window.AudioContext ??
-          (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
-            .webkitAudioContext;
+    const unsubscribers = [
+      waveSurfer.on("ready", (duration) => {
+        setDurationSeconds(Number.isFinite(duration) ? duration : undefined);
+        setFailed(false);
+        setDisplaySeconds(waveSurfer.getCurrentTime());
+      }),
+      waveSurfer.on("timeupdate", setDisplaySeconds),
+      waveSurfer.on("seeking", setDisplaySeconds),
+      waveSurfer.on("play", () => setPlaying(true)),
+      waveSurfer.on("pause", () => setPlaying(false)),
+      waveSurfer.on("finish", () => {
+        setPlaying(false);
+        setDisplaySeconds(waveSurfer.getDuration());
+      }),
+      waveSurfer.on("error", () => {
+        setFailed(true);
+        setPlaying(false);
+      }),
+    ];
 
-        if (!AudioContextCtor) return;
-
-        const response = await fetch(src);
-        if (!response.ok) throw new Error("Recording unavailable");
-        const data = await response.arrayBuffer();
-        audioContext = new AudioContextCtor();
-        const audioBuffer = await audioContext.decodeAudioData(data);
-        if (!cancelled) setPeaks(waveformPeaks(audioBuffer));
-      } catch {
-        if (!cancelled) setPeaks(FALLBACK_WAVEFORM_BARS);
-      } finally {
-        if (audioContext?.state !== "closed") void audioContext?.close().catch(() => undefined);
-      }
-    }
-
-    // ponytail: selected-file decode in the UI; move to a worker if long recordings stutter.
-    void loadWaveform();
     return () => {
-      cancelled = true;
-      if (audioContext?.state !== "closed") void audioContext?.close().catch(() => undefined);
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+      waveSurfer.destroy();
+      if (waveSurferRef.current === waveSurfer) waveSurferRef.current = undefined;
     };
   }, [recordingSrc]);
-
-  useEffect(() => {
-    if (!playing) return;
-
-    let frame = 0;
-    function tick() {
-      const audio = audioRef.current;
-      if (audio) {
-        paintProgress(audio.currentTime, audio.duration);
-        setDisplaySeconds(audio.currentTime);
-      }
-      frame = window.requestAnimationFrame(tick);
-    }
-
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-  }, [playing]);
-
-  useEffect(() => {
-    return () => {
-      if (seekFrameRef.current) window.cancelAnimationFrame(seekFrameRef.current);
-    };
-  }, []);
 
   if (!recordingSrc) return null;
-
-  function paintProgress(seconds: number, duration: number | undefined = durationSeconds) {
-    const resolvedDuration = duration && Number.isFinite(duration) ? duration : 0;
-    const ratio = resolvedDuration ? Math.max(0, Math.min(1, seconds / resolvedDuration)) : 0;
-    if (waveformFillRef.current) {
-      waveformFillRef.current.style.clipPath = `inset(0 ${100 - ratio * 100}% 0 0)`;
-    }
-  }
 
   function setDisplaySeconds(seconds: number) {
     const wholeSeconds = Math.floor(seconds);
@@ -207,59 +141,24 @@ function RecordingPlayer({
   }
 
   function seekToRatio(ratio: number) {
-    const audio = audioRef.current;
-    const duration = durationSeconds ?? audio?.duration;
-    if (!audio || !duration || !Number.isFinite(duration)) return;
+    const waveSurfer = waveSurferRef.current;
+    const duration = durationSeconds ?? waveSurfer?.getDuration();
+    if (!waveSurfer || !duration || !Number.isFinite(duration)) return;
 
     const nextSeconds = Math.max(0, Math.min(duration, ratio * duration));
-    audio.currentTime = nextSeconds;
-    paintProgress(nextSeconds, duration);
+    waveSurfer.setTime(nextSeconds);
     setDisplaySeconds(nextSeconds);
   }
 
   function seekBy(deltaSeconds: number) {
-    const audio = audioRef.current;
-    const duration = durationSeconds ?? audio?.duration;
-    if (!duration || !Number.isFinite(duration)) return;
-    seekToRatio(((audio?.currentTime ?? currentSeconds) + deltaSeconds) / duration);
-  }
-
-  function seekFromClientX(clientX: number) {
-    const bounds = waveformBoundsRef.current ?? waveformRef.current?.getBoundingClientRect();
-    if (!bounds?.width) return;
-    seekToRatio((clientX - bounds.left) / bounds.width);
-  }
-
-  function scheduleSeekFromClientX(clientX: number) {
-    pendingSeekClientXRef.current = clientX;
-    if (seekFrameRef.current) return;
-
-    seekFrameRef.current = window.requestAnimationFrame(() => {
-      seekFrameRef.current = undefined;
-      if (pendingSeekClientXRef.current === undefined) return;
-      seekFromClientX(pendingSeekClientXRef.current);
-    });
-  }
-
-  function endDrag(clientX?: number) {
-    draggingRef.current = false;
-    if (seekFrameRef.current) {
-      window.cancelAnimationFrame(seekFrameRef.current);
-      seekFrameRef.current = undefined;
-    }
-    if (clientX !== undefined) seekFromClientX(clientX);
-    pendingSeekClientXRef.current = undefined;
-    waveformBoundsRef.current = undefined;
+    const waveSurfer = waveSurferRef.current;
+    const duration = durationSeconds ?? waveSurfer?.getDuration();
+    if (!waveSurfer || !duration || !Number.isFinite(duration)) return;
+    seekToRatio((waveSurfer.getCurrentTime() + deltaSeconds) / duration);
   }
 
   function togglePlayback() {
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (audio.paused) {
-      void audio.play().catch(() => setFailed(true));
-      return;
-    }
-    audio.pause();
+    void waveSurferRef.current?.playPause().catch(() => setFailed(true));
   }
 
   return (
@@ -335,7 +234,7 @@ function RecordingPlayer({
             aria-valuemin={0}
             aria-valuenow={currentSeconds}
             aria-valuetext={`${formatElapsed(currentSeconds)}${durationSeconds === undefined ? "" : ` of ${formatElapsed(Math.floor(durationSeconds))}`}`}
-            className="relative h-14 min-w-0 flex-1 cursor-pointer touch-none overflow-hidden rounded-md bg-muted/60 px-3 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60"
+            className="relative h-14 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-md bg-muted/60 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60"
             onKeyDown={(event) => {
               if (!canSeek) return;
               if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
@@ -358,56 +257,10 @@ function RecordingPlayer({
                 seekToRatio(1);
               }
             }}
-            onPointerDown={(event) => {
-              if (!canSeek) return;
-              event.preventDefault();
-              draggingRef.current = true;
-              waveformBoundsRef.current = event.currentTarget.getBoundingClientRect();
-              event.currentTarget.setPointerCapture(event.pointerId);
-              seekFromClientX(event.clientX);
-            }}
-            onPointerMove={(event) => {
-              if (!draggingRef.current) return;
-              event.preventDefault();
-              scheduleSeekFromClientX(event.clientX);
-            }}
-            onPointerUp={(event) => {
-              endDrag(event.clientX);
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-            }}
-            onPointerCancel={() => {
-              endDrag();
-            }}
             ref={waveformRef}
             role="slider"
             tabIndex={canSeek ? 0 : -1}
-          >
-            <div className="absolute inset-x-3 inset-y-0 flex items-center gap-1" aria-hidden="true">
-              {peaks.map((height, index) => (
-                <span
-                  className="w-1 flex-1 rounded-full bg-muted-foreground/25"
-                  key={`${height}-${index}`}
-                  style={{ height: `${height}%` }}
-                />
-              ))}
-            </div>
-            <div
-              className="absolute inset-x-3 inset-y-0 flex items-center gap-1"
-              ref={waveformFillRef}
-              style={{ clipPath: "inset(0 100% 0 0)", willChange: "clip-path" }}
-              aria-hidden="true"
-            >
-              {peaks.map((height, index) => (
-                <span
-                  className="w-1 flex-1 rounded-full bg-primary/75"
-                  key={`${height}-${index}`}
-                  style={{ height: `${height}%` }}
-                />
-              ))}
-            </div>
-          </div>
+          />
         </div>
         <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
           <span>{playing ? "Playing" : recordingStatus}</span>
@@ -416,40 +269,6 @@ function RecordingPlayer({
             {durationSeconds === undefined ? null : ` / ${formatElapsed(Math.floor(durationSeconds))}`}
           </span>
         </div>
-        <audio
-          aria-describedby={failed ? `${statusId} ${errorId}` : statusId}
-          aria-label={`Play recording ${item.name}`}
-          aria-hidden="true"
-          className="sr-only"
-          key={recordingSrc}
-          onEnded={(event) => {
-            const seconds = event.currentTarget.duration;
-            setPlaying(false);
-            if (!Number.isFinite(seconds)) return;
-            paintProgress(seconds, seconds);
-            setDisplaySeconds(seconds);
-          }}
-          onError={() => {
-            setFailed(true);
-            setPlaying(false);
-          }}
-          onLoadedMetadata={(event) => {
-            const seconds = event.currentTarget.duration;
-            setDurationSeconds(Number.isFinite(seconds) ? seconds : undefined);
-            paintProgress(event.currentTarget.currentTime, seconds);
-            setDisplaySeconds(event.currentTarget.currentTime);
-          }}
-          onPause={() => setPlaying(false)}
-          onPlay={() => setPlaying(true)}
-          onTimeUpdate={(event) => {
-            if (playing) return;
-            paintProgress(event.currentTarget.currentTime, event.currentTarget.duration);
-            setDisplaySeconds(event.currentTarget.currentTime);
-          }}
-          preload="metadata"
-          ref={audioRef}
-          src={recordingSrc}
-        />
       </div>
       {failed ? (
         <p className="text-sm text-muted-foreground" id={errorId}>
