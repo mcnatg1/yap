@@ -3,6 +3,7 @@ import gsap from "gsap";
 import { Check, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import WaveSurfer from "wavesurfer.js";
 
 import { Button } from "@/components/ui/button";
 import { liveRouteLabel, liveStatusLabel, type LiveSessionView } from "@/lib/app-types";
@@ -243,45 +244,70 @@ function OverlayIconButton({
 }
 
 function LiveDots({ hot, level }: { hot: boolean; level: number }) {
-  const bars = useLiveLevelBars(level, 8);
-
-  return (
-    <span aria-hidden="true" className="flex items-center justify-center gap-1">
-      {bars.map((height, index) => (
-        <span
-          className={cn(
-            "w-0.5 rounded-full bg-current transition-[height,opacity] duration-75 motion-reduce:transition-none",
-            hot ? "opacity-95" : "opacity-65",
-          )}
-          key={index}
-          style={{ height: `${height}px` }}
-        />
-      ))}
-    </span>
-  );
+  return <LiveLevelWaveform className="h-4 w-10" count={8} hot={hot} level={level} />;
 }
 
 function LiveWaveform({ hot, level }: { hot: boolean; level: number }) {
-  const bars = useLiveLevelBars(level, 9);
-
-  return (
-    <span aria-hidden="true" className="flex h-3 w-full items-center justify-center gap-1">
-      {bars.map((height, index) => (
-        <span
-          className={cn(
-            "w-0.5 rounded-full bg-white/90 transition-[height,opacity] duration-75 motion-reduce:transition-none",
-            hot ? "opacity-100" : "opacity-55",
-          )}
-          key={index}
-          style={{ height: `${height}px` }}
-        />
-      ))}
-    </span>
-  );
+  return <LiveLevelWaveform className="h-3 w-full" count={10} hot={hot} level={level} />;
 }
 
-function useLiveLevelBars(level: number, count: number) {
-  const [bars, setBars] = useState(() => Array.from({ length: count }, () => 3));
+function LiveLevelWaveform({
+  className,
+  count,
+  hot,
+  level,
+}: {
+  className: string;
+  count: number;
+  hot: boolean;
+  level: number;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
+  const peaks = useLiveLevelPeaks(level, count);
+  const color = hot ? "rgba(255, 255, 255, 0.96)" : "rgba(255, 255, 255, 0.58)";
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const waveSurfer = WaveSurfer.create({
+      barGap: 2,
+      barMinHeight: 2,
+      barRadius: 999,
+      barWidth: 2,
+      container,
+      cursorWidth: 0,
+      duration: 1,
+      height: "auto",
+      hideScrollbar: true,
+      interact: false,
+      peaks: [signedPeaks(peaks)],
+      progressColor: color,
+      waveColor: color,
+    });
+    waveSurferRef.current = waveSurfer;
+
+    return () => {
+      waveSurfer.destroy();
+      if (waveSurferRef.current === waveSurfer) waveSurferRef.current = undefined;
+    };
+  }, []);
+
+  useEffect(() => {
+    waveSurferRef.current?.setOptions({
+      duration: 1,
+      peaks: [signedPeaks(peaks)],
+      progressColor: color,
+      waveColor: color,
+    });
+  }, [color, peaks]);
+
+  return <div aria-hidden="true" className={cn("overflow-hidden", className)} ref={containerRef} />;
+}
+
+function useLiveLevelPeaks(level: number, count: number) {
+  const [peaks, setPeaks] = useState(() => Array.from({ length: count }, () => 0.2));
   const lastRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -289,11 +315,15 @@ function useLiveLevelBars(level: number, count: number) {
     if (lastRef.current === clamped) return;
     lastRef.current = clamped;
 
-    setBars((current) => {
-      const next = Math.max(3, Math.round(3 + clamped * 9));
+    setPeaks((current) => {
+      const next = Math.max(0.16, Math.min(1, 0.16 + clamped * 0.84));
       return [...current.slice(1), next];
     });
   }, [level]);
 
-  return bars;
+  return peaks;
+}
+
+function signedPeaks(peaks: number[]) {
+  return peaks.flatMap((peak) => [peak, -peak]);
 }
