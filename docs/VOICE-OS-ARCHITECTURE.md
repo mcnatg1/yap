@@ -595,7 +595,7 @@ yap-knowledge (Git repo, org LAN)
 
 ## Master roadmap
 
-The canonical roadmap is now organized around the product boundary: **desktop thin client → server brain → enterprise/network layer**. Older ADR/spec phase labels remain as aliases until a rename is worth the churn.
+The canonical roadmap is organized around the product boundary: **desktop thin client → server brain → enterprise/network layer**. ADR phase labels remain as historical aliases, but active specs use client/server names.
 
 ```mermaid
 timeline
@@ -618,7 +618,7 @@ timeline
 | **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
 | **1** | desktop | Recordings home, playback, queue, settings, setup flow, and server connection state. | Phase 3 UI work |
 | **2** | desktop fallback | Local Moonshine v2 tiny live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002 |
-| **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; Phase 8 spec |
+| **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; server-tier spec |
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
 | **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server Cohere/Moonshine routing. | Old Phase 5/8 |
 | **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
@@ -647,7 +647,7 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Future (unnumbered):** multilingual live router — its own ADR once per-language streaming backends are chosen; server GPU removes the latency excuse.
 
-**Build specs:** [Client state machine](specs/client-state-machine.md) · [STT 1-2](specs/phase-1-2-stt-sidecar.md) · [LLM A-D](specs/phase-a-d-llm-sidecar.md) · [Live 3](specs/phase-3-live-ux-audio.md) · [Phase 8 server](specs/phase-8-yap-server.md) · [Testing](specs/testing-strategy.md). Spec filenames still use historical phase labels. Preprocessing, diarization, and server phases get build specs when implementation begins.
+**Build specs:** [Client state machine](specs/client-state-machine.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Testing](specs/testing-strategy.md). Preprocessing and diarization get dedicated build specs when implementation begins.
 
 ---
 
@@ -658,8 +658,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
 | **1** Desktop thin client | Recordings home, playback, recording-job workflow, setup/settings | Product copy; setup flow; connected/offline states |
-| **2** Local fallback | Moonshine v2 tiny live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; setup download docs |
-| **3** Server contract | Health, jobs, WSS, errors, client connector | [Phase 8 server spec](specs/phase-8-yap-server.md); OpenAPI/WSS docs |
+| **2** Local fallback | Moonshine v2 tiny live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/local-live-fallback-sidecar.md) Accepted; setup download docs |
+| **3** Server contract | Health, jobs, WSS, errors, client connector | [Server tier MVP spec](specs/server-tier-mvp.md); OpenAPI/WSS docs |
 | **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
 | **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
@@ -687,7 +687,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [ ] Agent profile registry; v1 enable `scribe` only
 - [ ] Mutex: one STT backend, one HOT LLM, one background LLM queue
 
-**LLM (Phase A–D)**
+**Local LLM sidecar**
 
 - [ ] Bundle llama-server; `-ngl 0`; Rust sidecar manager
 - [ ] Migrate polish.ts to `/v1/chat/completions`
@@ -734,10 +734,10 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Spec | Phase |
 |------|-------|
 | [Client state machine](specs/client-state-machine.md) | 1–2 |
-| [STT sidecar](specs/phase-1-2-stt-sidecar.md) | 1–2 |
-| [LLM sidecar](specs/phase-a-d-llm-sidecar.md) | A–D |
-| [Live UX + audio](specs/phase-3-live-ux-audio.md) | 3 |
-| [Yap server](specs/phase-8-yap-server.md) | 3–4 server |
+| [Local live fallback](specs/local-live-fallback-sidecar.md) | 2 |
+| [Local LLM sidecar](specs/local-llm-sidecar.md) | polish/Scribe |
+| [Live dictation client](specs/live-dictation-client-ux.md) | 1–2 |
+| [Server tier MVP](specs/server-tier-mvp.md) | 3–4 |
 | [Testing strategy](specs/testing-strategy.md) | all |
 
 ## Related documents

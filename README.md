@@ -103,7 +103,7 @@ pnpm test:desktop:build    # builds the WDIO-enabled debug Tauri binary
 pnpm test:desktop          # runs the WebdriverIO/Tauri smoke test
 ```
 
-`pnpm test:desktop` expects `src-tauri\target\debug\desktop.exe` unless `APP_BINARY` points at
+`pnpm test:desktop` expects `src-tauri\target\debug\yap-desktop.exe` unless `APP_BINARY` points at
 another build. The WDIO hooks are only compiled when `test:desktop:build` uses the `wdio` feature
 and `src-tauri\tauri.wdio.conf.json`.
 
@@ -112,7 +112,7 @@ Useful narrow checks:
 ```powershell
 cd C:\dev\cohere-transcribe-local
 git diff --check
-rg -n "transcribe.py|CommandCenter" -g "!node_modules" -g "!target"
+Get-Content docs\runbooks\repo-housekeeping.md
 ```
 
 ## MVP Monorepo Rule
@@ -120,11 +120,12 @@ rg -n "transcribe.py|CommandCenter" -g "!node_modules" -g "!target"
 Keep code here until the first server path is real enough to split:
 
 - `desktop/` owns the installed client and local fallback.
-- `server/` stages the Phase 8 `yap-server` contract and first service code.
+- `server/` stages the `yap-server` contract and first tested server-tier code.
 - `infra/yap-server-node/` owns host/bootstrap setup for GB-class server nodes.
 - `docs/` stays authoritative while the architecture is still moving.
 
 Do not add monorepo tooling until two packages actually need shared commands or dependency graphing. `pnpm -C desktop ...` and direct server commands are enough for now.
+Use [docs/runbooks/repo-housekeeping.md](docs/runbooks/repo-housekeeping.md) for naming rules and the current tech-debt ledger.
 
 ## Local Files
 

@@ -3,7 +3,7 @@
 **Status:** Draft
 **Date:** 2026-07-05
 **Scope:** Next PR for the live speaking UI/state/control foundation. This is the Phase 3/ADR 0013 bridge: build the always-available overlay, configurable hotkey, microphone setup, and typed live state contract before cross-app text injection. It does not implement the full audio thread, Scribe, save-session pipeline, or Phase 8 server streaming connector.
-**Canonical specs:** [../../specs/phase-3-live-ux-audio.md](../../specs/phase-3-live-ux-audio.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md)
+**Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md)
 
 ## Problem
 

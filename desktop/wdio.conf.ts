@@ -1,6 +1,6 @@
 import path from "node:path";
 
-const binaryName = process.platform === "win32" ? "desktop.exe" : "desktop";
+const binaryName = process.platform === "win32" ? "yap-desktop.exe" : "yap-desktop";
 const appBinaryPath =
   process.env.APP_BINARY ?? path.resolve("src-tauri", "target", "debug", binaryName);
 

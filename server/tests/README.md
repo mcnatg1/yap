@@ -1,6 +1,6 @@
 # Server tests
 
-Phase 8 starts with contract, API, and workload-router tests.
+The server tier starts with contract, API, and workload-router tests.
 
 ```text
 tests/

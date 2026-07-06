@@ -1,16 +1,16 @@
-# Spec: Phase 8 yap-server MVP
+# Spec: Server Tier MVP
 
 **Status:** Draft
 **Scope:** Stand up the first server path while keeping this repo as the MVP monorepo.
 
-Phase 8 introduces `yap-server` as a private service on an org-owned GB-class server node. The desktop remains the product surface; the server owns heavy inference, queues, and the future API contract.
+The server tier introduces `yap-server` as a private service on an org-owned GB-class server node. The desktop remains the product surface; the server owns heavy inference, queues, and the future API contract.
 
 ## Repo Layout
 
 ```text
 cohere-transcribe-local/
   desktop/               installed client and local Moonshine fallback
-  server/                Phase 8 service/API staging area
+  server/                service/API staging area
   infra/yap-server-node/ GB-class host setup and firewall/runbook scripts
   docs/                  ADRs, specs, runbooks
 ```
@@ -22,9 +22,9 @@ This stays a monorepo through MVP. Split into `yap-desktop`, `yap-server`, and `
 ```text
 server/
   openapi/              HTTP contract + live WSS event notes
-  src/yap_server/       service code when Phase 8 begins
-    api/                HTTP/WSS entrypoints
-    workload_router/    queues, fairness, backpressure, pool dispatch
+  src/yap_server/
+    api/                health and future HTTP/WSS entrypoints
+    workload_router/    live/batch route selection; later queues and pool dispatch
     pools/              streaming ASR and batch ASR pool adapters
     schemas/            request/event/job shapes, no model weights
     config/             environment/config parsing
@@ -38,7 +38,7 @@ Avoid top-level `models/` and `workers/` during MVP. Model files live on the nod
 | Slice | Minimum outcome |
 |-------|-----------------|
 | API contract | Health, live WSS shape, batch upload/job shape documented in `server/` |
-| Router | One service entrypoint that can accept authenticated health and stub job requests |
+| Router | Health contract and live/batch route selection protected by tests |
 | Desktop connector | Settings URL + reachability check + fallback state transitions |
 | Host setup | `infra/yap-server-node/setup-server.sh` can prepare the node without opening app ports by default |
 
@@ -53,6 +53,7 @@ Avoid top-level `models/` and `workers/` during MVP. Model files live on the nod
 ## Acceptance
 
 - `README.md` explains the MVP monorepo rule.
-- `server/README.md` defines where Phase 8 code lands.
+- `server/README.md` defines where server-tier code lands.
+- `python -m unittest discover -s server/tests -p "test_*.py"` passes with `PYTHONPATH=server/src`.
 - `infra/yap-server-node/setup-server.sh` stays idempotent and syntax-valid.
 - ADR 0018 still records the Phase 12 three-repo split.

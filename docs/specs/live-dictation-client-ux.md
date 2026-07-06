@@ -1,8 +1,8 @@
-# Spec: Phase 3 — Live English UX + audio thread
+# Spec: Live Dictation Client UX + Audio Thread
 
 **Status:** Draft (2026-06-30)
 **Implements:** [ADR 0001](../adr/0001-dual-stt-backends.md), [ADR 0002](../adr/0002-crispasr-unified-stt-runtime.md) (live endpoint), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (Silero, orchestrator)
-**Depends on:** [STT sidecar spec](phase-1-2-stt-sidecar.md) (live WS), [LLM sidecar spec](phase-a-d-llm-sidecar.md) (Scribe)
+**Depends on:** [STT sidecar spec](local-live-fallback-sidecar.md) (live WS), [LLM sidecar spec](local-llm-sidecar.md) (Scribe)
 **Scope:** Ship **English-only live transcription** — mic capture, Silero VAD, Moonshine streaming, optional Scribe polish, in-app preview, and the live overlay/hotkey foundation. No diarization/L3 (Phase 7), no cross-app text injection (Phase 7+).
 
 > **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).

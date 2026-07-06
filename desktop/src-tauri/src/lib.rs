@@ -17,6 +17,7 @@ const TRAY_START_DICTATING: &str = "start_dictating";
 const TRAY_STOP_RECORDING: &str = "stop_recording";
 const TRAY_QUIT: &str = "quit";
 
+mod file_actions;
 pub mod live;
 pub mod runtime;
 pub mod stt;
@@ -255,7 +256,7 @@ fn save_live_session(
 
 #[tauri::command]
 fn list_saved_live_sessions(window: tauri::WebviewWindow) -> Result<Vec<SavedLiveSession>, String> {
-    ensure_main_window(&window)?;
+    file_actions::ensure_main_window(&window)?;
     list_saved_live_session_files()
 }
 
@@ -423,185 +424,6 @@ fn start_transcribe(
     ))
 }
 
-#[tauri::command]
-fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
-    ensure_main_window(&window)?;
-    read_text_file_at(path)
-}
-
-fn read_text_file_at(path: String) -> Result<String, String> {
-    let path = std::path::PathBuf::from(path);
-
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be read.".into());
-    }
-
-    let path = canonical_existing_path(&path)?;
-    std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
-}
-
-#[tauri::command]
-fn write_polished_text(
-    window: tauri::WebviewWindow,
-    path: String,
-    text: String,
-) -> Result<String, String> {
-    ensure_main_window(&window)?;
-    write_polished_text_at(path, text)
-}
-
-fn write_polished_text_at(path: String, text: String) -> Result<String, String> {
-    let path = std::path::PathBuf::from(path);
-
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be polished.".into());
-    }
-
-    let path = canonical_existing_path(&path)?;
-    let output = polished_path(&path)?;
-    std::fs::write(&output, text)
-        .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
-    Ok(output.display().to_string())
-}
-
-fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| "Transcript path has no file name.".to_string())?;
-
-    Ok(path.with_file_name(format!("{stem}.polished.txt")))
-}
-
-#[tauri::command]
-fn open_app_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
-    ensure_main_window(&window)?;
-    let path = openable_app_path(path)?;
-    tauri_plugin_opener::open_path(&path, None::<&str>)
-        .map_err(|err| format!("Failed to open file: {err}"))
-}
-
-#[tauri::command]
-fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
-    ensure_main_window(&window)?;
-    let path = openable_app_path(path)?;
-    tauri_plugin_opener::reveal_item_in_dir(path)
-        .map_err(|err| format!("Failed to reveal file: {err}"))
-}
-
-#[tauri::command]
-fn delete_history_entry_files(
-    window: tauri::WebviewWindow,
-    output_path: String,
-    source_path: String,
-) -> Result<(), String> {
-    ensure_main_window(&window)?;
-    delete_history_entry_files_at(output_path, source_path)
-}
-
-fn delete_history_entry_files_at(output_path: String, source_path: String) -> Result<(), String> {
-    delete_history_entry_files_at_from_dir(output_path, source_path, &live_recordings_dir())
-}
-
-fn delete_history_entry_files_at_from_dir(
-    output_path: String,
-    source_path: String,
-    owned_dir: &std::path::Path,
-) -> Result<(), String> {
-    let output = deletable_transcript_path(output_path)?;
-    let source = deletable_yap_owned_recording_path_from_dir(source_path, owned_dir)?;
-
-    if let Some(source) = source.filter(|source| source != &output) {
-        std::fs::remove_file(&source)
-            .map_err(|err| format!("Failed to delete recording: {err}"))?;
-    }
-
-    std::fs::remove_file(&output).map_err(|err| format!("Failed to delete transcript: {err}"))
-}
-
-fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
-    let path = std::path::PathBuf::from(path);
-    if !is_yap_media_or_transcript_path(&path) {
-        return Err("Only Yap recording and transcript files can be opened.".into());
-    }
-    let path = canonical_existing_path(&path)?;
-    if !is_yap_media_or_transcript_path(&path) {
-        return Err("Only Yap recording and transcript files can be opened.".into());
-    }
-    Ok(path)
-}
-
-fn deletable_transcript_path(path: String) -> Result<std::path::PathBuf, String> {
-    let path = std::path::PathBuf::from(path);
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be deleted.".into());
-    }
-    let path = canonical_existing_path(&path)?;
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be deleted.".into());
-    }
-    Ok(path)
-}
-
-fn deletable_yap_owned_recording_path_from_dir(
-    path: String,
-    owned_dir: &std::path::Path,
-) -> Result<Option<std::path::PathBuf>, String> {
-    let path = std::path::PathBuf::from(path);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let path = path
-        .canonicalize()
-        .map_err(|err| format!("Failed to resolve recording path: {err}"))?;
-    let Ok(owned_dir) = owned_dir.canonicalize() else {
-        return Ok(None);
-    };
-
-    if path.starts_with(owned_dir) && is_yap_media_or_transcript_path(&path) {
-        Ok(Some(path))
-    } else {
-        Ok(None)
-    }
-}
-
-fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    if !path.exists() {
-        return Err("File no longer exists.".into());
-    }
-    path.canonicalize()
-        .map_err(|err| format!("Failed to resolve file path: {err}"))
-}
-
-fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == "main" {
-        Ok(())
-    } else {
-        Err("This file action is only available from the main window.".into())
-    }
-}
-
-fn is_transcript_path(path: &std::path::Path) -> bool {
-    has_extension(path, &["txt"])
-}
-
-fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
-    has_extension(
-        path,
-        &["txt", "mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"],
-    )
-}
-
-fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            allowed
-                .iter()
-                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-        })
-}
-
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupStatus {
@@ -713,7 +535,8 @@ fn save_live_session_files(
     let name = format!("live-{created_at_ms}");
     let transcript_path = dir.join(format!("{name}.txt"));
     let audio_path = dir.join(format!("{name}.wav"));
-    let transcript_body = transcript.unwrap_or_else(|| "No live transcript captured.".into());
+    let transcript_body =
+        transcript.unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
 
     if !pcm.is_empty() {
         write_pcm16_wav(&audio_path, &pcm)?;
@@ -750,7 +573,7 @@ fn list_saved_live_session_files_from_dir(
     {
         let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
         let path = entry.path();
-        if !is_transcript_path(&path) {
+        if !file_actions::is_transcript_path(&path) {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -759,6 +582,8 @@ fn list_saved_live_session_files_from_dir(
         if !stem.starts_with("live-") {
             continue;
         }
+
+        normalize_saved_live_transcript(&path)?;
 
         let audio_path = path.with_extension("wav");
         let source_path = if audio_path.exists() {
@@ -802,9 +627,55 @@ fn live_transcript_text(view: &live::state::LiveSessionView) -> Option<String> {
     view.final_text
         .as_deref()
         .or(view.partial_text.as_deref())
-        .map(str::trim)
+        .map(clean_live_transcript_text)
         .filter(|text| !text.is_empty())
-        .map(str::to_string)
+}
+
+fn clean_live_transcript_text(text: &str) -> String {
+    if text.trim() == "No live transcript captured." {
+        return "Transcript unavailable for this live recording.".into();
+    }
+
+    let mut cleaned = text
+        .split_whitespace()
+        .map(fix_word_casing)
+        .collect::<Vec<_>>()
+        .join(" ");
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", ".");
+    }
+    cleaned
+}
+
+fn fix_word_casing(word: &str) -> String {
+    let mut chars = word.chars();
+    let (Some(first), Some(second), Some(third)) = (chars.next(), chars.next(), chars.next())
+    else {
+        return word.to_string();
+    };
+
+    if first.is_uppercase() && second.is_uppercase() && third.is_lowercase() {
+        let mut fixed = String::new();
+        fixed.push(first);
+        fixed.extend(second.to_lowercase());
+        fixed.push(third);
+        fixed.extend(chars);
+        fixed
+    } else {
+        word.to_string()
+    }
+}
+
+fn normalize_saved_live_transcript(path: &std::path::Path) -> Result<(), String> {
+    let current = std::fs::read_to_string(path)
+        .map_err(|err| format!("Failed to read saved live transcript: {err}"))?;
+    let cleaned = clean_live_transcript_text(&current);
+    if cleaned.is_empty() || cleaned.trim_end() == current.trim_end() {
+        return Ok(());
+    }
+
+    std::fs::write(path, format!("{cleaned}\n"))
+        .map_err(|err| format!("Failed to repair saved live transcript: {err}"))
 }
 
 fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
@@ -1239,11 +1110,11 @@ pub fn run() {
             show_main_workspace,
             polish_num_gpu,
             start_transcribe,
-            read_text_file,
-            write_polished_text,
-            open_app_path,
-            reveal_app_path,
-            delete_history_entry_files
+            file_actions::read_text_file,
+            file_actions::write_polished_text,
+            file_actions::open_app_path,
+            file_actions::reveal_app_path,
+            file_actions::delete_history_entry_files
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -1271,16 +1142,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_test_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "yap-{name}-{}-{}",
-            std::process::id(),
-            unix_millis_now().unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     #[test]
     fn setup_status_serializes_for_frontend() {
@@ -1382,6 +1243,27 @@ mod tests {
     }
 
     #[test]
+    fn live_transcript_text_cleans_streaming_artifacts() {
+        let mut view = live::state::LiveSessionView {
+            visibility: live::state::LiveOverlayVisibility::Enabled,
+            status: live::state::LiveSessionStatus::Idle,
+            route: live::state::LiveRoute::None,
+            capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            hotkey: String::new(),
+            input_device_id: None,
+            input_device_label: None,
+            level: None,
+            partial_text: None,
+            final_text: Some("  THank   you.. ".into()),
+            error: None,
+        };
+
+        assert_eq!(live_transcript_text(&view).as_deref(), Some("Thank you."));
+        view.final_text = Some("NASA called.".into());
+        assert_eq!(live_transcript_text(&view).as_deref(), Some("NASA called."));
+    }
+
+    #[test]
     fn write_pcm16_wav_writes_standard_header_and_data() {
         let path = std::env::temp_dir().join(format!("yap-live-{}.wav", std::process::id()));
         let pcm = [0, 0, 255, 127];
@@ -1419,6 +1301,40 @@ mod tests {
     }
 
     #[test]
+    fn saved_live_session_scan_repairs_streaming_artifacts() {
+        let dir = std::env::temp_dir().join(format!("yap-live-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("live-201.txt");
+        std::fs::write(&transcript, "  THank   you.. \n").unwrap();
+
+        let sessions = list_saved_live_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "Thank you.\n"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saved_live_session_scan_repairs_old_empty_placeholder() {
+        let dir = std::env::temp_dir().join(format!("yap-live-placeholder-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("live-202.txt");
+        std::fs::write(&transcript, "No live transcript captured.\n").unwrap();
+
+        let sessions = list_saved_live_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "Transcript unavailable for this live recording.\n"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn start_live_setup_missing_blocks_without_claiming_server() {
         let live = live::LiveSessionState::new(live::settings::LiveSettings {
             overlay_enabled: true,
@@ -1432,74 +1348,5 @@ mod tests {
         assert_eq!(view.status, live::state::LiveSessionStatus::Blocked);
         assert_eq!(view.route, live::state::LiveRoute::Blocked);
         assert_eq!(view.error.as_deref(), Some("Local fallback is not ready."));
-    }
-
-    #[test]
-    fn read_text_file_rejects_non_transcripts() {
-        assert!(read_text_file_at("recording.mp3".into()).is_err());
-    }
-
-    #[test]
-    fn app_open_path_allows_only_recordings_and_transcripts() {
-        assert!(is_yap_media_or_transcript_path(std::path::Path::new(
-            "recording.mp3"
-        )));
-        assert!(is_yap_media_or_transcript_path(std::path::Path::new(
-            "recording.MP4"
-        )));
-        assert!(is_yap_media_or_transcript_path(std::path::Path::new(
-            "recording.txt"
-        )));
-        assert!(!is_yap_media_or_transcript_path(std::path::Path::new(
-            "script.ps1"
-        )));
-    }
-
-    #[test]
-    fn delete_history_entry_files_removes_owned_live_audio() {
-        let dir = temp_test_dir("delete-owned-live");
-        let transcript = dir.join("live-300.txt");
-        let audio = dir.join("live-300.wav");
-        std::fs::write(&transcript, "hello\n").unwrap();
-        std::fs::write(&audio, b"RIFF").unwrap();
-
-        delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            audio.display().to_string(),
-            &dir,
-        )
-        .unwrap();
-
-        assert!(!transcript.exists());
-        assert!(!audio.exists());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn delete_history_entry_files_keeps_imported_source_audio() {
-        let owned_dir = temp_test_dir("delete-owned-dir");
-        let imported_dir = temp_test_dir("delete-imported-source");
-        let transcript = imported_dir.join("clip.txt");
-        let audio = imported_dir.join("clip.wav");
-        std::fs::write(&transcript, "hello\n").unwrap();
-        std::fs::write(&audio, b"RIFF").unwrap();
-
-        delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            audio.display().to_string(),
-            &owned_dir,
-        )
-        .unwrap();
-
-        assert!(!transcript.exists());
-        assert!(audio.exists());
-        std::fs::remove_dir_all(owned_dir).ok();
-        std::fs::remove_dir_all(imported_dir).ok();
-    }
-
-    #[test]
-    fn polished_path_writes_sibling_file() {
-        let path = polished_path(std::path::Path::new("C:/recordings/take.txt")).unwrap();
-        assert_eq!(path.file_name().unwrap(), "take.polished.txt");
     }
 }
