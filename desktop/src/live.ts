@@ -3,6 +3,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView, WorkspaceView } from "@/lib/app-types";
 
+export type SavedLiveSession = {
+  createdAtMs: number;
+  name: string;
+  sourcePath: string;
+  outputPath: string;
+};
+
 export function liveStatus(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("live_status");
 }
@@ -51,8 +58,12 @@ export function stopLiveSession(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("stop_live_session");
 }
 
-export function saveLiveSession(): Promise<LiveSessionView> {
-  return invoke<LiveSessionView>("save_live_session");
+export function saveLiveSession(): Promise<SavedLiveSession> {
+  return invoke<SavedLiveSession>("save_live_session");
+}
+
+export function listSavedLiveSessions(): Promise<SavedLiveSession[]> {
+  return invoke<SavedLiveSession[]>("list_saved_live_sessions");
 }
 
 export function showMainWorkspace(workspace: WorkspaceView): Promise<void> {

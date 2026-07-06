@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Date:** 2026-07-05
-**Scope:** Turn the existing live overlay/hotkey foundation into real local live transcription by streaming selected microphone audio to the pinned CrispASR Moonshine v2 tiny fallback. This is a client-only **Phase 3a bridge**, not completion of the full Phase 3 audio spec. It does not implement the Phase 8 server WSS connector, Cohere batch upload, Scribe, diarization, or cross-app text injection. It must keep the local live stream session-owned until CrispASR exposes a reset/ack boundary, and leave explicit seams for Rust Silero `vad_segments`, Opus upload, and saved live audio.
+**Scope:** Turn the existing live overlay/hotkey foundation into real local live transcription by streaming selected microphone audio to the pinned CrispASR Moonshine v2 tiny fallback, then saving live WAV/TXT output into Home history. This is a client-only **Phase 3a bridge**, not completion of the full Phase 3 audio spec. It does not implement the Phase 8 server WSS connector, Cohere batch upload, Scribe, diarization, or cross-app text injection. It must keep the local live stream session-owned until CrispASR exposes a reset/ack boundary, and leave explicit seams for Rust Silero `vad_segments` and Opus upload.
 **Canonical specs:** [../../specs/phase-3-live-ux-audio.md](../../specs/phase-3-live-ux-audio.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0002-crispasr-unified-stt-runtime.md](../../adr/0002-crispasr-unified-stt-runtime.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
 
 ## Problem
@@ -45,7 +45,7 @@ Use the pinned `crispasr` binary and pinned artifacts already installed through 
 `ponytail:` CrispASR 0.6.12 exposes the live JSON stream over stdio, while the existing app sidecar uses HTTP server mode for file transcription. This branch uses a managed stdio child owned by `LiveRuntime`. For safety, each start owns a fresh stream child and stop retires it, because the stream JSON protocol does not currently expose a reset/ack or session tag that can prove delayed stdout belongs to a new session. Warm reuse is a follow-on optimization once that boundary exists.
 
 ```text
-crispasr --stream --stream-json --backend moonshine-streaming -m <moonshine-tiny.gguf> -l en --punc-model <fireredpunc.gguf>
+crispasr --stream --stream-json --backend moonshine-streaming -m <moonshine-tiny.gguf> -l en --cache-dir <models-dir> --punc-model <fireredpunc.gguf> --stream-step 1000 --stream-final-on-silence-ms 600
 ```
 
 Add GPU flags the same way the existing sidecar does: `--gpu-backend auto` when GPU preference resolves to GPU, otherwise `-ng`.
@@ -179,7 +179,6 @@ Until then:
 - Server WSS connector.
 - Opus encoding.
 - Rust Silero ONNX inference and emitted `vad_segments` manifests, except for the runtime seam and Phase 3a docs amendment described above.
-- Save live session audio.
 - Scribe polish.
 - Diarization and speaker labels.
 - Text injection into other apps.

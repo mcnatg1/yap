@@ -14,11 +14,13 @@ use super::stream::{self, LiveStreamProcess, StreamEvent};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
+const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(1200);
 
 #[derive(Clone)]
 pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
+    recorded_pcm: Arc<Mutex<Vec<u8>>>,
 }
 
 struct LiveRuntimeInner {
@@ -40,6 +42,7 @@ struct WarmStream {
     process: LiveStreamProcess,
     pcm_tx: mpsc::SyncSender<PcmMessage>,
     cancelled: Arc<AtomicBool>,
+    finishing: Arc<AtomicBool>,
     writer: Option<JoinHandle<()>>,
     reader: Option<JoinHandle<()>>,
 }
@@ -65,6 +68,7 @@ impl LiveRuntime {
         Self {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
+            recorded_pcm: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -86,6 +90,7 @@ impl LiveRuntime {
             if inner.capture.is_some() {
                 return Err("Live capture is already running.".into());
             }
+            self.recorded_pcm.lock().expect("live pcm poisoned").clear();
             inner.retire_stream();
             inner.session = inner.session.saturating_add(1);
             inner.last_used = Instant::now();
@@ -109,6 +114,7 @@ impl LiveRuntime {
             session,
             Arc::clone(&self.active_session),
             stream_tx,
+            Arc::clone(&self.recorded_pcm),
         );
         let (capture, level, audio) = match capture {
             Ok(capture) => capture,
@@ -127,10 +133,10 @@ impl LiveRuntime {
     }
 
     pub fn stop(&self) {
-        self.active_session.store(0, Ordering::SeqCst);
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         inner.stop_capture();
-        inner.retire_stream();
+        inner.finish_stream();
+        self.active_session.store(0, Ordering::SeqCst);
         inner.last_used = Instant::now();
     }
 
@@ -146,6 +152,10 @@ impl LiveRuntime {
         inner.stop_capture();
         inner.retire_stream();
         self.active_session.store(0, Ordering::SeqCst);
+    }
+
+    pub fn recorded_pcm(&self) -> Vec<u8> {
+        self.recorded_pcm.lock().expect("live pcm poisoned").clone()
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -214,6 +224,7 @@ impl LiveRuntimeInner {
             .ok_or_else(|| "Live stream stdout is unavailable.".to_string())?;
         let (pcm_tx, pcm_rx) = mpsc::sync_channel::<PcmMessage>(16);
         let cancelled = Arc::new(AtomicBool::new(false));
+        let finishing = Arc::new(AtomicBool::new(false));
 
         let writer_cancelled = Arc::clone(&cancelled);
         let writer_active_session = Arc::clone(&runtime.active_session);
@@ -253,6 +264,7 @@ impl LiveRuntimeInner {
         });
 
         let reader_cancelled = Arc::clone(&cancelled);
+        let reader_finishing = Arc::clone(&finishing);
         let active_session = Arc::clone(&runtime.active_session);
         let reader_runtime = runtime.clone();
         let reader = std::thread::spawn(move || {
@@ -290,9 +302,14 @@ impl LiveRuntimeInner {
                 }
             }
 
-            let session = active_session.load(Ordering::SeqCst);
-            if session != 0 && !reader_cancelled.load(Ordering::Relaxed) {
-                reader_runtime.handle_stream_crash(app, session, "Live stream stopped.");
+            let active = active_session.load(Ordering::SeqCst);
+            if should_report_stream_crash(
+                active,
+                session,
+                reader_cancelled.load(Ordering::Relaxed),
+                reader_finishing.load(Ordering::Relaxed),
+            ) {
+                reader_runtime.handle_stream_crash(app, active, "Live stream stopped.");
             }
         });
 
@@ -301,6 +318,7 @@ impl LiveRuntimeInner {
             process,
             pcm_tx,
             cancelled,
+            finishing,
             writer: Some(writer),
             reader: Some(reader),
         });
@@ -372,9 +390,34 @@ impl LiveRuntimeInner {
             self.has_stream_for_test = false;
         }
     }
+
+    fn finish_stream(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            stream.finish();
+        }
+        #[cfg(test)]
+        {
+            self.has_stream_for_test = false;
+        }
+    }
 }
 
 impl WarmStream {
+    fn finish(mut self) {
+        self.finishing.store(true, Ordering::SeqCst);
+        drop(self.pcm_tx);
+        if let Some(handle) = self.writer.take() {
+            let _ = handle.join();
+        }
+        // ponytail: bounded drain; move to protocol ack if CrispASR exposes one.
+        std::thread::sleep(STREAM_DRAIN_ON_STOP);
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.process.shutdown();
+        if let Some(handle) = self.reader.take() {
+            let _ = handle.join();
+        }
+    }
+
     fn shutdown(mut self, join_reader: bool) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.process.shutdown();
@@ -395,6 +438,7 @@ fn open_capture(
     session: u64,
     active_session: Arc<AtomicU64>,
     pcm_tx: mpsc::SyncSender<PcmMessage>,
+    recorded_pcm: Arc<Mutex<Vec<u8>>>,
 ) -> Result<(cpal::Stream, mpsc::Receiver<f32>, JoinHandle<()>), String> {
     let host = cpal::default_host();
     let device = resolve_capture_device(&host, selected_device_id)
@@ -423,6 +467,11 @@ fn open_capture(
             let resampled = resampler.push(&mono);
             let bytes = f32_to_i16_le_bytes(&resampled);
             if !bytes.is_empty() {
+                // ponytail: in-memory live WAV; stream to file if dictation sessions get long.
+                recorded_pcm
+                    .lock()
+                    .expect("live pcm poisoned")
+                    .extend_from_slice(&bytes);
                 let _ = pcm_tx.try_send(PcmMessage {
                     session: raw.session,
                     bytes,
@@ -514,6 +563,15 @@ fn should_write_pcm(message_session: u64, active_session: u64, stream_session: u
 
 fn accepted_stream_session(active_session: u64, stream_session: u64) -> Option<u64> {
     (active_session != 0 && active_session == stream_session).then_some(active_session)
+}
+
+fn should_report_stream_crash(
+    active_session: u64,
+    stream_session: u64,
+    cancelled: bool,
+    finishing: bool,
+) -> bool {
+    active_session != 0 && active_session == stream_session && !cancelled && !finishing
 }
 
 fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
@@ -807,6 +865,14 @@ mod tests {
             accepted_stream_session(new_active_session, old_stream_session),
             None
         );
+    }
+
+    #[test]
+    fn graceful_stop_does_not_report_stream_crash() {
+        assert!(should_report_stream_crash(3, 3, false, false));
+        assert!(!should_report_stream_crash(3, 3, false, true));
+        assert!(!should_report_stream_crash(3, 3, true, false));
+        assert!(!should_report_stream_crash(0, 3, false, false));
     }
 
     #[test]

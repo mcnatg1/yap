@@ -25,7 +25,9 @@ export function WorkspaceHeader({
     <header className="flex flex-wrap items-start justify-between gap-4">
       <div className="min-w-0">
         <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        <p className="mt-1.5 max-w-xl text-sm leading-6 text-muted-foreground">{description}</p>
+        {description ? (
+          <p className="mt-1.5 max-w-xl text-sm leading-6 text-muted-foreground">{description}</p>
+        ) : null}
       </div>
 
       <div className="flex min-w-0 flex-wrap items-center gap-2">

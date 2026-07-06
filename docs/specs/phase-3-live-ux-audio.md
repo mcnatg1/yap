@@ -7,7 +7,7 @@
 
 > **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).
 
-> **2026-07-05 Phase 3a amendment:** The local Moonshine live-transcription branch implements real local fallback text streaming through the existing overlay and hotkey surface. It is not full Phase 3 completion: Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, saved live audio, Scribe, and diarization remain follow-on work. See [Local Moonshine Live Transcription](../superpowers/specs/2026-07-05-local-moonshine-live-transcription.md).
+> **2026-07-05 Phase 3a amendment:** The local Moonshine live-transcription branch implements real local fallback text streaming, plus local live WAV/TXT save into Home history, through the existing overlay and hotkey surface. It is not full Phase 3 completion: Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work. See [Local Moonshine Live Transcription](../superpowers/specs/2026-07-05-local-moonshine-live-transcription.md).
 
 ---
 

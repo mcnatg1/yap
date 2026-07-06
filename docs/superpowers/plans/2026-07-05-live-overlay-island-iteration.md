@@ -63,7 +63,7 @@ For `armed`, `listening`, and `speaking`, show the compact FreeFlow-style wavefo
 
 - [ ] **Step 4: Render processing**
 
-For `settling` and `saving`, show the processing waveform and keep the window compact. Do not pretend `save_live_session` is complete; it currently only reports an unimplemented error.
+For `settling` and `saving`, show the processing waveform and keep the window compact. `save_live_session` should persist the live WAV and transcript through the same Home history path used after stop.
 
 - [ ] **Step 5: Render success and failure**
 

@@ -19,9 +19,12 @@ import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import {
+  hideTranscriptHistory,
+  readHiddenTranscriptHistory,
   readTranscriptHistory,
   recordTranscriptHistory,
   removeTranscriptHistory,
+  writeHiddenTranscriptHistory,
   writeTranscriptHistory,
   type TranscriptHistoryEntry,
 } from "@/history";
@@ -57,6 +60,7 @@ import { cn } from "@/lib/utils";
 import {
   clearLiveHotkey,
   listInputDevices,
+  listSavedLiveSessions,
   listenLiveSession,
   liveStatus,
   preflightInputDevice,
@@ -67,6 +71,7 @@ import {
   showLiveOverlay,
   startLiveSession,
   stopLiveSession,
+  type SavedLiveSession,
 } from "@/live";
 import {
   listenTranscribeEvents,
@@ -99,6 +104,19 @@ const initialLiveView: LiveSessionView = {
   status: "idle",
   visibility: "enabled",
 };
+
+function savedLiveSessionToHistoryEntry(session: SavedLiveSession): TranscriptHistoryEntry {
+  const createdAt = Number.isFinite(session.createdAtMs) && session.createdAtMs > 0
+    ? new Date(session.createdAtMs).toISOString()
+    : new Date().toISOString();
+
+  return {
+    name: session.name,
+    sourcePath: session.sourcePath,
+    outputPath: session.outputPath,
+    createdAt,
+  };
+}
 
 type ReviewMorphOrigin = {
   height: number;
@@ -174,6 +192,7 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     let unlistenLive: (() => void) | undefined;
+    let unlistenLiveSaved: (() => void) | undefined;
 
     void listenTranscribeEvents({
       onProgress: (event) => {
@@ -229,10 +248,35 @@ export default function App() {
       unlistenLive = stop;
     });
 
+    void listen<SavedLiveSession>("live-session-saved", (event) => {
+      const entry = savedLiveSessionToHistoryEntry(event.payload);
+      recordHistoryEntries([entry]);
+      setSelectedHistoryOutput(entry.outputPath);
+      setActiveRail("home");
+      setWorkspaceView("home");
+      setStatus("Ready");
+      void loadTranscriptText(entry.outputPath).catch(() => undefined);
+      toast.success("Live transcript saved");
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlistenLiveSaved = stop;
+    });
+
+    void listSavedLiveSessions()
+      .then((sessions) => {
+        if (cancelled) return;
+        recordMissingHistoryEntries(sessions.map(savedLiveSessionToHistoryEntry));
+      })
+      .catch(() => undefined);
+
     return () => {
       cancelled = true;
       unlisten?.();
       unlistenLive?.();
+      unlistenLiveSaved?.();
     };
   }, []);
 
@@ -823,9 +867,12 @@ export default function App() {
 
   function recordHistoryEntries(entries: TranscriptHistoryEntry[]) {
     if (!entries.length) return;
+    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
+    const visibleEntries = entries.filter((entry) => !hiddenHistoryOutputs.includes(entry.outputPath));
+    if (!visibleEntries.length) return;
 
     setHistory((current) => {
-      const next = entries.reduce(recordTranscriptHistory, current);
+      const next = visibleEntries.reduce(recordTranscriptHistory, current);
       try {
         writeTranscriptHistory(next);
       } catch (error) {
@@ -835,7 +882,37 @@ export default function App() {
     });
   }
 
-  function removeHistoryEntry(outputPath: string) {
+  function recordMissingHistoryEntries(entries: TranscriptHistoryEntry[]) {
+    if (!entries.length) return;
+    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
+
+    setHistory((current) => {
+      const knownOutputs = new Set(current.map((entry) => entry.outputPath));
+      const missing = entries.filter(
+        (entry) => !knownOutputs.has(entry.outputPath) && !hiddenHistoryOutputs.includes(entry.outputPath),
+      );
+      if (!missing.length) return current;
+
+      const next = missing.reduce(recordTranscriptHistory, current);
+      try {
+        writeTranscriptHistory(next);
+      } catch (error) {
+        console.warn("Live transcript history could not be synced.", error);
+      }
+      return next;
+    });
+  }
+
+  function rememberHiddenHistoryEntry(outputPath: string) {
+    const next = hideTranscriptHistory(readHiddenTranscriptHistory(), outputPath);
+    try {
+      writeHiddenTranscriptHistory(next);
+    } catch (error) {
+      console.warn("Hidden transcript history could not be saved.", error);
+    }
+  }
+
+  function forgetHistoryEntry(outputPath: string) {
     setHistory((current) => {
       const next = removeTranscriptHistory(current, outputPath);
       try {
@@ -846,7 +923,30 @@ export default function App() {
       return next;
     });
     if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
-    toast.success("Removed from history");
+  }
+
+  function hideHistoryEntry(outputPath: string) {
+    rememberHiddenHistoryEntry(outputPath);
+    forgetHistoryEntry(outputPath);
+    toast.success("Hidden from history");
+  }
+
+  async function deleteHistoryEntry(entry: TranscriptHistoryEntry) {
+    try {
+      await invoke("delete_history_entry_files", {
+        outputPath: entry.outputPath,
+        sourcePath: entry.sourcePath,
+      });
+      rememberHiddenHistoryEntry(entry.outputPath);
+      forgetHistoryEntry(entry.outputPath);
+      setTranscriptText((current) => {
+        const { [entry.outputPath]: _deleted, ...next } = current;
+        return next;
+      });
+      toast.success("Deleted from device");
+    } catch (error) {
+      toast.error(String(error || "Delete failed"));
+    }
   }
 
   function selectHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
@@ -902,11 +1002,12 @@ export default function App() {
         <HistoryPanel
           entries={history}
           onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
+          onDelete={(entry) => void deleteHistoryEntry(entry)}
+          onHide={hideHistoryEntry}
           onLoadPreviewText={(entry) => loadTranscriptText(entry.outputPath)}
           onOpen={(entry) => void openAppPath(entry.outputPath)}
           onOpenHelp={() => handleRailAction("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
-          onRemove={removeHistoryEntry}
           onReveal={(entry) => void revealPath(entry.outputPath)}
           onSelect={selectHistoryEntry}
           selectedOutputPath={selectedHistoryOutput}

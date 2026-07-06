@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -31,8 +31,8 @@ export function HistoryEntryPreview({
     if (closeDelayRef.current) clearTimeout(closeDelayRef.current);
   }
 
-  async function loadPreview() {
-    if (!onLoadPreviewText || preview !== undefined || loading) return;
+  async function loadPreview(force = false) {
+    if (!onLoadPreviewText || (!force && preview !== undefined) || loading) return;
 
     setLoading(true);
     setFailed(false);
@@ -47,6 +47,12 @@ export function HistoryEntryPreview({
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    setPreview(undefined);
+    setFailed(false);
+    if (onLoadPreviewText) void loadPreview(true);
+  }, [entry.outputPath]);
 
   function handleOpenChange(next: boolean) {
     setOpen(next);
@@ -80,7 +86,7 @@ export function HistoryEntryPreview({
         <Button
           aria-label={`Review recording ${entry.name}`}
           className={cn(
-            "h-auto min-w-0 justify-start truncate rounded-sm p-0 text-left font-medium hover:bg-transparent hover:underline",
+            "h-auto w-full min-w-0 justify-start rounded-sm p-0 text-left font-medium hover:bg-transparent hover:underline",
           )}
           onClick={(event) => {
             event.stopPropagation();
@@ -94,7 +100,9 @@ export function HistoryEntryPreview({
           type="button"
           variant="ghost"
         >
-          {entry.name}
+          <span className="line-clamp-4 whitespace-normal text-left">
+            {preview ?? (loading ? "Loading transcript..." : entry.name)}
+          </span>
         </Button>
       </PopoverTrigger>
       <PopoverContent

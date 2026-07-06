@@ -30,6 +30,7 @@
           "allow": [
             "$AUDIO/**",
             "$VIDEO/**",
+            "$LOCALDATA/Yap/live-recordings/**",
             "$DESKTOP/**",
             "$DOWNLOAD/**",
             "$DOCUMENT/**"

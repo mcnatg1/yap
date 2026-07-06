@@ -6,6 +6,8 @@ use serde_json::Value;
 use crate::stt::error::SttError;
 
 const STREAM_BACKEND: &str = "moonshine-streaming";
+const STREAM_STEP_MS: &str = "1000";
+const STREAM_FINAL_ON_SILENCE_MS: &str = "600";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
@@ -55,6 +57,7 @@ pub fn build_stream_args(
     punc_model: &Path,
     gpu: &crate::stt::gpu::GpuStatus,
 ) -> Vec<String> {
+    let cache_dir = model.parent().unwrap_or_else(|| Path::new("."));
     let mut args = vec![
         "--stream".to_string(),
         "--stream-json".to_string(),
@@ -64,8 +67,14 @@ pub fn build_stream_args(
         model.to_string_lossy().to_string(),
         "-l".to_string(),
         "en".to_string(),
+        "--cache-dir".to_string(),
+        cache_dir.to_string_lossy().to_string(),
         "--punc-model".to_string(),
         punc_model.to_string_lossy().to_string(),
+        "--stream-step".to_string(),
+        STREAM_STEP_MS.to_string(),
+        "--stream-final-on-silence-ms".to_string(),
+        STREAM_FINAL_ON_SILENCE_MS.to_string(),
     ];
     if gpu.layers > 0 {
         args.push("--gpu-backend".to_string());
@@ -199,8 +208,52 @@ mod tests {
         assert!(args.contains(&"--stream".to_string()));
         assert!(args.contains(&"--stream-json".to_string()));
         assert!(args.contains(&"--punc-model".to_string()));
+        assert!(args.contains(&"--cache-dir".to_string()));
+        assert!(args.contains(&"--stream-step".to_string()));
+        assert!(args.contains(&"--stream-final-on-silence-ms".to_string()));
         assert!(!args.contains(&"--no-punctuation".to_string()));
         assert!(args.contains(&"--gpu-backend".to_string()));
+    }
+
+    #[test]
+    fn stream_args_point_crispasr_at_model_cache_for_tokenizer() {
+        let gpu = crate::stt::gpu::GpuStatus {
+            available: false,
+            adapter_name: None,
+            preference: crate::stt::gpu::GpuPreference::Cpu,
+            layers: 0,
+        };
+        let args = build_stream_args(
+            std::path::Path::new("C:/models/moonshine.gguf"),
+            std::path::Path::new("C:/models/punc.gguf"),
+            &gpu,
+        );
+
+        let cache_dir = args.iter().position(|arg| arg == "--cache-dir").unwrap();
+        assert_eq!(args[cache_dir + 1], "C:/models");
+    }
+
+    #[test]
+    fn stream_args_use_lower_latency_live_defaults() {
+        let gpu = crate::stt::gpu::GpuStatus {
+            available: false,
+            adapter_name: None,
+            preference: crate::stt::gpu::GpuPreference::Cpu,
+            layers: 0,
+        };
+        let args = build_stream_args(
+            std::path::Path::new("C:/models/moonshine.gguf"),
+            std::path::Path::new("C:/models/punc.gguf"),
+            &gpu,
+        );
+
+        let step = args.iter().position(|arg| arg == "--stream-step").unwrap();
+        let silence = args
+            .iter()
+            .position(|arg| arg == "--stream-final-on-silence-ms")
+            .unwrap();
+        assert_eq!(args[step + 1], "1000");
+        assert_eq!(args[silence + 1], "600");
     }
 
     #[test]

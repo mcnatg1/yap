@@ -7,7 +7,7 @@ export type RailAction = WorkspaceView | "details" | "help";
 export const workspaceCopy: Record<WorkspaceView, { title: string; description: string }> = {
   home: {
     title: "Welcome back",
-    description: "Past recordings.",
+    description: "",
   },
   transcribe: {
     title: "Transcribe",

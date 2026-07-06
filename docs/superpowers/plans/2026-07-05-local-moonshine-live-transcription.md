@@ -6,7 +6,7 @@
 
 **Spec:** [../specs/2026-07-05-local-moonshine-live-transcription.md](../specs/2026-07-05-local-moonshine-live-transcription.md)
 
-**Architecture:** Keep React as a view layer. Tauri Rust owns route checks, mic capture, the local stream child, and live-session events. This branch uses a session-bound `crispasr --stream-json` stdio child for local fallback; stop retires the child until CrispASR exposes a reset/ack boundary for safe warm reuse. Server WSS, Opus, Rust Silero inference, save-audio, and diarization remain separate phases.
+**Architecture:** Keep React as a view layer. Tauri Rust owns route checks, mic capture, the local stream child, live-session events, and local live WAV/TXT save. This branch uses a session-bound `crispasr --stream-json` stdio child for local fallback; stop retires the child until CrispASR exposes a reset/ack boundary for safe warm reuse. Server WSS, Opus, Rust Silero inference, and diarization remain separate phases.
 
 **Tech Stack:** Tauri 2, Rust 2021, `cpal` already installed, existing `serde_json`, existing pinned CrispASR/Moonshine setup, React 19 live overlay.
 
@@ -14,7 +14,7 @@
 
 ## File Structure
 
-- Modify `docs/specs/phase-3-live-ux-audio.md`: add Phase 3a amendment that this branch ships local live text but not full Silero/save-audio completion.
+- Modify `docs/specs/phase-3-live-ux-audio.md`: add Phase 3a amendment that this branch ships local live text/save but not full Silero completion.
 - Modify `desktop/src-tauri/src/live/mod.rs`: export new modules.
 - Create `desktop/src-tauri/src/live/stream.rs`: CrispASR stream command builder, stream event parser, child launch helpers.
 - Create `desktop/src-tauri/src/live/runtime.rs`: `LiveRuntime`, CPAL capture, mono/resample/PCM conversion, session tokens, session-bound child lifecycle.
@@ -45,7 +45,7 @@
 Add this paragraph:
 
 ```markdown
-> **2026-07-05 Phase 3a amendment:** The local Moonshine live-transcription branch implements real local fallback text streaming through the existing overlay and hotkey surface. It is not full Phase 3 completion: Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, saved live audio, Scribe, and diarization remain follow-on work. See [Local Moonshine Live Transcription](../superpowers/specs/2026-07-05-local-moonshine-live-transcription.md).
+> **2026-07-05 Phase 3a amendment:** The local Moonshine live-transcription branch implements real local fallback text streaming, plus local live WAV/TXT save into Home history, through the existing overlay and hotkey surface. It is not full Phase 3 completion: Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work. See [Local Moonshine Live Transcription](../superpowers/specs/2026-07-05-local-moonshine-live-transcription.md).
 ```
 
 - [ ] **Step 2: Verify docs references**
@@ -141,8 +141,14 @@ pub fn build_stream_args(model: &Path, punc_model: &Path, gpu: &crate::stt::gpu:
         model.to_string_lossy().to_string(),
         "-l".into(),
         "en".into(),
+        "--cache-dir".into(),
+        model.parent().unwrap_or_else(|| std::path::Path::new(".")).to_string_lossy().to_string(),
         "--punc-model".into(),
         punc_model.to_string_lossy().to_string(),
+        "--stream-step".into(),
+        "1000".into(),
+        "--stream-final-on-silence-ms".into(),
+        "600".into(),
     ];
     if gpu.layers > 0 {
         args.push("--gpu-backend".into());
@@ -495,7 +501,7 @@ Live smoke: <CPU/GPU path>, first text in <rough seconds>, latency acceptable: y
 
 ## Self-Review
 
-- No task adds server WSS, Opus, diarization, Scribe, save-audio, or text injection.
+- No task adds server WSS, Opus, diarization, Scribe, or text injection.
 - The plan adds two Rust files because the current `state.rs` is only a snapshot and the existing HTTP sidecar cannot handle stdio streaming.
 - Tests are focused on command construction, parser behavior, audio conversion, and state transitions.
 - The plan originally targeted warm stream reuse, but implementation review found no safe CrispASR reset/ack boundary for delayed stdout. The shipped Phase 3a path retires the stream child on stop/start boundaries and leaves warm reuse as a follow-on optimization.

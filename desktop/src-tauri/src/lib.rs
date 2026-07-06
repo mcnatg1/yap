@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -9,6 +11,7 @@ const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 92.0;
 const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 38.0;
 const LIVE_OVERLAY_HOVER_SENSOR_HEIGHT: f64 = 4.0;
 const LIVE_OVERLAY_TOP_BEZEL_OFFSET: f64 = 0.0;
+const LIVE_WAV_SAMPLE_RATE: u32 = 16_000;
 const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_START_DICTATING: &str = "start_dictating";
 const TRAY_STOP_RECORDING: &str = "stop_recording";
@@ -241,12 +244,19 @@ fn stop_live_session(
 fn save_live_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
-) -> live::state::LiveSessionView {
-    let view = state.update(|view| {
-        view.error = Some("Live audio saving is not implemented yet.".into());
-    });
-    emit_live(&app, &view);
-    view
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
+) -> Result<SavedLiveSession, String> {
+    let view = state.snapshot();
+    let saved = save_live_session_files(&live_runtime, &view)?
+        .ok_or_else(|| "Nothing to save yet.".to_string())?;
+    emit_live_saved(&app, &saved);
+    Ok(saved)
+}
+
+#[tauri::command]
+fn list_saved_live_sessions(window: tauri::WebviewWindow) -> Result<Vec<SavedLiveSession>, String> {
+    ensure_main_window(&window)?;
+    list_saved_live_session_files()
 }
 
 #[tauri::command]
@@ -479,6 +489,36 @@ fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(), Str
         .map_err(|err| format!("Failed to reveal file: {err}"))
 }
 
+#[tauri::command]
+fn delete_history_entry_files(
+    window: tauri::WebviewWindow,
+    output_path: String,
+    source_path: String,
+) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    delete_history_entry_files_at(output_path, source_path)
+}
+
+fn delete_history_entry_files_at(output_path: String, source_path: String) -> Result<(), String> {
+    delete_history_entry_files_at_from_dir(output_path, source_path, &live_recordings_dir())
+}
+
+fn delete_history_entry_files_at_from_dir(
+    output_path: String,
+    source_path: String,
+    owned_dir: &std::path::Path,
+) -> Result<(), String> {
+    let output = deletable_transcript_path(output_path)?;
+    let source = deletable_yap_owned_recording_path_from_dir(source_path, owned_dir)?;
+
+    if let Some(source) = source.filter(|source| source != &output) {
+        std::fs::remove_file(&source)
+            .map_err(|err| format!("Failed to delete recording: {err}"))?;
+    }
+
+    std::fs::remove_file(&output).map_err(|err| format!("Failed to delete transcript: {err}"))
+}
+
 fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
     let path = std::path::PathBuf::from(path);
     if !is_yap_media_or_transcript_path(&path) {
@@ -489,6 +529,40 @@ fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
         return Err("Only Yap recording and transcript files can be opened.".into());
     }
     Ok(path)
+}
+
+fn deletable_transcript_path(path: String) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(path);
+    if !is_transcript_path(&path) {
+        return Err("Only transcript text files can be deleted.".into());
+    }
+    let path = canonical_existing_path(&path)?;
+    if !is_transcript_path(&path) {
+        return Err("Only transcript text files can be deleted.".into());
+    }
+    Ok(path)
+}
+
+fn deletable_yap_owned_recording_path_from_dir(
+    path: String,
+    owned_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let path = std::path::PathBuf::from(path);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let path = path
+        .canonicalize()
+        .map_err(|err| format!("Failed to resolve recording path: {err}"))?;
+    let Ok(owned_dir) = owned_dir.canonicalize() else {
+        return Ok(None);
+    };
+
+    if path.starts_with(owned_dir) && is_yap_media_or_transcript_path(&path) {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
 }
 
 fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
@@ -540,6 +614,15 @@ struct SetupStatus {
     engine_status: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedLiveSession {
+    name: String,
+    source_path: String,
+    output_path: String,
+    created_at_ms: u64,
+}
+
 impl SetupStatus {
     fn runtime_setup_state(&self) -> runtime::state::SetupState {
         if !self.fallback_enabled {
@@ -588,6 +671,178 @@ fn persist_live_view(view: &live::state::LiveSessionView) -> Result<(), String> 
 
 fn emit_live(app: &tauri::AppHandle, view: &live::state::LiveSessionView) {
     let _ = app.emit("live-session", view);
+}
+
+fn emit_live_saved(app: &tauri::AppHandle, saved: &SavedLiveSession) {
+    let _ = app.emit("live-session-saved", saved);
+}
+
+fn live_recordings_dir_from<F>(env: F) -> std::path::PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(dir) = env("YAP_LIVE_RECORDINGS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    if let Some(local) = env("LOCALAPPDATA") {
+        return std::path::PathBuf::from(local)
+            .join("Yap")
+            .join("live-recordings");
+    }
+    std::path::PathBuf::from(".").join("live-recordings")
+}
+
+fn live_recordings_dir() -> std::path::PathBuf {
+    live_recordings_dir_from(|key| std::env::var(key).ok())
+}
+
+fn save_live_session_files(
+    live_runtime: &live::runtime::LiveRuntime,
+    view: &live::state::LiveSessionView,
+) -> Result<Option<SavedLiveSession>, String> {
+    let transcript = live_transcript_text(view);
+    let pcm = live_runtime.recorded_pcm();
+    if transcript.is_none() && pcm.is_empty() {
+        return Ok(None);
+    }
+
+    let dir = live_recordings_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("Failed to create live recordings folder: {err}"))?;
+    let created_at_ms = unix_millis_now()?;
+    let name = format!("live-{created_at_ms}");
+    let transcript_path = dir.join(format!("{name}.txt"));
+    let audio_path = dir.join(format!("{name}.wav"));
+    let transcript_body = transcript.unwrap_or_else(|| "No live transcript captured.".into());
+
+    if !pcm.is_empty() {
+        write_pcm16_wav(&audio_path, &pcm)?;
+    }
+    std::fs::write(&transcript_path, format!("{transcript_body}\n"))
+        .map_err(|err| format!("Failed to save live transcript: {err}"))?;
+
+    Ok(Some(SavedLiveSession {
+        name,
+        source_path: if pcm.is_empty() {
+            transcript_path.display().to_string()
+        } else {
+            audio_path.display().to_string()
+        },
+        output_path: transcript_path.display().to_string(),
+        created_at_ms,
+    }))
+}
+
+fn list_saved_live_session_files() -> Result<Vec<SavedLiveSession>, String> {
+    list_saved_live_session_files_from_dir(&live_recordings_dir())
+}
+
+fn list_saved_live_session_files_from_dir(
+    dir: &std::path::Path,
+) -> Result<Vec<SavedLiveSession>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    for entry in
+        std::fs::read_dir(dir).map_err(|err| format!("Failed to read live recordings: {err}"))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
+        let path = entry.path();
+        if !is_transcript_path(&path) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if !stem.starts_with("live-") {
+            continue;
+        }
+
+        let audio_path = path.with_extension("wav");
+        let source_path = if audio_path.exists() {
+            audio_path
+        } else {
+            path.clone()
+        };
+        let created_at_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(system_time_to_unix_millis)
+            .unwrap_or(0);
+        sessions.push(SavedLiveSession {
+            name: stem.to_string(),
+            source_path: source_path.display().to_string(),
+            output_path: path.display().to_string(),
+            created_at_ms,
+        });
+    }
+
+    sessions.sort_by(|a, b| {
+        b.created_at_ms
+            .cmp(&a.created_at_ms)
+            .then_with(|| b.name.cmp(&a.name))
+    });
+    Ok(sessions)
+}
+
+fn unix_millis_now() -> Result<u64, String> {
+    system_time_to_unix_millis(std::time::SystemTime::now())
+        .ok_or_else(|| "System clock error: timestamp out of range.".to_string())
+}
+
+fn system_time_to_unix_millis(time: std::time::SystemTime) -> Option<u64> {
+    let millis = time.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    u64::try_from(millis).ok()
+}
+
+fn live_transcript_text(view: &live::state::LiveSessionView) -> Option<String> {
+    view.final_text
+        .as_deref()
+        .or(view.partial_text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
+    let data_len =
+        u32::try_from(pcm.len()).map_err(|_| "Live recording is too large to save.".to_string())?;
+    let riff_len = 36u32
+        .checked_add(data_len)
+        .ok_or_else(|| "Live recording is too large to save.".to_string())?;
+    let byte_rate = LIVE_WAV_SAMPLE_RATE * 2;
+    let mut file =
+        std::fs::File::create(path).map_err(|err| format!("Failed to save live audio: {err}"))?;
+
+    file.write_all(b"RIFF").map_err(wav_write_error)?;
+    file.write_all(&riff_len.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(b"WAVEfmt ").map_err(wav_write_error)?;
+    file.write_all(&16u32.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(&LIVE_WAV_SAMPLE_RATE.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(&byte_rate.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(&2u16.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(&16u16.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(b"data").map_err(wav_write_error)?;
+    file.write_all(&data_len.to_le_bytes())
+        .map_err(wav_write_error)?;
+    file.write_all(pcm).map_err(wav_write_error)
+}
+
+fn wav_write_error(err: std::io::Error) -> String {
+    format!("Failed to save live audio: {err}")
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -734,8 +989,14 @@ fn stop_live_runtime(
     orchestrator: &runtime::RuntimeOrchestratorState,
 ) -> live::state::LiveSessionView {
     live_runtime.stop();
+    let before_stop = live.snapshot();
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();
+    match save_live_session_files(live_runtime, &before_stop) {
+        Ok(Some(saved)) => emit_live_saved(&app, &saved),
+        Ok(None) => {}
+        Err(error) => log_line(&format!("live save failed: {error}")),
+    }
     if view.visibility == live::state::LiveOverlayVisibility::Enabled {
         if let Err(error) = ensure_idle_live_overlay(&app) {
             log_line(&format!("live overlay idle show failed: {error}"));
@@ -974,13 +1235,15 @@ pub fn run() {
             start_live_session,
             stop_live_session,
             save_live_session,
+            list_saved_live_sessions,
             show_main_workspace,
             polish_num_gpu,
             start_transcribe,
             read_text_file,
             write_polished_text,
             open_app_path,
-            reveal_app_path
+            reveal_app_path,
+            delete_history_entry_files
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -1008,6 +1271,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "yap-{name}-{}-{}",
+            std::process::id(),
+            unix_millis_now().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn setup_status_serializes_for_frontend() {
@@ -1088,6 +1361,64 @@ mod tests {
     }
 
     #[test]
+    fn live_transcript_text_prefers_final_then_partial() {
+        let mut view = live::state::LiveSessionView {
+            visibility: live::state::LiveOverlayVisibility::Enabled,
+            status: live::state::LiveSessionStatus::Idle,
+            route: live::state::LiveRoute::None,
+            capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            hotkey: String::new(),
+            input_device_id: None,
+            input_device_label: None,
+            level: None,
+            partial_text: Some("partial".into()),
+            final_text: Some("final".into()),
+            error: None,
+        };
+
+        assert_eq!(live_transcript_text(&view).as_deref(), Some("final"));
+        view.final_text = None;
+        assert_eq!(live_transcript_text(&view).as_deref(), Some("partial"));
+    }
+
+    #[test]
+    fn write_pcm16_wav_writes_standard_header_and_data() {
+        let path = std::env::temp_dir().join(format!("yap-live-{}.wav", std::process::id()));
+        let pcm = [0, 0, 255, 127];
+
+        write_pcm16_wav(&path, &pcm).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4);
+        assert_eq!(&bytes[44..], pcm);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn saved_live_session_scan_pairs_transcripts_with_audio() {
+        let dir = std::env::temp_dir().join(format!("yap-live-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("live-200.txt");
+        let audio = dir.join("live-200.wav");
+        let ignored = dir.join("note.txt");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(&audio, b"RIFF").unwrap();
+        std::fs::write(&ignored, "not a live session\n").unwrap();
+
+        let sessions = list_saved_live_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "live-200");
+        assert_eq!(sessions[0].output_path, transcript.display().to_string());
+        assert_eq!(sessions[0].source_path, audio.display().to_string());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn start_live_setup_missing_blocks_without_claiming_server() {
         let live = live::LiveSessionState::new(live::settings::LiveSettings {
             overlay_enabled: true,
@@ -1122,6 +1453,48 @@ mod tests {
         assert!(!is_yap_media_or_transcript_path(std::path::Path::new(
             "script.ps1"
         )));
+    }
+
+    #[test]
+    fn delete_history_entry_files_removes_owned_live_audio() {
+        let dir = temp_test_dir("delete-owned-live");
+        let transcript = dir.join("live-300.txt");
+        let audio = dir.join("live-300.wav");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(&audio, b"RIFF").unwrap();
+
+        delete_history_entry_files_at_from_dir(
+            transcript.display().to_string(),
+            audio.display().to_string(),
+            &dir,
+        )
+        .unwrap();
+
+        assert!(!transcript.exists());
+        assert!(!audio.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn delete_history_entry_files_keeps_imported_source_audio() {
+        let owned_dir = temp_test_dir("delete-owned-dir");
+        let imported_dir = temp_test_dir("delete-imported-source");
+        let transcript = imported_dir.join("clip.txt");
+        let audio = imported_dir.join("clip.wav");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(&audio, b"RIFF").unwrap();
+
+        delete_history_entry_files_at_from_dir(
+            transcript.display().to_string(),
+            audio.display().to_string(),
+            &owned_dir,
+        )
+        .unwrap();
+
+        assert!(!transcript.exists());
+        assert!(audio.exists());
+        std::fs::remove_dir_all(owned_dir).ok();
+        std::fs::remove_dir_all(imported_dir).ok();
     }
 
     #[test]

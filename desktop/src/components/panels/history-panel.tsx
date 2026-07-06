@@ -1,5 +1,6 @@
-import { useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Copy } from "@phosphor-icons/react/Copy";
+import { EyeSlash } from "@phosphor-icons/react/EyeSlash";
 import { FileText } from "@phosphor-icons/react/FileText";
 import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
 import { DotsThree as MoreHorizontal } from "@phosphor-icons/react/DotsThree";
@@ -17,14 +18,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import {
   DropdownMenu,
@@ -36,7 +33,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
@@ -47,8 +43,6 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
-  TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import type { TranscriptHistoryEntry } from "@/history";
@@ -58,19 +52,21 @@ import { cn } from "@/lib/utils";
 function HistoryActionMenu({
   entry,
   onCopy,
+  onDelete,
+  onHide,
   onOpen,
   onPreview,
-  onRemove,
   onReveal,
 }: {
   entry: TranscriptHistoryEntry;
   onCopy: (entry: TranscriptHistoryEntry) => void;
+  onDelete: (entry: TranscriptHistoryEntry) => void;
+  onHide: (outputPath: string) => void;
   onOpen: (entry: TranscriptHistoryEntry) => void;
   onPreview: (entry: TranscriptHistoryEntry) => void;
-  onRemove: (outputPath: string) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
 }) {
-  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
     <>
@@ -107,35 +103,39 @@ function HistoryActionMenu({
             </DropdownMenuItem>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
+            <EyeSlash />
+            Hide
+          </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={(event) => {
               event.preventDefault();
-              setConfirmRemove(true);
+              setConfirmDelete(true);
             }}
             variant="destructive"
           >
             <Trash2 />
-            Remove from history
+            Delete
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <AlertDialog onOpenChange={setConfirmRemove} open={confirmRemove}>
+      <AlertDialog onOpenChange={setConfirmDelete} open={confirmDelete}>
         <AlertDialogContent onClick={(event) => event.stopPropagation()}>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove from history?</AlertDialogTitle>
+            <AlertDialogTitle>Delete from device?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes {entry.name} from your Yap history list. The transcript file on disk stays
-              untouched.
+              This deletes the saved transcript. If the recording was captured by Yap, that audio file
+              is deleted too.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
-              onClick={() => onRemove(entry.outputPath)}
+              onClick={() => onDelete(entry)}
             >
-              Remove from history
+              Delete
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -147,84 +147,124 @@ function HistoryActionMenu({
 export function HistoryPanel({
   entries,
   onCopy,
+  onDelete,
+  onHide,
   onLoadPreviewText,
   onOpen,
   onOpenHelp,
   onPreview,
-  onRemove,
   onReveal,
   onSelect,
   selectedOutputPath,
 }: {
   entries: TranscriptHistoryEntry[];
   onCopy: (entry: TranscriptHistoryEntry) => void;
+  onDelete: (entry: TranscriptHistoryEntry) => void;
+  onHide: (outputPath: string) => void;
   onLoadPreviewText?: (entry: TranscriptHistoryEntry) => Promise<string>;
   onOpen: (entry: TranscriptHistoryEntry) => void;
   onOpenHelp?: () => void;
   onPreview: (entry: TranscriptHistoryEntry) => void;
-  onRemove: (outputPath: string) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
   onSelect: (entry: TranscriptHistoryEntry, origin?: DOMRect) => void;
   selectedOutputPath?: string;
 }) {
+  const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
+  const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
+
+  async function loadPreviewText(entry: TranscriptHistoryEntry) {
+    const cached = previewTextByPath[entry.outputPath];
+    if (cached !== undefined || !onLoadPreviewText) return cached ?? "";
+
+    const text = await onLoadPreviewText(entry);
+    setPreviewTextByPath((current) => ({ ...current, [entry.outputPath]: text }));
+    return text;
+  }
+
+  useEffect(() => {
+    if (!searchFilter.trim() || !onLoadPreviewText) return;
+
+    let cancelled = false;
+    for (const entry of entries) {
+      if (previewTextByPath[entry.outputPath] !== undefined) continue;
+      void onLoadPreviewText(entry)
+        .then((text) => {
+          if (cancelled) return;
+          setPreviewTextByPath((current) =>
+            current[entry.outputPath] === undefined
+              ? { ...current, [entry.outputPath]: text }
+              : current,
+          );
+        })
+        .catch(() => undefined);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entries, onLoadPreviewText, previewTextByPath, searchFilter]);
 
   const visibleGroups = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
     const filtered = query
-      ? entries.filter((entry) => `${entry.name} ${entry.sourcePath}`.toLowerCase().includes(query))
+      ? entries.filter((entry) =>
+          `${entry.name} ${entry.sourcePath} ${previewTextByPath[entry.outputPath] ?? ""}`
+            .toLowerCase()
+            .includes(query),
+        )
       : entries;
 
     return groupHistoryByDay(filtered);
-  }, [entries, searchFilter]);
+  }, [entries, previewTextByPath, searchFilter]);
 
   return (
     <Card className="surface-workspace-inset min-w-0 bg-card py-0">
-      <CardHeader className="p-4 sm:p-5">
-        <div className="min-w-0">
-          <CardTitle className="flex items-center gap-2 text-xl">
-            Recordings
-            <Badge className="tabular-nums" variant="secondary">
-              {entries.length}
-            </Badge>
-          </CardTitle>
-          <CardDescription>
-            Saved recordings and transcripts stay on this computer. Select a row to review it.
-          </CardDescription>
-        </div>
-      </CardHeader>
       <CardContent className="grid gap-4 p-4 sm:p-5">
         {entries.length ? (
           <>
-            <InputGroup>
-              <InputGroupInput
-                aria-label="Search recordings"
-                onChange={(event) => setSearchFilter(event.target.value)}
-                placeholder="Search recordings"
-                type="search"
-                value={searchFilter}
-              />
-              <InputGroupAddon align="inline-end">
-                <Search />
-              </InputGroupAddon>
-            </InputGroup>
-
-            <ScrollArea className="h-[min(520px,calc(100vh-280px))] pr-3">
+            <div className="flex items-center justify-end">
+              {searchOpen ? (
+                <div className="flex h-9 w-64 max-w-full items-center gap-3 text-muted-foreground">
+                  <Search className="size-5 shrink-0 text-muted-foreground/70" weight="regular" />
+                  <input
+                    aria-label="Search past transcripts"
+                    autoFocus
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    className="h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-base font-normal text-foreground outline-none placeholder:text-muted-foreground/85 focus-visible:outline-none"
+                    placeholder="Search past transcripts"
+                    type="text"
+                    value={searchFilter}
+                    onChange={(event) => setSearchFilter(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        setSearchFilter("");
+                        setSearchOpen(false);
+                      }
+                    }}
+                  />
+                </div>
+              ) : (
+                <Button
+                  aria-label="Search past transcripts"
+                  onClick={() => setSearchOpen(true)}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Search />
+                </Button>
+              )}
+            </div>
+            <ScrollArea className="h-[min(620px,calc(100vh-230px))] pr-3">
               {visibleGroups.length ? (
                 <div className="flex flex-col gap-6">
                   {visibleGroups.map((group) => (
                     <section key={group.key}>
-                      <h3 className="mb-2 text-xs font-semibold text-muted-foreground">{group.label}</h3>
+                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group.label}</h3>
                       <Table>
-                        <TableHeader>
-                          <TableRow className="hover:bg-transparent">
-                            <TableHead>Transcript</TableHead>
-                            <TableHead className="w-20 text-right">Time</TableHead>
-                            <TableHead className="w-[4.5rem]">
-                              <span className="sr-only">Actions</span>
-                            </TableHead>
-                          </TableRow>
-                        </TableHeader>
                         <TableBody>
                           {group.entries.map((entry) => {
                             const selected = entry.outputPath === selectedOutputPath;
@@ -245,25 +285,22 @@ export function HistoryPanel({
                                 data-history-entry-row
                               >
                                 <TableCell
-                                  className="max-w-0 cursor-pointer whitespace-normal"
-                                  onClick={selectEntry}
-                                >
-                                  <div className="flex min-w-0 items-center gap-2">
-                                    <FileText className="size-4 shrink-0 text-muted-foreground" />
-                                    <HistoryEntryPreview
-                                      entry={entry}
-                                      onLoadPreviewText={onLoadPreviewText}
-                                      onReview={(origin) => onSelect(entry, origin)}
-                                    />
-                                  </div>
-                                </TableCell>
-                                <TableCell
-                                  className="cursor-pointer text-right text-xs tabular-nums text-muted-foreground"
+                                  className="w-24 cursor-pointer align-top text-xs tabular-nums text-muted-foreground"
                                   onClick={selectEntry}
                                 >
                                   {formatHistoryTime(entry.createdAt)}
                                 </TableCell>
-                                <TableCell className="text-right">
+                                <TableCell
+                                  className="max-w-0 cursor-pointer whitespace-normal align-top"
+                                  onClick={selectEntry}
+                                >
+                                  <HistoryEntryPreview
+                                    entry={entry}
+                                    onLoadPreviewText={loadPreviewText}
+                                    onReview={(origin) => onSelect(entry, origin)}
+                                  />
+                                </TableCell>
+                                <TableCell className="w-[4.5rem] align-top text-right">
                                   <div className="flex items-center justify-end gap-0.5">
                                     <Tooltip>
                                       <TooltipTrigger asChild>
@@ -286,9 +323,10 @@ export function HistoryPanel({
                                     <HistoryActionMenu
                                       entry={entry}
                                       onCopy={onCopy}
+                                      onDelete={onDelete}
+                                      onHide={onHide}
                                       onOpen={onOpen}
                                       onPreview={onPreview}
-                                      onRemove={onRemove}
                                       onReveal={onReveal}
                                     />
                                   </div>
@@ -302,7 +340,20 @@ export function HistoryPanel({
                   ))}
                 </div>
               ) : (
-                <p className="py-8 text-center text-sm text-muted-foreground">No recordings match that search.</p>
+                <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
+                  <p>No recordings match that search.</p>
+                  <Button
+                    onClick={() => {
+                      setSearchFilter("");
+                      setSearchOpen(false);
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Clear search
+                  </Button>
+                </div>
               )}
             </ScrollArea>
           </>

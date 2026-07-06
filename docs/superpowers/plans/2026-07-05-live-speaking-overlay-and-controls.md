@@ -202,7 +202,7 @@ Expected: device selection logic is tested without requiring a physical mic in C
 - [ ] Add a tested transition for route loss: `serverLive` -> `localFallback` when fallback is ready, otherwise `blocked`, with a snapshot emitted to overlay and settings.
 - [ ] The command emits state snapshots to main and overlay windows.
 - [ ] Stop returns to idle and makes mic-hot state false.
-- [ ] Save is a stub seam that returns a typed "not implemented" or creates a placeholder only if an actual audio buffer exists.
+- [ ] Save persists a real live WAV/TXT only when an actual audio buffer or transcript exists.
 - [ ] Run:
 
 ```powershell
