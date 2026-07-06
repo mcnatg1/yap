@@ -29,4 +29,18 @@ describe("live session projection", () => {
     expect(view.error).toBe("Mic denied");
     expect(view.route).toBe("blocked");
   });
+
+  it("can expose a copyable final text after live returns to idle", () => {
+    const view: LiveSessionView = {
+      captureMode: "toggle",
+      finalText: "hello world",
+      hotkey: "Ctrl+Win",
+      route: "none",
+      status: "idle",
+      visibility: "enabled",
+    };
+
+    expect(view.status).toBe("idle");
+    expect(view.finalText).toBe("hello world");
+  });
 });

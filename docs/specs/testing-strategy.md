@@ -13,7 +13,7 @@ This is the shared reference the phase specs point to for their acceptance tests
 |-------|------|---------|
 | **Unit** | Pure logic — error mapping, language code map, manifest serde, path naming | `vitest` (TS), `cargo test` (Rust) |
 | **Integration** | Rust ↔ sidecar over real IPC; one fixture in → expected shape out | `cargo test` w/ sidecar launched; tagged `#[ignore]` unless binaries present |
-| **E2E (smoke)** | App boots, transcribes a fixture, shows transcript | Playwright/WebDriver on the Tauri build |
+| **E2E (smoke)** | App boots, overlay responds, desktop shell opens | Playwright for browser/Tauri shell surfaces; WebdriverIO for true desktop smoke |
 | **Accuracy** | WER spot-check vs golden transcripts | Python `jiwer` script in CI, tolerance-gated |
 
 Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
@@ -22,7 +22,14 @@ Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
 
 ## 2. Fixtures
 
-Stored under `tests/fixtures/` (small, license-clear audio):
+Current generated fixtures:
+
+| Path | Purpose | Expectation |
+|------|---------|-------------|
+| `desktop/test/fixtures/audio-fixture.ts` | Deterministic 16 kHz mono WAV generator for UI/contract tests | Stable bytes; not treated as speech quality evidence |
+
+Future speech fixtures should be stored under `tests/fixtures/` or `desktop/test/fixtures/`
+(small, license-clear audio):
 
 | File | Purpose | Expectation |
 |------|---------|-------------|
@@ -33,6 +40,9 @@ Stored under `tests/fixtures/` (small, license-clear audio):
 | `two-speaker-2min.wav` | Phase 7 diarization | ≥2 `SPEAKER_XX`, stable across chunks |
 
 Golden transcripts live beside fixtures. Comparison is **WER-tolerant**, never byte-equal (quantized models drift).
+
+Until a tiny licensed speech fixture is committed, real sidecar parity tests stay opt-in with
+`YAP_PARITY_CLIP`; mock JSON contract tests keep timestamp-shape coverage in normal CI.
 
 ---
 

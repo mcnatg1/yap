@@ -1,4 +1,6 @@
-import { Copy, FileText, FolderOpen } from "lucide-react";
+import { Copy } from "@phosphor-icons/react/Copy";
+import { FileText } from "@phosphor-icons/react/FileText";
+import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
 
 import { Button } from "@/components/ui/button";
 import {

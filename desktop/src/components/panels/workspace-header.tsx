@@ -1,4 +1,4 @@
-import { Settings2 } from "lucide-react";
+import { GearSix as Settings2 } from "@phosphor-icons/react/GearSix";
 
 import { PrivacyStatus } from "@/components/app/privacy-status";
 import { Badge } from "@/components/ui/badge";

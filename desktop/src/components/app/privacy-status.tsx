@@ -1,4 +1,4 @@
-import { LockKeyhole } from "lucide-react";
+import { LockKey as LockKeyhole } from "@phosphor-icons/react/LockKey";
 
 import { Button } from "@/components/ui/button";
 import {

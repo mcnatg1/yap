@@ -10,11 +10,19 @@ const isLiveOverlay = new URLSearchParams(window.location.search).get("window") 
 document.documentElement.dataset.window = isLiveOverlay ? "live-overlay" : "main";
 const Root = isLiveOverlay ? LiveOverlayHost : App;
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <TooltipProvider>
-      <Root />
-      <Toaster />
-    </TooltipProvider>
-  </React.StrictMode>,
-);
+async function bootstrap() {
+  if (import.meta.env.VITE_WDIO === "1") {
+    await import("@wdio/tauri-plugin");
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <TooltipProvider>
+        <Root />
+        <Toaster />
+      </TooltipProvider>
+    </React.StrictMode>,
+  );
+}
+
+void bootstrap();

@@ -7,6 +7,7 @@ import {
   isRecordingFinished,
   isRecordingRetryable,
   isRecordingRunnable,
+  isWorkspaceView,
   recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
@@ -68,5 +69,12 @@ describe("client recording workflow projection", () => {
     expect(recordingStatusForStartFailure("SIGN_IN_REQUIRED")).toBe("blocked_sign_in_required");
     expect(recordingStatusForStartFailure("BUSY")).toBe("failed");
     expect(recordingStatusForStartFailure()).toBe("failed");
+  });
+
+  it("guards workspace event payloads at runtime", () => {
+    expect(isWorkspaceView("home")).toBe(true);
+    expect(isWorkspaceView("polish")).toBe(true);
+    expect(isWorkspaceView("details")).toBe(false);
+    expect(isWorkspaceView(undefined)).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -36,6 +37,7 @@ import {
   isRecordingFinished,
   isRecordingRetryable,
   isRecordingRunnable,
+  isWorkspaceView,
   recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
@@ -232,6 +234,33 @@ export default function App() {
       unlistenLive?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<unknown>("open-workspace", (event) => {
+      if (!isWorkspaceView(event.payload)) return;
+      const action = event.payload;
+      setActiveRail(action);
+      setWorkspaceView(action);
+      if (action === "polish") {
+        setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
+      }
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [selectedItem?.status]);
 
   function updateQueueItem(path: string, updater: (item: RecordingJobView) => RecordingJobView) {
     setQueue((items) =>

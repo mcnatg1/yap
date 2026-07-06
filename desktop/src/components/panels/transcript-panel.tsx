@@ -1,6 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import { Copy, FileAudio, FileText, FolderOpen, HelpCircle, Pause, Play, RotateCcw } from "lucide-react";
+import { Copy } from "@phosphor-icons/react/Copy";
+import { FileAudio } from "@phosphor-icons/react/FileAudio";
+import { FileText } from "@phosphor-icons/react/FileText";
+import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
+import { Question as HelpCircle } from "@phosphor-icons/react/Question";
+import { Pause } from "@phosphor-icons/react/Pause";
+import { Play } from "@phosphor-icons/react/Play";
+import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowCounterClockwise";
 import WaveSurfer from "wavesurfer.js";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";

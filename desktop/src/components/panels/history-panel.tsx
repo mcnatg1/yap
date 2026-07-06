@@ -1,5 +1,10 @@
 import { useMemo, useState, type MouseEvent } from "react";
-import { Copy, FileText, FolderOpen, MoreHorizontal, Search, Trash2 } from "lucide-react";
+import { Copy } from "@phosphor-icons/react/Copy";
+import { FileText } from "@phosphor-icons/react/FileText";
+import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
+import { DotsThree as MoreHorizontal } from "@phosphor-icons/react/DotsThree";
+import { MagnifyingGlass as Search } from "@phosphor-icons/react/MagnifyingGlass";
+import { Trash as Trash2 } from "@phosphor-icons/react/Trash";
 
 import { HistoryEntryPreview } from "@/components/panels/history-entry-preview";
 import {

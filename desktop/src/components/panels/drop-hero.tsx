@@ -1,5 +1,6 @@
 import { type DragEvent } from "react";
-import { LockKeyhole, UploadCloud } from "lucide-react";
+import { LockKey as LockKeyhole } from "@phosphor-icons/react/LockKey";
+import { CloudArrowUp as UploadCloud } from "@phosphor-icons/react/CloudArrowUp";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

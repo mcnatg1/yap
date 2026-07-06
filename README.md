@@ -80,14 +80,32 @@ The desktop is a Tauri app with a local Moonshine tiny fallback. Larger recordin
 
 ## Development
 
+Use Node 24 LTS. This repo has a root `.node-version`, and `desktop/package.json` rejects
+Node 25+ because the Tauri/WebdriverIO desktop smoke path is sensitive to Node runtime drift.
+
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
+node -v  # should be v24.x
 pnpm install
 pnpm test
 pnpm build
+pnpm test:e2e
 cargo test --locked --manifest-path .\src-tauri\Cargo.toml
 pnpm tauri dev
 ```
+
+Desktop automation checks:
+
+```powershell
+cd C:\dev\cohere-transcribe-local\desktop
+pnpm test:e2e:update       # refresh Playwright visual snapshots intentionally
+pnpm test:desktop:build    # builds the WDIO-enabled debug Tauri binary
+pnpm test:desktop          # runs the WebdriverIO/Tauri smoke test
+```
+
+`pnpm test:desktop` expects `src-tauri\target\debug\desktop.exe` unless `APP_BINARY` points at
+another build. The WDIO hooks are only compiled when `test:desktop:build` uses the `wdio` feature
+and `src-tauri\tauri.wdio.conf.json`.
 
 Useful narrow checks:
 

@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView } from "@/lib/app-types";
+import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView, WorkspaceView } from "@/lib/app-types";
 
 export function liveStatus(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("live_status");
@@ -55,6 +55,11 @@ export function saveLiveSession(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("save_live_session");
 }
 
+export function showMainWorkspace(workspace: WorkspaceView): Promise<void> {
+  return invoke<void>("show_main_workspace", { workspace });
+}
+
 export async function listenLiveSession(onUpdate: (view: LiveSessionView) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
   return listen<LiveSessionView>("live-session", (event) => onUpdate(event.payload));
 }

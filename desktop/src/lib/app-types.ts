@@ -1,4 +1,6 @@
-export type WorkspaceView = "home" | "transcribe" | "polish";
+export const workspaceViews = ["home", "transcribe", "polish"] as const;
+
+export type WorkspaceView = (typeof workspaceViews)[number];
 
 export type RailAction = WorkspaceView | "details" | "help";
 
@@ -16,6 +18,10 @@ export const workspaceCopy: Record<WorkspaceView, { title: string; description: 
     description: "Clean text.",
   },
 };
+
+export function isWorkspaceView(value: unknown): value is WorkspaceView {
+  return typeof value === "string" && (workspaceViews as readonly string[]).includes(value);
+}
 
 export const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
 

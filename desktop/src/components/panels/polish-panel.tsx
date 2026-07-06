@@ -1,5 +1,8 @@
 import { useState, type KeyboardEvent } from "react";
-import { ChevronDown, Copy, Save, Sparkles } from "lucide-react";
+import { CaretDown as ChevronDown } from "@phosphor-icons/react/CaretDown";
+import { Copy } from "@phosphor-icons/react/Copy";
+import { FloppyDisk as Save } from "@phosphor-icons/react/FloppyDisk";
+import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";

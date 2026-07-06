@@ -250,6 +250,18 @@ fn save_live_session(
 }
 
 #[tauri::command]
+fn show_main_workspace(app: tauri::AppHandle, workspace: String) -> Result<(), String> {
+    match workspace.as_str() {
+        "home" | "transcribe" | "polish" => {
+            show_main_window(&app);
+            let _ = app.emit("open-workspace", workspace);
+            Ok(())
+        }
+        _ => Err("Unsupported workspace.".into()),
+    }
+}
+
+#[tauri::command]
 async fn install_local_fallback(
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
@@ -849,8 +861,14 @@ pub fn run() {
         }
     });
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+
+    #[cfg(feature = "wdio")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         .manage(stt_state)
         .manage(live_state)
         .manage(live_runtime)
@@ -956,6 +974,7 @@ pub fn run() {
             start_live_session,
             stop_live_session,
             save_live_session,
+            show_main_workspace,
             polish_num_gpu,
             start_transcribe,
             read_text_file,

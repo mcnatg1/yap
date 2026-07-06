@@ -1,0 +1,10 @@
+{
+  "$schema": "../../gen/schemas/desktop-schema.json",
+  "identifier": "wdio",
+  "description": "Generated into src-tauri/capabilities only for desktop automation builds.",
+  "windows": ["main"],
+  "permissions": [
+    "wdio:default",
+    "wdio-webdriver:default"
+  ]
+}

@@ -23,13 +23,29 @@ jobs:
           version: 10.24.0
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: pnpm
           cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: actions/cache@v6
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('desktop/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level high
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm exec playwright install chromium
+      - run: pnpm test:e2e
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: frontend-test-artifacts
+          path: |
+            desktop/test-results
+            desktop/playwright-report
+          if-no-files-found: ignore
 
   rust:
     runs-on: windows-latest

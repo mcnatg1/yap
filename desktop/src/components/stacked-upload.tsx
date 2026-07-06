@@ -1,13 +1,11 @@
-import {
-  CheckCircle2,
-  Clock3,
-  FileAudio,
-  FolderOpen,
-  Loader2,
-  RotateCcw,
-  Trash2,
-  XCircle,
-} from "lucide-react";
+import { CheckCircle as CheckCircle2 } from "@phosphor-icons/react/CheckCircle";
+import { Clock as Clock3 } from "@phosphor-icons/react/Clock";
+import { FileAudio } from "@phosphor-icons/react/FileAudio";
+import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
+import { SpinnerGap as Loader2 } from "@phosphor-icons/react/SpinnerGap";
+import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowCounterClockwise";
+import { Trash as Trash2 } from "@phosphor-icons/react/Trash";
+import { XCircle } from "@phosphor-icons/react/XCircle";
 
 import {
   Attachment,

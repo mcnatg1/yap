@@ -1,13 +1,11 @@
 import gsap from "gsap";
 import { useEffect, useRef, type ElementType } from "react";
-import {
-  CircleUserRound,
-  Grid2X2,
-  HelpCircle,
-  Mic,
-  Settings2,
-  Sparkles,
-} from "lucide-react";
+import { UserCircle as CircleUserRound } from "@phosphor-icons/react/UserCircle";
+import { SquaresFour as Grid2X2 } from "@phosphor-icons/react/SquaresFour";
+import { Question as HelpCircle } from "@phosphor-icons/react/Question";
+import { Microphone as Mic } from "@phosphor-icons/react/Microphone";
+import { GearSix as Settings2 } from "@phosphor-icons/react/GearSix";
+import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
 
 import { AppIcon } from "@/components/app/app-icon";
 import { Button } from "@/components/ui/button";

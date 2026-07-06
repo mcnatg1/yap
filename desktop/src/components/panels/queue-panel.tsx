@@ -1,4 +1,5 @@
-import { Sparkles, Trash2 } from "lucide-react";
+import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
+import { Trash as Trash2 } from "@phosphor-icons/react/Trash";
 
 import { StackedUpload } from "@/components/stacked-upload";
 import {

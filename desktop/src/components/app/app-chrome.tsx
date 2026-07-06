@@ -1,4 +1,6 @@
-import { Minus, Square, X } from "lucide-react";
+import { Minus } from "@phosphor-icons/react/Minus";
+import { Square } from "@phosphor-icons/react/Square";
+import { X } from "@phosphor-icons/react/X";
 
 import { runWindowAction } from "@/components/app/window-actions";
 import { Button } from "@/components/ui/button";

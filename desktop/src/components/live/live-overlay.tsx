@@ -1,85 +1,106 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
-import { ArrowDownCircle, CircleAlert, LoaderCircle, Pencil, Square, X } from "lucide-react";
+import { ArrowCircleDown as ArrowDownCircle } from "@phosphor-icons/react/ArrowCircleDown";
+import { Check } from "@phosphor-icons/react/Check";
+import { WarningCircle as CircleAlert } from "@phosphor-icons/react/WarningCircle";
+import { Copy } from "@phosphor-icons/react/Copy";
+import { ChatText as MessageSquareText } from "@phosphor-icons/react/ChatText";
+import { Microphone as Mic } from "@phosphor-icons/react/Microphone";
+import { PencilSimple as Pencil } from "@phosphor-icons/react/PencilSimple";
+import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowCounterClockwise";
+import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
+import { X } from "@phosphor-icons/react/X";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { type LiveCaptureMode, type LiveSessionView } from "@/lib/app-types";
+import {
+  hoverSensorHeight,
+  idleSensorWidth,
+  modelFromLiveView,
+  overlayFrame,
+  overlaySurface,
+  retractMs,
+  successVisibleMs,
+  type OverlayPhase,
+  type OverlayModel,
+  type OverlaySurface,
+} from "@/components/live/live-overlay-state";
+import { type LiveSessionView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
 type LiveOverlayProps = {
+  onCopyLast?: () => void;
+  onOpenScratch?: () => void;
+  onOpenTransform?: () => void;
+  onRetry?: () => void;
+  onStart?: () => void;
   onStop?: () => void;
   view: LiveSessionView;
 };
 
-type OverlayPhase = "idle" | "initializing" | "recording" | "transcribing" | "feedback" | "updateAvailable";
-
-type OverlayModel = {
-  audioLevel: number;
-  errorMessage?: string;
-  isCommandMode: boolean;
-  phase: OverlayPhase;
-  recordingTriggerMode: "hold" | "toggle";
-  updateVersion?: string;
-};
-
-const dropDownHeight = 38;
-const hoverSensorHeight = 4;
-const retractMs = 180;
 const defaultWidth = 92;
-const toggleWidth = 150;
-const commandModeWidth = 180;
-const updateWidth = 190;
-const minErrorWidth = 180;
-const maxErrorWidth = 420;
 
-export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
+export function LiveOverlay({
+  onCopyLast,
+  onOpenScratch,
+  onOpenTransform,
+  onRetry,
+  onStart,
+  onStop,
+  view,
+}: LiveOverlayProps) {
   const model = modelFromLiveView(view);
   const [entered, setEntered] = useState(false);
   const [peeked, setPeeked] = useState(false);
   const [retracting, setRetracting] = useState(false);
+  const [successVisible, setSuccessVisible] = useState(false);
   const [showInitializing, setShowInitializing] = useState(false);
-  const lockedTranscribingWidthRef = useRef<number | undefined>(undefined);
-  const lastNonTranscribingWidthRef = useRef(defaultWidth);
+  const lockedProcessingWidthRef = useRef<number | undefined>(undefined);
+  const lastNonProcessingWidthRef = useRef(defaultWidth);
   const previousPhaseRef = useRef<OverlayPhase>("idle");
-  const previousEntryPhaseRef = useRef<OverlayPhase>("idle");
+  const previousEntrySurfaceRef = useRef<OverlaySurface>("sensor");
+  const previousStatusRef = useRef(view.status);
   const retractTimerRef = useRef<number | undefined>(undefined);
-  const idlePreviewOpen = model.phase === "idle" && (peeked || retracting);
-  const visiblePhase = idlePreviewOpen ? "recording" : model.phase;
-  const visibleModel = idlePreviewOpen ? { ...model, phase: "recording" as const } : model;
-  const width = visiblePhase === "transcribing"
-    ? lockedTranscribingWidthRef.current ?? lastNonTranscribingWidthRef.current
-    : overlayWidth(visibleModel);
+  const resizeRunningRef = useRef(false);
+  const resizeTargetRef = useRef({ height: hoverSensorHeight, width: idleSensorWidth });
+  const successTimerRef = useRef<number | undefined>(undefined);
+  const hasCopyableFinal = Boolean(model.finalText?.trim());
+  const surface = overlaySurface(model, peeked, retracting, successVisible && hasCopyableFinal);
+  const frame = overlayFrame(surface, model);
+  const width = model.phase === "processing"
+    ? lockedProcessingWidthRef.current ?? lastNonProcessingWidthRef.current
+    : frame.width;
 
   useEffect(() => {
     const previousPhase = previousPhaseRef.current;
     previousPhaseRef.current = model.phase;
-    if (model.phase === "transcribing" && previousPhase !== "transcribing") {
-      lockedTranscribingWidthRef.current = lastNonTranscribingWidthRef.current;
-    } else if (model.phase !== "transcribing") {
-      lockedTranscribingWidthRef.current = undefined;
+    if (model.phase === "processing" && previousPhase !== "processing") {
+      lockedProcessingWidthRef.current = lastNonProcessingWidthRef.current;
+    } else if (model.phase !== "processing") {
+      lockedProcessingWidthRef.current = undefined;
       if (model.phase !== "idle") {
-        lastNonTranscribingWidthRef.current = overlayWidth(model);
+        lastNonProcessingWidthRef.current = overlayFrame(model.phase, model).width;
       }
     }
   }, [model]);
 
   useEffect(() => {
-    if ((model.phase === "idle" && !peeked) || (model.phase === "initializing" && !showInitializing)) {
+    if (surface === "sensor" || (surface === "initializing" && !showInitializing)) {
       setEntered(false);
       return;
     }
 
-    if (previousEntryPhaseRef.current === "idle") {
+    if (previousEntrySurfaceRef.current === "sensor") {
       setEntered(false);
       const frame = window.requestAnimationFrame(() => setEntered(true));
-      previousEntryPhaseRef.current = model.phase;
+      previousEntrySurfaceRef.current = surface;
       return () => window.cancelAnimationFrame(frame);
     }
 
-    previousEntryPhaseRef.current = model.phase;
+    previousEntrySurfaceRef.current = surface;
     setEntered(true);
-  }, [model.phase, peeked, showInitializing]);
+  }, [showInitializing, surface]);
 
   useEffect(() => {
     if (model.phase !== "initializing") {
@@ -92,21 +113,69 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
   }, [model.phase]);
 
   useEffect(() => {
-    if (model.phase === "idle" && !peeked && !retracting) {
-      previousEntryPhaseRef.current = "idle";
-      void resizeOverlayWindow(defaultWidth, hoverSensorHeight);
-      return;
+    if (model.phase === "idle") return;
+    cancelRetract();
+    setPeeked(false);
+    setRetracting(false);
+  }, [model.phase]);
+
+  useEffect(() => {
+    const previousStatus = previousStatusRef.current;
+    previousStatusRef.current = view.status;
+    if (view.status !== "idle") {
+      clearSuccessTimer();
+      setSuccessVisible(false);
+    } else if (previousStatus !== "idle" && hasCopyableFinal) {
+      clearSuccessTimer();
+      setSuccessVisible(true);
+      successTimerRef.current = window.setTimeout(() => {
+        successTimerRef.current = undefined;
+        setSuccessVisible(false);
+      }, successVisibleMs);
     }
-    void resizeOverlayWindow(width, dropDownHeight);
-  }, [model.phase, peeked, retracting, width]);
+  }, [hasCopyableFinal, view.status]);
+
+  useEffect(() => {
+    if (surface === "sensor") {
+      previousEntrySurfaceRef.current = "sensor";
+    }
+    scheduleOverlayResize(width, frame.height);
+  }, [frame.height, surface, width]);
 
   useEffect(() => {
     return () => {
       if (retractTimerRef.current !== undefined) {
         window.clearTimeout(retractTimerRef.current);
       }
+      clearSuccessTimer();
     };
   }, []);
+
+  function clearSuccessTimer() {
+    if (successTimerRef.current === undefined) return;
+    window.clearTimeout(successTimerRef.current);
+    successTimerRef.current = undefined;
+  }
+
+  function scheduleOverlayResize(width: number, height: number) {
+    resizeTargetRef.current = { height, width };
+    if (!resizeRunningRef.current) {
+      void flushOverlayResize();
+    }
+  }
+
+  async function flushOverlayResize() {
+    resizeRunningRef.current = true;
+    try {
+      while (true) {
+        const target = resizeTargetRef.current;
+        await resizeOverlayWindow(target.width, target.height);
+        if (target === resizeTargetRef.current) break;
+      }
+    } finally {
+      resizeRunningRef.current = false;
+    }
+  }
 
   function cancelRetract() {
     if (retractTimerRef.current === undefined) return;
@@ -123,6 +192,7 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
   function closeIdlePreview() {
     cancelRetract();
     setPeeked(false);
+    setEntered(false);
     setRetracting(true);
     retractTimerRef.current = window.setTimeout(() => {
       retractTimerRef.current = undefined;
@@ -130,7 +200,7 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
     }, retractMs);
   }
 
-  if (model.phase === "idle" && !peeked && !retracting) {
+  if (surface === "sensor") {
     return (
       <div
         className="live-overlay-root pointer-events-auto h-full w-full bg-transparent"
@@ -143,67 +213,43 @@ export function LiveOverlay({ onStop, view }: LiveOverlayProps) {
   return (
     <div className="live-overlay-root pointer-events-none h-full w-full overflow-hidden bg-transparent p-0">
       <div
-        className="pointer-events-auto h-full w-full overflow-hidden bg-black text-white"
+        className="pointer-events-auto h-full w-full text-white"
         onMouseLeave={() => {
-          if (model.phase !== "idle") return;
+          if (surface !== "peek") return;
           closeIdlePreview();
         }}
         style={{
-          borderBottomLeftRadius: 12,
-          borderBottomRightRadius: 12,
+          backgroundColor: "black",
+          borderBottomLeftRadius: 14,
+          borderBottomRightRadius: 14,
+          overflow: "hidden",
           transform: entered ? "translateY(0)" : "translateY(-100%)",
           transition: "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
         }}
       >
-        <RecordingOverlayView model={visibleModel} onStopButtonPressed={onStop} />
+        {surface === "peek" ? (
+          <PeekOverlayView
+            onOpenScratch={onOpenScratch}
+            onOpenTransform={onOpenTransform}
+            onStart={onStart}
+          />
+        ) : surface === "success" ? (
+          <SuccessOverlayView onCopyLast={onCopyLast} />
+        ) : (
+          <RecordingOverlayView
+            model={model}
+            onRetryButtonPressed={onRetry}
+            onStopButtonPressed={onStop}
+          />
+        )}
       </div>
     </div>
   );
 }
 
-function modelFromLiveView(view: LiveSessionView): OverlayModel {
-  const triggerMode = triggerModeFromCaptureMode(view.captureMode);
-  if (view.visibility === "hidden" || view.status === "idle") {
-    return { audioLevel: 0, isCommandMode: false, phase: "idle", recordingTriggerMode: triggerMode };
-  }
-
-  switch (view.status) {
-    case "armed":
-      return { audioLevel: 0, isCommandMode: false, phase: "initializing", recordingTriggerMode: triggerMode };
-    case "listening":
-    case "speaking":
-      return { audioLevel: view.level ?? 0, isCommandMode: false, phase: "recording", recordingTriggerMode: triggerMode };
-    case "settling":
-    case "saving":
-      return { audioLevel: 0, isCommandMode: false, phase: "transcribing", recordingTriggerMode: triggerMode };
-    case "blocked":
-      return {
-        audioLevel: 0,
-        errorMessage: view.error,
-        isCommandMode: false,
-        phase: "feedback",
-        recordingTriggerMode: triggerMode,
-      };
-  }
-}
-
-function triggerModeFromCaptureMode(captureMode: LiveCaptureMode): "hold" | "toggle" {
-  return captureMode === "toggle" ? "toggle" : "hold";
-}
-
-function overlayWidth(model: OverlayModel, lockedWidth?: number) {
-  if (lockedWidth && model.phase === "transcribing") return lockedWidth;
-  if (model.phase === "feedback") {
-    if (!model.errorMessage) return defaultWidth;
-    return Math.min(maxErrorWidth, Math.max(minErrorWidth, model.errorMessage.length * 6.8 + 60));
-  }
-  if (model.phase === "updateAvailable") return updateWidth;
-  if (model.isCommandMode) return commandModeWidth;
-  if (model.phase === "recording" && model.recordingTriggerMode === "toggle") return toggleWidth;
-  return defaultWidth;
-}
-
 async function resizeOverlayWindow(width: number, height: number) {
+  if (!isTauri()) return;
+
   const window = getCurrentWindow();
   await window.setSize(new LogicalSize(width, height));
 
@@ -215,20 +261,46 @@ async function resizeOverlayWindow(width: number, height: number) {
   await window.setPosition(new LogicalPosition(position.x + Math.max((size.width - width) / 2, 0), position.y));
 }
 
+function PeekOverlayView({
+  onOpenScratch,
+  onOpenTransform,
+  onStart,
+}: {
+  onOpenScratch?: () => void;
+  onOpenTransform?: () => void;
+  onStart?: () => void;
+}) {
+  return (
+    <div className="flex h-full w-full items-center justify-center gap-2 px-3">
+      <IslandInlineButton label="Start dictating" onClick={onStart}>
+        <Mic className="size-[18px]" weight="bold" />
+      </IslandInlineButton>
+      <IslandInlineButton label="Open scratch" onClick={onOpenScratch}>
+        <MessageSquareText className="size-4" weight="bold" />
+      </IslandInlineButton>
+      <IslandInlineButton label="Open transform" onClick={onOpenTransform}>
+        <Sparkles className="size-4" weight="bold" />
+      </IslandInlineButton>
+    </div>
+  );
+}
+
 function RecordingOverlayView({
   model,
+  onRetryButtonPressed,
   onStopButtonPressed,
 }: {
   model: OverlayModel;
+  onRetryButtonPressed?: () => void;
   onStopButtonPressed?: () => void;
 }) {
   const showsLiveRecordingContent = model.phase === "recording";
   const showsStopButton = showsLiveRecordingContent && model.recordingTriggerMode === "toggle";
 
   if (model.phase === "feedback" && model.errorMessage) {
-    return <ErrorOverlayView message={model.errorMessage} />;
+    return <ErrorOverlayView message={model.errorMessage} onRetry={onRetryButtonPressed} />;
   }
-  if (model.phase === "feedback") return <FailureIndicatorView />;
+  if (model.phase === "feedback") return <FailureIndicatorView onRetry={onRetryButtonPressed} />;
   if (model.phase === "updateAvailable") return <UpdateAvailableOverlayView />;
 
   return (
@@ -243,24 +315,29 @@ function RecordingOverlayView({
         )}
       </div>
 
-      <div className="absolute inset-0 flex items-center px-3">
-        <div className="grid h-full w-6 place-items-center">
-          {model.isCommandMode ? <CommandModeIndicator /> : null}
+      {showsStopButton ? (
+        <div className="absolute inset-0 flex items-center justify-between px-2.5">
+          <FreeFlowIconButton label="Cancel recording" onClick={onStopButtonPressed} tone="cancel">
+            <X className="size-3" weight="bold" />
+          </FreeFlowIconButton>
+          <div className="h-px w-11" />
+          <FreeFlowIconButton label="Finish recording" onClick={onStopButtonPressed} tone="confirm">
+            <Check className="size-3" weight="bold" />
+          </FreeFlowIconButton>
         </div>
-        <div className="min-w-0 flex-1" />
-        <div className="grid h-full w-8 place-items-end items-center">
-          {showsStopButton ? (
-            <FreeFlowIconButton label="Stop recording" onClick={onStopButtonPressed}>
-              <Square className="size-[7px] fill-white" strokeWidth={0} />
-            </FreeFlowIconButton>
-          ) : null}
+      ) : (
+        <div className="absolute inset-0 flex items-center px-3">
+          <div className="grid h-full w-6 place-items-center">
+            {model.isCommandMode ? <CommandModeIndicator /> : null}
+          </div>
+          <div className="min-w-0 flex-1" />
         </div>
-      </div>
+      )}
     </div>
   );
 }
 
-function FreeFlowIconButton({
+function IslandInlineButton({
   children,
   label,
   onClick,
@@ -272,11 +349,43 @@ function FreeFlowIconButton({
   return (
     <Button
       aria-label={label}
-      className="size-[14px] rounded-full bg-red-600/90 p-0 text-white hover:bg-red-600 hover:text-white focus-visible:ring-white/60"
+      className="size-8 rounded-full bg-white/10 p-0 text-white transition-colors hover:bg-white/20 hover:text-fuchsia-100 focus-visible:ring-white/60"
+      onClick={onClick}
+      size="icon"
+      type="button"
+      variant="ghost"
+      title={label}
+    >
+      {children}
+    </Button>
+  );
+}
+
+function FreeFlowIconButton({
+  children,
+  label,
+  onClick,
+  tone = "cancel",
+}: {
+  children: ReactNode;
+  label: string;
+  onClick?: () => void;
+  tone?: "cancel" | "confirm";
+}) {
+  return (
+    <Button
+      aria-label={label}
+      className={cn(
+        "size-[22px] rounded-full p-0 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.16)] focus-visible:ring-white/60",
+        tone === "confirm"
+          ? "bg-white text-black hover:bg-emerald-100 hover:text-black"
+          : "bg-white/18 hover:bg-red-500/85 hover:text-white",
+      )}
       onClick={onClick}
       size="icon-xs"
       type="button"
       variant="ghost"
+      title={label}
     >
       {children}
     </Button>
@@ -286,7 +395,7 @@ function FreeFlowIconButton({
 function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; showsActivityPulse?: boolean }) {
   const pulseTime = useAnimationTime(Boolean(showsActivityPulse));
   return (
-    <div className="flex h-6 items-center justify-center gap-[2.5px]">
+    <div className="flex h-6 w-11 items-center justify-center gap-[2.5px]">
       {waveformMultipliers.map((multiplier, index) => (
         <WaveformBar
           amplitude={barAmplitude(audioLevel, multiplier, index, pulseTime)}
@@ -308,7 +417,7 @@ function WaveformBar({ amplitude, delay, response }: { amplitude: number; delay:
       className="w-[3px] rounded-full bg-white"
       style={{
         height: 2 + (22 - 2) * amplitude,
-        transition: `height ${response}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
+        transition: `height ${Math.min(response, 0.12)}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
       }}
     />
   );
@@ -327,19 +436,7 @@ function barAmplitude(level: number, multiplier: number, index: number, pulseTim
 }
 
 function ProcessingIndicatorView() {
-  const [showsExtendedSpinner, setShowsExtendedSpinner] = useState(false);
-
-  useEffect(() => {
-    setShowsExtendedSpinner(false);
-    const timer = window.setTimeout(() => setShowsExtendedSpinner(true), 1000);
-    return () => window.clearTimeout(timer);
-  }, []);
-
-  return showsExtendedSpinner ? (
-    <LoaderCircle className="size-4 animate-spin text-white" strokeWidth={2.5} />
-  ) : (
-    <ProcessingWaveformView />
-  );
+  return <ProcessingWaveformView />;
 }
 
 function ProcessingWaveformView() {
@@ -404,25 +501,69 @@ function InitializingDotsView() {
 }
 
 function CommandModeIndicator() {
-  return <Pencil className="size-4 text-white/90" strokeWidth={2.4} />;
+  return <Pencil className="size-4 text-white/90" weight="bold" />;
 }
 
-function FailureIndicatorView() {
+function SuccessOverlayView({ onCopyLast }: { onCopyLast?: () => void }) {
   return (
-    <div className="grid h-full w-full place-items-center">
-      <span className="grid size-5 place-items-center rounded-full bg-red-600/90">
-        <X className="size-3 text-white" strokeWidth={3} />
+    <div className="flex h-full w-full items-center justify-center gap-2 px-3">
+      <span className="grid size-5 place-items-center rounded-full bg-emerald-500/90">
+        <Check className="size-3.5 text-black" weight="bold" />
       </span>
+      <span className="text-[12px] font-semibold leading-none text-white">Saved</span>
+      <FreeFlowNeutralButton label="Copy last dictation" onClick={onCopyLast}>
+        <Copy className="size-3.5" weight="bold" />
+      </FreeFlowNeutralButton>
     </div>
   );
 }
 
-function ErrorOverlayView({ message }: { message: string }) {
+function FailureIndicatorView({ onRetry }: { onRetry?: () => void }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center gap-2">
+      <span className="grid size-5 place-items-center rounded-full bg-red-600/90">
+        <X className="size-3 text-white" weight="bold" />
+      </span>
+      <FreeFlowNeutralButton label="Retry dictation" onClick={onRetry}>
+        <RotateCcw className="size-3.5" weight="bold" />
+      </FreeFlowNeutralButton>
+    </div>
+  );
+}
+
+function ErrorOverlayView({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="flex h-full w-full items-center justify-center gap-1.5 px-3">
       <CircleAlert className="size-[13px] shrink-0 fill-red-600/90 text-red-600/90" />
       <span className="min-w-0 truncate text-[12px] font-medium leading-none text-white">{message}</span>
+      <FreeFlowNeutralButton label="Retry dictation" onClick={onRetry}>
+        <RotateCcw className="size-3.5" weight="bold" />
+      </FreeFlowNeutralButton>
     </div>
+  );
+}
+
+function FreeFlowNeutralButton({
+  children,
+  label,
+  onClick,
+}: {
+  children: ReactNode;
+  label: string;
+  onClick?: () => void;
+}) {
+  return (
+    <Button
+      aria-label={label}
+      className="size-[22px] shrink-0 rounded-full bg-white/12 p-0 text-white hover:bg-white/20 hover:text-fuchsia-100 focus-visible:ring-white/60"
+      onClick={onClick}
+      size="icon-xs"
+      title={label}
+      type="button"
+      variant="ghost"
+    >
+      {children}
+    </Button>
   );
 }
 
@@ -447,7 +588,7 @@ function useAnimationTime(enabled: boolean) {
     let frame = 0;
     let previous = 0;
     const tick = (now: number) => {
-      if (now - previous >= 1000 / 30) {
+      if (now - previous >= 1000 / 60) {
         previous = now;
         setTime(now / 1000);
       }

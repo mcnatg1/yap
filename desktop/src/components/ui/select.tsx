@@ -1,4 +1,6 @@
-import { Check, ChevronDown, ChevronUp } from "lucide-react"
+import { Check } from "@phosphor-icons/react/Check";
+import { CaretDown as ChevronDown } from "@phosphor-icons/react/CaretDown";
+import { CaretUp as ChevronUp } from "@phosphor-icons/react/CaretUp";
 import * as React from "react"
 import { Select as SelectPrimitive } from "radix-ui"
 

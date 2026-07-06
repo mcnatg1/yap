@@ -4,6 +4,9 @@ import { LiveOverlay } from "@/components/live/live-overlay";
 import {
   listenLiveSession,
   liveStatus,
+  setLiveCaptureMode,
+  showMainWorkspace,
+  startLiveSession,
   stopLiveSession,
 } from "@/live";
 import type { LiveSessionView } from "@/lib/app-types";
@@ -39,6 +42,20 @@ export function LiveOverlayHost() {
 
   return (
     <LiveOverlay
+      onCopyLast={() => {
+        const text = view.finalText?.trim();
+        if (!text) return;
+        void navigator.clipboard.writeText(text).catch(() => undefined);
+      }}
+      onOpenScratch={() => void showMainWorkspace("home")}
+      onOpenTransform={() => void showMainWorkspace("polish")}
+      onRetry={() => void startLiveSession().then(setView)}
+      onStart={() => {
+        void setLiveCaptureMode("toggle")
+          .catch(() => view)
+          .then(() => startLiveSession())
+          .then(setView);
+      }}
       onStop={() => void stopLiveSession().then(setView)}
       view={view}
     />

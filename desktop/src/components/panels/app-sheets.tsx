@@ -1,16 +1,14 @@
-import {
-  BadgeCheck,
-  Copy,
-  FolderOpen,
-  FolderOutput,
-  LockKeyhole,
-  Keyboard,
-  Mic,
-  Server,
-  Sparkles,
-  Trash2,
-  UploadCloud,
-} from "lucide-react";
+import { SealCheck as BadgeCheck } from "@phosphor-icons/react/SealCheck";
+import { Copy } from "@phosphor-icons/react/Copy";
+import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
+import { FolderSimple as FolderOutput } from "@phosphor-icons/react/FolderSimple";
+import { LockKey as LockKeyhole } from "@phosphor-icons/react/LockKey";
+import { Keyboard } from "@phosphor-icons/react/Keyboard";
+import { Microphone as Mic } from "@phosphor-icons/react/Microphone";
+import { HardDrives as Server } from "@phosphor-icons/react/HardDrives";
+import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
+import { Trash as Trash2 } from "@phosphor-icons/react/Trash";
+import { CloudArrowUp as UploadCloud } from "@phosphor-icons/react/CloudArrowUp";
 import { useEffect, useId, useState } from "react";
 
 import { StatusRow } from "@/components/app/status-row";

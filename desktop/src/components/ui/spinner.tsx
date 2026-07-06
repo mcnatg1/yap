@@ -1,4 +1,4 @@
-import { Loader2Icon } from "lucide-react"
+import { SpinnerGap as Loader2Icon } from "@phosphor-icons/react/SpinnerGap";
 
 import { cn } from "@/lib/utils"
 
