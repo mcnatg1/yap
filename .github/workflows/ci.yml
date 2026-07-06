@@ -82,3 +82,15 @@ jobs:
           cargo audit --target-os windows --target-arch x86_64 `
             --ignore RUSTSEC-2026-0194 `
             --ignore RUSTSEC-2026-0195
+
+  server:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: server/src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m unittest discover -s server/tests -p "test_*.py"

@@ -1,16 +1,16 @@
-# Spec: Phase A–D — llama-server LLM sidecar
+# Spec: Local LLM Sidecar
 
 **Status:** Draft (2026-06-30)
 **Implements:** [ADR 0005](../adr/0005-llama-server-agents.md), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (HOT/background mutex)
 **Scope:** Move Polish off the external Ollama dependency onto a bundled `llama-server` sidecar, and define the shared LLM client used by Polish today and Scribe/agents later.
 
-Pairs with the [STT sidecar spec](phase-1-2-stt-sidecar.md) — same lifecycle/manager pattern, different runtime.
+Pairs with the [STT sidecar spec](local-live-fallback-sidecar.md) — same lifecycle/manager pattern, different runtime.
 
 ---
 
 ## 1. Scope
 
-### In scope (Phase A–D)
+### In scope
 
 - Bundle `llama-server` (llama.cpp) per platform; Rust sidecar manager.
 - Pinned default GGUF for Polish/Scribe; first-run download + checksum.
@@ -22,7 +22,7 @@ Pairs with the [STT sidecar spec](phase-1-2-stt-sidecar.md) — same lifecycle/m
 
 | Deferred | Where |
 |----------|-------|
-| Live Scribe wiring | Phase D / [live spec](phase-3-live-ux-audio.md) |
+| Live Scribe wiring | Phase D / [live spec](live-dictation-client-ux.md) |
 | Background agents (Student…) | Phase 7d+ ([ADR 0006](../adr/0006-silero-agents-state-machine.md)) |
 | Metal/CUDA offload | post-v1 (`-ngl 0` baseline) |
 | Embeddings for RAG | [ADR 0011](../adr/0011-vector-rag-retrieval.md) |

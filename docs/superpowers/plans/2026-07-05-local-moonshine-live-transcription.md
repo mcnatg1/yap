@@ -14,7 +14,7 @@
 
 ## File Structure
 
-- Modify `docs/specs/phase-3-live-ux-audio.md`: add Phase 3a amendment that this branch ships local live text/save but not full Silero completion.
+- Modify `docs/specs/live-dictation-client-ux.md`: add Phase 3a amendment that this branch ships local live text/save but not full Silero completion.
 - Modify `desktop/src-tauri/src/live/mod.rs`: export new modules.
 - Create `desktop/src-tauri/src/live/stream.rs`: CrispASR stream command builder, stream event parser, child launch helpers.
 - Create `desktop/src-tauri/src/live/runtime.rs`: `LiveRuntime`, CPAL capture, mono/resample/PCM conversion, session tokens, session-bound child lifecycle.
@@ -38,7 +38,7 @@
 ### Task 1: Mark This As Phase 3a In Docs
 
 **Files:**
-- Modify `docs/specs/phase-3-live-ux-audio.md`
+- Modify `docs/specs/live-dictation-client-ux.md`
 
 - [ ] **Step 1: Add the amendment under the existing 2026-07-05 amendment**
 
@@ -53,7 +53,7 @@ Add this paragraph:
 Run:
 
 ```powershell
-rg -n "Phase 3a|Local Moonshine Live Transcription|vad_segments" docs/specs/phase-3-live-ux-audio.md docs/superpowers/specs/2026-07-05-local-moonshine-live-transcription.md
+rg -n "Phase 3a|Local Moonshine Live Transcription|vad_segments" docs/specs/live-dictation-client-ux.md docs/superpowers/specs/2026-07-05-local-moonshine-live-transcription.md
 ```
 
 Expected: both files mention Phase 3a and preserve `vad_segments` as follow-on work.
@@ -61,7 +61,7 @@ Expected: both files mention Phase 3a and preserve `vad_segments` as follow-on w
 - [ ] **Step 3: Commit**
 
 ```powershell
-git add docs/specs/phase-3-live-ux-audio.md docs/superpowers/specs/2026-07-05-local-moonshine-live-transcription.md docs/superpowers/plans/2026-07-05-local-moonshine-live-transcription.md
+git add docs/specs/live-dictation-client-ux.md docs/superpowers/specs/2026-07-05-local-moonshine-live-transcription.md docs/superpowers/plans/2026-07-05-local-moonshine-live-transcription.md
 git commit -m "docs: specify local live transcription bridge"
 ```
 

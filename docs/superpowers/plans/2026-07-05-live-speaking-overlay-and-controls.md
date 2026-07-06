@@ -14,7 +14,7 @@
 
 ## File Structure
 
-- Modify `docs/specs/phase-3-live-ux-audio.md`: scope amendment for overlay/hotkey foundation.
+- Modify `docs/specs/live-dictation-client-ux.md`: scope amendment for overlay/hotkey foundation.
 - Modify `docs/adr/0013-global-hotkey-injection.md`: clarify that injection remains later while overlay/hotkey settings can land earlier.
 - Modify `desktop/src/lib/app-types.ts`: live session, route, hotkey, mic device projection types and label helpers.
 - Create `desktop/src/lib/live-session.test.ts`: pure state/label tests.
@@ -44,7 +44,7 @@
 ### Task 1: Reconcile Existing Docs
 
 **Files:**
-- Modify `docs/specs/phase-3-live-ux-audio.md`
+- Modify `docs/specs/live-dictation-client-ux.md`
 - Modify `docs/adr/0013-global-hotkey-injection.md`
 
 - [ ] Add a scope amendment to Phase 3: overlay/hotkey foundation is in scope; cross-app injection remains out of scope.
@@ -54,7 +54,7 @@
 
 ```powershell
 cd C:\dev\cohere-transcribe-local
-rg -n "global hotkey|injection|overlay|live-overlay" docs/specs/phase-3-live-ux-audio.md docs/adr/0013-global-hotkey-injection.md docs/superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md
+rg -n "global hotkey|injection|overlay|live-overlay" docs/specs/live-dictation-client-ux.md docs/adr/0013-global-hotkey-injection.md docs/superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md
 ```
 
 Expected: docs consistently distinguish overlay/hotkey foundation from injection.

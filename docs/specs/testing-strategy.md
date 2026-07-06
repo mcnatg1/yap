@@ -41,8 +41,10 @@ Future speech fixtures should be stored under `tests/fixtures/` or `desktop/test
 
 Golden transcripts live beside fixtures. Comparison is **WER-tolerant**, never byte-equal (quantized models drift).
 
-Until a tiny licensed speech fixture is committed, real sidecar parity tests stay opt-in with
-`YAP_PARITY_CLIP`; mock JSON contract tests keep timestamp-shape coverage in normal CI.
+Real sidecar parity tests stay opt-in: set `YAP_PARITY_CLIP` and run the ignored
+Cargo parity tests when a licensed audio clip is available. Normal CI uses
+`desktop/src-tauri/tests/fixtures/parity-contract.verbose.json` to keep
+timestamp-shape coverage without shipping private or unclear audio.
 
 ---
 

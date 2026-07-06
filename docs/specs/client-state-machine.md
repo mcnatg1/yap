@@ -1,7 +1,7 @@
 # Spec: Client Recording State Machine
 
 **Status:** Draft
-**Scope:** Desktop client workflow for Phases 1-2, with explicit hooks for server STT, preprocessing, and diarization.
+**Scope:** Desktop client workflow for the thin-client MVP, with explicit hooks for server STT, preprocessing, and diarization.
 
 This is the build contract for the client workflow. It replaces the cosmetic readiness-layer approach: the queue and runtime state must model the actual recording lifecycle.
 
@@ -17,7 +17,7 @@ This is the build contract for the client workflow. It replaces the cosmetic rea
 
 The long-term state machine belongs in Tauri Rust as a `RuntimeOrchestrator` or equivalent. React should project typed snapshots/events from that orchestrator.
 
-The Phase 1/2 bridge is allowed to keep React as the temporary owner of queue projection while we refactor the current UI, but it must use the same vocabulary the Rust orchestrator will own later. Do not add a standalone readiness helper.
+The current desktop bridge is allowed to keep React as the temporary owner of queue projection while we refactor the UI, but it must use the same vocabulary the Rust orchestrator will own later. Do not add a standalone readiness helper.
 
 ## State Axes
 
@@ -135,7 +135,7 @@ Rust can use snake_case names internally and serialize typed snapshots/events to
 | Larger recording | No | Any | `blocked_server_unavailable` or `queued_server` for retry |
 | Explicit local fallback test/dev file | No | Yes | `localFallback` |
 
-Phase 1/2 may still run selected files through local fallback while the server does not exist, but the state model must label that path as fallback/dev behavior, not the official large-recording product path.
+The current desktop bridge may still run selected files through local fallback while the server does not exist, but the state model must label that path as fallback/dev behavior, not the official large-recording product path.
 
 ## Transitions
 
@@ -181,7 +181,7 @@ flowchart LR
 
 ## Implementation Boundary
 
-Phase 1/2 changes should touch existing state owners before adding runtime breadth:
+Client cleanup changes should touch existing state owners before adding runtime breadth:
 
 - `desktop/src/lib/app-types.ts` owns shared TypeScript projection types and pure label helpers.
 - `desktop/src/App.tsx` temporarily owns React queue projection while Rust orchestration is being introduced.
@@ -192,7 +192,7 @@ Phase 1/2 changes should touch existing state owners before adding runtime bread
 - `desktop/src-tauri/src/runtime/` becomes the Rust `RuntimeOrchestrator` home when implementation reaches the backend state-machine slice.
 - `desktop/src-tauri/src/stt/dispatch.rs` keeps local fallback transcription but reports job/runtime events instead of only path-based progress.
 
-No server HTTP/WSS calls, diarization engine, preprocessing engine, or local Cohere fallback are introduced by the Phase 1/2 cleanup.
+No server HTTP/WSS calls, diarization engine, preprocessing engine, or local Cohere fallback are introduced by this client cleanup.
 
 ## Acceptance
 

@@ -62,6 +62,7 @@ function RecordingPlayer({
   onReveal: (path: string) => void;
 }) {
   const displayedSecondRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
   const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
   const statusId = useId();
@@ -91,8 +92,9 @@ function RecordingPlayer({
   }, [recordingSrc]);
 
   useEffect(() => {
+    const audio = audioRef.current;
     const container = waveformRef.current;
-    if (!container || !recordingSrc) return;
+    if (!audio || !container || !recordingSrc) return;
 
     const waveSurfer = WaveSurfer.create({
       barGap: 2,
@@ -104,9 +106,9 @@ function RecordingPlayer({
       dragToSeek: true,
       height: 56,
       hideScrollbar: true,
+      media: audio,
       normalize: true,
       progressColor: "#034f46",
-      url: recordingSrc,
       waveColor: "rgba(117, 111, 102, 0.28)",
     });
     waveSurferRef.current = waveSurfer;
@@ -127,7 +129,7 @@ function RecordingPlayer({
         setDisplaySeconds(waveSurfer.getDuration());
       }),
       waveSurfer.on("error", () => {
-        setFailed(true);
+        setFailed(Boolean(audio.error));
         setPlaying(false);
       }),
     ];
@@ -148,25 +150,63 @@ function RecordingPlayer({
     setCurrentSeconds(wholeSeconds);
   }
 
+  function syncMediaDuration() {
+    const duration = audioRef.current?.duration;
+    if (duration && Number.isFinite(duration)) {
+      setDurationSeconds(duration);
+      setFailed(false);
+    }
+  }
+
+  function syncMediaTime() {
+    const currentTime = audioRef.current?.currentTime;
+    if (currentTime !== undefined && Number.isFinite(currentTime)) setDisplaySeconds(currentTime);
+  }
+
   function seekToRatio(ratio: number) {
     const waveSurfer = waveSurferRef.current;
-    const duration = durationSeconds ?? waveSurfer?.getDuration();
-    if (!waveSurfer || !duration || !Number.isFinite(duration)) return;
+    const audio = audioRef.current;
+    const duration = durationSeconds ?? waveSurfer?.getDuration() ?? audio?.duration;
+    if (!duration || !Number.isFinite(duration)) return;
 
     const nextSeconds = Math.max(0, Math.min(duration, ratio * duration));
-    waveSurfer.setTime(nextSeconds);
+    if (waveSurfer) {
+      waveSurfer.setTime(nextSeconds);
+    } else if (audio) {
+      audio.currentTime = nextSeconds;
+    }
     setDisplaySeconds(nextSeconds);
   }
 
   function seekBy(deltaSeconds: number) {
     const waveSurfer = waveSurferRef.current;
-    const duration = durationSeconds ?? waveSurfer?.getDuration();
-    if (!waveSurfer || !duration || !Number.isFinite(duration)) return;
-    seekToRatio((waveSurfer.getCurrentTime() + deltaSeconds) / duration);
+    const audio = audioRef.current;
+    const duration = durationSeconds ?? waveSurfer?.getDuration() ?? audio?.duration;
+    const currentTime = waveSurfer?.getCurrentTime() ?? audio?.currentTime;
+    if (currentTime === undefined || !duration || !Number.isFinite(duration)) return;
+    seekToRatio((currentTime + deltaSeconds) / duration);
   }
 
   function togglePlayback() {
-    void waveSurferRef.current?.playPause().catch(() => setFailed(true));
+    const waveSurfer = waveSurferRef.current;
+    if (waveSurfer) {
+      void waveSurfer.playPause().catch(() => toggleNativePlayback());
+      return;
+    }
+    toggleNativePlayback();
+  }
+
+  function toggleNativePlayback() {
+    const audio = audioRef.current;
+    if (!audio) {
+      setFailed(true);
+      return;
+    }
+    if (audio.paused) {
+      void audio.play().catch(() => setFailed(true));
+    } else {
+      audio.pause();
+    }
   }
 
   return (
@@ -283,6 +323,24 @@ function RecordingPlayer({
           This recording is unsupported, moved, or unavailable in the app. Open it from disk instead.
         </p>
       ) : null}
+      <audio
+        aria-hidden="true"
+        className="hidden"
+        onCanPlay={() => setFailed(false)}
+        onDurationChange={syncMediaDuration}
+        onEnded={() => {
+          setPlaying(false);
+          syncMediaTime();
+        }}
+        onError={() => setFailed(true)}
+        onLoadedMetadata={syncMediaDuration}
+        onPause={() => setPlaying(false)}
+        onPlay={() => setPlaying(true)}
+        onTimeUpdate={syncMediaTime}
+        preload="metadata"
+        ref={audioRef}
+        src={recordingSrc}
+      />
     </section>
   );
 }

@@ -5,12 +5,12 @@ This directory is the MVP staging area for the future `yap-server` repo.
 Keep it boring until there is a real service:
 
 - API contracts live here first, likely `openapi/`.
-- Router/service code lives here once Phase 8 starts.
+- Router/service code lives here only when it has tests.
 - Model worker code lives here only after the router contract exists.
 - Host setup stays in `../infra/yap-server-node/`.
 - Shared desktop/server contracts stay here until type drift proves a separate `yap-contracts` repo is worth it.
 
-Phase 8 grows inside this shape:
+The server tier grows inside this shape:
 
 ```text
 server/
@@ -34,5 +34,11 @@ server/
 ```
 
 Use `workload_router/` instead of vague `router/`. Use `schemas/` for API and message shapes. Do not add a repo `models/` directory; runtime model files belong on the server node, not in Git.
+
+## Local checks
+
+```powershell
+$env:PYTHONPATH = "server/src"; python -m unittest discover -s server/tests -p "test_*.py"
+```
 
 Skipped for now: Nx/Turborepo, package workspace wiring, framework/server dependencies, checked-in model weights, and fake GB300 profiles.

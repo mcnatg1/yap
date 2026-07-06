@@ -887,13 +887,12 @@ export default function App() {
     const hiddenHistoryOutputs = readHiddenTranscriptHistory();
 
     setHistory((current) => {
-      const knownOutputs = new Set(current.map((entry) => entry.outputPath));
-      const missing = entries.filter(
-        (entry) => !knownOutputs.has(entry.outputPath) && !hiddenHistoryOutputs.includes(entry.outputPath),
+      const visible = entries.filter(
+        (entry) => !hiddenHistoryOutputs.includes(entry.outputPath),
       );
-      if (!missing.length) return current;
+      if (!visible.length) return current;
 
-      const next = missing.reduce(recordTranscriptHistory, current);
+      const next = visible.reduce(recordTranscriptHistory, current);
       try {
         writeTranscriptHistory(next);
       } catch (error) {

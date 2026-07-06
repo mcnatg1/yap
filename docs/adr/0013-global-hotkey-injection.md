@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Status:** Accepted (roadmap — overlay/hotkey foundation in Phase 3; injection in Phase 7+)
-**Builds on:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) (STT sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [live spec](../specs/phase-3-live-ux-audio.md)
+**Builds on:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) (STT sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [live spec](../specs/live-dictation-client-ux.md)
 
 ## Context
 
@@ -64,5 +64,5 @@ inject into focused field → if blocked → copy to clipboard + toast "Copied �
 
 ## References
 - [ADR 0006](0006-silero-agents-state-machine.md) — pre-warm, single residency
-- [live spec](../specs/phase-3-live-ux-audio.md) — the pipeline L1 reuses
+- [live spec](../specs/live-dictation-client-ux.md) — the pipeline L1 reuses
 - [ADR 0003](0003-long-term-voice-architecture.md) — original open question resolved here

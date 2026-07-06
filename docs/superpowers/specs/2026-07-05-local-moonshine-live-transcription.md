@@ -3,7 +3,7 @@
 **Status:** Draft
 **Date:** 2026-07-05
 **Scope:** Turn the existing live overlay/hotkey foundation into real local live transcription by streaming selected microphone audio to the pinned CrispASR Moonshine v2 tiny fallback, then saving live WAV/TXT output into Home history. This is a client-only **Phase 3a bridge**, not completion of the full Phase 3 audio spec. It does not implement the Phase 8 server WSS connector, Cohere batch upload, Scribe, diarization, or cross-app text injection. It must keep the local live stream session-owned until CrispASR exposes a reset/ack boundary, and leave explicit seams for Rust Silero `vad_segments` and Opus upload.
-**Canonical specs:** [../../specs/phase-3-live-ux-audio.md](../../specs/phase-3-live-ux-audio.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0002-crispasr-unified-stt-runtime.md](../../adr/0002-crispasr-unified-stt-runtime.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
+**Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0002-crispasr-unified-stt-runtime.md](../../adr/0002-crispasr-unified-stt-runtime.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
 
 ## Problem
 
