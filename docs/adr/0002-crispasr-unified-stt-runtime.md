@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Status:** Accepted
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and the moonshine-XOR-cohere exclusivity rule move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. CrispASR on the client is demoted to an **offline/degraded-mode fallback** (local Moonshine tiny) for the team profile. The on-prem GB-class server node is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles. PR3 implements the client fallback slice only: one local Moonshine tiny sidecar, not a local Cohere batch default.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and the moonshine-XOR-cohere exclusivity rule move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. CrispASR on the client is demoted to an **offline/degraded-mode fallback** (local Moonshine v2 tiny) for the team profile. The on-prem GB-class server node is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles. PR3 implements the client fallback slice only: one local Moonshine v2 tiny sidecar, not a local Cohere batch default.
 **Supersedes:** Implementation details in [ADR 0001](0001-dual-stt-backends.md) (PyTorch `transcribe.py`, `moonshine-voice` ONNX, per-invocation subprocess, “no GGUF” rule). The product split from ADR 0001 remains: Moonshine-class streaming for live/offline fallback, Cohere for larger recordings through the GB-class server path.
 
 ## Context
@@ -27,7 +27,7 @@ CrispASR is the **engine**, not the model. Yap still chooses **which GGUF files*
 
 ## Decision
 
-Adopt **CrispASR as the local STT fallback runtime**, backed by a pinned **Moonshine tiny GGUF** and a **long-lived sidecar daemon** that stays warm across sessions. Larger recording transcription moves to the GB-class server Cohere connector instead of the PR3 client fallback.
+Adopt **CrispASR as the local STT fallback runtime**, backed by a pinned **Moonshine v2 tiny GGUF** and a **long-lived sidecar daemon** that stays warm across sessions. Larger recording transcription moves to the GB-class server Cohere connector instead of the PR3 client fallback.
 
 ### Runtime
 
@@ -87,7 +87,7 @@ Quantization policy: **Q4_K as default** for the local fallback. The client does
 
 ### Residency rules (from ADR 0001, unchanged)
 
-1. PR3 client fallback loads **Moonshine tiny only**.
+1. PR3 client fallback loads **Moonshine v2 tiny only**.
 2. Cohere residency is a server workload-router concern once the GB-class server connector lands.
 3. **Unload or idle-evict** local fallback sidecars after a configurable idle timeout (mirror llama-server / sidecar keep-warm semantics; today Ollama `keep_alive` in `desktop/src/polish.ts` until ADR 0005 migration).
 4. GGUF files live on disk under a stable cache dir; mmap + OS page cache make repeat loads fast even after process restart.
@@ -245,7 +245,7 @@ Wispr Flow parity is a **product** goal for live only (hotkey, injection, polish
 | Phase | Scope |
 |-------|--------|
 | **0 — Historical** | Batch via `transcribe.py` (PyTorch); no sidecar |
-| **1–2 — Local fallback sidecar** | Bundle/resolve `crispasr`; pinned Moonshine tiny + tokenizer + punctuation; evented Tauri path replaces Python runtime |
+| **1–2 — Local fallback sidecar** | Bundle/resolve `crispasr`; pinned Moonshine v2 tiny + tokenizer + punctuation; evented Tauri path replaces Python runtime |
 | **3 — Live MVP** | moonshine-streaming + stream-json → Live panel; **English only**; no backend selector |
 | **4 — Polish / server handoff** | Optional live WAV save + server Cohere re-pass; GPU/server connector copy |
 | **5 — LID** | SpeechBrain batch probe + language gate UI (ADR 0003 Phase 4) |
@@ -262,7 +262,7 @@ See [ADR 0003](0003-long-term-voice-architecture.md) for live multilingual route
 ### Validation checklist (before Phase 2 ship)
 
 - [ ] English live: partial latency on target hardware
-- [ ] Local fallback: spot-check Moonshine tiny on representative short clips; label output as degraded/offline where appropriate
+- [ ] Local fallback: spot-check Moonshine v2 tiny on representative short clips; label output as degraded/offline where appropriate
 - [ ] Mode switch: no dual residency; memory returns to baseline after unload
 - [ ] Offline: works with pre-cached models, no HF hub on hot path
 - [ ] Crash recovery: sidecar restart does not wedgie the desktop shell

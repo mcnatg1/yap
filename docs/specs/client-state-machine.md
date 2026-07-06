@@ -8,7 +8,7 @@ This is the build contract for the client workflow. It replaces the cosmetic rea
 ## Product Direction
 
 - Yap desktop is a thin client.
-- Local Moonshine tiny is the live/offline fallback.
+- Local Moonshine v2 tiny is the live/offline fallback.
 - Larger recordings use the GB-class server Cohere path when available.
 - Without a server path, larger recordings queue or block instead of silently producing official-looking fallback output.
 - Preprocessing and diarization are future compute phases, but the client job model must reserve their state now.

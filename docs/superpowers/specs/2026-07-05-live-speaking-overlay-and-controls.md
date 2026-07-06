@@ -125,7 +125,7 @@ Frontend package changes should be minimal. Do not add `@gsap/react` unless a co
 |-----------|-------|-----------------------|
 | Team server ready and Phase 8 connector present | `serverLive` | Overlay labels route as server; audio streams to org GB-class node. |
 | Team server configured but connector absent | `blocked` or `localFallback` | Overlay labels the server route as unavailable; do not fake server streaming. |
-| Server missing/offline and fallback ready | `localFallback` | Overlay labels fallback/degraded; local Moonshine tiny handles English live. |
+| Server missing/offline and fallback ready | `localFallback` | Overlay labels fallback/degraded; local Moonshine v2 tiny handles English live. |
 | No server and fallback missing/disabled | `blocked` | Overlay prompts setup; capture cannot start. |
 | Server drops mid-session and fallback ready | `localFallback` | Continue degraded if possible; preserve visible route change. |
 

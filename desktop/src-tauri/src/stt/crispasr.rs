@@ -209,7 +209,7 @@ where
 fn transcribe_progress_estimate_secs(audio: &Path) -> u64 {
     let file_len = std::fs::metadata(audio).map(|meta| meta.len()).unwrap_or(0);
     let audio_secs = estimate_audio_seconds(audio, file_len);
-    // Moonshine tiny is a degraded local fallback; keep a generous timeout for noisy clips.
+    // Moonshine v2 tiny is a degraded local fallback; keep a generous timeout for noisy clips.
     ((audio_secs as f64) * 1.55).max(30.0) as u64
 }
 

@@ -211,6 +211,14 @@ export function setupStateLabel(state: SetupState) {
   }
 }
 
+export function fallbackModelLabel(model: string) {
+  const normalized = model.toLowerCase();
+  if (normalized.includes("moonshine-streaming-tiny")) {
+    return "Moonshine v2 tiny";
+  }
+  return model.replace("cstr/", "").replace(".gguf", "");
+}
+
 export function serverConnectionLabel(state: ServerConnectionState) {
   switch (state) {
     case "not_set":

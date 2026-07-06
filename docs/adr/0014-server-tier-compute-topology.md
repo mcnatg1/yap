@@ -28,7 +28,7 @@ Yap supports two deployment profiles. Neither profile is deleted. The team profi
 | Attribute | Solo / fallback profile | Team / server profile |
 |-----------|---------------------------|----------------------|
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
-| STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server-hosted Moonshine GPU (streaming ASR pool) |
+| STT (live) | Local Moonshine v2 tiny (CrispASR sidecar) | Server-hosted Moonshine GPU (streaming ASR pool) |
 | STT (batch) | Queue/block larger recordings when offline; no local Cohere default in PR3 | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
 | Diarization | Server-less (L3 worker, Phase 7b) | Two-pass server pipeline (ADR 0015, Phase 10) |
@@ -49,7 +49,7 @@ The Tauri desktop app (`yap-desktop`) retains everything that cannot be delegate
 | **Ghost / preview UI** | Tauri webview overlay; latency-sensitive rendering |
 | **Local file selection** | OS file picker; files may be uploaded to server for batch |
 | **Server connector** | Manages WSS (live) and HTTP/job (batch) connections to `yap-server` |
-| **Offline / solo fallback** | Local Moonshine tiny; larger recordings should queue/block when server unreachable |
+| **Offline / solo fallback** | Local Moonshine v2 tiny; larger recordings should queue/block when server unreachable |
 
 ### Server-side architecture (`yap-server` on a GB-class server node)
 
@@ -96,7 +96,7 @@ C4Container
     System_Boundary(desktopBoundary, "yap-desktop") {
         Container(desktop, "Desktop app", "Tauri + React", "Mic, UI, playback, settings")
         Container(connector, "Server connector", "Rust/Tauri", "WSS live and HTTP batch")
-        Container(fallback, "Moonshine tiny fallback", "CrispASR", "Offline/degraded live transcription")
+        Container(fallback, "Moonshine v2 tiny fallback", "CrispASR", "Offline/degraded live transcription")
     }
 
     System_Boundary(serverBoundary, "yap-server") {
@@ -131,7 +131,7 @@ C4Deployment
     Deployment_Node(userMachine, "End-user machine", "Windows/macOS") {
         Container(desktop, "yap-desktop", "Tauri + React", "Mic, UI, playback, settings")
         Container(connector, "Server connector", "Rust/Tauri", "WSS live and HTTP batch")
-        Container(fallback, "Moonshine tiny fallback", "CrispASR", "Offline/degraded live transcription")
+        Container(fallback, "Moonshine v2 tiny fallback", "CrispASR", "Offline/degraded live transcription")
     }
 
     Deployment_Node(gbNode, "GB-class server node", "DGX Spark GB10 now; GB300-class later") {
@@ -192,7 +192,7 @@ sequenceDiagram
     participant Router as Workload router
     participant ASR as Streaming ASR pool
     participant Batch as Cohere batch pool
-    participant Fallback as Local Moonshine tiny
+    participant Fallback as Local Moonshine v2 tiny
 
     User->>Desktop: start live dictation
     Desktop->>Connector: mic frames + vad_segments
@@ -219,9 +219,9 @@ sequenceDiagram
 | Path | When used | Notes |
 |------|-----------|-------|
 | **Server streaming ASR** (team default) | Team profile; server reachable | Client streams Opus → server Moonshine GPU → partial tokens returned over WSS; lowest latency on LAN |
-| **Local Moonshine tiny** (offline/degraded fallback) | Solo profile; server unreachable; degraded mode | CrispASR sidecar on client; ~183 MB GGUF; quality lower than server GPU |
+| **Local Moonshine v2 tiny** (offline/degraded fallback) | Solo profile; server unreachable; degraded mode | CrispASR sidecar on client; ~183 MB GGUF; quality lower than server GPU |
 
-**Local Moonshine tiny is a fallback flag, not the product.** In team profile, the default live path is server-hosted streaming ASR. The client connector detects server reachability and falls back automatically.
+**Local Moonshine v2 tiny is a fallback flag, not the product.** In team profile, the default live path is server-hosted streaming ASR. The client connector detects server reachability and falls back automatically.
 
 ### On-prem is not cloud
 
@@ -241,7 +241,7 @@ The GB-class server node:
 | **Bandwidth** | ~16 kbps Opus audio upstream | Zero |
 | **Privacy** | Audio leaves device → server (org-controlled LAN) | Audio never leaves device |
 | **Offline** | Requires LAN/VPN | Fully offline |
-| **Quality** | GPU Moonshine; potentially larger model | Moonshine tiny Q4 |
+| **Quality** | GPU Moonshine; potentially larger model | Moonshine v2 tiny Q4 |
 | **Throughput** | GPU pool; multiple users concurrently | Single user, single thread |
 
 ## Consequences

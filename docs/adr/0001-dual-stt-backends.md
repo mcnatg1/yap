@@ -2,8 +2,8 @@
 
 **Date:** 2026-06-30
 **Status:** Accepted
-**Amended by:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) — runtime implementation (CrispASR + GGUF + warm sidecar) replaces the PyTorch / `moonshine-voice` ONNX paths described in this document. The **dual-model split** (streaming model for live, Cohere for batch) remains authoritative. **Live v1 is English-only** per ADR 0002 language policy. **Recordings = Cohere; LID + voice OS roadmap** in [ADR 0003](0003-long-term-voice-architecture.md).
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, the live path is server-hosted Moonshine GPU streaming ASR (Wispr-style WSS) rather than a local sidecar. The **solo/local-first profile** retains today's local CrispASR sidecar with Moonshine tiny. The dual-model principle (streaming for live, Cohere for batch) is preserved in both profiles.
+**Amended by:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) — runtime implementation uses CrispASR + GGUF + a pinned Moonshine v2 tiny fallback instead of the earlier PyTorch / `moonshine-voice` ONNX sketch. The **dual-model split** (streaming model for live, Cohere for batch) remains authoritative. **Live v1 is English-only** per ADR 0002 language policy. **Recordings = Cohere; LID + voice OS roadmap** in [ADR 0003](0003-long-term-voice-architecture.md).
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, the live path is server-hosted Moonshine GPU streaming ASR (Wispr-style WSS) rather than a local sidecar. The **solo/local-first profile** retains today's local CrispASR sidecar with Moonshine v2 tiny. The dual-model principle (streaming for live, Cohere for batch) is preserved in both profiles.
 
 ## Context
 
@@ -16,13 +16,13 @@ The current speech-to-text (STT) stack is **Cohere Transcribe** (~2B parameters)
 - Reported WER ~5.42%, 14 languages, strong accuracy on recorded media
 - Runtime cost: heavy CPU/GPU footprint (~3.8 GB PyTorch weights in typical use; optional INT8 ONNX ~2.69 GB is a possible future optimization)
 
-We want to add **live transcription** — microphone or streaming input with low latency and modest memory — without sacrificing batch quality for file-based workflows. **Moonshine v2 Medium** is a better fit for that mode:
+We want to add **live transcription** — microphone or streaming input with low latency and modest memory — without sacrificing batch quality for file-based workflows. **Moonshine v2 tiny** is the client fallback target for that mode:
 
-- ~245M parameters, INT8 ONNX ~562 MB
-- English streaming, WER ~6.65%
-- Designed for on-device streaming via the `moonshine-voice` stack
+- Small English streaming model with a pinned Q4 GGUF artifact
+- Low-latency partial transcripts through the CrispASR `moonshine-streaming` backend
+- Suitable as a local fallback when the GB-class server connector is not reachable
 
-Loading both models at once would waste RAM and slow startup on typical user machines. Neither stack will use GGUF quantization; we stay on PyTorch/ONNX paths appropriate to each upstream.
+Loading local fallback and server-oriented batch models on the client would waste RAM and slow startup on typical user machines. The client owns the pinned Moonshine v2 tiny fallback; server Cohere owns official large-recording transcription.
 
 This ADR expands Yap’s architectural scope beyond batch-only STT while keeping batch transcription on the higher-accuracy backend.
 
@@ -32,8 +32,8 @@ Use **two STT backends**, selected by **mode**, with **lazy loading** so only on
 
 | Mode | Backend | Primary use |
 |------|---------|-------------|
-| **Live** (mic / streaming) | **Moonshine v2 Medium** (INT8 ONNX via `moonshine-voice`) | Real-time partial transcripts, low latency, ~562 MB footprint |
-| **Batch** (files / queue) | **Cohere Transcribe** (existing PyTorch path in `transcribe.py`) | Dropped recordings, queue jobs, export-quality transcripts |
+| **Live** (mic / streaming) | **Moonshine v2 tiny** (GGUF via CrispASR `moonshine-streaming`) | Real-time partial transcripts, low-latency local fallback |
+| **Batch** (files / queue) | **Cohere Transcribe** (server batch pool) | Dropped recordings, queued jobs, export-quality transcripts |
 
 **Rules:**
 
@@ -51,16 +51,16 @@ Use **two STT backends**, selected by **mode**, with **lazy loading** so only on
 
 ### Positive
 
-- **Right tool per job:** streaming latency and RAM stay acceptable with Moonshine; file transcription keeps Cohere’s accuracy and multilingual support.
+- **Right tool per job:** streaming latency and RAM stay acceptable with Moonshine v2 tiny; file transcription keeps Cohere’s accuracy and multilingual support.
 - **Clear product story:** live preview and dictation-style sessions become possible without replacing the batch pipeline users already rely on.
 - **Lazy loading** avoids ~4+ GB combined resident weights and keeps cold start predictable.
 - **Incremental rollout:** batch path remains largely unchanged; live is an additive subsystem.
 
 ### Negative
 
-- **Two integration surfaces:** separate dependencies (`moonshine-voice` vs Transformers/Cohere), two test matrices, and two failure modes to surface in the UI.
-- **English-only live path** (Moonshine v2 Medium) unless we add another streaming model later; batch still carries multilingual Cohere.
-- **Slightly worse live WER** (~6.65% vs ~5.42%) — acceptable for streaming UX, not for final archival quality without a re-pass.
+- **Two integration surfaces:** local CrispASR streaming vs server Cohere batch, two test matrices, and two failure modes to surface in the UI.
+- **English-only live path** (Moonshine v2 tiny) unless we add another streaming model later; batch still carries multilingual Cohere.
+- **Degraded local quality:** Moonshine v2 tiny is for responsive live fallback, not final archival quality.
 - **Product doc drift** until `PRODUCT.md` is updated: this ADR intentionally ahead of marketing copy.
 
 ### Neutral
@@ -81,8 +81,8 @@ flowchart TB
     end
 
     subgraph LivePath["Live path"]
-        MV[moonshine-voice]
-        MS[Moonshine v2 Medium INT8 ONNX]
+        MV[CrispASR moonshine-streaming]
+        MS[Moonshine v2 tiny GGUF]
         MV --> MS
     end
 
@@ -112,13 +112,13 @@ ASCII equivalent:
            ▼                               ▼
    ┌───────────────┐               ┌──────────────────┐
    │ Live          │               │ Batch             │
-   │ moonshine-    │               │ transcribe.py     │
-   │ voice         │               │ Cohere Transcribe │
-   │ Moonshine v2  │               │ (PyTorch)         │
-   │ Medium INT8   │               │                   │
+   │ CrispASR      │               │ yap-server        │
+   │ streaming     │               │ Cohere Transcribe │
+   │ Moonshine v2  │               │ GPU workers       │
+   │ tiny GGUF     │               │                   │
    └───────────────┘               └──────────────────┘
-        ~562 MB ONNX                      ~3.8 GB PT
-        load on live                      load on batch
+        pinned local fallback             server batch pool
+        load on live                      upload on batch
 ```
 
 ### Lazy loading
@@ -136,7 +136,7 @@ Implementation detail (TBD in code): live may run in a sidecar process or Tauri 
 
 | Backend | Params | On-disk (typical) | In-memory (order of magnitude) | WER (ref.) | Languages |
 |---------|--------|-------------------|----------------------------------|------------|-----------|
-| Moonshine v2 Medium (live) | ~245M | INT8 ONNX ~562 MB | Sub-1 GB operational | ~6.65% | English (streaming) |
+| Moonshine v2 tiny (live fallback) | small | Q4 GGUF pinned artifact | Client-friendly | Measure on target clips | English (streaming) |
 | Cohere Transcribe (batch) | ~2B | PyTorch ~3.8 GB | Several GB with activations | ~5.42% | 14 |
 | Cohere INT8 ONNX (future) | ~2B | ~2.69 GB | Lower than full PT | ~5.42% (target) | 14 |
 
@@ -147,7 +147,7 @@ Figures are planning estimates; measure on target hardware before hardening UI c
 | Phase | Scope |
 |-------|--------|
 | **0 — Today** | Batch-only Cohere via `transcribe.py`; no Moonshine |
-| **1 — Live MVP** | Moonshine live path behind explicit “live” entry; lazy load; partial transcripts in UI; batch unchanged |
+| **1 — Live MVP** | CrispASR Moonshine v2 tiny live fallback behind explicit “live” entry; lazy load; partial transcripts in UI; batch unchanged |
 | **2 — Polish** | Mode switching UX, unload policy, error handling when wrong backend unavailable |
 | **3 — Optional** | Save live WAV + Cohere re-pass for final transcript; Cohere INT8 ONNX for CPU-only batch |
 
@@ -175,9 +175,9 @@ Update `PRODUCT.md` and in-app positioning when Phase 1 ships so live transcript
 
 **Rejected.** Wastes memory and slows launch; most sessions use one mode predominantly.
 
-### GGUF / llama.cpp-style weights for either stack
+### Unpinned local model artifacts
 
-**Rejected.** Neither Moonshine nor Cohere integrations target GGUF in this project; ONNX (Moonshine) and PyTorch/ONNX (Cohere) align with upstream tooling.
+**Rejected.** GGUF is acceptable for the local Moonshine v2 tiny fallback only through the pinned CrispASR artifact set in ADR 0002. Ad hoc local weights or local Cohere batch defaults are out of scope.
 
 ### Cloud STT for live or batch
 

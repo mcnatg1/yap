@@ -229,7 +229,7 @@ export function SettingsSheet({
               Fallback
             </div>
             <p className="mb-3 break-words text-xs leading-5 text-muted-foreground">
-              Moonshine tiny and punctuation files install to {setupRoot || "app data"}.
+              Moonshine v2 tiny and punctuation files install to {setupRoot || "app data"}.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button disabled={busy || liveActive} onClick={onInstallFallback} size="sm" type="button">

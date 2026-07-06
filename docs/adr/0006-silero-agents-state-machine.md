@@ -3,7 +3,7 @@
 **Date:** 2026-06-30
 **Status:** Accepted
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md), [ADR 0005](0005-llama-server-agents.md)
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and PR3 — model residency for Moonshine/Cohere moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus a local Moonshine tiny fallback path. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context; PR3 does not load local Cohere.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and PR3 — model residency for Moonshine/Cohere moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus a local Moonshine v2 tiny fallback path. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context; PR3 does not load local Cohere.
 
 ## Context
 
@@ -73,7 +73,7 @@ Orchestrator lives in **Tauri Rust** (`RuntimeOrchestrator` or equivalent). Side
 ```
 AppRuntimeState:
   Idle                 # no STT model loaded; sidecars may be up empty
-  FallbackReady        # crispasr: Moonshine tiny fallback loaded
+  FallbackReady        # crispasr: Moonshine v2 tiny fallback loaded
   FallbackRunning      # local degraded/offline transcription active
   ServerQueued         # batch file queued for GB-class server Cohere path
   ServerUploading      # server batch upload/job active
@@ -90,7 +90,7 @@ AppRuntimeState:
 | Idle | User queues larger recording | ServerQueued | Prepare server job; do not load local Cohere |
 | ServerQueued | Server available + user runs queue | ServerUploading | Upload/job through GB-class server Cohere path |
 | ServerQueued | Server unavailable | Idle | Queue/block; do not silently degrade larger recordings |
-| Idle | User opens Live or explicit offline fallback | FallbackReady | Load pinned **Moonshine tiny** fallback |
+| Idle | User opens Live or explicit offline fallback | FallbackReady | Load pinned **Moonshine v2 tiny** fallback |
 | LiveReady | Start mic | LiveActive | Pre-warm llama-server (Scribe) |
 | LiveActive | Stop mic | FallbackReady | Keep Moonshine fallback warm briefly |
 | FallbackReady | Idle timeout (5m) | Idle | Unload Moonshine fallback |
@@ -100,7 +100,7 @@ AppRuntimeState:
 
 **Hard invariants:**
 
-1. **At most one local crispasr fallback loaded:** PR3 loads Moonshine tiny only; no local Cohere backend.
+1. **At most one local crispasr fallback loaded:** PR3 loads Moonshine v2 tiny only; no local Cohere backend.
 2. **At most one HOT llama-server call** at a time (Scribe).
 3. **At most one BACKGROUND_LLM job** queued; additional jobs coalesce or wait.
 4. **knowledge-worker:** sequential chunk processing; **idle exit 5 min** after empty queue.

@@ -8,6 +8,7 @@ import {
   isRecordingRetryable,
   isRecordingRunnable,
   isWorkspaceView,
+  fallbackModelLabel,
   recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
@@ -46,6 +47,11 @@ describe("client recording workflow projection", () => {
     expect(serverConnectionLabel("sign_in_required")).toBe("Sign in");
     expect(serverConnectionLabel("retrying")).toBe("Retrying");
     expect(serverConnectionLabel("disabled")).toBe("Disabled");
+  });
+
+  it("labels the pinned local fallback model clearly", () => {
+    expect(fallbackModelLabel("moonshine-streaming-tiny-q4_k.gguf")).toBe("Moonshine v2 tiny");
+    expect(fallbackModelLabel("custom.gguf")).toBe("custom");
   });
 
   it("keeps active, finished, and runnable statuses distinct", () => {

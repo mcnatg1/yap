@@ -131,6 +131,20 @@ punc_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
     }
 
     #[test]
+    fn committed_pin_stays_on_moonshine_v2_tiny_streaming_fallback() {
+        let pin = load_pin().unwrap();
+        assert_eq!(pin.crispasr_version, "0.6.12");
+        assert_eq!(pin.gguf_repo, "cstr/moonshine-streaming-tiny-GGUF");
+        assert_eq!(pin.gguf_file, "moonshine-streaming-tiny-q4_k.gguf");
+        assert_eq!(
+            pin.gguf_sha256,
+            "46bf62ab1323da8ff3cf3936b62c08980590396a324bb822c91e38e821d972cc"
+        );
+        assert_eq!(pin.punc_repo, "cstr/fireredpunc-GGUF");
+        assert_eq!(pin.punc_file, "fireredpunc-q4_k.gguf");
+    }
+
+    #[test]
     fn rejects_missing_key() {
         assert!(parse_pin("crispasr_version=0.4.6\n").is_err());
     }

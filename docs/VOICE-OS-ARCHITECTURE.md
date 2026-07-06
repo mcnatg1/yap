@@ -3,7 +3,7 @@
 **Status:** Living document (2026-07-01)
 **Authority:** Decisions are normative in [ADR 0001–0018](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
-> **2026-07-01 — Major pivot:** Yap now targets a thin desktop client with an on-prem NVIDIA GB-class server tier for heavy transcription. DGX Spark GB10 is the first node profile; GB300-class nodes should keep the same server contract. The client keeps a local Moonshine tiny sidecar as live/offline fallback; larger recordings belong on the server Cohere path. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
+> **2026-07-01 — Major pivot:** Yap now targets a thin desktop client with an on-prem NVIDIA GB-class server tier for heavy transcription. DGX Spark GB10 is the first node profile; GB300-class nodes should keep the same server contract. The client keeps a local Moonshine v2 tiny sidecar as live/offline fallback; larger recordings belong on the server Cohere path. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
 
 ---
 
@@ -18,7 +18,7 @@
 | **Local-first (solo profile)** | Offline, privacy-max; no cloud STT lock-in for individual users. |
 | **On-prem GPU (team profile)** | The GB-class server node is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
 | **Critical path isolation** | Live stays fast; heavy work (diarization, OKF, agents) never blocks typing. |
-| **Right model per job** | Moonshine tiny for live/offline fallback; server Cohere for recordings; **LLM pool** for polish/agents — not one model for everything. |
+| **Right model per job** | Moonshine v2 tiny for live/offline fallback; server Cohere for recordings; **LLM pool** for polish/agents — not one model for everything. |
 | **Two-pass diarization** | ECAPA-TDNN live labels + AHC/VBx post-meeting accuracy; rolling centroid improves speaker recognition over time. |
 | **Modular diarizer** | WeSpeaker + vault (~200 MB) for solo; ECAPA-TDNN on GPU for team — realistic on both hardware targets. |
 | **Graceful degradation** | Dual-track Scribe, quarantine folder, RAG confidence gates, offline fallback to local sidecar — production-minded. |
@@ -49,7 +49,7 @@
 | Primary input | Thin client live/offline fallback + recording queue shell | + live mic, eventually global hotkey |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
-| STT runtime | **Moonshine tiny CrispASR fallback** + future server connector | Same client shell; heavier pools move server-side |
+| STT runtime | **Moonshine v2 tiny CrispASR fallback** + future server connector | Same client shell; heavier pools move server-side |
 | Polish | **llama-server** (bundled, CPU `-ngl 0`) | Scribe + agents; Ollama dev fallback |
 | Speakers | Plain transcript | Diarization + vault + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Git + compiler (team) | OKF + glossary agents + Q&A |
@@ -61,7 +61,7 @@
 | Attribute | **Solo / fallback** | **Team / server** |
 |-----------|------------------------|-------------------|
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
-| STT (live) | Local Moonshine tiny (CrispASR sidecar) | Server Moonshine GPU (streaming ASR pool, WSS) |
+| STT (live) | Local Moonshine v2 tiny (CrispASR sidecar) | Server Moonshine GPU (streaming ASR pool, WSS) |
 | STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
 | Diarization | WeSpeaker + vault (old 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 8, ADR 0015) |
@@ -69,7 +69,7 @@
 | Knowledge base | Local OKF markdown (old 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
-The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In PR3, the local path is a Moonshine tiny fallback for live/offline degraded use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
+The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In PR3, the local path is a Moonshine v2 tiny fallback for live/offline degraded use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
@@ -80,7 +80,7 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 ## Core decisions (summary)
 
 1. **Recordings → server Cohere** (accuracy, multilingual, long files).
-2. **Live mic / offline fallback → Moonshine tiny** (English v1, low latency).
+2. **Live mic / offline fallback → Moonshine v2 tiny** (English v1, low latency).
 3. **One warm local CrispASR fallback sidecar**; server router owns heavier model residency.
 4. **SpeechBrain LID** = language **gate** (“Detected French — continue?”), not silent auto-`-l`.
 5. **L3 background worker** = separate subprocess (not Python thread — avoids GIL).
@@ -96,7 +96,7 @@ Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-u
 
 ## Pipeline charts
 
-Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Moonshine tiny fallback, and server model pools for official large-recording work. PR3 implements the local fallback slice only. Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
+Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Moonshine v2 tiny fallback, and server model pools for official large-recording work. PR3 implements the local fallback slice only. Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
 
 **Read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
 
@@ -115,7 +115,7 @@ flowchart TB
     Orch["RuntimeOrchestrator<br/>Moonshine fallback · server connector · bounded LLM"]
 
     subgraph Sidecars["Local sidecars — localhost only"]
-        CR["crispasr<br/>Moonshine tiny fallback"]
+        CR["crispasr<br/>Moonshine v2 tiny fallback"]
         LL["llama-server<br/>Scribe + agents · -ngl 0"]
         KW["yap-knowledge-worker<br/>align · diarize · OKF"]
     end
@@ -226,7 +226,7 @@ flowchart TB
     end
 
     subgraph Sidecars["Sidecars — subprocess / sidecar"]
-        CR["crispasr<br/>Moonshine tiny fallback"]
+        CR["crispasr<br/>Moonshine v2 tiny fallback"]
         LL["llama-server<br/>~2B Q4 · CPU -ngl 0"]
         KW["yap-knowledge-worker<br/>BELOW_NORMAL · ORT 2 threads · idle exit 5 min"]
     end
@@ -495,7 +495,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 | Rule | Limit |
 |------|--------|
-| crispasr STT loaded | PR3 client fallback loads **Moonshine tiny only**; server router owns Cohere residency |
+| crispasr STT loaded | PR3 client fallback loads **Moonshine v2 tiny only**; server router owns Cohere residency |
 | Scribe (HOT) | **1** at a time; **400 ms** max |
 | Background LLM agents | **1 queued** (Student, Curator, Analyst, …) |
 | Knowledge worker | **1 chunk** processing; **3** pending max → degraded |
@@ -505,7 +505,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 **Silero:** ONNX in **Rust** on audio thread → live VAD + chunk cuts + `vad_segments`; worker **does not** re-run Silero.
 
 ```
-Idle ↔ FallbackReady ↔ FallbackRunning  (local Moonshine tiny)
+Idle ↔ FallbackReady ↔ FallbackRunning  (local Moonshine v2 tiny)
 Idle ↔ ServerQueued ↔ ServerUploading   (GB-class server Cohere)
          client does not load local Cohere in PR3
 ```
@@ -544,7 +544,7 @@ UI copy: **“Local fallback: English · Server files: 14 languages”**
 
 ```
 Yap (Tauri)  [yap-desktop]
-  ├─ crispasr sidecar          STT — Moonshine tiny fallback
+  ├─ crispasr sidecar          STT — Moonshine v2 tiny fallback
   ├─ llama-server sidecar      Polish + LLM agents (CPU -ngl 0)
   └─ yap-knowledge-worker      align + diarize + OKF (queue-driven)
 
@@ -567,7 +567,7 @@ Yap (Tauri)  [yap-desktop]
 ```
 yap-desktop (Tauri) — thin client shell
   ├─ Silero VAD (Rust ONNX)    VAD + Opus encoding + vad_segments
-  ├─ crispasr sidecar          Offline fallback only (Moonshine tiny)
+  ├─ crispasr sidecar          Offline fallback only (Moonshine v2 tiny)
   └─ Server connector          WSS (live) + HTTP (batch) to yap-server
 
 yap-server (GB-class server node, org LAN/VPN)
@@ -617,7 +617,7 @@ timeline
 |-------|----------|-------------|----------|
 | **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
 | **1** | desktop | Recordings home, playback, queue, settings, setup flow, and server connection state. | Phase 3 UI work |
-| **2** | desktop fallback | Local Moonshine tiny live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002 |
+| **2** | desktop fallback | Local Moonshine v2 tiny live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002 |
 | **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; Phase 8 spec |
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
 | **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server Cohere/Moonshine routing. | Old Phase 5/8 |
@@ -633,7 +633,7 @@ timeline
 |-------|--------|------------------|
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
 | **1** | In progress | Desktop has recordings/playback; a typed recording-job workflow is the next required refactor before server connector wiring. |
-| **2** | In progress | Local Moonshine tiny fallback is the active local path; install/remove/disable is explicit and UI copy stays terse. |
+| **2** | In progress | Local Moonshine v2 tiny fallback is the active local path; install/remove/disable is explicit and UI copy stays terse. |
 | **3** | Starting now | `server/` exists as a small staging area; the real API/WSS contract still needs to be written. |
 | **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
@@ -658,7 +658,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
 | **1** Desktop thin client | Recordings home, playback, recording-job workflow, setup/settings | Product copy; setup flow; connected/offline states |
-| **2** Local fallback | Moonshine tiny live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; setup download docs |
+| **2** Local fallback | Moonshine v2 tiny live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/phase-1-2-stt-sidecar.md) Accepted; setup download docs |
 | **3** Server contract | Health, jobs, WSS, errors, client connector | [Phase 8 server spec](specs/phase-8-yap-server.md); OpenAPI/WSS docs |
 | **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |

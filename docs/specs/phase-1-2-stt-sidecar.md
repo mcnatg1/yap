@@ -5,7 +5,7 @@
 ## Scope
 
 - One local CrispASR sidecar.
-- One local model family: Moonshine tiny for live/offline degraded use.
+- One local model family: Moonshine v2 tiny for live/offline degraded use.
 - Pinned and verified artifacts: CrispASR binary, Moonshine GGUF, tokenizer, FireRed punctuation.
 - Setup/settings own artifact download, removal, and fallback disablement; runtime never silently downloads.
 - Loopback HTTP requires a per-launch API key.
@@ -29,7 +29,7 @@ The desktop queue must model the real recording workflow, not a cosmetic readine
 
 - Jobs carry setup/server/fallback routing state as typed app state.
 - Jobs reserve pipeline fields for preprocessing and diarization even when those stages are not implemented yet.
-- Local Moonshine tiny is the live/offline fallback path, not the official large-recording product path.
+- Local Moonshine v2 tiny is the live/offline fallback path, not the official large-recording product path.
 - Larger recordings should queue or block without a server path instead of silently producing official-looking fallback transcripts.
 - UI labels stay compact; docs carry the explanation.
 

@@ -33,6 +33,7 @@ import {
   createInitialPipelineState,
   deriveSetupState,
   extension,
+  fallbackModelLabel,
   isRecordingActive,
   isRecordingFinished,
   isRecordingRetryable,
@@ -113,7 +114,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const [model, setModel] = useState("Moonshine tiny");
+  const [model, setModel] = useState("Moonshine v2 tiny");
   const [auth, setAuth] = useState("Checking");
   const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
   const [engineReady, setEngineReady] = useState(false);
@@ -419,7 +420,7 @@ export default function App() {
       modelInstalled: setup.modelInstalled,
     });
 
-    setModel(setup.model.replace("cstr/", "").replace(".gguf", ""));
+    setModel(fallbackModelLabel(setup.model));
     setStatus(setup.engineReady ? setup.engineStatus : "Setup");
     setAuth(setup.engineReady ? "Ready" : "Setup");
     setEngineBinaryStatus(setup.engineBinaryStatus);

@@ -2,11 +2,11 @@
 
 Yap is a staged monorepo for the MVP: one desktop app, one future server tier, and the docs that keep the architecture honest.
 
-The desktop is a Tauri app with a local Moonshine tiny fallback. Larger recording transcription belongs on the GB-class server path once `yap-server` exists. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
+The desktop is a Tauri app with a local Moonshine v2 tiny fallback. Larger recording transcription belongs on the GB-class server path once `yap-server` exists. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
 
 ## Current Posture
 
-- Local/live fallback: Moonshine tiny through a CrispASR sidecar.
+- Local/live fallback: Moonshine v2 tiny through a CrispASR sidecar.
 - Local fallback install: explicit setup/settings action; runtime never silently downloads models.
 - Client workflow: typed recording-job state for setup, local fallback, future server routing, preprocessing, and diarization.
 - Batch/large recordings: future GB-class server Cohere path.

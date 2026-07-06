@@ -14,7 +14,7 @@ The desktop currently works, but its state is still UI-shaped:
 - Rust currently exposes setup status and local STT events, but not a client/runtime job state machine.
 - The queue can only say `queued`, `running`, `done`, or `error`, which is not enough for the product direction.
 
-The product direction is no longer "local model does everything." Yap is a thin desktop client with local Moonshine tiny for live/offline fallback, server Cohere for official larger recordings, queued/blocking behavior when the server path is unavailable, and preprocessing/diarization as first-class pipeline stages.
+The product direction is no longer "local model does everything." Yap is a thin desktop client with local Moonshine v2 tiny for live/offline fallback, server Cohere for official larger recordings, queued/blocking behavior when the server path is unavailable, and preprocessing/diarization as first-class pipeline stages.
 
 The previous readiness helper was the wrong abstraction. It created side-state around the app instead of turning the app's real workflow into a state machine.
 
