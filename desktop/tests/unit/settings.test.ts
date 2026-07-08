@@ -40,6 +40,7 @@ describe("settings model lifecycle bindings", () => {
 
     await fallbackModelStatus();
     await installFallbackModel();
+    await installFallbackModel({ force: true });
     await cancelFallbackModelInstall();
     await verifyFallbackModel();
     await removeFallbackModel();
@@ -49,6 +50,7 @@ describe("settings model lifecycle bindings", () => {
     expect(invokeMock.mock.calls).toEqual([
       ["fallback_model_status"],
       ["fallback_model_install"],
+      ["fallback_model_install", { force: true }],
       ["fallback_model_cancel_install"],
       ["fallback_model_verify"],
       ["fallback_model_remove"],

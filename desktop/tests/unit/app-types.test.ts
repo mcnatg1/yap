@@ -219,6 +219,6 @@ describe("client recording workflow projection", () => {
     );
 
     expect(downloading.primaryAction).toMatchObject({ id: "cancel", disabled: false });
-    expect(cancelling.primaryAction).toMatchObject({ id: "cancel", disabled: true });
+    expect(cancelling.primaryAction).toMatchObject({ id: "cancel", disabled: false });
   });
 });
