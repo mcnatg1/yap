@@ -16,6 +16,8 @@
 | Spec | Roadmap area | Status |
 |------|--------------|--------|
 | [client-state-machine.md](specs/client-state-machine.md) | Desktop client workflow | Draft — recording-job state, setup/server axes, pipeline hooks |
+| [model-download-ux.md](specs/model-download-ux.md) | Local fallback setup | Draft — explicit Nemotron install, progress, verify, remove, disable |
+| [local-audio-preprocessing-stack.md](specs/local-audio-preprocessing-stack.md) | Local audio preparation | Draft — capture, resample, VAD/chunk, manifest, server-ready transport |
 | [local-live-fallback-sidecar.md](specs/local-live-fallback-sidecar.md) | Local live fallback | Draft — local Nemotron INT8 fallback, setup, profiling, cutover |
 | [local-llm-sidecar.md](specs/local-llm-sidecar.md) | Local LLM polish | Draft — llama-server, Polish migration, shared client |
 | [live-dictation-client-ux.md](specs/live-dictation-client-ux.md) | Live dictation client | Draft — mic, Silero audio thread, overlay UI, state map |
