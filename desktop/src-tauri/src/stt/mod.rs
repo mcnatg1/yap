@@ -54,6 +54,7 @@ pub(crate) fn log_yap(message: &str) {
 
 pub mod dispatch;
 pub mod error;
+pub mod fallback_model;
 pub mod model;
 pub mod nemotron;
 pub mod parity;

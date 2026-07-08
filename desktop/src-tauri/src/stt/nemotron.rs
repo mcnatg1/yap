@@ -107,15 +107,20 @@ pub fn model_status_at(root: &Path, enabled: bool) -> FallbackModelView {
 }
 
 pub fn verify_model(enabled: bool) -> FallbackModelView {
-    verify_model_with_progress(enabled, |_| {})
+    verify_model_with_progress(enabled, |_| {}, || false)
 }
 
-pub fn verify_model_with_progress<P>(enabled: bool, mut on_progress: P) -> FallbackModelView
+pub fn verify_model_with_progress<P, C>(
+    enabled: bool,
+    mut on_progress: P,
+    is_cancelled: C,
+) -> FallbackModelView
 where
     P: FnMut(FallbackModelView),
+    C: Fn() -> bool + Copy,
 {
     let root = root_dir();
-    match verify_model_at_with_progress(&root, &mut on_progress) {
+    match verify_model_at_with_progress(&root, &mut on_progress, is_cancelled) {
         Ok(()) => model_status_at(&root, enabled),
         Err(SttError::ModelMissing) => status_view(
             &root,
@@ -347,9 +352,14 @@ fn verify_sha_and_mark(path: &Path, expected_hash: &str) -> Result<(), SttError>
     .map_err(|_| SttError::ModelMissing)
 }
 
-fn verify_model_at_with_progress<P>(root: &Path, on_progress: &mut P) -> Result<(), SttError>
+fn verify_model_at_with_progress<P, C>(
+    root: &Path,
+    on_progress: &mut P,
+    is_cancelled: C,
+) -> Result<(), SttError>
 where
     P: FnMut(FallbackModelView),
+    C: Fn() -> bool + Copy,
 {
     let total_bytes = ARTIFACTS.iter().try_fold(0u64, |acc, artifact| {
         let size = std::fs::metadata(root.join(artifact.file))
@@ -360,6 +370,9 @@ where
     let mut verified_bytes = 0u64;
 
     for artifact in ARTIFACTS {
+        if is_cancelled() {
+            return Err(SttError::ModelInstallCancelled);
+        }
         let path = root.join(artifact.file);
         let size = std::fs::metadata(&path)
             .map_err(|_| SttError::ModelMissing)?
@@ -375,6 +388,9 @@ where
             None,
             Some(format!("Verifying {}", artifact.file)),
         ));
+        if is_cancelled() {
+            return Err(SttError::ModelInstallCancelled);
+        }
     }
     Ok(())
 }
