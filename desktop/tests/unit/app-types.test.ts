@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   createInitialPipelineState,
   deriveSetupState,
+  deriveSetupStateFromFallbackModel,
+  isFallbackModelBusy,
   isRecordingActive,
   isRecordingFinished,
   isRecordingRetryable,
@@ -30,6 +32,11 @@ describe("client recording workflow projection", () => {
     expect(deriveSetupState({ engineReady: true, fallbackEnabled: true, modelInstalled: true })).toBe("fallback_ready");
     expect(deriveSetupState({ engineReady: false, fallbackEnabled: true, modelInstalled: false })).toBe("fallback_missing");
     expect(deriveSetupState({ engineReady: true, fallbackEnabled: false, modelInstalled: true })).toBe("fallback_disabled");
+    expect(deriveSetupStateFromFallbackModel("downloading", true)).toBe("fallback_installing");
+    expect(deriveSetupStateFromFallbackModel("verifying", true)).toBe("fallback_installing");
+    expect(deriveSetupStateFromFallbackModel("corrupted", true)).toBe("fallback_missing");
+    expect(deriveSetupStateFromFallbackModel("missing", false)).toBe("fallback_disabled");
+    expect(deriveSetupStateFromFallbackModel("error", true)).toBe("setup_error");
 
     expect(setupStateLabel("checking")).toBe("Checking");
     expect(setupStateLabel("fallback_missing")).toBe("Setup");
@@ -82,5 +89,13 @@ describe("client recording workflow projection", () => {
     expect(isWorkspaceView("polish")).toBe(true);
     expect(isWorkspaceView("details")).toBe(false);
     expect(isWorkspaceView(undefined)).toBe(false);
+  });
+
+  it("treats downloading and verifying fallback states as busy", () => {
+    expect(isFallbackModelBusy({ status: "downloading" }, false)).toBe(true);
+    expect(isFallbackModelBusy({ status: "verifying" }, false)).toBe(true);
+    expect(isFallbackModelBusy({ status: "ready" }, true)).toBe(true);
+    expect(isFallbackModelBusy({ status: "ready" }, false)).toBe(false);
+    expect(isFallbackModelBusy(undefined, false)).toBe(false);
   });
 });

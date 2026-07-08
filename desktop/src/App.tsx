@@ -34,9 +34,10 @@ import {
   audioExts,
   basename,
   createInitialPipelineState,
-  deriveSetupState,
+  deriveSetupStateFromFallbackModel,
   extension,
   fallbackModelLabel,
+  isFallbackModelBusy,
   isRecordingActive,
   isRecordingFinished,
   isRecordingRetryable,
@@ -45,6 +46,7 @@ import {
   recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
+  type FallbackModelView,
   type LocalComputeTargetView,
   type LiveCaptureMode,
   type LiveInputDeviceView,
@@ -74,7 +76,19 @@ import {
   stopLiveSession,
   type SavedLiveSession,
 } from "@/live";
-import { listLocalComputeTargets, setLocalComputeTarget } from "@/settings";
+import {
+  cancelFallbackModelInstall,
+  fallbackModelStatus,
+  installFallbackModel,
+  listLocalComputeTargets,
+  listenFallbackModelProgress,
+  listenFallbackModelStatus,
+  openFallbackModelFolder,
+  removeFallbackModel,
+  setFallbackModelEnabled,
+  setLocalComputeTarget,
+  verifyFallbackModel,
+} from "@/settings";
 import { SttInvokeError, startTranscribe } from "@/stt";
 
 type SetupStatus = {
@@ -131,11 +145,13 @@ export default function App() {
   const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
   const [engineReady, setEngineReady] = useState(false);
   const [fallbackEnabled, setFallbackEnabled] = useState(true);
+  const [fallbackModel, setFallbackModel] = useState<FallbackModelView | null>(null);
   const [modelInstalled, setModelInstalled] = useState(false);
   const [setupState, setSetupState] = useState<SetupState>("checking");
   const [serverState] = useState<ServerConnectionState>("not_set");
   const [setupRoot, setSetupRoot] = useState("");
-  const [setupBusy, setSetupBusy] = useState(false);
+  const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
+  const [computeTargetPending, setComputeTargetPending] = useState(false);
   const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
   const [liveInputDevices, setLiveInputDevices] = useState<LiveInputDeviceView[]>([]);
   const [localComputeTargets, setLocalComputeTargets] = useState<LocalComputeTargetView[]>([
@@ -158,6 +174,8 @@ export default function App() {
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
   const setupPrompted = useRef(false);
+  const fallbackEnabledRef = useRef(fallbackEnabled);
+  const modelInstalledRef = useRef(modelInstalled);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => isRecordingRunnable(item.status)),
@@ -182,6 +200,16 @@ export default function App() {
   const showHistory = workspaceView === "home";
   const showTranscript = workspaceView === "transcribe" || workspaceView === "polish";
   const showPolish = workspaceView === "polish";
+  const fallbackModelBusy = isFallbackModelBusy(fallbackModel, fallbackCommandPending);
+  const setupBusy = fallbackModelBusy || computeTargetPending;
+
+  useEffect(() => {
+    fallbackEnabledRef.current = fallbackEnabled;
+  }, [fallbackEnabled]);
+
+  useEffect(() => {
+    modelInstalledRef.current = modelInstalled;
+  }, [modelInstalled]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -189,6 +217,8 @@ export default function App() {
     let cancelled = false;
     let unlistenLive: (() => void) | undefined;
     let unlistenLiveSaved: (() => void) | undefined;
+    let unlistenFallbackProgress: (() => void) | undefined;
+    let unlistenFallbackStatus: (() => void) | undefined;
 
     void listenLiveSession(setLiveView).then((stop) => {
       if (cancelled) {
@@ -215,6 +245,26 @@ export default function App() {
       unlistenLiveSaved = stop;
     });
 
+    void listenFallbackModelProgress((view) => {
+      applyFallbackModelView(view);
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlistenFallbackProgress = stop;
+    });
+
+    void listenFallbackModelStatus((view) => {
+      applyFallbackModelView(view);
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlistenFallbackStatus = stop;
+    });
+
     void listSavedLiveSessions()
       .then((sessions) => {
         if (cancelled) return;
@@ -229,6 +279,8 @@ export default function App() {
       cancelled = true;
       unlistenLive?.();
       unlistenLiveSaved?.();
+      unlistenFallbackProgress?.();
+      unlistenFallbackStatus?.();
     };
   }, []);
 
@@ -308,8 +360,18 @@ export default function App() {
     if (!isTauri()) return;
 
     try {
-      const setup = await invoke<SetupStatus>("setup_status");
+      const [setup, view] = await Promise.all([
+        invoke<SetupStatus>("setup_status"),
+        fallbackModelStatus(),
+      ]);
       applySetupStatus(setup);
+      applyFallbackModelView(view, {
+        authText: setup.engineReady ? "Ready" : "Setup",
+        engineReady: setup.engineReady,
+        fallbackEnabled: setup.fallbackEnabled,
+        modelInstalled: setup.modelInstalled,
+        statusText: setup.engineReady ? setup.engineStatus : "Setup",
+      });
       await Promise.all([loadLiveControls(), loadComputeTargets()]);
     } catch (error) {
       setStatus("Setup check failed");
@@ -327,13 +389,85 @@ export default function App() {
     setLocalComputeTargets(await listLocalComputeTargets());
   }
 
-  function applySetupStatus(setup: SetupStatus) {
-    const nextSetupState = deriveSetupState({
-      engineReady: setup.engineReady,
-      fallbackEnabled: setup.fallbackEnabled,
-      modelInstalled: setup.modelInstalled,
-    });
+  function unblockFallbackReadyQueue() {
+    setQueue((items) =>
+      items.map((item) =>
+        item.status === "blocked_setup_required"
+          ? {
+              ...item,
+              error: undefined,
+              pipeline: {
+                ...item.pipeline,
+                transcription: "notStarted",
+              },
+              status: "queued_local_fallback",
+            }
+          : item,
+      ),
+    );
+  }
 
+  function fallbackStatusText(view: FallbackModelView, enabled: boolean) {
+    switch (view.status) {
+      case "downloading":
+        return view.message ?? "Installing local fallback";
+      case "verifying":
+        return view.message ?? "Verifying local fallback";
+      case "ready":
+        return "Transcription engine ready";
+      case "disabled":
+        return "Local fallback disabled";
+      case "error":
+        return view.message ?? "Local fallback needs attention";
+      case "missing":
+      case "corrupted":
+        return enabled ? "Local fallback model missing" : "Local fallback disabled";
+    }
+  }
+
+  function applyFallbackModelView(
+    view: FallbackModelView,
+    overrides: {
+      authText?: string;
+      engineReady?: boolean;
+      fallbackEnabled?: boolean;
+      modelInstalled?: boolean;
+      statusText?: string;
+    } = {},
+  ) {
+    const nextFallbackEnabled = overrides.fallbackEnabled
+      ?? (view.status === "ready" ? true : view.status === "disabled" ? false : fallbackEnabledRef.current);
+    const nextModelInstalled = overrides.modelInstalled
+      ?? (
+        view.status === "ready" || view.status === "disabled" || view.status === "corrupted"
+          ? true
+          : view.status === "missing"
+            ? false
+            : modelInstalledRef.current
+      );
+    const nextEngineReady = overrides.engineReady ?? (view.status === "ready");
+    const nextSetupState = deriveSetupStateFromFallbackModel(view.status, nextFallbackEnabled);
+
+    fallbackEnabledRef.current = nextFallbackEnabled;
+    modelInstalledRef.current = nextModelInstalled;
+    setFallbackModel(view);
+    setModel(view.label);
+    setStatus(overrides.statusText ?? fallbackStatusText(view, nextFallbackEnabled));
+    setAuth(overrides.authText ?? (nextEngineReady ? "Ready" : "Setup"));
+    setEngineReady(nextEngineReady);
+    setFallbackEnabled(nextFallbackEnabled);
+    setModelInstalled(nextModelInstalled);
+    setSetupRoot(view.modelsDir);
+    setSetupState(nextSetupState);
+
+    if (nextSetupState === "fallback_ready") {
+      unblockFallbackReadyQueue();
+    }
+  }
+
+  function applySetupStatus(setup: SetupStatus) {
+    fallbackEnabledRef.current = setup.fallbackEnabled;
+    modelInstalledRef.current = setup.modelInstalled;
     setModel(fallbackModelLabel(setup.model));
     setStatus(setup.engineReady ? setup.engineStatus : "Setup");
     setAuth(setup.engineReady ? "Ready" : "Setup");
@@ -342,25 +476,10 @@ export default function App() {
     setFallbackEnabled(setup.fallbackEnabled);
     setModelInstalled(setup.modelInstalled);
     setSetupRoot(setup.root);
-    setSetupState(nextSetupState);
-
-    if (nextSetupState === "fallback_ready") {
-      setQueue((items) =>
-        items.map((item) =>
-          item.status === "blocked_setup_required"
-            ? {
-                ...item,
-                error: undefined,
-                pipeline: {
-                  ...item.pipeline,
-                  transcription: "notStarted",
-                },
-                status: "queued_local_fallback",
-              }
-            : item,
-        ),
-      );
-    }
+    setSetupState(deriveSetupStateFromFallbackModel(
+      setup.modelInstalled ? (setup.engineReady ? "ready" : "corrupted") : "missing",
+      setup.fallbackEnabled,
+    ));
 
     if (!setup.engineReady && !setupPrompted.current && localStorage.getItem(setupSkipKey) !== "true") {
       setupPrompted.current = true;
@@ -370,64 +489,124 @@ export default function App() {
   }
 
   async function installFallback() {
-    if (!isTauri() || setupBusy) return;
+    if (!isTauri() || fallbackModelBusy) return;
 
-    setSetupBusy(true);
+    setFallbackCommandPending(true);
+    fallbackEnabledRef.current = true;
+    setFallbackEnabled(true);
     setSetupState("fallback_installing");
     setStatus("Installing local fallback");
     try {
-      const setup = await invoke<SetupStatus>("install_local_fallback");
+      const view = await installFallbackModel();
       localStorage.removeItem(setupSkipKey);
-      applySetupStatus(setup);
+      applyFallbackModelView(view, { fallbackEnabled: true });
       toast.success("Local fallback installed");
     } catch (error) {
       setSetupState("setup_error");
       toast.error(`Install failed: ${String(error)}`);
       await loadStatus();
     } finally {
-      setSetupBusy(false);
+      setFallbackCommandPending(false);
     }
   }
 
   async function removeFallback() {
-    if (!isTauri() || setupBusy) return;
+    if (!isTauri() || fallbackModelBusy) return;
 
-    setSetupBusy(true);
+    setFallbackCommandPending(true);
     try {
-      const setup = await invoke<SetupStatus>("remove_local_fallback");
-      applySetupStatus(setup);
+      const view = await removeFallbackModel();
+      applyFallbackModelView(view, {
+        engineReady: false,
+        fallbackEnabled: false,
+        modelInstalled: false,
+        statusText: "Setup",
+      });
       toast.success("Local fallback files removed");
     } catch (error) {
       setSetupState("setup_error");
       toast.error(`Remove failed: ${String(error)}`);
       await loadStatus();
     } finally {
-      setSetupBusy(false);
+      setFallbackCommandPending(false);
     }
   }
 
   async function setFallbackEnabledSetting(enabled: boolean) {
-    if (!isTauri() || setupBusy) return;
+    if (!isTauri() || fallbackModelBusy) return;
 
-    setSetupBusy(true);
+    setFallbackCommandPending(true);
     try {
-      const setup = await invoke<SetupStatus>("set_local_fallback_enabled", { enabled });
+      const view = await setFallbackModelEnabled(enabled);
       if (!enabled) localStorage.setItem(setupSkipKey, "true");
-      applySetupStatus(setup);
+      applyFallbackModelView(view, {
+        engineReady: enabled && view.status === "ready",
+        fallbackEnabled: enabled,
+        modelInstalled: enabled && view.status === "missing" ? false : modelInstalledRef.current,
+        statusText: enabled && view.status === "ready" ? "Transcription engine ready" : "Setup",
+      });
       toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
     } catch (error) {
       setSetupState("setup_error");
       toast.error(`Update failed: ${String(error)}`);
       await loadStatus();
     } finally {
-      setSetupBusy(false);
+      setFallbackCommandPending(false);
     }
   }
+
+  async function cancelFallbackInstall() {
+    if (!isTauri() || fallbackModel?.status !== "downloading") return;
+    try {
+      const view = await cancelFallbackModelInstall();
+      applyFallbackModelView(view, { fallbackEnabled: true });
+      if (view.status !== "missing" && view.status !== "error") {
+        applyFallbackModelView(await fallbackModelStatus(), { fallbackEnabled: true });
+      }
+      toast.success("Local fallback cancellation requested");
+    } catch (error) {
+      setSetupState("setup_error");
+      toast.error(`Cancel failed: ${String(error)}`);
+      await loadStatus();
+    }
+  }
+
+  async function verifyFallback() {
+    if (!isTauri() || fallbackModelBusy) return;
+
+    setFallbackCommandPending(true);
+    try {
+      const view = await verifyFallbackModel();
+      applyFallbackModelView(view);
+      toast.success("Local fallback verified");
+    } catch (error) {
+      setSetupState("setup_error");
+      toast.error(`Verify failed: ${String(error)}`);
+      await loadStatus();
+    } finally {
+      setFallbackCommandPending(false);
+    }
+  }
+
+  async function openFallbackFolder() {
+    if (!isTauri()) return;
+
+    try {
+      await openFallbackModelFolder();
+    } catch (error) {
+      toast.error(`Open failed: ${String(error)}`);
+    }
+  }
+
+  // Task 5 wires these lifecycle controls into the Settings UI.
+  void cancelFallbackInstall;
+  void verifyFallback;
+  void openFallbackFolder;
 
   async function updateLocalComputeTarget(targetId: string) {
     if (!isTauri() || setupBusy) return;
 
-    setSetupBusy(true);
+    setComputeTargetPending(true);
     try {
       setLocalComputeTargets(await setLocalComputeTarget(targetId));
       toast.success("Local compute updated");
@@ -435,7 +614,7 @@ export default function App() {
       toast.error(String(error));
       await loadComputeTargets();
     } finally {
-      setSetupBusy(false);
+      setComputeTargetPending(false);
     }
   }
 
