@@ -378,7 +378,7 @@ async fn install_local_fallback(
     ensure_fallback_setup_idle(&live_state)?;
     tauri::async_runtime::spawn_blocking(|| {
         stt::settings::set_local_fallback_enabled(true)?;
-        stt::nemotron::ensure_model()?;
+        stt::nemotron::local_fallback_start_paths()?;
         Ok(current_setup_status())
     })
     .await
@@ -406,9 +406,13 @@ fn set_local_fallback_enabled(
 }
 
 fn current_setup_status() -> SetupStatus {
-    let model_installed = stt::nemotron::is_installed();
     let fallback_enabled = stt::settings::local_fallback_enabled();
-    let engine_ready = fallback_enabled && model_installed;
+    let model_installed = matches!(
+        stt::nemotron::model_status(fallback_enabled).status,
+        stt::nemotron::FallbackModelStatus::Ready | stt::nemotron::FallbackModelStatus::Disabled
+    );
+    let (setup_state, engine_ready, engine_status) =
+        compose_engine_status(stt::nemotron::local_fallback_start_paths().map(|_| ()));
     log_line(&format!(
         "setup_status engine_ready={engine_ready} fallback_enabled={fallback_enabled} model=nemotron"
     ));
@@ -420,7 +424,8 @@ fn current_setup_status() -> SetupStatus {
         engine_binary_status: "Built in".into(),
         model_installed,
         fallback_enabled,
-        engine_status: compose_engine_status(model_installed, fallback_enabled),
+        engine_status,
+        setup_state,
     }
 }
 
@@ -455,14 +460,35 @@ fn local_compute_targets() -> Vec<LocalComputeTargetView> {
     targets
 }
 
-fn compose_engine_status(model_installed: bool, fallback_enabled: bool) -> String {
-    if !fallback_enabled {
-        return "Local fallback disabled".into();
-    }
-    if model_installed {
-        "Transcription engine ready".into()
-    } else {
-        "Local fallback model missing".into()
+fn compose_engine_status(
+    availability: Result<(), stt::error::SttError>,
+) -> (runtime::state::SetupState, bool, String) {
+    match availability {
+        Ok(()) => (
+            runtime::state::SetupState::FallbackReady,
+            true,
+            "Transcription engine ready".into(),
+        ),
+        Err(stt::error::SttError::FallbackDisabled) => (
+            runtime::state::SetupState::FallbackDisabled,
+            false,
+            "Local fallback disabled".into(),
+        ),
+        Err(stt::error::SttError::ModelMissing) => (
+            runtime::state::SetupState::FallbackMissing,
+            false,
+            "Local fallback model missing".into(),
+        ),
+        Err(stt::error::SttError::ModelCorrupt) => (
+            runtime::state::SetupState::SetupError,
+            false,
+            stt::error::SttError::ModelCorrupt.user_message().into(),
+        ),
+        Err(_) => (
+            runtime::state::SetupState::SetupError,
+            false,
+            "Local fallback needs attention.".into(),
+        ),
     }
 }
 
@@ -512,6 +538,8 @@ struct SetupStatus {
     model_installed: bool,
     fallback_enabled: bool,
     engine_status: String,
+    #[serde(skip_serializing)]
+    setup_state: runtime::state::SetupState,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -524,13 +552,7 @@ struct LocalComputeTargetView {
 
 impl SetupStatus {
     fn runtime_setup_state(&self) -> runtime::state::SetupState {
-        if !self.fallback_enabled {
-            return runtime::state::SetupState::FallbackDisabled;
-        }
-        if self.engine_ready && self.model_installed {
-            return runtime::state::SetupState::FallbackReady;
-        }
-        runtime::state::SetupState::FallbackMissing
+        self.setup_state
     }
 }
 
@@ -1136,6 +1158,7 @@ mod tests {
             model_installed: true,
             fallback_enabled: true,
             engine_status: "Transcription engine ready".into(),
+            setup_state: runtime::state::SetupState::FallbackReady,
         })
         .unwrap();
 
@@ -1150,8 +1173,12 @@ mod tests {
     #[test]
     fn disabled_status_wins() {
         assert_eq!(
-            compose_engine_status(true, false),
-            "Local fallback disabled"
+            compose_engine_status(Err(stt::error::SttError::FallbackDisabled)),
+            (
+                runtime::state::SetupState::FallbackDisabled,
+                false,
+                "Local fallback disabled".into()
+            )
         );
     }
 
@@ -1165,11 +1192,24 @@ mod tests {
             model_installed: false,
             fallback_enabled: true,
             engine_status: "Setup".into(),
+            setup_state: runtime::state::SetupState::FallbackMissing,
         };
 
         assert_eq!(
             missing_model.runtime_setup_state(),
             runtime::state::SetupState::FallbackMissing
+        );
+    }
+
+    #[test]
+    fn corrupt_status_maps_to_setup_error() {
+        assert_eq!(
+            compose_engine_status(Err(stt::error::SttError::ModelCorrupt)),
+            (
+                runtime::state::SetupState::SetupError,
+                false,
+                stt::error::SttError::ModelCorrupt.user_message().into()
+            )
         );
     }
 

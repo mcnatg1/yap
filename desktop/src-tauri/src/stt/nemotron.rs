@@ -173,6 +173,10 @@ where
     paths_at(root)
 }
 
+pub fn local_fallback_start_paths() -> Result<NemotronPaths, SttError> {
+    local_fallback_start_paths_at(&root_dir(), crate::stt::settings::local_fallback_enabled())
+}
+
 pub fn resolve_model() -> Result<NemotronPaths, SttError> {
     resolve_model_at(&root_dir())
 }
@@ -410,6 +414,13 @@ fn resolve_model_at(root: &Path) -> Result<NemotronPaths, SttError> {
     }
 }
 
+fn local_fallback_start_paths_at(root: &Path, enabled: bool) -> Result<NemotronPaths, SttError> {
+    if !enabled {
+        return Err(SttError::FallbackDisabled);
+    }
+    resolve_model_at(root)
+}
+
 fn status_view(
     root: &Path,
     status: FallbackModelStatus,
@@ -628,6 +639,46 @@ mod tests {
         assert_eq!(classify_model(dir.path()), ArtifactInstallState::Corrupted);
         assert_eq!(
             resolve_model_at(dir.path()).unwrap_err(),
+            SttError::ModelCorrupt
+        );
+    }
+
+    #[test]
+    fn local_fallback_start_paths_require_enabled_even_when_ready() {
+        let dir = TestDir::new();
+
+        for artifact in ARTIFACTS {
+            write_verified_artifact(dir.path(), artifact, artifact.sha256.as_bytes());
+        }
+
+        assert_eq!(
+            local_fallback_start_paths_at(dir.path(), false).unwrap_err(),
+            SttError::FallbackDisabled
+        );
+        assert!(local_fallback_start_paths_at(dir.path(), true).is_ok());
+    }
+
+    #[test]
+    fn local_fallback_start_paths_preserve_missing_and_corrupt_failures() {
+        let dir = TestDir::new();
+
+        assert_eq!(
+            local_fallback_start_paths_at(dir.path(), true).unwrap_err(),
+            SttError::ModelMissing
+        );
+
+        for artifact in ARTIFACTS {
+            write_verified_artifact(dir.path(), artifact, artifact.sha256.as_bytes());
+        }
+        std::fs::remove_file(
+            dir.path()
+                .join(ARTIFACTS[0].file)
+                .with_extension("verified"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            local_fallback_start_paths_at(dir.path(), true).unwrap_err(),
             SttError::ModelCorrupt
         );
     }
