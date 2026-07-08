@@ -37,9 +37,9 @@ Current generated fixtures:
 
 | Path | Purpose | Expectation |
 |------|---------|-------------|
-| `desktop/test/fixtures/audio-fixture.ts` | Deterministic 16 kHz mono WAV generator for UI/contract tests | Stable bytes; not treated as speech quality evidence |
+| `desktop/tests/fixtures/audio-fixture.ts` | Deterministic 16 kHz mono WAV generator for UI/contract tests | Stable bytes; not treated as speech quality evidence |
 
-Future speech fixtures should be stored under `tests/fixtures/` or `desktop/test/fixtures/`
+Future speech fixtures should be stored under `desktop/tests/fixtures/`
 (small, license-clear audio):
 
 | File | Purpose | Expectation |

@@ -200,7 +200,7 @@ export default function App() {
 
     void listen<SavedLiveSession>("live-session-saved", (event) => {
       const entry = savedLiveSessionToHistoryEntry(event.payload);
-      recordHistoryEntries([entry]);
+      recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
       setSelectedHistoryOutput(entry.outputPath);
       setActiveRail("home");
       setWorkspaceView("home");
@@ -218,7 +218,10 @@ export default function App() {
     void listSavedLiveSessions()
       .then((sessions) => {
         if (cancelled) return;
-        recordMissingHistoryEntries(sessions.map(savedLiveSessionToHistoryEntry));
+        recordVisibleHistoryEntries(
+          sessions.map(savedLiveSessionToHistoryEntry),
+          "Live transcript history could not be synced.",
+        );
       })
       .catch(() => undefined);
 
@@ -745,10 +748,10 @@ export default function App() {
     }
   }
 
-  function recordHistoryEntries(entries: TranscriptHistoryEntry[]) {
+  function recordVisibleHistoryEntries(entries: TranscriptHistoryEntry[], warning: string) {
     if (!entries.length) return;
-    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
-    const visibleEntries = entries.filter((entry) => !hiddenHistoryOutputs.includes(entry.outputPath));
+    const hiddenHistoryOutputs = new Set(readHiddenTranscriptHistory());
+    const visibleEntries = entries.filter((entry) => !hiddenHistoryOutputs.has(entry.outputPath));
     if (!visibleEntries.length) return;
 
     setHistory((current) => {
@@ -756,27 +759,7 @@ export default function App() {
       try {
         writeTranscriptHistory(next);
       } catch (error) {
-        console.warn("Transcript history could not be saved.", error);
-      }
-      return next;
-    });
-  }
-
-  function recordMissingHistoryEntries(entries: TranscriptHistoryEntry[]) {
-    if (!entries.length) return;
-    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
-
-    setHistory((current) => {
-      const visible = entries.filter(
-        (entry) => !hiddenHistoryOutputs.includes(entry.outputPath),
-      );
-      if (!visible.length) return current;
-
-      const next = visible.reduce(recordTranscriptHistory, current);
-      try {
-        writeTranscriptHistory(next);
-      } catch (error) {
-        console.warn("Live transcript history could not be synced.", error);
+        console.warn(warning, error);
       }
       return next;
     });

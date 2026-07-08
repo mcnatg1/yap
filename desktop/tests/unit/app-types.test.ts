@@ -12,7 +12,7 @@ import {
   recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
-} from "./app-types";
+} from "@/lib/app-types";
 
 describe("client recording workflow projection", () => {
   it("initializes future pipeline stages without running them", () => {

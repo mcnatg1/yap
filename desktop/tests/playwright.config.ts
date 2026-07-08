@@ -10,6 +10,7 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
+  outputDir: "./results/playwright",
   testDir: "./e2e",
   timeout: 20_000,
   use: {

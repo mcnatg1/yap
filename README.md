@@ -38,6 +38,13 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 `-- desktop/
     |-- README.md                     Desktop-only quick commands.
     |-- package.json                  pnpm scripts and frontend deps.
+    |-- tests/                        Frontend unit tests, fixtures, E2E, WDIO, scripts, results.
+    |   |-- unit/                     Vitest specs for TS/React helpers.
+    |   |-- fixtures/                 Deterministic test data generators.
+    |   |-- e2e/                      Playwright specs and snapshots.
+    |   |-- wdio/                     WebdriverIO desktop smoke specs and capabilities.
+    |   |-- scripts/                  Test runner helper scripts.
+    |   `-- results/                  Ignored test traces, screenshots, and reports.
     |-- vite.config.ts                Vite/Tauri dev server config.
     |-- src/                          React app.
     |   |-- App.tsx                   Main app state and screen composition.
@@ -63,7 +70,6 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
                 |-- model.rs          Shared model cache/download/verification helpers.
                 |-- nemotron.rs       Pinned sherpa-onnx Nemotron model bundle.
                 |-- parity.rs         Small WER/timestamp helpers for tests.
-                |-- progress.rs       Progress event structs.
                 `-- settings.rs       Local fallback and compute-target settings.
 ```
 

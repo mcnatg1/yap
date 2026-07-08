@@ -21,7 +21,7 @@ pnpm test:desktop:build
 pnpm test:desktop
 ```
 
-Playwright writes traces, videos, screenshots, and visual diffs under `test-results` on failure.
+Playwright and WDIO write traces, videos, screenshots, and visual diffs under `tests\results` on failure.
 The WebdriverIO/Tauri smoke test uses the debug binary at `src-tauri\target\debug\yap-desktop.exe`
 unless `APP_BINARY` is set. Run WDIO under Node 24 LTS; Node 26 has produced embedded-session
 failures on this machine.

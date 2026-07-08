@@ -3,8 +3,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const source = path.join(root, "src-tauri", "wdio", "capabilities", "wdio.json");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const source = path.join(root, "tests", "wdio", "capabilities", "wdio.json");
 const generated = path.join(root, "src-tauri", "capabilities", "wdio.generated.json");
 const pnpmCli = process.env.npm_execpath;
 

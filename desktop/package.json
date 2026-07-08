@@ -8,16 +8,16 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "check:node": "node ./scripts/assert-node24.mjs",
+    "check:node": "node ./tests/scripts/assert-node24.mjs",
     "dev": "pnpm check:node && vite",
     "build": "pnpm check:node && tsc && vite build",
     "preview": "pnpm check:node && vite preview",
     "tauri": "pnpm check:node && tauri",
     "test": "pnpm check:node && vitest run",
-    "test:e2e": "pnpm check:node && playwright test",
-    "test:e2e:update": "pnpm check:node && playwright test --update-snapshots",
-    "test:desktop": "pnpm check:node && wdio run ./wdio.conf.ts",
-    "test:desktop:build": "pnpm check:node && node ./scripts/tauri-wdio-build.mjs",
+    "test:e2e": "pnpm check:node && playwright test -c ./tests/playwright.config.ts",
+    "test:e2e:update": "pnpm check:node && playwright test -c ./tests/playwright.config.ts --update-snapshots",
+    "test:desktop": "pnpm check:node && wdio run ./tests/wdio.conf.ts",
+    "test:desktop:build": "pnpm check:node && node ./tests/scripts/tauri-wdio-build.mjs",
     "test:desktop:all": "pnpm test:desktop:build && pnpm test:desktop"
   },
   "dependencies": {

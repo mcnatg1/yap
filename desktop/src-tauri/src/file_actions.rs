@@ -75,7 +75,11 @@ pub fn delete_history_entry_files(
 }
 
 fn delete_history_entry_files_at(output_path: String, source_path: String) -> Result<(), String> {
-    delete_history_entry_files_at_from_dir(output_path, source_path, &crate::live_recordings_dir())
+    delete_history_entry_files_at_from_dir(
+        output_path,
+        source_path,
+        &crate::live::recordings::recordings_dir(),
+    )
 }
 
 fn delete_history_entry_files_at_from_dir(
@@ -185,7 +189,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "yap-{name}-{}-{}",
             std::process::id(),
-            crate::unix_millis_now().unwrap_or(0)
+            crate::live::recordings::unix_millis_now().unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
