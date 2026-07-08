@@ -47,11 +47,33 @@ Results:
 - `pnpm test -- app-types`: passed
 - `pnpm build`: passed
 
+Results:
+
+- `pnpm test -- app-types`: passed
+- `pnpm build`: passed
+
 ## Commit
 
-- `8ef7590` `Render fallback settings lifecycle UI`
+- `9b5e818` `Render fallback settings lifecycle UI`
 
 ## Notes
 
 - I did not modify `desktop/src/components/ui/alert-dialog.tsx`; the existing component was sufficient.
 - There was an unrelated pre-existing modified file in the worktree: `.superpowers/sdd/task-2-report.md`. I left it untouched.
+
+## Reviewer Fixes
+
+- Replaced non-compact lifecycle detail text with the brief's short matrix copy for `missing`, `verifying`, `ready`, `corrupted`, and `disabled`.
+- Kept `downloading` detail on percent/speed and preserved actionable backend detail for `error`, with a short fallback error detail when the backend message is absent.
+- Promoted the shared live-settings lock so `saving` now disables the full settings surface consistently, not just fallback lifecycle actions.
+- Tightened unit coverage to assert the compact detail strings and the `saving` lock behavior.
+
+## Reviewer Fix Verification
+
+Ran again:
+
+```powershell
+cd .\desktop
+pnpm test -- app-types
+pnpm build
+```

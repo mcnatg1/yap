@@ -110,6 +110,10 @@ function liveLocksFallbackActions(status: LiveSessionStatus) {
   return ["armed", "listening", "speaking", "settling", "saving"].includes(status);
 }
 
+export function liveSettingsLocked(status: LiveSessionStatus) {
+  return liveLocksFallbackActions(status);
+}
+
 function fallbackDownloadLabel(view: FallbackModelView) {
   const percent = typeof view.progressPercent === "number" ? Math.max(0, Math.min(100, Math.round(view.progressPercent))) : null;
   return percent === null ? "Downloading" : `Downloading ${percent}%`;
@@ -147,7 +151,7 @@ export function projectFallbackLifecycle(
     };
   }
 
-  const liveActive = liveLocksFallbackActions(options.liveStatus);
+  const liveActive = liveSettingsLocked(options.liveStatus);
   const toggleDisabled = options.commandPending || liveActive;
   const removeDisabled = options.commandPending || liveActive;
   const verifyDisabled = options.commandPending || liveActive;
@@ -179,7 +183,7 @@ export function projectFallbackLifecycle(
   switch (fallbackModel.status) {
     case "missing":
       return {
-        detail: fallbackModel.label,
+        detail: "Local fallback is not installed.",
         primaryAction: createAction("install", installDisabled),
         secondaryActions: secondaryActions("missing"),
         value: "Not installed",
@@ -193,34 +197,34 @@ export function projectFallbackLifecycle(
       };
     case "verifying":
       return {
-        detail: fallbackModel.message ?? fallbackModel.label,
+        detail: "Verifying files.",
         secondaryActions: secondaryActions("verifying"),
         value: "Verifying files",
       };
     case "ready":
       return {
-        detail: fallbackModel.label,
+        detail: "Ready.",
         primaryAction: createAction("reinstall", installDisabled),
         secondaryActions: secondaryActions("ready"),
         value: "Ready",
       };
     case "corrupted":
       return {
-        detail: fallbackModel.message ?? fallbackModel.label,
+        detail: "Files failed verification.",
         primaryAction: createAction("repair", installDisabled),
         secondaryActions: secondaryActions("corrupted"),
         value: "Files failed verification.",
       };
     case "disabled":
       return {
-        detail: fallbackModel.label,
+        detail: "Disabled.",
         primaryAction: createAction("enable", toggleDisabled),
         secondaryActions: secondaryActions("disabled"),
         value: "Disabled",
       };
     case "error":
       return {
-        detail: fallbackModel.message ?? fallbackModel.label,
+        detail: fallbackModel.message ?? "Local fallback needs attention.",
         primaryAction: createAction("retry", installDisabled),
         secondaryActions: secondaryActions("error"),
         value: "Needs attention",
@@ -291,8 +295,8 @@ export function SettingsSheet({
   serverLabel: string;
   status: string;
 }) {
-  const liveActive = ["armed", "listening", "speaking", "settling"].includes(liveView.status);
-  const fallbackLocked = liveLocksFallbackActions(liveView.status);
+  const liveActive = liveSettingsLocked(liveView.status);
+  const fallbackLocked = liveActive;
   const micLabelId = useId();
   const computeLabelId = useId();
   const modeLabelId = useId();
@@ -464,7 +468,7 @@ export function SettingsSheet({
                     </SettingsRow>
                     <SettingsRow
                       action={
-                        <Button disabled={liveBusy} onClick={liveActive ? onStopLive : onStartLive} type="button">
+                        <Button disabled={liveBusy || liveActive} onClick={liveActive ? onStopLive : onStartLive} type="button">
                           <Mic data-icon="inline-start" />
                           {liveActive ? "Stop" : "Start"}
                         </Button>
