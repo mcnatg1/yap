@@ -2,6 +2,7 @@
 pub enum SttError {
     ModelMissing,
     ModelCorrupt,
+    ModelInstallCancelled,
     BadLang,
     Oom,
     AudioDecode,
@@ -18,6 +19,7 @@ impl SttError {
         match self {
             SttError::ModelMissing => "MODEL_MISSING",
             SttError::ModelCorrupt => "MODEL_CORRUPT",
+            SttError::ModelInstallCancelled => "MODEL_INSTALL_CANCELLED",
             SttError::BadLang => "BAD_LANG",
             SttError::Oom => "OOM",
             SttError::AudioDecode => "AUDIO_DECODE",
@@ -34,6 +36,7 @@ impl SttError {
         match self {
             SttError::ModelMissing => "Local fallback model isn't installed yet.",
             SttError::ModelCorrupt => "Model file failed verification.",
+            SttError::ModelInstallCancelled => "Local fallback install was cancelled.",
             SttError::BadLang => "That language isn't supported.",
             SttError::Oom => "Ran out of memory while transcribing.",
             SttError::AudioDecode => "Couldn't read that audio file.",
@@ -64,6 +67,7 @@ mod tests {
         let all = [
             SttError::ModelMissing,
             SttError::ModelCorrupt,
+            SttError::ModelInstallCancelled,
             SttError::BadLang,
             SttError::Oom,
             SttError::AudioDecode,

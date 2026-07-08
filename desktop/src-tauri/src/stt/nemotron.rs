@@ -141,10 +141,22 @@ pub fn verify_model(enabled: bool) -> FallbackModelView {
 }
 
 pub fn ensure_model() -> Result<NemotronPaths, SttError> {
+    ensure_model_with_progress(false, |_| {}, || false)
+}
+
+pub fn ensure_model_with_progress<P, C>(
+    force: bool,
+    mut on_progress: P,
+    is_cancelled: C,
+) -> Result<NemotronPaths, SttError>
+where
+    P: FnMut(FallbackModelView),
+    C: Fn() -> bool + Copy,
+{
     let root = root_dir();
     std::fs::create_dir_all(&root).map_err(|_| SttError::ModelMissing)?;
     for artifact in ARTIFACTS {
-        ensure_artifact(&root, artifact)?;
+        ensure_artifact(&root, artifact, force, &mut on_progress, is_cancelled)?;
     }
     paths_at(root)
 }
@@ -176,16 +188,65 @@ fn require(path: PathBuf) -> Result<PathBuf, SttError> {
     path.exists().then_some(path).ok_or(SttError::ModelMissing)
 }
 
-fn ensure_artifact(root: &Path, artifact: &Artifact) -> Result<(), SttError> {
+fn ensure_artifact<P, C>(
+    root: &Path,
+    artifact: &Artifact,
+    force: bool,
+    on_progress: &mut P,
+    is_cancelled: C,
+) -> Result<(), SttError>
+where
+    P: FnMut(FallbackModelView),
+    C: Fn() -> bool + Copy,
+{
     let dest = root.join(artifact.file);
-    if verify_or_trust(&dest, artifact.sha256).is_ok() {
+
+    if force {
+        remove_download_artifacts(&dest)?;
+    } else if verify_or_trust(&dest, artifact.sha256).is_ok() {
         return Ok(());
     }
-    let _ = std::fs::remove_file(&dest);
-    let _ = std::fs::remove_file(dest.with_extension("verified"));
+
+    remove_download_artifacts(&dest)?;
     let url = crate::stt::model::hf_resolve_url(REPO, REVISION, artifact.file);
-    crate::stt::model::download_file(&url, &dest)?;
-    verify_sha_and_mark(&dest, artifact.sha256)
+    let download = crate::stt::model::download_file_with_progress(
+        &url,
+        &dest,
+        |progress| {
+            on_progress(status_view(
+                root,
+                FallbackModelStatus::Downloading,
+                Some(progress.downloaded_bytes),
+                progress.total_bytes,
+                progress.percent(),
+                progress.speed_mbps(),
+                Some(format!("Downloading {}", artifact.file)),
+            ));
+        },
+        is_cancelled,
+    );
+
+    if let Err(error) = download {
+        remove_download_artifacts(&dest)?;
+        return Err(error);
+    }
+
+    on_progress(status_view(
+        root,
+        FallbackModelStatus::Verifying,
+        Some(std::fs::metadata(&dest).map(|metadata| metadata.len()).unwrap_or(0)),
+        Some(std::fs::metadata(&dest).map(|metadata| metadata.len()).unwrap_or(0)),
+        Some(100.0),
+        None,
+        Some(format!("Verifying {}", artifact.file)),
+    ));
+
+    if let Err(error) = verify_sha_and_mark(&dest, artifact.sha256) {
+        remove_download_artifacts(&dest)?;
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 fn classify_model(root: &Path) -> ArtifactInstallState {
@@ -312,6 +373,13 @@ fn remove_if_exists(path: PathBuf) -> Result<(), SttError> {
     if path.exists() {
         std::fs::remove_file(path).map_err(|_| SttError::ModelMissing)?;
     }
+    Ok(())
+}
+
+fn remove_download_artifacts(path: &Path) -> Result<(), SttError> {
+    remove_if_exists(path.to_path_buf())?;
+    remove_if_exists(path.with_extension("verified"))?;
+    remove_if_exists(path.with_extension("part"))?;
     Ok(())
 }
 
@@ -514,5 +582,20 @@ mod tests {
             resolve_model_at(dir.path()).unwrap_err(),
             SttError::ModelCorrupt
         );
+    }
+
+    #[test]
+    fn remove_download_artifacts_cleans_file_marker_and_partial() {
+        let dir = TestDir::new();
+        let path = dir.path().join(ARTIFACTS[0].file);
+        std::fs::write(&path, b"current").unwrap();
+        std::fs::write(path.with_extension("verified"), b"marker").unwrap();
+        std::fs::write(path.with_extension("part"), b"partial").unwrap();
+
+        remove_download_artifacts(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!path.with_extension("verified").exists());
+        assert!(!path.with_extension("part").exists());
     }
 }
