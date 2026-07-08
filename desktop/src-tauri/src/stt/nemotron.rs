@@ -225,6 +225,15 @@ fn marker_state(path: &Path, expected_hash: &str) -> MarkerState {
     let Ok(metadata) = std::fs::metadata(path) else {
         return MarkerState::Missing;
     };
+    let Ok(marker_metadata) = std::fs::metadata(&marker) else {
+        return MarkerState::Missing;
+    };
+    let Ok(artifact_modified) = metadata.modified() else {
+        return MarkerState::Stale;
+    };
+    let Ok(marker_modified) = marker_metadata.modified() else {
+        return MarkerState::Stale;
+    };
 
     let mut lines = contents.lines();
     let Some(hash) = lines.next() else {
@@ -234,6 +243,10 @@ fn marker_state(path: &Path, expected_hash: &str) -> MarkerState {
         return MarkerState::Stale;
     };
 
+    if marker_modified < artifact_modified {
+        return MarkerState::Stale;
+    }
+
     if hash.eq_ignore_ascii_case(expected_hash) && size == metadata.len() {
         MarkerState::Valid
     } else {
@@ -242,18 +255,8 @@ fn marker_state(path: &Path, expected_hash: &str) -> MarkerState {
 }
 
 fn verify_or_trust(path: &Path, expected_hash: &str) -> Result<(), SttError> {
-    let marker = path.with_extension("verified");
-    if let (Ok(contents), Ok(metadata)) =
-        (std::fs::read_to_string(&marker), std::fs::metadata(path))
-    {
-        let mut lines = contents.lines();
-        if lines
-            .next()
-            .is_some_and(|hash| hash.eq_ignore_ascii_case(expected_hash))
-            && lines.next().and_then(|size| size.parse::<u64>().ok()) == Some(metadata.len())
-        {
-            return Ok(());
-        }
+    if marker_state(path, expected_hash) == MarkerState::Valid {
+        return Ok(());
     }
     verify_sha_and_mark(path, expected_hash)
 }
@@ -315,6 +318,8 @@ fn remove_if_exists(path: PathBuf) -> Result<(), SttError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestDir {
@@ -354,6 +359,26 @@ mod tests {
             format!("{}\n{}\n", artifact.sha256, contents.len()),
         )
         .unwrap();
+    }
+
+    fn tamper_artifact_same_size_after_marker(root: &Path, artifact: &Artifact) {
+        let path = root.join(artifact.file);
+        let marker_modified = std::fs::metadata(path.with_extension("verified"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let tampered = vec![b'x'; artifact.sha256.len()];
+
+        for _ in 0..20 {
+            sleep(Duration::from_millis(25));
+            std::fs::write(&path, &tampered).unwrap();
+            let artifact_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            if artifact_modified > marker_modified {
+                return;
+            }
+        }
+
+        panic!("artifact modified time did not advance past marker modified time");
     }
 
     #[test]
@@ -462,6 +487,29 @@ mod tests {
         std::fs::remove_file(dir.path().join(ARTIFACTS[0].file).with_extension("verified")).unwrap();
 
         assert_eq!(classify_model(dir.path()), ArtifactInstallState::Corrupted);
+        assert_eq!(
+            resolve_model_at(dir.path()).unwrap_err(),
+            SttError::ModelCorrupt
+        );
+    }
+
+    #[test]
+    fn same_size_tampering_after_marker_creation_is_corrupted() {
+        let dir = TestDir::new();
+
+        for artifact in ARTIFACTS {
+            write_verified_artifact(dir.path(), artifact, artifact.sha256.as_bytes());
+        }
+        tamper_artifact_same_size_after_marker(dir.path(), &ARTIFACTS[0]);
+
+        assert_eq!(
+            marker_state(&dir.path().join(ARTIFACTS[0].file), ARTIFACTS[0].sha256),
+            MarkerState::Stale
+        );
+        assert_eq!(
+            model_status_at(dir.path(), true).status,
+            FallbackModelStatus::Corrupted
+        );
         assert_eq!(
             resolve_model_at(dir.path()).unwrap_err(),
             SttError::ModelCorrupt
