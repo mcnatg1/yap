@@ -1,0 +1,94 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { invokeMock, isTauriMock, listenMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  isTauriMock: vi.fn(() => true),
+  listenMock: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+  isTauri: isTauriMock,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: listenMock,
+}));
+
+import {
+  cancelFallbackModelInstall,
+  fallbackModelStatus,
+  installFallbackModel,
+  listenFallbackModelProgress,
+  listenFallbackModelStatus,
+  openFallbackModelFolder,
+  removeFallbackModel,
+  setFallbackModelEnabled,
+  verifyFallbackModel,
+} from "@/settings";
+
+describe("settings model lifecycle bindings", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    isTauriMock.mockReset();
+    isTauriMock.mockReturnValue(true);
+    listenMock.mockReset();
+  });
+
+  it("invokes the typed fallback model commands", async () => {
+    invokeMock.mockResolvedValue({ status: "ready" });
+
+    await fallbackModelStatus();
+    await installFallbackModel();
+    await cancelFallbackModelInstall();
+    await verifyFallbackModel();
+    await removeFallbackModel();
+    await setFallbackModelEnabled(false);
+    await openFallbackModelFolder();
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["fallback_model_status"],
+      ["fallback_model_install"],
+      ["fallback_model_cancel_install"],
+      ["fallback_model_verify"],
+      ["fallback_model_remove"],
+      ["fallback_model_set_enabled", { enabled: false }],
+      ["fallback_model_open_folder"],
+    ]);
+  });
+
+  it("wraps fallback model events behind typed listeners", async () => {
+    const stopProgress = vi.fn();
+    const stopStatus = vi.fn();
+    listenMock
+      .mockResolvedValueOnce(stopProgress)
+      .mockResolvedValueOnce(stopStatus);
+
+    const onProgress = vi.fn();
+    const onStatus = vi.fn();
+
+    const unlistenProgress = await listenFallbackModelProgress(onProgress);
+    const progressEvent = listenMock.mock.calls[0]?.[1];
+    progressEvent?.({ payload: { status: "downloading" } });
+
+    const unlistenStatus = await listenFallbackModelStatus(onStatus);
+    const statusEvent = listenMock.mock.calls[1]?.[1];
+    statusEvent?.({ payload: { status: "ready" } });
+
+    expect(listenMock.mock.calls[0]?.[0]).toBe("fallback-model-progress");
+    expect(listenMock.mock.calls[1]?.[0]).toBe("fallback-model-status");
+    expect(onProgress).toHaveBeenCalledWith({ status: "downloading" });
+    expect(onStatus).toHaveBeenCalledWith({ status: "ready" });
+    expect(unlistenProgress).toBe(stopProgress);
+    expect(unlistenStatus).toBe(stopStatus);
+  });
+
+  it("returns a noop listener outside Tauri", async () => {
+    isTauriMock.mockReturnValue(false);
+
+    const unlisten = await listenFallbackModelProgress(vi.fn());
+
+    expect(listenMock).not.toHaveBeenCalled();
+    expect(unlisten()).toBeUndefined();
+  });
+});

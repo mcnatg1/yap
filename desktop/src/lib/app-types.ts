@@ -36,6 +36,27 @@ export type SetupState =
   | "fallback_disabled"
   | "setup_error";
 
+export type FallbackModelStatus =
+  | "missing"
+  | "downloading"
+  | "verifying"
+  | "ready"
+  | "corrupted"
+  | "disabled"
+  | "error";
+
+export type FallbackModelView = {
+  id: "nemotron-3.5-asr-streaming-0.6b-1120ms-int8";
+  label: string;
+  status: FallbackModelStatus;
+  installedBytes?: number | null;
+  totalBytes?: number | null;
+  progressPercent?: number | null;
+  speedMbps?: number | null;
+  message?: string | null;
+  modelsDir: string;
+};
+
 export type ServerConnectionState =
   | "not_set"
   | "connecting"
@@ -162,9 +183,39 @@ export function createInitialPipelineState(): RecordingPipelineState {
 }
 
 export function deriveSetupState(snapshot: SetupSnapshot): SetupState {
-  if (!snapshot.fallbackEnabled) return "fallback_disabled";
-  if (snapshot.engineReady && snapshot.modelInstalled) return "fallback_ready";
-  return "fallback_missing";
+  const status: FallbackModelStatus = snapshot.engineReady && snapshot.modelInstalled
+    ? "ready"
+    : snapshot.modelInstalled
+      ? "corrupted"
+      : "missing";
+  return deriveSetupStateFromFallbackModel(status, snapshot.fallbackEnabled);
+}
+
+export function deriveSetupStateFromFallbackModel(
+  status: FallbackModelStatus,
+  fallbackEnabled: boolean,
+): SetupState {
+  if (!fallbackEnabled || status === "disabled") return "fallback_disabled";
+
+  switch (status) {
+    case "downloading":
+    case "verifying":
+      return "fallback_installing";
+    case "ready":
+      return "fallback_ready";
+    case "error":
+      return "setup_error";
+    case "missing":
+    case "corrupted":
+      return "fallback_missing";
+  }
+}
+
+export function isFallbackModelBusy(
+  fallbackModel?: Pick<FallbackModelView, "status"> | null,
+  pending = false,
+) {
+  return pending || fallbackModel?.status === "downloading" || fallbackModel?.status === "verifying";
 }
 
 export function isRecordingActive(status: RecordingJobStatus) {
