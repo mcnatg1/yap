@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { projectFallbackLifecycle } from "@/components/panels/app-sheets";
 import {
   createInitialPipelineState,
   deriveSetupState,
@@ -17,6 +18,13 @@ import {
 } from "@/lib/app-types";
 
 describe("client recording workflow projection", () => {
+  const baseFallbackModel = {
+    id: "nemotron-3.5-asr-streaming-0.6b-1120ms-int8" as const,
+    label: "Nemotron 3.5 ASR Streaming 0.6B INT8",
+    modelsDir: "C:\\models",
+    status: "missing" as const,
+  };
+
   it("initializes future pipeline stages without running them", () => {
     expect(createInitialPipelineState()).toEqual({
       intake: "queued",
@@ -97,5 +105,102 @@ describe("client recording workflow projection", () => {
     expect(isFallbackModelBusy({ status: "ready" }, true)).toBe(true);
     expect(isFallbackModelBusy({ status: "ready" }, false)).toBe(false);
     expect(isFallbackModelBusy(undefined, false)).toBe(false);
+  });
+
+  it("projects the full fallback lifecycle action matrix", () => {
+    expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "missing" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      value: "Not installed",
+      primaryAction: { id: "install", disabled: false, label: "Install" },
+      secondaryActions: [{ id: "open-folder", disabled: false, label: "Open folder" }],
+    });
+
+    expect(projectFallbackLifecycle({
+      ...baseFallbackModel,
+      progressPercent: 42,
+      speedMbps: 8.4,
+      status: "downloading",
+    }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "8.4 Mbps",
+      value: "Downloading 42%",
+      primaryAction: { id: "cancel", disabled: false, label: "Cancel" },
+      secondaryActions: [{ id: "open-folder", disabled: false, label: "Open folder" }],
+    });
+
+    const verifying = projectFallbackLifecycle(
+      { ...baseFallbackModel, status: "verifying" },
+      { commandPending: false, liveStatus: "idle" },
+    );
+    expect(verifying).toMatchObject({
+      value: "Verifying files",
+      secondaryActions: [{ id: "open-folder", disabled: false, label: "Open folder" }],
+    });
+    expect(verifying.primaryAction).toBeUndefined();
+
+    expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "ready" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      value: "Ready",
+      primaryAction: { id: "reinstall", disabled: false, label: "Reinstall" },
+      secondaryActions: [
+        { id: "verify", disabled: false, label: "Verify" },
+        { id: "disable", disabled: false, label: "Disable" },
+        { id: "remove", disabled: false, label: "Remove" },
+        { id: "open-folder", disabled: false, label: "Open folder" },
+      ],
+    });
+
+    expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "corrupted" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      value: "Files failed verification.",
+      primaryAction: { id: "repair", disabled: false, label: "Repair" },
+      secondaryActions: [
+        { id: "remove", disabled: false, label: "Remove" },
+        { id: "open-folder", disabled: false, label: "Open folder" },
+      ],
+    });
+
+    expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "disabled" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      value: "Disabled",
+      primaryAction: { id: "enable", disabled: false, label: "Enable" },
+      secondaryActions: [
+        { id: "remove", disabled: false, label: "Remove" },
+        { id: "open-folder", disabled: false, label: "Open folder" },
+      ],
+    });
+
+    expect(projectFallbackLifecycle({
+      ...baseFallbackModel,
+      message: "Checksum mismatch",
+      status: "error",
+    }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "Checksum mismatch",
+      value: "Needs attention",
+      primaryAction: { id: "retry", disabled: false, label: "Retry" },
+      secondaryActions: [
+        { id: "remove", disabled: false, label: "Remove" },
+        { id: "open-folder", disabled: false, label: "Open folder" },
+      ],
+    });
+  });
+
+  it("locks install, remove, and verify while live is active but keeps cancel during downloads", () => {
+    const ready = projectFallbackLifecycle(
+      { ...baseFallbackModel, status: "ready" },
+      { commandPending: false, liveStatus: "saving" },
+    );
+
+    expect(ready.primaryAction).toMatchObject({ id: "reinstall", disabled: true });
+    expect(ready.secondaryActions.find((action) => action.id === "verify")).toMatchObject({ disabled: true });
+    expect(ready.secondaryActions.find((action) => action.id === "remove")).toMatchObject({ disabled: true });
+    expect(ready.secondaryActions.find((action) => action.id === "open-folder")).toMatchObject({ disabled: false });
+
+    const downloading = projectFallbackLifecycle(
+      { ...baseFallbackModel, status: "downloading" },
+      { commandPending: false, liveStatus: "saving" },
+    );
+    const cancelling = projectFallbackLifecycle(
+      { ...baseFallbackModel, status: "downloading" },
+      { commandPending: true, liveStatus: "idle" },
+    );
+
+    expect(downloading.primaryAction).toMatchObject({ id: "cancel", disabled: false });
+    expect(cancelling.primaryAction).toMatchObject({ id: "cancel", disabled: true });
   });
 });
