@@ -36,7 +36,6 @@ import {
   createInitialPipelineState,
   deriveSetupStateFromFallbackModel,
   extension,
-  fallbackModelLabel,
   isFallbackModelBusy,
   isRecordingActive,
   isRecordingFinished,
@@ -45,7 +44,6 @@ import {
   isWorkspaceView,
   recordingStatusForStartFailure,
   serverConnectionLabel,
-  setupStateLabel,
   type FallbackModelView,
   type LocalComputeTargetView,
   type LiveCaptureMode,
@@ -54,7 +52,6 @@ import {
   type RailAction,
   type RecordingJobView,
   type ServerConnectionState,
-  type SetupState,
   type WorkspaceView,
   workspaceCopy,
 } from "@/lib/app-types";
@@ -140,16 +137,12 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const [model, setModel] = useState("Nemotron 3.5 ASR Streaming 0.6B INT8");
   const [auth, setAuth] = useState("Checking");
-  const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
-  const [engineReady, setEngineReady] = useState(false);
+  const [, setEngineReady] = useState(false);
   const [fallbackEnabled, setFallbackEnabled] = useState(true);
   const [fallbackModel, setFallbackModel] = useState<FallbackModelView | null>(null);
   const [modelInstalled, setModelInstalled] = useState(false);
-  const [setupState, setSetupState] = useState<SetupState>("checking");
   const [serverState] = useState<ServerConnectionState>("not_set");
-  const [setupRoot, setSetupRoot] = useState("");
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
   const [computeTargetPending, setComputeTargetPending] = useState(false);
   const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
@@ -186,7 +179,6 @@ export default function App() {
   const runningItem = queue.find((item) => isRecordingActive(item.status));
   const elapsedSeconds = useElapsedSeconds(runningSince);
   const serverLabel = serverConnectionLabel(serverState);
-  const setupLabel = setupStateLabel(setupState);
   const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
   const selectedHistoryItem = selectedHistoryEntry ? historyEntryToRecordingJob(selectedHistoryEntry) : undefined;
   const selectedItem =
@@ -424,6 +416,21 @@ export default function App() {
     }
   }
 
+  function maybeOpenSetupPrompt(nextSetupState: ReturnType<typeof deriveSetupStateFromFallbackModel>, nextFallbackEnabled: boolean) {
+    if (
+      !nextFallbackEnabled ||
+      nextSetupState === "fallback_ready" ||
+      setupPrompted.current ||
+      localStorage.getItem(setupSkipKey) === "true"
+    ) {
+      return;
+    }
+
+    setupPrompted.current = true;
+    setActiveRail("details");
+    setDetailsOpen(true);
+  }
+
   function applyFallbackModelView(
     view: FallbackModelView,
     overrides: {
@@ -450,14 +457,12 @@ export default function App() {
     fallbackEnabledRef.current = nextFallbackEnabled;
     modelInstalledRef.current = nextModelInstalled;
     setFallbackModel(view);
-    setModel(view.label);
     setStatus(overrides.statusText ?? fallbackStatusText(view, nextFallbackEnabled));
     setAuth(overrides.authText ?? (nextEngineReady ? "Ready" : "Setup"));
     setEngineReady(nextEngineReady);
     setFallbackEnabled(nextFallbackEnabled);
     setModelInstalled(nextModelInstalled);
-    setSetupRoot(view.modelsDir);
-    setSetupState(nextSetupState);
+    maybeOpenSetupPrompt(nextSetupState, nextFallbackEnabled);
 
     if (nextSetupState === "fallback_ready") {
       unblockFallbackReadyQueue();
@@ -467,29 +472,11 @@ export default function App() {
   function applySetupStatus(setup: SetupStatus) {
     fallbackEnabledRef.current = setup.fallbackEnabled;
     modelInstalledRef.current = setup.modelInstalled;
-    setModel(fallbackModelLabel(setup.model));
     setStatus(setup.engineReady ? setup.engineStatus : "Setup");
     setAuth(setup.engineReady ? "Ready" : "Setup");
-    setEngineBinaryStatus(setup.engineBinaryStatus);
     setEngineReady(setup.engineReady);
     setFallbackEnabled(setup.fallbackEnabled);
     setModelInstalled(setup.modelInstalled);
-    setSetupRoot(setup.root);
-    setSetupState(deriveSetupStateFromFallbackModel(
-      setup.modelInstalled ? (setup.engineReady ? "ready" : "corrupted") : "missing",
-      setup.fallbackEnabled,
-    ));
-
-    if (
-      setup.fallbackEnabled &&
-      !setup.engineReady &&
-      !setupPrompted.current &&
-      localStorage.getItem(setupSkipKey) !== "true"
-    ) {
-      setupPrompted.current = true;
-      setActiveRail("details");
-      setDetailsOpen(true);
-    }
   }
 
   async function installFallback() {
@@ -498,7 +485,6 @@ export default function App() {
     setFallbackCommandPending(true);
     fallbackEnabledRef.current = true;
     setFallbackEnabled(true);
-    setSetupState("fallback_installing");
     setStatus("Installing local fallback");
     try {
       const view = await installFallbackModel();
@@ -506,7 +492,6 @@ export default function App() {
       applyFallbackModelView(view, { fallbackEnabled: true });
       toast.success("Local fallback installed");
     } catch (error) {
-      setSetupState("setup_error");
       toast.error(`Install failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -528,7 +513,6 @@ export default function App() {
       });
       toast.success("Local fallback files removed");
     } catch (error) {
-      setSetupState("setup_error");
       toast.error(`Remove failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -550,7 +534,6 @@ export default function App() {
       });
       toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
     } catch (error) {
-      setSetupState("setup_error");
       toast.error(`Update failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -569,7 +552,6 @@ export default function App() {
       }
       toast.success("Local fallback cancellation requested");
     } catch (error) {
-      setSetupState("setup_error");
       toast.error(`Cancel failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -586,7 +568,6 @@ export default function App() {
       applyFallbackModelView(view);
       toast.success("Local fallback verified");
     } catch (error) {
-      setSetupState("setup_error");
       toast.error(`Verify failed: ${String(error)}`);
       await loadStatus();
     } finally {
@@ -603,11 +584,6 @@ export default function App() {
       toast.error(`Open failed: ${String(error)}`);
     }
   }
-
-  // Task 5 wires these lifecycle controls into the Settings UI.
-  void cancelFallbackInstall;
-  void verifyFallback;
-  void openFallbackFolder;
 
   async function updateLocalComputeTarget(targetId: string) {
     if (!isTauri() || setupBusy) return;
@@ -1157,18 +1133,17 @@ export default function App() {
       <SettingsSheet
         auth={auth}
         busy={setupBusy}
-        engineReady={engineReady}
-        engineBinaryStatus={engineBinaryStatus}
-        fallbackEnabled={fallbackEnabled}
-        model={model}
-        modelInstalled={modelInstalled}
+        fallbackActionPending={fallbackCommandPending}
+        fallbackModel={fallbackModel}
         liveBusy={liveBusy}
         liveInputDevices={liveInputDevices}
         liveSettingsError={liveSettingsError}
         liveView={liveView}
         localComputeTargets={localComputeTargets}
+        onCancelFallbackInstall={() => void cancelFallbackInstall()}
         onClearLiveHotkey={clearLiveShortcut}
         onInstallFallback={() => void installFallback()}
+        onOpenFallbackFolder={() => void openFallbackFolder()}
         onPreflightLiveInput={preflightLiveInput}
         onResetLiveHotkey={resetLiveHotkey}
         onOpenChange={(open) => {
@@ -1178,6 +1153,7 @@ export default function App() {
         onRemoveFallback={() => void removeFallback()}
         onSetInputDevice={updateInputDevice}
         onSetFallbackEnabled={(enabled) => void setFallbackEnabledSetting(enabled)}
+        onVerifyFallback={() => void verifyFallback()}
         onSetLiveCaptureMode={updateLiveCaptureMode}
         onSetLiveHotkey={updateLiveHotkey}
         onSetLiveOverlayEnabled={updateLiveOverlay}
@@ -1187,8 +1163,6 @@ export default function App() {
         onStopLive={stopLive}
         open={detailsOpen}
         serverLabel={serverLabel}
-        setupLabel={setupLabel}
-        setupRoot={setupRoot}
         status={status}
       />
       <HelpSheet
