@@ -370,7 +370,6 @@ export default function App() {
         engineReady: setup.engineReady,
         fallbackEnabled: setup.fallbackEnabled,
         modelInstalled: setup.modelInstalled,
-        statusText: setup.engineReady ? setup.engineStatus : "Setup",
       });
       await Promise.all([loadLiveControls(), loadComputeTargets()]);
     } catch (error) {
@@ -481,7 +480,12 @@ export default function App() {
       setup.fallbackEnabled,
     ));
 
-    if (!setup.engineReady && !setupPrompted.current && localStorage.getItem(setupSkipKey) !== "true") {
+    if (
+      setup.fallbackEnabled &&
+      !setup.engineReady &&
+      !setupPrompted.current &&
+      localStorage.getItem(setupSkipKey) !== "true"
+    ) {
       setupPrompted.current = true;
       setActiveRail("details");
       setDetailsOpen(true);
@@ -515,12 +519,12 @@ export default function App() {
 
     setFallbackCommandPending(true);
     try {
+      localStorage.setItem(setupSkipKey, "true");
       const view = await removeFallbackModel();
       applyFallbackModelView(view, {
         engineReady: false,
         fallbackEnabled: false,
         modelInstalled: false,
-        statusText: "Setup",
       });
       toast.success("Local fallback files removed");
     } catch (error) {
@@ -543,7 +547,6 @@ export default function App() {
         engineReady: enabled && view.status === "ready",
         fallbackEnabled: enabled,
         modelInstalled: enabled && view.status === "missing" ? false : modelInstalledRef.current,
-        statusText: enabled && view.status === "ready" ? "Transcription engine ready" : "Setup",
       });
       toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
     } catch (error) {
@@ -557,6 +560,7 @@ export default function App() {
 
   async function cancelFallbackInstall() {
     if (!isTauri() || fallbackModel?.status !== "downloading") return;
+    setFallbackCommandPending(true);
     try {
       const view = await cancelFallbackModelInstall();
       applyFallbackModelView(view, { fallbackEnabled: true });
@@ -568,6 +572,8 @@ export default function App() {
       setSetupState("setup_error");
       toast.error(`Cancel failed: ${String(error)}`);
       await loadStatus();
+    } finally {
+      setFallbackCommandPending(false);
     }
   }
 
