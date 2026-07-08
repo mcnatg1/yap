@@ -94,13 +94,7 @@ where
         return Err(SttError::ModelMissing);
     }
     let total_bytes = response.content_length();
-    stream_to_destination(
-        &mut response,
-        total_bytes,
-        dest,
-        on_progress,
-        is_cancelled,
-    )
+    stream_to_destination(&mut response, total_bytes, dest, on_progress, is_cancelled)
 }
 
 fn progress_metrics(
@@ -109,8 +103,7 @@ fn progress_metrics(
     elapsed_ms: u128,
 ) -> (Option<f32>, Option<f32>) {
     let percent = total_bytes.and_then(|total| {
-        (total > 0)
-            .then(|| ((downloaded_bytes as f32 / total as f32) * 100.0).clamp(0.0, 100.0))
+        (total > 0).then(|| ((downloaded_bytes as f32 / total as f32) * 100.0).clamp(0.0, 100.0))
     });
     let speed_mbps = (elapsed_ms > 0).then(|| {
         let elapsed_seconds = elapsed_ms as f32 / 1000.0;
@@ -249,12 +242,7 @@ mod tests {
                         return Ok(len);
                     }
                     Err(_) => {
-                        let err = std::mem::replace(
-                            entry,
-                            Ok(Vec::new()),
-                        )
-                        .err()
-                        .unwrap();
+                        let err = std::mem::replace(entry, Ok(Vec::new())).err().unwrap();
                         self.chunk_index += 1;
                         return Err(err);
                     }
