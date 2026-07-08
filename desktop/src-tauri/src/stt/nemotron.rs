@@ -107,8 +107,15 @@ pub fn model_status_at(root: &Path, enabled: bool) -> FallbackModelView {
 }
 
 pub fn verify_model(enabled: bool) -> FallbackModelView {
+    verify_model_with_progress(enabled, |_| {})
+}
+
+pub fn verify_model_with_progress<P>(enabled: bool, mut on_progress: P) -> FallbackModelView
+where
+    P: FnMut(FallbackModelView),
+{
     let root = root_dir();
-    match verify_model_at(&root) {
+    match verify_model_at_with_progress(&root, &mut on_progress) {
         Ok(()) => model_status_at(&root, enabled),
         Err(SttError::ModelMissing) => status_view(
             &root,
@@ -234,8 +241,16 @@ where
     on_progress(status_view(
         root,
         FallbackModelStatus::Verifying,
-        Some(std::fs::metadata(&dest).map(|metadata| metadata.len()).unwrap_or(0)),
-        Some(std::fs::metadata(&dest).map(|metadata| metadata.len()).unwrap_or(0)),
+        Some(
+            std::fs::metadata(&dest)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        ),
+        Some(
+            std::fs::metadata(&dest)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        ),
         Some(100.0),
         None,
         Some(format!("Verifying {}", artifact.file)),
@@ -332,11 +347,43 @@ fn verify_sha_and_mark(path: &Path, expected_hash: &str) -> Result<(), SttError>
     .map_err(|_| SttError::ModelMissing)
 }
 
-fn verify_model_at(root: &Path) -> Result<(), SttError> {
+fn verify_model_at_with_progress<P>(root: &Path, on_progress: &mut P) -> Result<(), SttError>
+where
+    P: FnMut(FallbackModelView),
+{
+    let total_bytes = ARTIFACTS.iter().try_fold(0u64, |acc, artifact| {
+        let size = std::fs::metadata(root.join(artifact.file))
+            .map_err(|_| SttError::ModelMissing)?
+            .len();
+        Ok::<u64, SttError>(acc + size)
+    })?;
+    let mut verified_bytes = 0u64;
+
     for artifact in ARTIFACTS {
-        verify_sha_and_mark(&root.join(artifact.file), artifact.sha256)?;
+        let path = root.join(artifact.file);
+        let size = std::fs::metadata(&path)
+            .map_err(|_| SttError::ModelMissing)?
+            .len();
+        verify_sha_and_mark(&path, artifact.sha256)?;
+        verified_bytes += size;
+        on_progress(status_view(
+            root,
+            FallbackModelStatus::Verifying,
+            Some(verified_bytes),
+            Some(total_bytes),
+            Some(progress_percent(verified_bytes, total_bytes)),
+            None,
+            Some(format!("Verifying {}", artifact.file)),
+        ));
     }
     Ok(())
+}
+
+fn progress_percent(complete: u64, total: u64) -> f32 {
+    if total == 0 {
+        return 100.0;
+    }
+    ((complete as f32 / total as f32) * 100.0).clamp(0.0, 100.0)
 }
 
 fn resolve_model_at(root: &Path) -> Result<NemotronPaths, SttError> {
@@ -494,7 +541,10 @@ mod tests {
             FallbackModelStatus::Disabled
         );
 
-        let marker = dir.path().join(ARTIFACTS[0].file).with_extension("verified");
+        let marker = dir
+            .path()
+            .join(ARTIFACTS[0].file)
+            .with_extension("verified");
         std::fs::write(&marker, format!("{}\n999\n", ARTIFACTS[0].sha256)).unwrap();
 
         assert_eq!(
@@ -552,7 +602,12 @@ mod tests {
         for artifact in ARTIFACTS {
             write_verified_artifact(dir.path(), artifact, artifact.sha256.as_bytes());
         }
-        std::fs::remove_file(dir.path().join(ARTIFACTS[0].file).with_extension("verified")).unwrap();
+        std::fs::remove_file(
+            dir.path()
+                .join(ARTIFACTS[0].file)
+                .with_extension("verified"),
+        )
+        .unwrap();
 
         assert_eq!(classify_model(dir.path()), ArtifactInstallState::Corrupted);
         assert_eq!(

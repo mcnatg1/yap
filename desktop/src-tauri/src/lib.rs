@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -30,6 +33,10 @@ const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_START_DICTATING: &str = "start_dictating";
 const TRAY_STOP_RECORDING: &str = "stop_recording";
 const TRAY_QUIT: &str = "quit";
+const FALLBACK_MODEL_STATUS_EVENT: &str = "fallback-model-status";
+const FALLBACK_MODEL_PROGRESS_EVENT: &str = "fallback-model-progress";
+const FALLBACK_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
+const FALLBACK_PROGRESS_MIN_PERCENT_DELTA: f32 = 1.0;
 
 mod file_actions;
 pub mod live;
@@ -44,6 +51,105 @@ fn polish_num_gpu() -> u32 {
 #[tauri::command]
 fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
     current_setup_status()
+}
+
+#[tauri::command]
+fn fallback_model_status(
+    install_state: tauri::State<'_, FallbackModelInstallState>,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    Ok(current_fallback_model_view(install_state.inner()))
+}
+
+#[tauri::command]
+async fn fallback_model_install(
+    app: tauri::AppHandle,
+    install_state: tauri::State<'_, FallbackModelInstallState>,
+    live_state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_fallback_setup_idle(&live_state)?;
+
+    let install_state = install_state.inner().clone();
+    let initial_view = fallback_model_phase_view(
+        true,
+        stt::nemotron::FallbackModelStatus::Downloading,
+        Some("Preparing download".into()),
+    );
+    let cancellation = match install_state.begin(
+        FallbackModelInstallPhase::Installing,
+        initial_view.clone(),
+        true,
+    ) {
+        Ok(cancellation) => cancellation,
+        Err(active) => return Ok(active),
+    };
+    emit_fallback_progress(&app, &install_state, initial_view);
+
+    run_fallback_install_worker(app, install_state, cancellation).await
+}
+
+#[tauri::command]
+fn fallback_model_cancel_install(
+    install_state: tauri::State<'_, FallbackModelInstallState>,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    let install_state = install_state.inner();
+    let snapshot = install_state.snapshot();
+    if snapshot.phase == Some(FallbackModelInstallPhase::Installing) {
+        install_state.cancel_install();
+    }
+    Ok(current_fallback_model_view(install_state))
+}
+
+#[tauri::command]
+fn fallback_model_verify(
+    app: tauri::AppHandle,
+    install_state: tauri::State<'_, FallbackModelInstallState>,
+    live_state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_fallback_setup_idle(&live_state)?;
+
+    let install_state = install_state.inner().clone();
+    let initial_view = fallback_model_phase_view(
+        stt::settings::local_fallback_enabled(),
+        stt::nemotron::FallbackModelStatus::Verifying,
+        Some("Verifying files".into()),
+    );
+    match install_state.begin(
+        FallbackModelInstallPhase::Verifying,
+        initial_view.clone(),
+        false,
+    ) {
+        Ok(_) => emit_fallback_status(&app, &install_state, initial_view),
+        Err(active) => return Ok(active),
+    }
+
+    tauri::async_runtime::block_on(run_fallback_verify_worker(app, install_state))
+}
+
+#[tauri::command]
+fn fallback_model_remove(
+    live_state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_fallback_setup_idle(&live_state)?;
+    remove_local_fallback_files()?;
+    stt::settings::set_local_fallback_enabled(false)?;
+    Ok(stt::nemotron::model_status(false))
+}
+
+#[tauri::command]
+fn fallback_model_set_enabled(
+    live_state: tauri::State<'_, live::LiveSessionState>,
+    enabled: bool,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_fallback_setup_idle(&live_state)?;
+    stt::settings::set_local_fallback_enabled(enabled)?;
+    Ok(stt::nemotron::model_status(enabled))
+}
+
+#[tauri::command]
+fn fallback_model_open_folder(
+    _app: tauri::AppHandle,
+) -> Result<(), stt::dispatch::SttCommandError> {
+    open_fallback_model_folder()
 }
 
 #[tauri::command]
@@ -317,9 +423,7 @@ fn show_main_workspace(app: tauri::AppHandle, workspace: String) -> Result<(), S
 async fn install_local_fallback(
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
-    if live::state::is_live_session_started(live_state.snapshot().status) {
-        return Err(live_setup_busy_error());
-    }
+    ensure_fallback_setup_idle(&live_state)?;
     tauri::async_runtime::spawn_blocking(|| {
         stt::settings::set_local_fallback_enabled(true)?;
         stt::nemotron::ensure_model()?;
@@ -333,10 +437,9 @@ async fn install_local_fallback(
 fn remove_local_fallback(
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
-    if live::state::is_live_session_started(live_state.snapshot().status) {
-        return Err(live_setup_busy_error());
-    }
+    ensure_fallback_setup_idle(&live_state)?;
     remove_local_fallback_files()?;
+    stt::settings::set_local_fallback_enabled(false)?;
     Ok(current_setup_status())
 }
 
@@ -345,9 +448,7 @@ fn set_local_fallback_enabled(
     live_state: tauri::State<'_, live::LiveSessionState>,
     enabled: bool,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
-    if live::state::is_live_session_started(live_state.snapshot().status) {
-        return Err(live_setup_busy_error());
-    }
+    ensure_fallback_setup_idle(&live_state)?;
     stt::settings::set_local_fallback_enabled(enabled)?;
     Ok(current_setup_status())
 }
@@ -368,6 +469,210 @@ fn current_setup_status() -> SetupStatus {
         model_installed,
         fallback_enabled,
         engine_status: compose_engine_status(model_installed, fallback_enabled),
+    }
+}
+
+fn current_fallback_model_view(
+    install_state: &FallbackModelInstallState,
+) -> stt::nemotron::FallbackModelView {
+    install_state
+        .current_view()
+        .unwrap_or_else(persisted_fallback_model_view)
+}
+
+fn persisted_fallback_model_view() -> stt::nemotron::FallbackModelView {
+    stt::nemotron::model_status(stt::settings::local_fallback_enabled())
+}
+
+fn fallback_model_phase_view(
+    enabled: bool,
+    status: stt::nemotron::FallbackModelStatus,
+    message: Option<String>,
+) -> stt::nemotron::FallbackModelView {
+    let mut view = stt::nemotron::model_status(enabled);
+    view.status = status;
+    view.installed_bytes = None;
+    view.total_bytes = None;
+    view.progress_percent = None;
+    view.speed_mbps = None;
+    view.message = message;
+    view
+}
+
+fn fallback_model_terminal_view(error: stt::error::SttError) -> stt::nemotron::FallbackModelView {
+    let enabled = stt::settings::local_fallback_enabled();
+    match error {
+        stt::error::SttError::ModelInstallCancelled
+        | stt::error::SttError::ModelMissing
+        | stt::error::SttError::ModelCorrupt => persisted_fallback_model_view(),
+        other => {
+            let mut view = stt::nemotron::model_status(enabled);
+            view.status = stt::nemotron::FallbackModelStatus::Error;
+            view.installed_bytes = None;
+            view.total_bytes = None;
+            view.progress_percent = None;
+            view.speed_mbps = None;
+            view.message = Some(other.user_message().to_string());
+            view
+        }
+    }
+}
+
+async fn run_fallback_install_worker(
+    app: tauri::AppHandle,
+    install_state: FallbackModelInstallState,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let final_view = {
+            let mut progress = FallbackProgressEmitter::new(app.clone(), install_state.clone());
+            let result = (|| -> Result<stt::nemotron::FallbackModelView, stt::error::SttError> {
+                stt::settings::set_local_fallback_enabled(true)?;
+                let cancellation = cancellation.clone();
+                stt::nemotron::ensure_model_with_progress(
+                    false,
+                    |view| progress.publish(view),
+                    || {
+                        cancellation
+                            .as_ref()
+                            .is_some_and(|token| token.load(Ordering::Relaxed))
+                    },
+                )?;
+                let verifying_view = fallback_model_phase_view(
+                    true,
+                    stt::nemotron::FallbackModelStatus::Verifying,
+                    Some("Verifying files".into()),
+                );
+                emit_fallback_status(&app, &install_state, verifying_view);
+                Ok(stt::nemotron::verify_model_with_progress(true, |view| {
+                    progress.publish(view);
+                }))
+            })();
+            match result {
+                Ok(view) => sanitize_fallback_model_view(view),
+                Err(error) => {
+                    install_state.set_error(stt::dispatch::SttCommandError::from(error));
+                    sanitize_fallback_model_view(fallback_model_terminal_view(error))
+                }
+            }
+        };
+
+        emit_fallback_status(&app, &install_state, final_view.clone());
+        install_state.clear();
+        Ok(final_view)
+    })
+    .await
+    .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::SidecarCrash))?
+}
+
+async fn run_fallback_verify_worker(
+    app: tauri::AppHandle,
+    install_state: FallbackModelInstallState,
+) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let final_view = {
+            let mut progress = FallbackProgressEmitter::new(app.clone(), install_state.clone());
+            sanitize_fallback_model_view(stt::nemotron::verify_model_with_progress(
+                stt::settings::local_fallback_enabled(),
+                |view| progress.publish(view),
+            ))
+        };
+
+        emit_fallback_status(&app, &install_state, final_view.clone());
+        install_state.clear();
+        Ok(final_view)
+    })
+    .await
+    .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::SidecarCrash))?
+}
+
+fn ensure_fallback_setup_idle(
+    live_state: &live::LiveSessionState,
+) -> Result<(), stt::dispatch::SttCommandError> {
+    if live::state::is_live_session_started(live_state.snapshot().status) {
+        return Err(live_setup_busy_error());
+    }
+    Ok(())
+}
+
+fn emit_fallback_status(
+    app: &tauri::AppHandle,
+    install_state: &FallbackModelInstallState,
+    view: stt::nemotron::FallbackModelView,
+) {
+    let view = sanitize_fallback_model_view(view);
+    install_state.set_phase(
+        install_state
+            .snapshot()
+            .phase
+            .unwrap_or(FallbackModelInstallPhase::Verifying),
+        view.clone(),
+    );
+    let _ = app.emit(FALLBACK_MODEL_STATUS_EVENT, &view);
+}
+
+fn emit_fallback_progress(
+    app: &tauri::AppHandle,
+    install_state: &FallbackModelInstallState,
+    view: stt::nemotron::FallbackModelView,
+) {
+    let view = sanitize_fallback_model_view(view);
+    install_state.set_progress(view.clone());
+    let _ = app.emit(FALLBACK_MODEL_PROGRESS_EVENT, &view);
+}
+
+fn sanitize_fallback_model_view(
+    mut view: stt::nemotron::FallbackModelView,
+) -> stt::nemotron::FallbackModelView {
+    if view
+        .progress_percent
+        .is_some_and(|value| !value.is_finite())
+    {
+        view.progress_percent = None;
+    }
+    if view.speed_mbps.is_some_and(|value| !value.is_finite()) {
+        view.speed_mbps = None;
+    }
+    view
+}
+
+fn is_final_fallback_progress(view: &stt::nemotron::FallbackModelView) -> bool {
+    match view.status {
+        stt::nemotron::FallbackModelStatus::Downloading => {
+            view.progress_percent
+                .is_some_and(|percent| percent >= 100.0)
+                || matches!(
+                    (view.installed_bytes, view.total_bytes),
+                    (Some(installed), Some(total)) if total > 0 && installed >= total
+                )
+        }
+        _ => true,
+    }
+}
+
+fn percent_changed(previous: Option<f32>, next: Option<f32>, delta: f32) -> bool {
+    match (previous, next) {
+        (Some(previous), Some(next)) => (next - previous).abs() >= delta,
+        (None, Some(_)) | (Some(_), None) => true,
+        (None, None) => false,
+    }
+}
+
+fn open_fallback_model_folder() -> Result<(), stt::dispatch::SttCommandError> {
+    let root = stt::nemotron::root_dir();
+    std::fs::create_dir_all(&root)
+        .map_err(|error| fallback_model_command_error("MODEL_FOLDER_OPEN_FAILED", &error))?;
+    tauri_plugin_opener::open_path(&root, None::<&str>)
+        .map_err(|error| fallback_model_command_error("MODEL_FOLDER_OPEN_FAILED", &error))
+}
+
+fn fallback_model_command_error(
+    code: &str,
+    error: &impl std::fmt::Display,
+) -> stt::dispatch::SttCommandError {
+    stt::dispatch::SttCommandError {
+        code: code.into(),
+        message: format!("{error}"),
     }
 }
 
@@ -458,6 +763,186 @@ struct LocalComputeTargetView {
     id: String,
     label: String,
     selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackModelInstallPhase {
+    Installing,
+    Verifying,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FallbackModelInstallSnapshot {
+    phase: Option<FallbackModelInstallPhase>,
+    view: Option<stt::nemotron::FallbackModelView>,
+    progress: Option<stt::nemotron::FallbackModelView>,
+    error: Option<stt::dispatch::SttCommandError>,
+}
+
+#[derive(Debug, Default)]
+struct FallbackModelInstallInner {
+    phase: Option<FallbackModelInstallPhase>,
+    view: Option<stt::nemotron::FallbackModelView>,
+    progress: Option<stt::nemotron::FallbackModelView>,
+    error: Option<stt::dispatch::SttCommandError>,
+}
+
+#[derive(Clone, Default)]
+struct FallbackModelInstallState {
+    inner: Arc<Mutex<FallbackModelInstallInner>>,
+    cancellation: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+}
+
+impl FallbackModelInstallState {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin(
+        &self,
+        phase: FallbackModelInstallPhase,
+        view: stt::nemotron::FallbackModelView,
+        cancellable: bool,
+    ) -> Result<Option<Arc<AtomicBool>>, stt::nemotron::FallbackModelView> {
+        {
+            let mut inner = self.inner.lock().expect("fallback model state poisoned");
+            if inner.phase.is_some() {
+                return Err(inner
+                    .progress
+                    .clone()
+                    .or_else(|| inner.view.clone())
+                    .unwrap_or(view));
+            }
+            inner.phase = Some(phase);
+            inner.view = Some(view);
+            inner.progress = None;
+            inner.error = None;
+        }
+
+        let token = cancellable.then(|| Arc::new(AtomicBool::new(false)));
+        let mut cancellation = self
+            .cancellation
+            .lock()
+            .expect("fallback model cancellation state poisoned");
+        *cancellation = token.clone();
+        Ok(token)
+    }
+
+    fn snapshot(&self) -> FallbackModelInstallSnapshot {
+        let inner = self.inner.lock().expect("fallback model state poisoned");
+        FallbackModelInstallSnapshot {
+            phase: inner.phase,
+            view: inner.view.clone(),
+            progress: inner.progress.clone(),
+            error: inner.error.clone(),
+        }
+    }
+
+    fn current_view(&self) -> Option<stt::nemotron::FallbackModelView> {
+        let snapshot = self.snapshot();
+        if snapshot.error.is_some() {
+            return snapshot.progress.or(snapshot.view);
+        }
+        snapshot.progress.or(snapshot.view)
+    }
+
+    fn set_phase(&self, phase: FallbackModelInstallPhase, view: stt::nemotron::FallbackModelView) {
+        let mut inner = self.inner.lock().expect("fallback model state poisoned");
+        inner.phase = Some(phase);
+        inner.view = Some(view);
+        inner.progress = None;
+        inner.error = None;
+    }
+
+    fn set_progress(&self, view: stt::nemotron::FallbackModelView) {
+        let mut inner = self.inner.lock().expect("fallback model state poisoned");
+        inner.progress = Some(view.clone());
+        inner.view = Some(view);
+    }
+
+    fn set_error(&self, error: stt::dispatch::SttCommandError) {
+        let mut inner = self.inner.lock().expect("fallback model state poisoned");
+        inner.error = Some(error);
+    }
+
+    fn cancel_install(&self) {
+        if let Some(token) = self
+            .cancellation
+            .lock()
+            .expect("fallback model cancellation state poisoned")
+            .as_ref()
+        {
+            token.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn clear(&self) {
+        {
+            let mut inner = self.inner.lock().expect("fallback model state poisoned");
+            *inner = FallbackModelInstallInner::default();
+        }
+        let mut cancellation = self
+            .cancellation
+            .lock()
+            .expect("fallback model cancellation state poisoned");
+        *cancellation = None;
+    }
+}
+
+#[derive(Debug, Default)]
+struct FallbackProgressThrottle {
+    emitted_once: bool,
+    last_emit_at: Option<Instant>,
+    last_progress_percent: Option<f32>,
+}
+
+impl FallbackProgressThrottle {
+    fn should_emit(&mut self, view: &stt::nemotron::FallbackModelView, now: Instant) -> bool {
+        let progress_percent = view.progress_percent;
+        let should_emit = !self.emitted_once
+            || is_final_fallback_progress(view)
+            || view.status != stt::nemotron::FallbackModelStatus::Downloading
+            || self
+                .last_emit_at
+                .is_none_or(|last| now.duration_since(last) >= FALLBACK_PROGRESS_MIN_INTERVAL)
+            || percent_changed(
+                self.last_progress_percent,
+                progress_percent,
+                FALLBACK_PROGRESS_MIN_PERCENT_DELTA,
+            );
+
+        if should_emit {
+            self.emitted_once = true;
+            self.last_emit_at = Some(now);
+            self.last_progress_percent = progress_percent;
+        }
+
+        should_emit
+    }
+}
+
+struct FallbackProgressEmitter {
+    app: tauri::AppHandle,
+    install_state: FallbackModelInstallState,
+    throttle: FallbackProgressThrottle,
+}
+
+impl FallbackProgressEmitter {
+    fn new(app: tauri::AppHandle, install_state: FallbackModelInstallState) -> Self {
+        Self {
+            app,
+            install_state,
+            throttle: FallbackProgressThrottle::default(),
+        }
+    }
+
+    fn publish(&mut self, view: stt::nemotron::FallbackModelView) {
+        let view = sanitize_fallback_model_view(view);
+        self.install_state.set_progress(view.clone());
+        if self.throttle.should_emit(&view, Instant::now()) {
+            let _ = self.app.emit(FALLBACK_MODEL_PROGRESS_EVENT, &view);
+        }
+    }
 }
 
 impl SetupStatus {
@@ -912,6 +1397,7 @@ pub fn run() {
     let runtime_state = runtime::RuntimeOrchestratorState::new();
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
+    let fallback_model_install_state = FallbackModelInstallState::new();
     let live_runtime_for_monitor = live_runtime.clone();
     let live_runtime_for_exit = live_runtime.clone();
     let live_shortcut_interaction =
@@ -933,6 +1419,7 @@ pub fn run() {
         .manage(stt_state)
         .manage(live_state)
         .manage(live_runtime)
+        .manage(fallback_model_install_state)
         .manage(runtime_state)
         .setup(move |app| {
             let shortcut_interaction = Arc::clone(&live_shortcut_interaction);
@@ -996,6 +1483,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             setup_status,
+            fallback_model_status,
+            fallback_model_install,
+            fallback_model_cancel_install,
+            fallback_model_verify,
+            fallback_model_remove,
+            fallback_model_set_enabled,
+            fallback_model_open_folder,
             list_local_compute_targets,
             set_local_compute_target,
             install_local_fallback,
@@ -1054,6 +1548,22 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fallback_test_view(
+        status: stt::nemotron::FallbackModelStatus,
+    ) -> stt::nemotron::FallbackModelView {
+        stt::nemotron::FallbackModelView {
+            id: stt::nemotron::MODEL_ID.into(),
+            label: "Nemotron local fallback".into(),
+            status,
+            installed_bytes: None,
+            total_bytes: None,
+            progress_percent: None,
+            speed_mbps: None,
+            message: None,
+            models_dir: "C:/models/nemotron".into(),
+        }
+    }
 
     #[test]
     fn setup_status_serializes_for_frontend() {
@@ -1132,5 +1642,80 @@ mod tests {
         assert_eq!(view.status, live::state::LiveSessionStatus::Blocked);
         assert_eq!(view.route, live::state::LiveRoute::Blocked);
         assert_eq!(view.error.as_deref(), Some("Local fallback is not ready."));
+    }
+
+    #[test]
+    fn fallback_model_install_state_coalesces_and_cancels_idempotently() {
+        let state = FallbackModelInstallState::new();
+        let initial = fallback_test_view(stt::nemotron::FallbackModelStatus::Downloading);
+        let cancellation = state
+            .begin(FallbackModelInstallPhase::Installing, initial.clone(), true)
+            .unwrap()
+            .expect("install should create a cancellation token");
+
+        let second = state.begin(
+            FallbackModelInstallPhase::Verifying,
+            fallback_test_view(stt::nemotron::FallbackModelStatus::Verifying),
+            false,
+        );
+        assert_eq!(second.unwrap_err().status, initial.status);
+
+        state.cancel_install();
+        state.cancel_install();
+        assert!(cancellation.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn fallback_model_status_prefers_transient_progress_view() {
+        let state = FallbackModelInstallState::new();
+        state
+            .begin(
+                FallbackModelInstallPhase::Installing,
+                fallback_test_view(stt::nemotron::FallbackModelStatus::Downloading),
+                true,
+            )
+            .unwrap();
+        let mut progress = fallback_test_view(stt::nemotron::FallbackModelStatus::Downloading);
+        progress.progress_percent = Some(42.0);
+        state.set_progress(progress.clone());
+
+        let view = current_fallback_model_view(&state);
+
+        assert_eq!(view.progress_percent, Some(42.0));
+        assert_eq!(view.status, stt::nemotron::FallbackModelStatus::Downloading);
+    }
+
+    #[test]
+    fn fallback_model_progress_throttle_emits_first_delta_and_final() {
+        let mut throttle = FallbackProgressThrottle::default();
+        let base = Instant::now();
+        let mut first = fallback_test_view(stt::nemotron::FallbackModelStatus::Downloading);
+        first.progress_percent = Some(10.0);
+        let mut tiny_delta = first.clone();
+        tiny_delta.progress_percent = Some(10.4);
+        let mut final_view = first.clone();
+        final_view.progress_percent = Some(100.0);
+        final_view.installed_bytes = Some(10);
+        final_view.total_bytes = Some(10);
+
+        assert!(throttle.should_emit(&first, base));
+        assert!(!throttle.should_emit(&tiny_delta, base + Duration::from_millis(50)));
+        assert!(throttle.should_emit(
+            &tiny_delta,
+            base + FALLBACK_PROGRESS_MIN_INTERVAL + Duration::from_millis(1)
+        ));
+        assert!(throttle.should_emit(&final_view, base + Duration::from_millis(75)));
+    }
+
+    #[test]
+    fn fallback_model_sanitize_drops_non_finite_progress_values() {
+        let mut view = fallback_test_view(stt::nemotron::FallbackModelStatus::Downloading);
+        view.progress_percent = Some(f32::NAN);
+        view.speed_mbps = Some(f32::INFINITY);
+
+        let sanitized = sanitize_fallback_model_view(view);
+
+        assert_eq!(sanitized.progress_percent, None);
+        assert_eq!(sanitized.speed_mbps, None);
     }
 }
