@@ -2,12 +2,13 @@
 
 **Date:** 2026-07-01
 **Status:** Accepted (roadmap — Phase 8)
-**Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (CrispASR sidecar), [ADR 0005](0005-llama-server-agents.md) (LLM sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (runtime state machine)
+**Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (local fallback runtime history), [ADR 0005](0005-llama-server-agents.md) (LLM sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (runtime state machine)
+**Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the team profile still defaults to server-hosted live ASR when connected, but the desktop-local offline/degraded fallback is Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`.
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
 
 ## Context
 
-Yap's existing architecture is **local-first**: the CrispASR STT sidecar, llama-server LLM, and knowledge worker all run on the client machine. Benchmarks against a typical 16 GB i5 laptop CPU reveal hard limits:
+Yap's existing architecture is **local-first**: the local STT fallback, llama-server LLM, and knowledge worker all run on the client machine. Benchmarks against a typical 16 GB i5 laptop CPU reveal hard limits:
 
 | Workload | Result | Significance |
 |----------|--------|--------------|
@@ -28,7 +29,7 @@ Yap supports two deployment profiles. Neither profile is deleted. The team profi
 | Attribute | Solo / fallback profile | Team / server profile |
 |-----------|---------------------------|----------------------|
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
-| STT (live) | Local Moonshine v2 tiny (CrispASR sidecar) | Server-hosted Moonshine GPU (streaming ASR pool) |
+| STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server-hosted streaming ASR pool |
 | STT (batch) | Queue/block larger recordings when offline; no local Cohere default in PR3 | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
 | Diarization | Server-less (L3 worker, Phase 7b) | Two-pass server pipeline (ADR 0015, Phase 10) |
@@ -49,7 +50,7 @@ The Tauri desktop app (`yap-desktop`) retains everything that cannot be delegate
 | **Ghost / preview UI** | Tauri webview overlay; latency-sensitive rendering |
 | **Local file selection** | OS file picker; files may be uploaded to server for batch |
 | **Server connector** | Manages WSS (live) and HTTP/job (batch) connections to `yap-server` |
-| **Offline / solo fallback** | Local Moonshine v2 tiny; larger recordings should queue/block when server unreachable |
+| **Offline / solo fallback** | Local Nemotron INT8; larger recordings should queue/block when server unreachable |
 
 ### Server-side architecture (`yap-server` on a GB-class server node)
 
@@ -63,7 +64,7 @@ flowchart TB
         Router["Workload Router\n(per-tenant queues · fairness · backpressure)"]
 
         subgraph Pools["Model Pools"]
-            ASR["Streaming ASR pool\nMoonshine GPU\n(Wispr-style WSS)"]
+            ASR["Streaming ASR pool\nGPU\n(Wispr-style WSS)"]
             Batch["Cohere batch pool\nMultiple concurrent workers\nGPU-accelerated"]
             LLM["LLM pool\nScribe · polish · agents\n(GPU, multi-tenant)"]
         end
@@ -96,12 +97,12 @@ C4Container
     System_Boundary(desktopBoundary, "yap-desktop") {
         Container(desktop, "Desktop app", "Tauri + React", "Mic, UI, playback, settings")
         Container(connector, "Server connector", "Rust/Tauri", "WSS live and HTTP batch")
-        Container(fallback, "Moonshine v2 tiny fallback", "CrispASR", "Offline/degraded live transcription")
+        Container(fallback, "Nemotron INT8 fallback", "sherpa-onnx", "Offline/degraded live transcription")
     }
 
     System_Boundary(serverBoundary, "yap-server") {
         Container(router, "Workload router", "Service", "Queues, fairness, backpressure")
-        Container(asr, "Streaming ASR pool", "Moonshine GPU", "Live WSS tokens")
+        Container(asr, "Streaming ASR pool", "GPU", "Live WSS tokens")
         Container(batch, "Cohere batch pool", "GPU workers", "Large recording jobs")
         Container(llm, "LLM pool", "GPU workers", "Scribe, polish, agents")
         Container(kbCompiler, "KB compiler", "Service", "Permission-filtered OKF view")
@@ -131,12 +132,12 @@ C4Deployment
     Deployment_Node(userMachine, "End-user machine", "Windows/macOS") {
         Container(desktop, "yap-desktop", "Tauri + React", "Mic, UI, playback, settings")
         Container(connector, "Server connector", "Rust/Tauri", "WSS live and HTTP batch")
-        Container(fallback, "Moonshine v2 tiny fallback", "CrispASR", "Offline/degraded live transcription")
+        Container(fallback, "Nemotron INT8 fallback", "sherpa-onnx", "Offline/degraded live transcription")
     }
 
     Deployment_Node(gbNode, "GB-class server node", "DGX Spark GB10 now; GB300-class later") {
         Container(router, "Workload router", "Service", "Queues, fairness, backpressure")
-        Container(asr, "Streaming ASR pool", "Moonshine GPU", "Live WSS tokens")
+        Container(asr, "Streaming ASR pool", "GPU", "Live WSS tokens")
         Container(batch, "Cohere batch pool", "GPU workers", "Large recording jobs")
         Container(llm, "LLM pool", "GPU workers", "Scribe, polish, agents")
         Container(kbCompiler, "KB compiler", "Service", "Permission-filtered OKF view")
@@ -171,13 +172,13 @@ C4Deployment
 | **Per-tenant queues** | One queue per authenticated user (ADR 0016); fairness prevents one user monopolising GPU |
 | **Priority** | Interactive live (ASR pool) always prioritised over background batch jobs |
 | **Backpressure** | Router signals client when all pool workers are busy; client falls back to local sidecar or queues |
-| **Model residency** | Moonshine XOR Cohere exclusivity rule from ADR 0002 **relaxes on the server**: a GPU pool can hold multiple models resident simultaneously; the router allocates to the appropriate pool per request type |
+| **Model residency** | Client local-model exclusivity **relaxes on the server**: a GPU pool can hold multiple models resident simultaneously; the router allocates to the appropriate pool per request type |
 
 #### Model pools
 
 | Pool | Model | Mode | Notes |
 |------|-------|------|-------|
-| **Streaming ASR pool** | Moonshine (GPU) | Live mic, real-time WSS | Wispr-Flow-style; thin client streams Opus chunks; server returns partial/final tokens |
+| **Streaming ASR pool** | Server-selected GPU ASR | Live mic, real-time WSS | Wispr-Flow-style; thin client streams Opus chunks; server returns partial/final tokens |
 | **Cohere batch pool** | Cohere Transcribe (GPU) | File / queue jobs | Multiple concurrent workers; GPU throughput removes the 26-min CPU bottleneck |
 | **LLM pool** | Scribe/polish + agent models (GPU) | Scribe polish, Student/Curator/Analyst/Coordinator | Multi-tenant; `-ngl` not 0 on GPU |
 
@@ -192,7 +193,7 @@ sequenceDiagram
     participant Router as Workload router
     participant ASR as Streaming ASR pool
     participant Batch as Cohere batch pool
-    participant Fallback as Local Moonshine v2 tiny
+    participant Fallback as Local Nemotron INT8
 
     User->>Desktop: start live dictation
     Desktop->>Connector: mic frames + vad_segments
@@ -218,10 +219,10 @@ sequenceDiagram
 
 | Path | When used | Notes |
 |------|-----------|-------|
-| **Server streaming ASR** (team default) | Team profile; server reachable | Client streams Opus → server Moonshine GPU → partial tokens returned over WSS; lowest latency on LAN |
-| **Local Moonshine v2 tiny** (offline/degraded fallback) | Solo profile; server unreachable; degraded mode | CrispASR sidecar on client; ~183 MB GGUF; quality lower than server GPU |
+| **Server streaming ASR** (team default) | Team profile; server reachable | Client streams Opus → server ASR pool → partial tokens returned over WSS; lowest latency on LAN |
+| **Local Nemotron INT8** (offline/degraded fallback) | Solo profile; server unreachable; degraded mode | sherpa-onnx recognizer on client; quality/language coverage lower than server GPU |
 
-**Local Moonshine v2 tiny is a fallback flag, not the product.** In team profile, the default live path is server-hosted streaming ASR. The client connector detects server reachability and falls back automatically.
+**Local Nemotron INT8 is a fallback flag, not the product.** In team profile, the default live path is server-hosted streaming ASR. The client connector detects server reachability and falls back automatically.
 
 ### On-prem is not cloud
 
@@ -235,13 +236,13 @@ The GB-class server node:
 
 ### Live path tradeoffs
 
-| Concern | Server streaming ASR (team) | Local Moonshine (solo/fallback) |
+| Concern | Server streaming ASR (team) | Local Nemotron (solo/fallback) |
 |---------|----------------------------|---------------------------------|
 | **Latency** | LAN round-trip (~1–5 ms) + server inference; typically competitive | Pure local; no network |
 | **Bandwidth** | ~16 kbps Opus audio upstream | Zero |
 | **Privacy** | Audio leaves device → server (org-controlled LAN) | Audio never leaves device |
 | **Offline** | Requires LAN/VPN | Fully offline |
-| **Quality** | GPU Moonshine; potentially larger model | Moonshine v2 tiny Q4 |
+| **Quality** | GPU model chosen by the router; potentially larger model | Nemotron INT8 fallback |
 | **Throughput** | GPU pool; multiple users concurrently | Single user, single thread |
 
 ## Consequences
@@ -249,7 +250,7 @@ The GB-class server node:
 ### Positive
 
 - **CPU bottleneck removed** — Cohere batch drops from ~26 min (CPU) to a few minutes on the GPU pool, with concurrent multi-user throughput. (Exact GPU wall time is unbenchmarked; see § Open questions.)
-- **Better live quality** — GPU Moonshine can run a larger model variant than the client can afford locally.
+- **Better live quality** — the server can run larger or more specialized ASR models than the client can afford locally.
 - **Solo profile preserved** — no regression for offline or privacy-max users.
 - **Clear trust framing** — "our hardware, our network" resolves the local-first/GPU tension cleanly.
 - **Scalable LLM** — GPU LLM pool enables richer agents without CPU constraints.
@@ -309,7 +310,7 @@ On `Connected` loss → switch to solo/local fallback; toast "Using local transc
 
 - [ ] `server/` staging area and Phase 8 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in Phase 12)
 - [ ] Workload router: per-user queues, priority, pool dispatch
-- [ ] Streaming ASR pool: Moonshine GPU, WSS endpoint
+- [ ] Streaming ASR pool: GPU ASR, WSS endpoint
 - [ ] Cohere batch pool: concurrent GPU workers, job queue
 - [ ] Client server-connector: WSS live path + HTTP batch upload + profile detection
 - [ ] Local-fallback logic: auto-switch on server unreachability

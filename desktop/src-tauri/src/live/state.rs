@@ -55,6 +55,7 @@ pub struct LiveSessionView {
     pub status: LiveSessionStatus,
     pub route: LiveRoute,
     pub capture_mode: LiveCaptureMode,
+    pub active_capture_mode: Option<LiveCaptureMode>,
     pub hotkey: String,
     pub input_device_id: Option<String>,
     pub input_device_label: Option<String>,
@@ -75,6 +76,7 @@ impl LiveSessionView {
             status: LiveSessionStatus::Idle,
             route: LiveRoute::None,
             capture_mode: settings.capture_mode,
+            active_capture_mode: None,
             hotkey: settings.hotkey.clone().unwrap_or_default(),
             input_device_id: settings.input_device_id.clone(),
             input_device_label: settings.input_device_id.clone(),
@@ -98,7 +100,8 @@ pub fn is_live_capture_active(status: LiveSessionStatus) -> bool {
 }
 
 pub fn is_live_session_started(status: LiveSessionStatus) -> bool {
-    is_live_capture_active(status) || status == LiveSessionStatus::Armed
+    is_live_capture_active(status)
+        || matches!(status, LiveSessionStatus::Armed | LiveSessionStatus::Saving)
 }
 
 impl LiveSessionState {
@@ -122,13 +125,15 @@ impl LiveSessionState {
         self.update(|view| {
             view.error = None;
             view.level = Some(0.0);
-            view.route = live_route_for(setup, server_ready);
-            view.status = if view.route == LiveRoute::Blocked {
+            let route = live_route_for(setup, server_ready);
+            view.route = route;
+            view.active_capture_mode = (route != LiveRoute::Blocked).then_some(view.capture_mode);
+            view.status = if route == LiveRoute::Blocked {
                 LiveSessionStatus::Blocked
             } else {
                 LiveSessionStatus::Armed
             };
-            if view.route == LiveRoute::Blocked {
+            if route == LiveRoute::Blocked {
                 view.error = Some(blocked_message(setup).into());
             }
         })
@@ -141,6 +146,16 @@ impl LiveSessionState {
             view.partial_text = None;
             view.route = LiveRoute::None;
             view.status = LiveSessionStatus::Idle;
+            view.active_capture_mode = None;
+        })
+    }
+
+    pub fn begin_saving(&self) -> LiveSessionView {
+        self.update(|view| {
+            view.error = None;
+            view.level = Some(0.0);
+            view.status = LiveSessionStatus::Saving;
+            view.active_capture_mode = None;
         })
     }
 
@@ -163,6 +178,7 @@ impl LiveSessionState {
             } else {
                 view.route = LiveRoute::Blocked;
                 view.status = LiveSessionStatus::Blocked;
+                view.active_capture_mode = None;
                 view.error = Some("Server unavailable and local fallback is not ready.".into());
             }
         })
@@ -176,6 +192,7 @@ impl LiveSessionState {
             view.partial_text = None;
             view.route = LiveRoute::LocalFallback;
             view.status = LiveSessionStatus::Listening;
+            view.active_capture_mode.get_or_insert(view.capture_mode);
         })
     }
 
@@ -199,7 +216,9 @@ impl LiveSessionState {
         self.update(|view| {
             view.error = None;
             view.partial_text = Some(text.to_string());
-            view.status = LiveSessionStatus::Speaking;
+            if view.status != LiveSessionStatus::Saving {
+                view.status = LiveSessionStatus::Speaking;
+            }
         })
     }
 
@@ -208,7 +227,9 @@ impl LiveSessionState {
             view.error = None;
             view.partial_text = None;
             view.final_text = Some(append_final_text(view.final_text.as_deref(), text));
-            view.status = LiveSessionStatus::Settling;
+            if view.status != LiveSessionStatus::Saving {
+                view.status = LiveSessionStatus::Settling;
+            }
         })
     }
 
@@ -228,11 +249,15 @@ impl LiveSessionState {
 
     pub fn block_with_error(&self, message: &str) -> LiveSessionView {
         self.update(|view| {
+            let was_saving = view.status == LiveSessionStatus::Saving;
             view.error = Some(message.to_string());
             view.level = Some(0.0);
-            view.partial_text = None;
+            if !was_saving {
+                view.partial_text = None;
+            }
             view.route = LiveRoute::Blocked;
             view.status = LiveSessionStatus::Blocked;
+            view.active_capture_mode = None;
         })
     }
 }
@@ -350,6 +375,54 @@ mod tests {
         let view = state.stop();
 
         assert_eq!(view.final_text.as_deref(), Some("hello."));
+    }
+
+    #[test]
+    fn saving_counts_as_busy_while_live_stop_drains() {
+        assert!(is_live_session_started(LiveSessionStatus::Saving));
+    }
+
+    #[test]
+    fn saving_keeps_drain_text_without_returning_to_recording() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: LiveCaptureMode::Toggle,
+            input_device_id: None,
+        });
+        state.update(|view| {
+            view.active_capture_mode = Some(LiveCaptureMode::Toggle);
+            view.route = LiveRoute::LocalFallback;
+            view.status = LiveSessionStatus::Listening;
+        });
+
+        let saving = state.begin_saving();
+        assert_eq!(saving.status, LiveSessionStatus::Saving);
+        assert_eq!(saving.active_capture_mode, None);
+
+        let final_view = state.update_final("tail text");
+        assert_eq!(final_view.status, LiveSessionStatus::Saving);
+        assert_eq!(final_view.final_text.as_deref(), Some("tail text"));
+
+        let listening = state.return_to_listening();
+        assert_eq!(listening.status, LiveSessionStatus::Saving);
+    }
+
+    #[test]
+    fn saving_block_keeps_partial_text_for_stop_race() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: LiveCaptureMode::Toggle,
+            input_device_id: None,
+        });
+        state.update_partial("draft");
+        state.begin_saving();
+
+        let view = state.block_with_error("Live stream stopped.");
+
+        assert_eq!(view.status, LiveSessionStatus::Blocked);
+        assert_eq!(view.partial_text.as_deref(), Some("draft"));
     }
 
     #[test]

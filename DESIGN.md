@@ -113,8 +113,9 @@ the current file and transcript feel more important than the model, auth state,
 or runner details. Technical setup belongs in a details drawer or secondary
 status area unless something needs attention.
 
-Use the phrase "local" sparingly but confidently. Users should understand that
-files stay on this device without the app sounding like infrastructure tooling.
+Use route labels sparingly but confidently. Users should understand whether work
+is private on this device or running on the org-owned server without the app
+sounding like infrastructure tooling.
 
 ## Colors
 
@@ -162,6 +163,21 @@ Use an 8px rhythm. The Tauri window enforces a minimum of 1122×740 (default
 Responsive single-column at mobile widths (e.g. 360px) is not a current target
 unless `minWidth` is lowered later. Nothing in the main flow should require
 horizontal scrolling at the enforced minimum size.
+
+## Motion & Stability
+
+Motion should feel quick, but it cannot move the target out from under the
+cursor.
+
+- Animate `transform` and `opacity` before layout dimensions.
+- Keep hover hit areas stable while the visible control morphs inside them.
+- Use one owner for geometry: either React lays out an in-window surface, or
+  Rust/Tauri owns the native window frame.
+- Test motion during the transition, not only after it settles.
+- Respect `prefers-reduced-motion`.
+
+Do not resize native windows from multiple layers, animate hit-area width on
+hover, or use decorative motion that changes the user's target.
 
 ## Elevation & Depth
 
@@ -218,8 +234,8 @@ details behind disclosure unless an error requires them.
 ## Do's and Don'ts
 
 - Do make the transcript or next user action the visual center.
-- Do say "Private on this device" or "Files stay on this machine" instead of
-  exposing implementation details.
+- Do say "Private on this device" or "Org server" instead of exposing
+  implementation details.
 - Do keep the app usable at the Tauri minimum size (1122×740) with no overlapping controls.
 - Do use icons for actions like remove, reveal, copy, settings, and export.
 - Don't lead with model IDs, Python paths, auth mechanisms, or RTX jargon.

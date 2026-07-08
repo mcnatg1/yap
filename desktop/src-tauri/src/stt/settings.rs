@@ -1,21 +1,38 @@
 use crate::stt::error::SttError;
-use crate::stt::gpu::GpuPreference;
 
-pub fn effective_gpu_preference() -> GpuPreference {
-    preference_from_env_value(std::env::var("YAP_USE_GPU").ok().as_deref())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalComputeTarget {
+    Auto,
+    Cpu,
 }
 
-fn preference_from_env_value(value: Option<&str>) -> GpuPreference {
-    let Some(trimmed) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return GpuPreference::Auto;
-    };
-    crate::stt::gpu::gpu_preference_from(Some(trimmed))
+impl LocalComputeTarget {
+    pub fn id(self) -> String {
+        match self {
+            Self::Auto => "auto".into(),
+            Self::Cpu => "cpu".into(),
+        }
+    }
+}
+
+pub fn effective_compute_target() -> LocalComputeTarget {
+    if let Some(target) =
+        compute_target_from_env_value(std::env::var("YAP_USE_GPU").ok().as_deref())
+    {
+        return target;
+    }
+    saved_compute_target()
+}
+
+#[cfg(test)]
+fn compute_target_from_env_for_test(value: Option<&str>) -> LocalComputeTarget {
+    compute_target_from_env_value(value).unwrap_or(LocalComputeTarget::Auto)
 }
 
 pub fn polish_num_gpu_layers() -> u32 {
-    match effective_gpu_preference() {
-        GpuPreference::Cpu => 0,
-        GpuPreference::Auto | GpuPreference::On => 99,
+    match effective_compute_target() {
+        LocalComputeTarget::Cpu => 0,
+        LocalComputeTarget::Auto => 99,
     }
 }
 
@@ -35,6 +52,41 @@ fn settings_dir() -> std::path::PathBuf {
 
 fn fallback_disabled_path() -> std::path::PathBuf {
     settings_dir().join("local-fallback.disabled")
+}
+
+fn compute_target_path() -> std::path::PathBuf {
+    settings_dir().join("compute-target.txt")
+}
+
+pub fn saved_compute_target() -> LocalComputeTarget {
+    std::fs::read_to_string(compute_target_path())
+        .ok()
+        .and_then(|value| parse_compute_target(&value))
+        .unwrap_or(LocalComputeTarget::Auto)
+}
+
+pub fn set_local_compute_target(target: &str) -> Result<(), SttError> {
+    let target = parse_compute_target(target).ok_or(SttError::SidecarUnreachable)?;
+    let path = compute_target_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| SttError::SidecarUnreachable)?;
+    }
+    std::fs::write(path, format!("{}\n", target.id())).map_err(|_| SttError::SidecarUnreachable)
+}
+
+fn compute_target_from_env_value(value: Option<&str>) -> Option<LocalComputeTarget> {
+    let trimmed = value.map(str::trim).filter(|value| !value.is_empty())?;
+    parse_compute_target(trimmed)
+}
+
+fn parse_compute_target(value: &str) -> Option<LocalComputeTarget> {
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "auto" => Some(LocalComputeTarget::Auto),
+        "cpu" | "0" | "false" | "off" | "no" => Some(LocalComputeTarget::Cpu),
+        "1" | "true" | "on" | "yes" => Some(LocalComputeTarget::Auto),
+        _ => None,
+    }
 }
 
 pub fn local_fallback_enabled() -> bool {
@@ -61,14 +113,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_use_auto_gpu() {
-        assert_eq!(preference_from_env_value(None), GpuPreference::Auto);
-        assert_eq!(preference_from_env_value(Some(" ")), GpuPreference::Auto);
+    fn default_settings_use_auto_compute() {
+        assert_eq!(
+            compute_target_from_env_for_test(None),
+            LocalComputeTarget::Auto
+        );
+        assert_eq!(
+            compute_target_from_env_for_test(Some(" ")),
+            LocalComputeTarget::Auto
+        );
     }
 
     #[test]
     fn env_can_force_cpu() {
-        assert_eq!(preference_from_env_value(Some("cpu")), GpuPreference::Cpu);
+        assert_eq!(
+            compute_target_from_env_for_test(Some("cpu")),
+            LocalComputeTarget::Cpu
+        );
+    }
+
+    #[test]
+    fn rejects_specific_gpu_target_for_local_asr() {
+        assert_eq!(parse_compute_target("gpu:1"), None);
+        assert_eq!(parse_compute_target("auto"), Some(LocalComputeTarget::Auto));
+        assert_eq!(parse_compute_target("cpu"), Some(LocalComputeTarget::Cpu));
+        assert_eq!(parse_compute_target("gpu:nope"), None);
     }
 
     #[test]

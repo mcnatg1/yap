@@ -1,6 +1,7 @@
 # Yap Desktop
 
-Tauri desktop app for the local Moonshine fallback sidecar. See `..\README.md` for the repo map.
+Tauri desktop app for the local Nemotron INT8 fallback. Yap targets installed desktop
+windows, not phone/mobile layouts. See `..\README.md` for the repo map.
 
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop

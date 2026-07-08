@@ -1,6 +1,6 @@
 import { polishNumGpuLayers } from "@/settings";
 
-export const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
+const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
 
 export type PolishTone = "light" | "clean" | "notes";
 

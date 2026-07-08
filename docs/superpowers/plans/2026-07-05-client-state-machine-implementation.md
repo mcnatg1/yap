@@ -6,7 +6,7 @@
 
 **Architecture:** Phase 1/2 starts by changing current app state owners instead of adding side files: shared TypeScript projection types move to `desktop/src/lib/app-types.ts`, and UI components render recording jobs instead of owning `UploadItem`. The durable source of truth then moves into a Tauri Rust `RuntimeOrchestrator` that wraps current STT dispatch state and later owns server connector, preprocessing, and diarization transitions.
 
-**Tech Stack:** Tauri 2, Rust, React 19, TypeScript, Vitest, Cargo tests, existing CrispASR/Moonshine fallback commands.
+**Tech Stack:** Tauri 2, Rust, React 19, TypeScript, Vitest, Cargo tests, in-process Nemotron fallback commands.
 
 ---
 

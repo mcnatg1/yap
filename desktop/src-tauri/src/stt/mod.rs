@@ -1,19 +1,8 @@
-//! STT runtime: dispatcher, error contract, and CrispASR local sidecar.
+//! STT runtime: dispatcher, error contract, and local fallback artifacts.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-pub(crate) fn hide_child_console(command: &mut std::process::Command) {
-    command.creation_flags(0x08000000);
-}
-
-#[cfg(not(windows))]
-pub(crate) fn hide_child_console(_command: &mut std::process::Command) {}
 
 pub fn logs_dir() -> PathBuf {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -27,11 +16,7 @@ pub fn yap_log_path() -> PathBuf {
 }
 
 pub fn stt_log_path() -> PathBuf {
-    logs_dir().join("crispasr.log")
-}
-
-pub fn sidecar_stderr_log_path() -> PathBuf {
-    logs_dir().join("crispasr-sidecar.log")
+    logs_dir().join("asr.log")
 }
 
 fn format_timestamp() -> String {
@@ -67,14 +52,9 @@ pub(crate) fn log_yap(message: &str) {
     append_log(&yap_log_path(), message);
 }
 
-pub mod binary;
-pub mod crispasr;
 pub mod dispatch;
 pub mod error;
-pub mod gpu;
 pub mod model;
+pub mod nemotron;
 pub mod parity;
-pub mod pin;
-pub mod progress;
 pub mod settings;
-pub mod sidecar;

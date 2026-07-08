@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "packageManager": "pnpm@10.24.0",
+  "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=24 <25"
   },
@@ -39,7 +39,7 @@
     "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/cli": "^2",
-    "@types/node": "^26.1.0",
+    "@types/node": "^24.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",

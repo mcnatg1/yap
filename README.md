@@ -2,17 +2,19 @@
 
 Yap is a staged monorepo for the MVP: one desktop app, one future server tier, and the docs that keep the architecture honest.
 
-The desktop is a Tauri app with a local Moonshine v2 tiny fallback. Larger recording transcription belongs on the GB-class server path once `yap-server` exists. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
+The desktop is a Tauri app with a local Nemotron live fallback. Larger recording transcription belongs on the GB-class server path once `yap-server` exists. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
 
 ## Current Posture
 
-- Local/live fallback: Moonshine v2 tiny through a CrispASR sidecar.
+- Local/live fallback: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`.
+- Product surface: installed Tauri desktop app only. Do not add phone/mobile-specific
+  layouts; support normal and narrow desktop windows.
 - Local fallback install: explicit setup/settings action; runtime never silently downloads models.
 - Client workflow: typed recording-job state for setup, local fallback, future server routing, preprocessing, and diarization.
 - Batch/large recordings: future GB-class server Cohere path.
 - Offline without a suitable server/GPU path: queue or block instead of producing low-confidence
   official-looking transcripts.
-- Punctuation stays enabled through the pinned FireRed punctuation companion.
+- Nemotron native punctuation stays enabled; no extra local punctuation model is installed.
 - Editor-specific config is not tracked. Use whichever editor you want.
 - MVP repo posture: staged monorepo, no Nx/Turborepo, no separate `yap-contracts` yet.
 
@@ -37,7 +39,6 @@ The desktop is a Tauri app with a local Moonshine v2 tiny fallback. Larger recor
     |-- README.md                     Desktop-only quick commands.
     |-- package.json                  pnpm scripts and frontend deps.
     |-- vite.config.ts                Vite/Tauri dev server config.
-    |-- crispasr-version.txt          Pinned CrispASR/model/tokenizer/punctuation artifacts.
     |-- src/                          React app.
     |   |-- App.tsx                   Main app state and screen composition.
     |   |-- stt.ts                    Tauri STT event/invoke client.
@@ -52,31 +53,30 @@ The desktop is a Tauri app with a local Moonshine v2 tiny fallback. Larger recor
         |-- Cargo.toml                Rust/Tauri deps.
         |-- tauri.conf.json           Window and bundle config.
         |-- nsis-hooks.nsh            Windows installer DLL hook.
-        |-- tests/parity.rs           Sidecar smoke/parity checks.
+        |-- examples/nemotron_profile.rs Local live runtime profiler.
+        |-- tests/parity.rs           Mock verbose-json parity contract.
         `-- src/
             |-- lib.rs                Tauri commands, event wiring, app lifecycle.
             `-- stt/
-                |-- binary.rs         CrispASR binary resolution/install verification.
-                |-- crispasr.rs       HTTP transcription client and retry path.
                 |-- dispatch.rs       Batch orchestration and transcript file writes.
                 |-- error.rs          Stable STT error codes/messages.
-                |-- gpu.rs            GPU detection/preference.
-                |-- model.rs          Model cache/download/verification.
+                |-- model.rs          Shared model cache/download/verification helpers.
+                |-- nemotron.rs       Pinned sherpa-onnx Nemotron model bundle.
                 |-- parity.rs         Small WER/timestamp helpers for tests.
-                |-- pin.rs            `crispasr-version.txt` parser.
                 |-- progress.rs       Progress event structs.
-                |-- settings.rs       Env-only GPU preference (`YAP_USE_GPU`); no persisted app settings.
-                `-- sidecar.rs        Sidecar process lifecycle, auth, launch args.
+                `-- settings.rs       Local fallback and compute-target settings.
 ```
 
-## Runtime Flow
+## Current Local Fallback Flow
 
-1. The React UI calls `start_transcribe` through `desktop/src/stt.ts`.
-2. Tauri spawns a worker thread in `desktop/src-tauri/src/lib.rs`.
-3. `stt::dispatch` serializes files, emits progress, and writes sibling `.txt` files.
-4. `stt::sidecar` uses the already-installed CrispASR sidecar, model, tokenizer, and punctuation
-   model; setup/settings own downloads and removal.
-5. `stt::crispasr` sends authenticated loopback HTTP requests and returns transcript text.
+Official large recordings use or wait for the future `serverBatch` path. The
+local path in this branch is the explicit Nemotron INT8 fallback for live/offline
+work, plus setup/install/remove controls for the pinned sherpa model artifacts.
+
+1. The React UI calls live/setup commands through `desktop/src/live.ts` and `desktop/src/settings.ts`.
+2. Tauri owns mic capture, hotkey state, the live overlay window, and the local fallback runtime.
+3. `stt::nemotron` resolves/downloads the pinned Nemotron INT8 artifact set; the live worker keeps one in-process sherpa recognizer warm.
+4. Larger recording jobs queue or block until the server contract exists instead of silently producing official-looking local batch transcripts.
 
 ## Development
 
@@ -115,6 +115,15 @@ git diff --check
 Get-Content docs\runbooks\repo-housekeeping.md
 ```
 
+Local live profiling:
+
+```powershell
+cd C:\dev\cohere-transcribe-local
+cargo run --release --manifest-path .\desktop\src-tauri\Cargo.toml --example nemotron_profile -- <clip.wav> [reference.txt]
+```
+
+The profiler exercises the same in-process Nemotron `LiveStreamEngine` as the app and reports load time, decode time, real-time factor, first-text latency, optional WER, and transcript output.
+
 ## MVP Monorepo Rule
 
 Keep code here until the first server path is real enough to split:
@@ -143,7 +152,7 @@ These are intentionally local and ignored:
 
 - No Python STT fallback runtime.
 - No local Cohere batch default.
-- No runtime backend selector.
+- No runtime STT model/backend selector.
 - No command palette or generated UI drawer.
 - No editor-specific project config.
 - No production `yap-server` connector yet.

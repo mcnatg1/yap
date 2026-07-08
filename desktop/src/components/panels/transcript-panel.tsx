@@ -56,10 +56,12 @@ function RecordingPlayer({
   item,
   onOpen,
   onReveal,
+  variant = "panel",
 }: {
   item: RecordingJobView;
   onOpen: (path: string) => void;
   onReveal: (path: string) => void;
+  variant?: "panel" | "modal";
 }) {
   const displayedSecondRef = useRef(0);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -210,8 +212,8 @@ function RecordingPlayer({
   }
 
   return (
-    <section className="grid gap-3 border-b bg-muted/40 p-4 sm:p-5" aria-label="Recording playback">
-      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <section className={cn("grid gap-3 border-b", variant === "modal" ? "bg-background px-8 py-6" : "bg-muted/40 p-4 sm:p-5")} aria-label="Recording playback">
+      <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
           <FileAudio className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0">
@@ -226,10 +228,7 @@ function RecordingPlayer({
             </p>
           </div>
         </div>
-        <ButtonGroup
-          aria-label="Recording actions"
-          className="w-full [&>[data-slot=button]]:flex-1 sm:w-auto sm:[&>[data-slot=button]]:flex-none"
-        >
+        <ButtonGroup aria-label="Recording actions">
           <Button
             aria-label={`Open recording ${item.name}`}
             onClick={() => onOpen(item.path)}
@@ -252,7 +251,7 @@ function RecordingPlayer({
           </Button>
         </ButtonGroup>
       </div>
-      <div className="rounded-lg border bg-background p-3">
+      <div className={cn("rounded-lg border bg-background p-3", variant === "modal" && "rounded-2xl border-0 bg-muted/35 p-5 shadow-[0_0_0_1px_rgba(0,0,0,0.04)]")}>
         <div className="flex items-center gap-3">
           <Button
             aria-label={playing ? `Pause recording ${item.name}` : `Play recording ${item.name}`}
@@ -356,6 +355,7 @@ export function TranscriptPanel({
   onReveal,
   running,
   text,
+  variant = "panel",
 }: {
   className?: string;
   elapsedSeconds: number;
@@ -367,6 +367,7 @@ export function TranscriptPanel({
   onReveal: (path: string) => void;
   running: boolean;
   text?: string;
+  variant?: "panel" | "modal";
 }) {
   const output = item?.output;
   const isDone = isRecordingFinished(item?.status);
@@ -392,11 +393,13 @@ export function TranscriptPanel({
   return (
     <Card
       className={cn(
-        "surface-workspace-inset flex min-h-[420px] min-w-0 flex-col bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]",
+        variant === "modal"
+          ? "flex h-full min-h-0 min-w-0 flex-col gap-0 rounded-none bg-background py-0"
+          : "surface-workspace-inset flex min-h-[420px] min-w-0 flex-col bg-card py-0 xl:sticky xl:top-5 xl:min-h-[calc(100vh-180px)]",
         className,
       )}
     >
-      <CardHeader className="gap-3 border-b p-4 sm:p-5">
+      <CardHeader className={cn("gap-3 border-b", variant === "modal" ? "p-8 pb-6" : "p-4 sm:p-5")}>
         <div className="min-w-0">
           <CardTitle className="truncate text-lg">{item?.name ?? "Transcript"}</CardTitle>
           <CardDescription>
@@ -466,9 +469,9 @@ export function TranscriptPanel({
         ) : null}
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-        {item ? <RecordingPlayer item={item} onOpen={onOpen} onReveal={onReveal} /> : null}
+        {item ? <RecordingPlayer item={item} onOpen={onOpen} onReveal={onReveal} variant={variant} /> : null}
         <ScrollArea className="min-h-[280px] flex-1 bg-[var(--surface-transcript)]">
-          <div className="min-h-[280px] p-5">
+          <div className={cn("min-h-[280px]", variant === "modal" ? "p-8 pt-7" : "p-5")}>
             {isDone ? (
               text ? (
                 <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{text}</pre>

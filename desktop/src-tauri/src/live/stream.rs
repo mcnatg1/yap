@@ -1,191 +1,105 @@
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 
 use crate::stt::error::SttError;
 
-const STREAM_BACKEND: &str = "moonshine-streaming";
-const STREAM_STEP_MS: &str = "1000";
-const STREAM_FINAL_ON_SILENCE_MS: &str = "600";
+const SAMPLE_RATE: i32 = 16_000;
+const TAIL_SILENCE: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamEvent {
-    Partial(String),
-    Final(String),
+pub struct LiveStreamEngine {
+    recognizer: OnlineRecognizer,
+    stream: OnlineStream,
+    last_text: String,
 }
 
-#[derive(Debug)]
-pub struct LiveStreamProcess {
-    child: Child,
-}
-
-impl LiveStreamProcess {
-    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
-        self.child.stdin.take()
+impl LiveStreamEngine {
+    pub fn new() -> Result<Self, SttError> {
+        let paths = crate::stt::nemotron::resolve_model()?;
+        let started = Instant::now();
+        let recognizer = OnlineRecognizer::create(&recognizer_config(&paths))
+            .ok_or(SttError::SidecarUnreachable)?;
+        crate::stt::log_stt_timed(
+            "nemotron.load",
+            started.elapsed(),
+            crate::stt::nemotron::MODEL_LABEL,
+        );
+        let stream = recognizer.create_stream();
+        Ok(Self {
+            recognizer,
+            stream,
+            last_text: String::new(),
+        })
     }
 
-    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.child.stdout.take()
+    pub fn reset(&mut self) {
+        self.stream = self.recognizer.create_stream();
+        self.last_text.clear();
     }
 
-    pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    pub fn accept_samples(&mut self, samples: &[f32]) -> Option<String> {
+        if samples.is_empty() {
+            return None;
+        }
+        self.stream.accept_waveform(SAMPLE_RATE, samples);
+        self.decode_ready();
+        self.changed_text()
     }
 
-    pub fn shutdown(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for LiveStreamProcess {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamPaths {
-    pub binary: PathBuf,
-    pub model: PathBuf,
-    pub punc_model: PathBuf,
-}
-
-pub fn build_stream_args(
-    model: &Path,
-    punc_model: &Path,
-    gpu: &crate::stt::gpu::GpuStatus,
-) -> Vec<String> {
-    let cache_dir = model.parent().unwrap_or_else(|| Path::new("."));
-    let mut args = vec![
-        "--stream".to_string(),
-        "--stream-json".to_string(),
-        "--backend".to_string(),
-        STREAM_BACKEND.to_string(),
-        "-m".to_string(),
-        model.to_string_lossy().to_string(),
-        "-l".to_string(),
-        "en".to_string(),
-        "--cache-dir".to_string(),
-        cache_dir.to_string_lossy().to_string(),
-        "--punc-model".to_string(),
-        punc_model.to_string_lossy().to_string(),
-        "--stream-step".to_string(),
-        STREAM_STEP_MS.to_string(),
-        "--stream-final-on-silence-ms".to_string(),
-        STREAM_FINAL_ON_SILENCE_MS.to_string(),
-    ];
-    if gpu.layers > 0 {
-        args.push("--gpu-backend".to_string());
-        args.push("auto".to_string());
-    } else {
-        args.push("-ng".to_string());
-    }
-    args
-}
-
-pub fn parse_stream_event(line: &str) -> Option<StreamEvent> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    let text = value.get("text")?.as_str()?.trim();
-    if text.is_empty() {
-        return None;
+    pub fn finish(&mut self) -> Option<String> {
+        let tail = vec![0.0; silence_samples(TAIL_SILENCE)];
+        self.stream.accept_waveform(SAMPLE_RATE, &tail);
+        self.stream.input_finished();
+        self.decode_ready();
+        self.changed_text()
+            .or_else(|| (!self.last_text.is_empty()).then(|| self.last_text.clone()))
     }
 
-    let kinds = ["type", "event", "status"]
-        .into_iter()
-        .filter_map(|key| value.get(key).and_then(Value::as_str))
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>();
+    fn decode_ready(&self) {
+        while self.recognizer.is_ready(&self.stream) {
+            self.recognizer.decode(&self.stream);
+        }
+    }
 
-    if kinds.iter().any(|kind| kind.contains("final")) {
-        Some(StreamEvent::Final(text.to_string()))
-    } else if kinds.iter().any(|kind| kind.contains("partial")) || kinds.is_empty() {
-        Some(StreamEvent::Partial(text.to_string()))
-    } else {
-        None
+    fn changed_text(&mut self) -> Option<String> {
+        let text = self
+            .recognizer
+            .get_result(&self.stream)?
+            .text
+            .trim()
+            .to_string();
+        if text.is_empty() || text == self.last_text {
+            return None;
+        }
+        self.last_text = text.clone();
+        Some(text)
     }
 }
 
-pub fn resolve_stream_paths() -> Result<StreamPaths, SttError> {
-    if !crate::stt::settings::local_fallback_enabled() {
-        crate::stt::log_stt("live stream: local fallback disabled");
-        return Err(SttError::FallbackDisabled);
-    }
-
-    let exe_dir = current_exe_dir();
-    let binary = crate::stt::binary::resolve_for_spawn(&exe_dir)?;
-    let pin = crate::stt::pin::load_pin().map_err(|_| SttError::ModelCorrupt)?;
-    if !crate::stt::model::is_installed(&pin) {
-        crate::stt::log_stt("live stream: local fallback model missing");
-        return Err(SttError::ModelMissing);
-    }
-
-    let model_dir = crate::stt::model::models_dir();
-    Ok(StreamPaths {
-        binary,
-        model: model_dir.join(&pin.gguf_file),
-        punc_model: model_dir.join(&pin.punc_file),
-    })
+pub fn chunk_samples() -> usize {
+    (SAMPLE_RATE as u64 * crate::stt::nemotron::CHUNK_MS / 1000) as usize
 }
 
-pub fn spawn_stream_child() -> Result<LiveStreamProcess, SttError> {
-    let paths = resolve_stream_paths()?;
-    let gpu = crate::stt::gpu::GpuStatus::resolve();
-    spawn_stream_child_with_paths(&paths, &gpu)
+pub fn silence_samples(duration: Duration) -> usize {
+    (SAMPLE_RATE as u128 * duration.as_millis() / 1000) as usize
 }
 
-pub fn spawn_stream_child_with_paths(
-    paths: &StreamPaths,
-    gpu: &crate::stt::gpu::GpuStatus,
-) -> Result<LiveStreamProcess, SttError> {
-    spawn_child(&paths.binary, &paths.model, &paths.punc_model, gpu)
+fn recognizer_config(paths: &crate::stt::nemotron::NemotronPaths) -> OnlineRecognizerConfig {
+    let mut config = OnlineRecognizerConfig::default();
+    config.model_config.transducer.encoder = Some(path_string(&paths.encoder));
+    config.model_config.transducer.decoder = Some(path_string(&paths.decoder));
+    config.model_config.transducer.joiner = Some(path_string(&paths.joiner));
+    config.model_config.tokens = Some(path_string(&paths.tokens));
+    config.model_config.num_threads = crate::stt::nemotron::NUM_THREADS;
+    config.model_config.provider = Some("cpu".into());
+    config.model_config.model_type = Some("nemo_transducer".into());
+    config.decoding_method = Some("greedy_search".into());
+    config
 }
 
-fn spawn_child(
-    binary: &Path,
-    model: &Path,
-    punc_model: &Path,
-    gpu: &crate::stt::gpu::GpuStatus,
-) -> Result<LiveStreamProcess, SttError> {
-    let stderr_path = crate::stt::sidecar_stderr_log_path();
-    if let Some(parent) = stderr_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let stderr_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_path)
-        .map_err(|_| SttError::SidecarUnreachable)?;
-    let args = build_stream_args(model, punc_model, gpu);
-    crate::stt::log_stt(&format!(
-        "spawning live stream stderr_log={} binary={} args={:?}",
-        stderr_path.display(),
-        binary.display(),
-        args
-    ));
-
-    let mut command = Command::new(binary);
-    command.args(args);
-    command.env_clear();
-    command.envs(crate::stt::sidecar::sidecar_env(std::env::vars()));
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::from(stderr_file));
-    crate::stt::hide_child_console(&mut command);
-
-    let child = command.spawn().map_err(|err| {
-        crate::stt::log_stt(&format!("live stream spawn failed: {err}"));
-        SttError::SidecarUnreachable
-    })?;
-    Ok(LiveStreamProcess { child })
-}
-
-fn current_exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }
 
 #[cfg(test)]
@@ -193,122 +107,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stream_args_keep_punctuation_and_gpu_choice() {
-        let gpu = crate::stt::gpu::GpuStatus {
-            available: true,
-            adapter_name: Some("test gpu".into()),
-            preference: crate::stt::gpu::GpuPreference::Auto,
-            layers: 99,
+    fn stream_chunk_matches_pinned_nemotron_export() {
+        assert_eq!(chunk_samples(), 17_920);
+    }
+
+    #[test]
+    fn tail_silence_is_bounded() {
+        assert_eq!(silence_samples(Duration::from_millis(500)), 8_000);
+    }
+
+    #[test]
+    fn config_uses_nemotron_transducer_on_cpu() {
+        let paths = crate::stt::nemotron::NemotronPaths {
+            encoder: "C:/models/encoder.int8.onnx".into(),
+            decoder: "C:/models/decoder.int8.onnx".into(),
+            joiner: "C:/models/joiner.int8.onnx".into(),
+            tokens: "C:/models/tokens.txt".into(),
         };
-        let args = build_stream_args(
-            std::path::Path::new("C:/models/moonshine.gguf"),
-            std::path::Path::new("C:/models/punc.gguf"),
-            &gpu,
-        );
-        assert!(args.contains(&"--stream".to_string()));
-        assert!(args.contains(&"--stream-json".to_string()));
-        assert!(args.contains(&"--punc-model".to_string()));
-        assert!(args.contains(&"--cache-dir".to_string()));
-        assert!(args.contains(&"--stream-step".to_string()));
-        assert!(args.contains(&"--stream-final-on-silence-ms".to_string()));
-        assert!(!args.contains(&"--no-punctuation".to_string()));
-        assert!(args.contains(&"--gpu-backend".to_string()));
-    }
-
-    #[test]
-    fn stream_args_point_crispasr_at_model_cache_for_tokenizer() {
-        let gpu = crate::stt::gpu::GpuStatus {
-            available: false,
-            adapter_name: None,
-            preference: crate::stt::gpu::GpuPreference::Cpu,
-            layers: 0,
-        };
-        let args = build_stream_args(
-            std::path::Path::new("C:/models/moonshine.gguf"),
-            std::path::Path::new("C:/models/punc.gguf"),
-            &gpu,
-        );
-
-        let cache_dir = args.iter().position(|arg| arg == "--cache-dir").unwrap();
-        assert_eq!(args[cache_dir + 1], "C:/models");
-    }
-
-    #[test]
-    fn stream_args_use_lower_latency_live_defaults() {
-        let gpu = crate::stt::gpu::GpuStatus {
-            available: false,
-            adapter_name: None,
-            preference: crate::stt::gpu::GpuPreference::Cpu,
-            layers: 0,
-        };
-        let args = build_stream_args(
-            std::path::Path::new("C:/models/moonshine.gguf"),
-            std::path::Path::new("C:/models/punc.gguf"),
-            &gpu,
-        );
-
-        let step = args.iter().position(|arg| arg == "--stream-step").unwrap();
-        let silence = args
-            .iter()
-            .position(|arg| arg == "--stream-final-on-silence-ms")
-            .unwrap();
-        assert_eq!(args[step + 1], "1000");
-        assert_eq!(args[silence + 1], "600");
-    }
-
-    #[test]
-    fn stream_args_disable_gpu_when_layers_are_zero() {
-        let gpu = crate::stt::gpu::GpuStatus {
-            available: false,
-            adapter_name: None,
-            preference: crate::stt::gpu::GpuPreference::Cpu,
-            layers: 0,
-        };
-        let args = build_stream_args(
-            std::path::Path::new("C:/models/moonshine.gguf"),
-            std::path::Path::new("C:/models/punc.gguf"),
-            &gpu,
-        );
-        assert!(args.contains(&"-ng".to_string()));
-        assert!(!args.contains(&"--gpu-backend".to_string()));
-        assert!(!args.contains(&"--no-punctuation".to_string()));
-    }
-
-    #[test]
-    fn parses_partial_and_final_events() {
+        let config = recognizer_config(&paths);
         assert_eq!(
-            parse_stream_event(r#"{"type":"partial","text":"hello"}"#),
-            Some(StreamEvent::Partial("hello".into()))
+            config.model_config.model_type.as_deref(),
+            Some("nemo_transducer")
         );
+        assert_eq!(config.model_config.provider.as_deref(), Some("cpu"));
         assert_eq!(
-            parse_stream_event(r#"{"event":"final","text":"hello."}"#),
-            Some(StreamEvent::Final("hello.".into()))
+            config.model_config.num_threads,
+            crate::stt::nemotron::NUM_THREADS
         );
-        assert_eq!(parse_stream_event("not json"), None);
-    }
-
-    #[test]
-    fn parses_untyped_text_as_partial_and_ignores_empty_text() {
-        assert_eq!(
-            parse_stream_event(r#"{"text":"still listening"}"#),
-            Some(StreamEvent::Partial("still listening".into()))
-        );
-        assert_eq!(
-            parse_stream_event(r#"{"type":"partial","text":"   "}"#),
-            None
-        );
-        assert_eq!(parse_stream_event(r#"{"type":"partial"}"#), None);
-    }
-
-    #[test]
-    fn parser_accepts_status_or_event_kind() {
-        assert_eq!(
-            parse_stream_event(r#"{"status":"utterance_final","text":"done."}"#),
-            Some(StreamEvent::Final("done.".into()))
-        );
-        assert_eq!(
-            parse_stream_event(r#"{"type":"unknown","event":"partial_update","text":"do"}"#),
-            Some(StreamEvent::Partial("do".into()))
-        );
+        assert_eq!(config.decoding_method.as_deref(), Some("greedy_search"));
     }
 }

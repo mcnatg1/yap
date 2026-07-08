@@ -2,8 +2,13 @@
   "$schema": "../../gen/schemas/desktop-schema.json",
   "identifier": "wdio",
   "description": "Generated into src-tauri/capabilities only for desktop automation builds.",
-  "windows": ["main"],
+  "windows": ["main", "live-overlay"],
   "permissions": [
+    "core:window:allow-inner-size",
+    "core:window:allow-is-closable",
+    "core:window:allow-is-focused",
+    "core:window:allow-is-visible",
+    "core:window:allow-outer-size",
     "wdio:default",
     "wdio-webdriver:default"
   ]

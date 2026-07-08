@@ -50,7 +50,7 @@ describe("client recording workflow projection", () => {
   });
 
   it("labels the pinned local fallback model clearly", () => {
-    expect(fallbackModelLabel("moonshine-streaming-tiny-q4_k.gguf")).toBe("Moonshine v2 tiny");
+    expect(fallbackModelLabel("Nemotron 3.5 ASR Streaming 0.6B INT8")).toBe("Nemotron 3.5 ASR Streaming 0.6B INT8");
     expect(fallbackModelLabel("custom.gguf")).toBe("custom");
   });
 

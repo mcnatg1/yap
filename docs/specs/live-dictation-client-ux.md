@@ -3,11 +3,11 @@
 **Status:** Draft (2026-06-30)
 **Implements:** [ADR 0001](../adr/0001-dual-stt-backends.md), [ADR 0002](../adr/0002-crispasr-unified-stt-runtime.md) (live endpoint), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (Silero, orchestrator)
 **Depends on:** [STT sidecar spec](local-live-fallback-sidecar.md) (live WS), [LLM sidecar spec](local-llm-sidecar.md) (Scribe)
-**Scope:** Ship **English-only live transcription** — mic capture, Silero VAD, Moonshine streaming, optional Scribe polish, in-app preview, and the live overlay/hotkey foundation. No diarization/L3 (Phase 7), no cross-app text injection (Phase 7+).
+**Scope:** Ship **English-only live transcription** — mic capture, Silero VAD, Nemotron INT8 local streaming fallback, optional Scribe polish, in-app preview, and the live overlay/hotkey foundation. No diarization/L3 (Phase 7), no cross-app text injection (Phase 7+).
 
 > **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).
 
-> **2026-07-05 Phase 3a amendment:** The local Moonshine live-transcription branch implements real local fallback text streaming, plus local live WAV/TXT save into Home history, through the existing overlay and hotkey surface. It is not full Phase 3 completion: Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work. See [Local Moonshine Live Transcription](../superpowers/specs/2026-07-05-local-moonshine-live-transcription.md).
+> **2026-07-08 Phase 3a amendment:** The local live-transcription path uses one local model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. It keeps native punctuation, uses 1120 ms chunks until smaller chunks profile under real-time, and saves local live WAV/TXT output into Home history. Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work.
 
 ---
 
@@ -17,7 +17,7 @@
 - Mic permission + device selection.
 - Top-positioned live overlay foundation and typed live session state.
 - Configurable capture hotkey for in-app/overlay live recording.
-- Rust audio thread: capture → ring buffer → Silero VAD → frames to crispasr live WS.
+- Rust audio thread: capture → ring buffer → Silero VAD → frames to the warm sherpa Nemotron recognizer.
 - Live partial/final tokens rendered in an in-app panel (ghost preview).
 - Optional Scribe polish on finals with 400 ms bypass + raw-mode indicator.
 - “Save session” → WAV on disk (bridges to Phase 5 Cohere re-pass).
@@ -39,7 +39,7 @@ cpal input stream (16 kHz mono f32)
   → VAD worker thread:
        Silero ONNX (ort) per 30 ms frame → speech prob
        state: silence / speech; debounce
-  → on speech: stream PCM frames to crispasr live WS
+  → on speech: stream PCM frames to the warm sherpa Nemotron recognizer
   → on silence ≥ 1.5–2 s AND speech buffer ≥ 30 s: emit chunk-cut event
        (async .opus writer thread; manifest carries vad_segments) [hook only in P3]
 ```
@@ -52,7 +52,7 @@ cpal input stream (16 kHz mono f32)
 | VAD runtime | **`ort` (onnxruntime) + bundled `silero_vad.onnx`** | Same ORT as worker; full control of thresholds; ~2 MB model |
 | Not `silero-vad` crate | rejected default | Less control over framing/threshold; revisit only if `ort` integration churns |
 | Threading | dedicated **audio callback** + **VAD/dispatch thread** + **writer thread** | Callback stays real-time; no model inference on the callback |
-| Resampling | resample to 16 kHz mono before VAD/STT | Moonshine + Silero expect 16 kHz |
+| Resampling | resample to 16 kHz mono before VAD/STT | Nemotron + Silero expect 16 kHz |
 
 Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-agents-state-machine.md)); the worker never re-runs it.
 
@@ -65,7 +65,7 @@ Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-age
 | Runtime state | UI state | Indicator |
 |---------------|----------|-----------|
 | `Idle` | Idle | “Start live” button |
-| `LiveReady` (moonshine loaded) | Ready | Mic armed, “Listening soon…” |
+| `LiveReady` (Nemotron loaded) | Ready | Mic armed, “Listening soon…” |
 | `LiveActive` + silence | Listening | Animated mic / waveform idle |
 | `LiveActive` + speech | Transcribing | Live waveform + streaming partials (ghost text, dimmed) |
 | Scribe within budget | Polished | Final text settles (normal weight) |
@@ -88,7 +88,7 @@ Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-age
 
 ## 5. Ghost preview behavior
 
-- **Partials**: dimmed/italic, replaced in place as Moonshine revises.
+- **Partials**: dimmed/italic, replaced in place as Nemotron revises.
 - **Finals**: committed to normal weight; Scribe may replace a final with its polished version (dual-track stored: raw + polished).
 - User can toggle **Raw / Polished** view of the whole session.
 - “Save session” writes WAV (+ raw and polished text). In Phase 5 this WAV feeds a Cohere re-pass; in Phase 7 it feeds L3.
@@ -112,7 +112,7 @@ Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-age
 - [ ] Speaking English shows partials < ~300 ms after speech onset (warm sidecar).
 - [ ] Silence ≥ ~1.5 s finalizes the phrase.
 - [ ] Scribe polishes finals when within 400 ms; otherwise raw with visible badge — never blocks the stream.
-- [ ] Starting Live while batch runs is blocked with a clear message; switching unloads cohere → loads moonshine (orchestrator).
+- [ ] Starting Live while batch/server work is active is blocked or queued with a clear message; no dual STT work runs, and the local fallback loads Nemotron INT8 only.
 - [ ] “Save session” produces a playable WAV + raw/polished text.
 - [ ] Mic-denied path is recoverable (no dead end).
 - [ ] Chunk-cut hook writes a manifest with `vad_segments` (even though L3 doesn’t consume it yet).

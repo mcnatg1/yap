@@ -18,6 +18,17 @@ This is the shared reference the phase specs point to for their acceptance tests
 
 Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
 
+### Overlay and motion contract
+
+The live overlay has two test owners:
+
+| Owner | Covers | Must catch |
+|-------|--------|------------|
+| Playwright preview mode | DOM layout, visible island dimensions, hover/recording/processing/success states, reduced-motion behavior | One-frame layout jumps, hit-area shrink, overlap, text overflow |
+| WebdriverIO desktop smoke | Real Tauri overlay window properties and tray/app-window behavior | Taskbar/Alt-Tab exposure, focusability, native frame size drift |
+
+For overlay changes, settled screenshots are not enough. Add a short `requestAnimationFrame` sampler around hover/state churn and fail on unexpected rect drift. The native hover sensor must stay stable while the visible island animates inside it.
+
 ---
 
 ## 2. Fixtures
@@ -56,7 +67,7 @@ timestamp-shape coverage without shipping private or unclear audio.
 | Path | WER gate |
 |------|----------|
 | Server Cohere batch (en) | ≤ 0.12 |
-| Moonshine live (en, finals) | ≤ 0.18 |
+| Nemotron INT8 live (en, finals) | ≤ 0.18 |
 
 - A regression beyond gate **fails CI** for that backend; server pool sizing/model choice is the mitigation.
 
@@ -64,17 +75,17 @@ timestamp-shape coverage without shipping private or unclear audio.
 
 ## 4. CI matrix (pinned native runtimes)
 
-The risk is **native binaries**, not app logic. CI must run the pinned `crispasr` and `llama-server` per OS.
+The risk is **native runtimes**, not app logic. CI must run the pinned Nemotron/sherpa path and `llama-server` per OS.
 
-| OS | crispasr smoke | llama-server smoke | E2E |
+| OS | Nemotron live smoke | llama-server smoke | E2E |
 |----|----------------|--------------------|-----|
-| Windows x64 | ✅ load + 1 file | ✅ 1 completion | ✅ |
+| Windows x64 | ✅ profiler + fixture | ✅ 1 completion | ✅ |
 | macOS arm64 | ✅ | ✅ | ✅ |
 | macOS x64 | if retained | if retained | — |
 | Linux x64 | best-effort | best-effort | — |
 
-- Versions pinned in `desktop/crispasr-version.txt` and `desktop/llama-model.txt` (+ llama.cpp build hash).
-- Smoke = start sidecar at pinned version, run one fixture, assert non-empty output + clean exit. Catches breaking changes on upgrade ([ADR 0002](../adr/0002-crispasr-unified-stt-runtime.md) requirement).
+- Versions pinned in `desktop/src-tauri/src/stt/nemotron.rs` and `desktop/llama-model.txt` (+ llama.cpp build hash).
+- Smoke = run `nemotron_profile` against one fixture, assert non-empty output + real-time factor under gate. Catches breaking changes on upgrade ([ADR 0019](../adr/0019-local-streaming-model-selection.md)).
 
 ---
 
@@ -82,7 +93,7 @@ The risk is **native binaries**, not app logic. CI must run the pinned `crispasr
 
 | Phase | Critical tests |
 |-------|----------------|
-| 1–2 STT | sidecar parity, crash→restart→complete, port-conflict, local fallback disabled, queue continues past corrupt file |
+| 1–2 STT | Nemotron profiler, live state transitions, local fallback disabled, queue blocks larger files without server |
 | A–D LLM | Polish parity, 400 ms Scribe bypass, backend flag, empty-completion retry |
 | 3 Live | partial latency, silence finalize, raw-mode badge, mic-denied recovery, dual-STT block |
 | 4 LID | code mapping, low-confidence gate, multi-window probe agreement |

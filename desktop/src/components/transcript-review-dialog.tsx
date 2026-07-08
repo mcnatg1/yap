@@ -26,8 +26,8 @@ function prefersReducedMotion() {
 }
 
 function dialogTargetRect(): MorphRect {
-  const width = Math.min(900, window.innerWidth - 32);
-  const height = Math.min(window.innerHeight * 0.82, 720);
+  const width = Math.min(1120, window.innerWidth - 40);
+  const height = Math.min(720, window.innerHeight - 40);
 
   return {
     height,
@@ -155,7 +155,7 @@ export function TranscriptReviewDialog({
       <Dialog onOpenChange={handleOpenChange} open={open}>
         <DialogContent
           className={cn(
-            "h-[min(82vh,720px)] max-w-none gap-0 overflow-hidden rounded-[28px] border-0 bg-card/90 p-2 shadow-[0_0_0_1px_rgba(255,255,255,0.56),0_24px_80px_rgba(0,0,0,0.18)] backdrop-blur-2xl transition-opacity duration-100 data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-2 motion-reduce:animate-none sm:w-[min(900px,calc(100vw-2rem))] sm:max-w-none",
+            "h-[min(720px,calc(100vh-40px))] w-[1120px] gap-0 overflow-hidden rounded-2xl border-0 bg-background p-0 shadow-[0_24px_80px_rgba(0,0,0,0.28)] !max-w-[calc(100vw-40px)] transition-opacity duration-100 data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-2 motion-reduce:animate-none",
             phase && "opacity-0",
           )}
           showCloseButton
@@ -166,7 +166,6 @@ export function TranscriptReviewDialog({
           </DialogHeader>
           {item ? (
             <TranscriptPanel
-              className="h-full min-h-0 rounded-[22px] bg-card/95 shadow-none xl:static xl:top-auto xl:min-h-0 [&_[data-slot=card-action]_[data-slot=button-group]]:!w-full [&_[data-slot=card-action]_[data-slot=button]]:!flex-1 [&_[data-slot=card-action]]:!col-span-full [&_[data-slot=card-action]]:!col-start-1 [&_[data-slot=card-action]]:!row-start-2 [&_[data-slot=card-action]]:!w-full [&_[data-slot=card-action]]:!justify-self-stretch [&_[data-slot=card-header]]:pr-14"
               elapsedSeconds={elapsedSeconds}
               item={item}
               onCopy={onCopy}
@@ -176,6 +175,7 @@ export function TranscriptReviewDialog({
               onReveal={onReveal}
               running={running}
               text={text}
+              variant="modal"
             />
           ) : null}
         </DialogContent>
@@ -183,7 +183,7 @@ export function TranscriptReviewDialog({
       {phase && morphStyle ? (
         <div
           aria-hidden="true"
-          className="fixed z-[60] rounded-[22px] bg-card/90 shadow-[0_0_0_1px_rgba(255,255,255,0.56),0_18px_52px_rgba(0,0,0,0.14)] will-change-transform"
+          className="fixed z-[60] rounded-2xl bg-background shadow-[0_24px_80px_rgba(0,0,0,0.24)] will-change-transform"
           ref={morphLayerRef}
           style={morphStyle}
         />

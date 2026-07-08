@@ -18,10 +18,6 @@ export function showLiveOverlay(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("show_live_overlay");
 }
 
-export function hideLiveOverlay(): Promise<LiveSessionView> {
-  return invoke<LiveSessionView>("hide_live_overlay");
-}
-
 export function setLiveOverlayEnabled(enabled: boolean): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("set_live_overlay_enabled", { enabled });
 }
@@ -50,16 +46,12 @@ export function preflightInputDevice(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("preflight_input_device");
 }
 
-export function startLiveSession(): Promise<LiveSessionView> {
-  return invoke<LiveSessionView>("start_live_session");
+export function startLiveSession(activeCaptureMode?: LiveCaptureMode): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("start_live_session", { activeCaptureMode });
 }
 
 export function stopLiveSession(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("stop_live_session");
-}
-
-export function saveLiveSession(): Promise<SavedLiveSession> {
-  return invoke<SavedLiveSession>("save_live_session");
 }
 
 export function listSavedLiveSessions(): Promise<SavedLiveSession[]> {

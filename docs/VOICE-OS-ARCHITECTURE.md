@@ -1,9 +1,11 @@
 # Yap & Voice OS — System Architecture
 
 **Status:** Living document (2026-07-01)
-**Authority:** Decisions are normative in [ADR 0001–0018](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
+**Authority:** Decisions are normative in [ADR 0001–0019](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
-> **2026-07-01 — Major pivot:** Yap now targets a thin desktop client with an on-prem NVIDIA GB-class server tier for heavy transcription. DGX Spark GB10 is the first node profile; GB300-class nodes should keep the same server contract. The client keeps a local Moonshine v2 tiny sidecar as live/offline fallback; larger recordings belong on the server Cohere path. See [ADR 0014](adr/0014-server-tier-compute-topology.md) and [§ Two deployment profiles](#two-deployment-profiles) below.
+> **2026-07-08 — Local model reset:** Yap keeps one local live/offline fallback model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Client-side fusion routing is rejected; model routing belongs on the server.
+
+> **ADR precedence:** ADR 0014-0019 are the current direction for team/server mode, official large-recording paths, and local fallback model selection. Older local-heavy ADR details remain useful for solo/local fallback where they have not been amended. The desktop owns mic capture, VAD/endpointing, Opus chunks, hotkey/UI, server connector, and local live fallback. In team/server mode, the server owns official long-recording STT, preprocessing, diarization, auth, KB compilation, and agent workloads.
 
 ---
 
@@ -18,7 +20,7 @@
 | **Local-first (solo profile)** | Offline, privacy-max; no cloud STT lock-in for individual users. |
 | **On-prem GPU (team profile)** | The GB-class server node is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
 | **Critical path isolation** | Live stays fast; heavy work (diarization, OKF, agents) never blocks typing. |
-| **Right model per job** | Moonshine v2 tiny for live/offline fallback; server Cohere for recordings; **LLM pool** for polish/agents — not one model for everything. |
+| **Right model per job** | Nemotron INT8 for local live/offline fallback; server router for official recordings/live; **LLM pool** for polish/agents — not one model for everything. |
 | **Two-pass diarization** | ECAPA-TDNN live labels + AHC/VBx post-meeting accuracy; rolling centroid improves speaker recognition over time. |
 | **Modular diarizer** | WeSpeaker + vault (~200 MB) for solo; ECAPA-TDNN on GPU for team — realistic on both hardware targets. |
 | **Graceful degradation** | Dual-track Scribe, quarantine folder, RAG confidence gates, offline fallback to local sidecar — production-minded. |
@@ -28,9 +30,9 @@
 
 | Risk | Mitigation (in ADRs) |
 |------|----------------------|
-| **Scope creep** | Ship Yap batch → CrispASR → live EN → LID → L3 OKF in that order. |
-| **Three processes** | crispasr + llama-server + knowledge worker; worker idles out after 5 min. |
-| **CrispASR dependency** | Pin version; verified companions; loopback auth; CI smoke tests. |
+| **Scope creep** | Ship desktop history/playback → local live fallback → server STT → preprocessing → diarization → L3 OKF in that order. |
+| **Three processes** | sherpa live recognizer in the Tauri process + llama-server + knowledge worker; worker idles out after 5 min. |
+| **Local ASR dependency** | Pin artifacts; verify hashes; profile chunk/latency; CI smoke tests. |
 | **Wispr comparison on v1** | Don’t promise global hotkey + inject until later desktop OS integration; compete on batch + local first. |
 | **OKF/agents before core STT** | Transcripts history first; OKF Phase 9. |
 
@@ -49,7 +51,7 @@
 | Primary input | Thin client live/offline fallback + recording queue shell | + live mic, eventually global hotkey |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
-| STT runtime | **Moonshine v2 tiny CrispASR fallback** + future server connector | Same client shell; heavier pools move server-side |
+| STT runtime | **Nemotron INT8 sherpa fallback** + future server connector | Same client shell; heavier pools move server-side |
 | Polish | **llama-server** (bundled, CPU `-ngl 0`) | Scribe + agents; Ollama dev fallback |
 | Speakers | Plain transcript | Diarization + vault + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Git + compiler (team) | OKF + glossary agents + Q&A |
@@ -61,7 +63,7 @@
 | Attribute | **Solo / fallback** | **Team / server** |
 |-----------|------------------------|-------------------|
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
-| STT (live) | Local Moonshine v2 tiny (CrispASR sidecar) | Server Moonshine GPU (streaming ASR pool, WSS) |
+| STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server streaming ASR pool (WSS) |
 | STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
 | Diarization | WeSpeaker + vault (old 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 8, ADR 0015) |
@@ -69,7 +71,7 @@
 | Knowledge base | Local OKF markdown (old 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
-The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. In PR3, the local path is a Moonshine v2 tiny fallback for live/offline degraded use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
+The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. The local path is a Nemotron INT8 fallback for live/offline use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
@@ -80,8 +82,8 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 ## Core decisions (summary)
 
 1. **Recordings → server Cohere** (accuracy, multilingual, long files).
-2. **Live mic / offline fallback → Moonshine v2 tiny** (English v1, low latency).
-3. **One warm local CrispASR fallback sidecar**; server router owns heavier model residency.
+2. **Live mic / offline fallback → Nemotron INT8** (English v1).
+3. **One warm local sherpa recognizer**; server router owns heavier model residency.
 4. **SpeechBrain LID** = language **gate** (“Detected French — continue?”), not silent auto-`-l`.
 5. **L3 background worker** = separate subprocess (not Python thread — avoids GIL).
 6. **Diarization** = off hot path; silence-anchored chunks + **Speaker Vault**.
@@ -90,13 +92,13 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 9. **Auth** = Entra ID / MSAL; objectId→voice-centroid bridge in identity DB; biometric consent required before enrollment.
 10. **KB compiler** = Git source-of-truth + deterministic compile → Postgres + Redis + vector DB (all indexes disposable).
 
-Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0015](adr/0015-two-pass-diarization-speaker-identity.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md)
+Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0015](adr/0015-two-pass-diarization-speaker-identity.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md)
 
 ---
 
 ## Pipeline charts
 
-Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Moonshine v2 tiny fallback, and server model pools for official large-recording work. PR3 implements the local fallback slice only. Normative rules live in [ADR 0001–0018](adr/README.md); sections below expand each box.
+Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Nemotron INT8 fallback, and server model pools for official large-recording work. Normative rules live in [ADR 0001–0019](adr/README.md); sections below expand each box.
 
 **Read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
 
@@ -112,10 +114,10 @@ flowchart TB
         UI["Transcribe · Live · Polish · History · KB agents"]
     end
 
-    Orch["RuntimeOrchestrator<br/>Moonshine fallback · server connector · bounded LLM"]
+    Orch["RuntimeOrchestrator<br/>Nemotron fallback · server connector · bounded LLM"]
 
     subgraph Sidecars["Local sidecars — localhost only"]
-        CR["crispasr<br/>Moonshine v2 tiny fallback"]
+        CR["sherpa-onnx<br/>Nemotron INT8 fallback"]
         LL["llama-server<br/>Scribe + agents · -ngl 0"]
         KW["yap-knowledge-worker<br/>align · diarize · OKF"]
     end
@@ -125,7 +127,7 @@ flowchart TB
     end
 
     subgraph L2["L2 — critical path"]
-        Live["Live mic → Moonshine EN → Scribe → ghost UI"]
+        Live["Live mic → Nemotron EN → Scribe → ghost UI"]
         Batch["File drop → server Cohere path / queue → History"]
     end
 
@@ -176,7 +178,7 @@ flowchart TB
 
     subgraph Server["yap-server - GB-class node (org LAN/VPN)"]
         Router["Workload router\n(per-tenant queues · fairness)"]
-        ASR["Streaming ASR pool\n(Moonshine GPU · WSS)"]
+        ASR["Streaming ASR pool\n(WSS)"]
         Batch["Cohere batch pool\n(concurrent GPU workers)"]
         LLM["LLM pool\n(Scribe · agents · GPU)"]
         Diar["Diarization service\n(ECAPA-TDNN · VBx · ADR 0015)"]
@@ -222,25 +224,25 @@ flowchart TB
 
     subgraph Orch["RuntimeOrchestrator — Rust"]
         States["Idle · FallbackReady · FallbackRunning · ServerQueued · ServerUploading · DegradedBackground"]
-        Inv["Moonshine local fallback · server ASR request · 1 HOT Scribe · 1 bg LLM queue · worker 1 chunk · FIFO ≤ 3"]
+        Inv["Nemotron local fallback · server ASR request · 1 HOT Scribe · 1 bg LLM queue · worker 1 chunk · FIFO ≤ 3"]
     end
 
-    subgraph Sidecars["Sidecars — subprocess / sidecar"]
-        CR["crispasr<br/>Moonshine v2 tiny fallback"]
+    subgraph Sidecars["Local runtime / sidecars"]
+        CR["sherpa-onnx<br/>Nemotron INT8 fallback"]
         LL["llama-server<br/>~2B Q4 · CPU -ngl 0"]
         KW["yap-knowledge-worker<br/>BELOW_NORMAL · ORT 2 threads · idle exit 5 min"]
     end
 
     subgraph L1["L1 — OS listeners + pre-warm · future"]
         OSHooks["Global listeners · Tauri/Rust"]
-        PreWarm["Pre-warm crispasr + llama-server · open mic · Silero ready"]
+        PreWarm["Pre-warm Nemotron + llama-server · open mic · Silero ready"]
     end
 
     subgraph L2Live["L2 live — hot path · must stay fast"]
         Mic["Mic capture"]
         AGC["Optional WebRTC/AGC"]
         Silero["Silero VAD · Rust ONNX · audio thread"]
-        MS["Moonshine streaming · crispasr · -l en"]
+        MS["Nemotron INT8 · sherpa-onnx · English"]
         ScribeL["Scribe · llama-server · ≤ 400 ms · dual-track raw+polished"]
         Ghost["Ghost / in-app preview · v1"]
         Injector["Cross-app text inject · future"]
@@ -351,11 +353,11 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | Original flowchart node | Documented? | Where | Yap decision (if changed) |
 |-------------------------|-------------|-------|---------------------------|
 | **L1** Global OS listeners (pynput, UI automation) | ✅ | § Layer model | Future — not v1 |
-| **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005 | Warm **crispasr** + **llama-server** + mic |
+| **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005, 0019 | Warm **Nemotron recognizer** + **llama-server** + mic |
 | **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Optional AGC; Silero required |
 | **L2** Silero VAD | ✅ | ADR 0004 §3, §10 | Shared `vad_segments` → L3 |
 | **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2 v1**; batch gate Phase 4 |
-| **L2** Cohere ASR (llama.cpp) | ✅ Reconciled | ADR 0001–0002/0014 | **Moonshine local fallback**; **server Cohere recordings** via GB-class server connector |
+| **L2** ASR | ✅ Reconciled | ADR 0001–0002/0014/0019 | **Nemotron local fallback**; **server router** for official recordings/live |
 | **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | **llama-server** ~2B Q4, `-ngl 0` |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
 | **L2** Cross-app injector | ✅ | Future desktop OS integration | Deferred |
@@ -390,7 +392,7 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | Layer | Name | Yap phase | Role |
 |-------|------|-----------|------|
 | **L1** | OS listeners + pre-warm | 7+ | Hotkey, focus detect, warm sidecar/mic |
-| **L2** | Real-time critical path | 3 | Moonshine → optional Scribe → UI/inject |
+| **L2** | Real-time critical path | 3 | Nemotron → optional Scribe → UI/inject |
 | **L3** | Async background | 7a–7c | Align, diarize, stitch, OKF |
 | **L4** | OKF knowledge base | 7c | Markdown + YAML conversations |
 | **L5** | Agentic feedback | 7d | Student, Curator, Auditor |
@@ -403,7 +405,7 @@ Everything from the original 7-layer flowchart and master spec is captured below
 
 ```
 Mic → optional AGC → Silero VAD
-  → Moonshine streaming (CrispASR, -l en)     ← live tokens
+  → Nemotron INT8 (sherpa-onnx, English)       ← live tokens
   → llama-server polish (Scribe) if <400ms budget   ← else raw only
   → ghost UI / in-app panel (v1)              ← inject later (L1)
 
@@ -495,7 +497,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 | Rule | Limit |
 |------|--------|
-| crispasr STT loaded | PR3 client fallback loads **Moonshine v2 tiny only**; server router owns Cohere residency |
+| Local STT loaded | Client fallback loads **Nemotron INT8 only**; server router owns fusion/routing |
 | Scribe (HOT) | **1** at a time; **400 ms** max |
 | Background LLM agents | **1 queued** (Student, Curator, Analyst, …) |
 | Knowledge worker | **1 chunk** processing; **3** pending max → degraded |
@@ -505,10 +507,25 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 **Silero:** ONNX in **Rust** on audio thread → live VAD + chunk cuts + `vad_segments`; worker **does not** re-run Silero.
 
 ```
-Idle ↔ FallbackReady ↔ FallbackRunning  (local Moonshine v2 tiny)
+Idle ↔ FallbackReady ↔ FallbackRunning  (local Nemotron INT8)
 Idle ↔ ServerQueued ↔ ServerUploading   (GB-class server Cohere)
          client does not load local Cohere in PR3
 ```
+
+### Desktop implementation guardrails
+
+These rules prevent the repeated UI and runtime churn we have been seeing. They are part of the architecture contract, not polish notes.
+
+| Surface | Do | Do not |
+|---------|----|--------|
+| Live overlay geometry | Keep one owner for native window size and position. Rust owns the Tauri window frame; React owns only the visible island inside that frame. | Do not resize/reposition the native overlay from both Rust and React. Do not shrink the hover sensor to the visible island width. |
+| Live overlay motion | Animate transforms and opacity inside a stable frame. Keep the hover sensor fixed and test the motion while it is moving. | Do not animate layout dimensions that move the cursor out of the hit area. Do not rely only on settled screenshots. |
+| Overlay permissions | Give the overlay window only the capabilities it needs for its owner boundary. | Do not grant frontend `set_size`, `set_position`, or monitor permissions if Rust owns geometry. |
+| Live transcription process | Prefer one session owner and explicit lifecycle boundaries. Until the sidecar exposes reset/ack/session tags, stale stdout must not be able to enter a new dictation session. | Do not hide clipping or stale-session risk behind warm reuse unless there is a protocol-level ready/reset signal. |
+| Recording history | Keep one canonical transcript/review surface and one cache owner. | Do not maintain separate preview dialogs, separate read-through caches, or fake recording adapters for the same transcript row. |
+| Settings and controls | Use native controls or already-installed primitives when they cover the job. Keep copy user-facing. | Do not add bespoke controls for simple select/radio/toggle behavior or explain CPU/GPU plumbing in normal settings copy. |
+| Docs and code | Update the ADR/spec/product surface in the same phase as the code. | Do not ship behavior that contradicts the client/server split: live local fallback is allowed; official long recordings queue for server. |
+| Server staging | Keep `server/` to health, contract, route selection, and tests until the API/WSS contract is real. | Do not add placeholder pools/config/schema packages, app firewall exposure, Docker deployment, or service-disabling host tweaks before Phase 3-4 need them. |
 
 ---
 
@@ -544,12 +561,12 @@ UI copy: **“Local fallback: English · Server files: 14 languages”**
 
 ```
 Yap (Tauri)  [yap-desktop]
-  ├─ crispasr sidecar          STT — Moonshine v2 tiny fallback
+  ├─ sherpa recognizer         STT — Nemotron INT8 fallback
   ├─ llama-server sidecar      Polish + LLM agents (CPU -ngl 0)
   └─ yap-knowledge-worker      align + diarize + OKF (queue-driven)
 
 %LOCALAPPDATA%/Yap/
-  models/                      GGUF cache
+  models/                      pinned model cache
   Transcripts/                 Yap history (ship first)
   knowledge_base/              OKF (Phase 9)
     conversations/
@@ -567,12 +584,12 @@ Yap (Tauri)  [yap-desktop]
 ```
 yap-desktop (Tauri) — thin client shell
   ├─ Silero VAD (Rust ONNX)    VAD + Opus encoding + vad_segments
-  ├─ crispasr sidecar          Offline fallback only (Moonshine v2 tiny)
+  ├─ sherpa recognizer         Offline fallback only (Nemotron INT8)
   └─ Server connector          WSS (live) + HTTP (batch) to yap-server
 
 yap-server (GB-class server node, org LAN/VPN)
   ├─ Workload router            per-tenant queues, fairness, backpressure
-  ├─ Streaming ASR pool         Moonshine GPU, WSS endpoint
+  ├─ Streaming ASR pool         WSS endpoint
   ├─ Cohere batch pool          concurrent GPU workers
   ├─ LLM pool                   Scribe + agents, GPU
   ├─ Diarization service        ECAPA-TDNN + AHC/VBx (ADR 0015)
@@ -617,10 +634,10 @@ timeline
 |-------|----------|-------------|----------|
 | **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
 | **1** | desktop | Recordings home, playback, queue, settings, setup flow, and server connection state. | Phase 3 UI work |
-| **2** | desktop fallback | Local Moonshine v2 tiny live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002 |
+| **2** | desktop fallback | Local Nemotron INT8 live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002/0019 |
 | **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; server-tier spec |
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
-| **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server Cohere/Moonshine routing. | Old Phase 5/8 |
+| **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server ASR routing. | Old Phase 5/8 |
 | **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
 | **7** | identity/access | Entra/MSAL bridge, consent, voice identity DB, and permission hooks needed by speaker identity and KB. | Old Phase 9; ADR 0016 |
 | **8** | diarization | Solo fallback diarization plus server two-pass ECAPA/VBx, speaker vault/centroids, and post-meeting correction. | Old 7b/10; ADR 0004/0015 |
@@ -633,7 +650,7 @@ timeline
 |-------|--------|------------------|
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
 | **1** | In progress | Desktop has recordings/playback; a typed recording-job workflow is the next required refactor before server connector wiring. |
-| **2** | In progress | Local Moonshine v2 tiny fallback is the active local path; install/remove/disable is explicit and UI copy stays terse. |
+| **2** | In progress | Local Nemotron INT8 fallback is the active local path; install/remove/disable is explicit and UI copy stays terse. |
 | **3** | Starting now | `server/` exists as a small staging area; the real API/WSS contract still needs to be written. |
 | **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
@@ -658,7 +675,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
 | **1** Desktop thin client | Recordings home, playback, recording-job workflow, setup/settings | Product copy; setup flow; connected/offline states |
-| **2** Local fallback | Moonshine v2 tiny live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/local-live-fallback-sidecar.md) Accepted; setup download docs |
+| **2** Local fallback | Nemotron INT8 live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/local-live-fallback-sidecar.md) Accepted; setup download docs |
 | **3** Server contract | Health, jobs, WSS, errors, client connector | [Server tier MVP spec](specs/server-tier-mvp.md); OpenAPI/WSS docs |
 | **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
@@ -674,8 +691,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 **STT (Phase 1–2)**
 
-- [ ] Local Moonshine fallback sidecar
-- [ ] Pin CrispASR version; CI smoke test
+- [ ] Local Nemotron fallback
+- [ ] Pin Nemotron artifacts; CI smoke test
 - [ ] Sidecar health in Setup UI
 - [ ] Structured error codes → toasts
 - [ ] Optional Q8 batch quality toggle
@@ -710,8 +727,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 | Topic | ADR |
 |-------|-----|
-| Dual models (Moonshine live / Cohere batch) | [0001](adr/0001-dual-stt-backends.md) |
-| CrispASR sidecar, English live v1 | [0002](adr/0002-crispasr-unified-stt-runtime.md) |
+| Streaming live vs server batch split | [0001](adr/0001-dual-stt-backends.md) |
+| Local fallback runtime history | [0002](adr/0002-crispasr-unified-stt-runtime.md), [0019](adr/0019-local-streaming-model-selection.md) |
 | SpeechBrain LID gate, recordings moat | [0003](adr/0003-long-term-voice-architecture.md) |
 | Diarization, vault, micro-batches, OKF, agents | [0004](adr/0004-background-diarization-okf-agents.md) |
 | llama-server for Scribe + agents | [0005](adr/0005-llama-server-agents.md) |
@@ -728,6 +745,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Auth + identity bridge (Entra ID / MSAL, objectId→centroid, biometric consent) | [0016](adr/0016-auth-identity-bridge.md) |
 | Team KB compiler (source-of-truth, two-lane store, permission model, disposable indexes) | [0017](adr/0017-knowledge-base-compiler.md) |
 | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | [0018](adr/0018-three-repo-topology.md) |
+| Local Nemotron INT8 streaming fallback | [0019](adr/0019-local-streaming-model-selection.md) |
 
 ### Build specs (how to implement)
 

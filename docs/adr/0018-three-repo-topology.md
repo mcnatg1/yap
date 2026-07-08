@@ -38,7 +38,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | Tauri + React thin client |
 | **Primary language** | Rust (Tauri backend) + TypeScript (React frontend) |
 | **Deployment** | NSIS installer (Windows); future: macOS DMG, Linux AppImage |
-| **Responsibilities** | Mic capture; Silero VAD; Opus encoding; global hotkey + text injection (ADR 0013); ghost / preview UI; server connector (WSS + HTTP); local file selection; local Moonshine v2 tiny fallback sidecar; Settings UI |
+| **Responsibilities** | Mic capture; Silero VAD; Opus encoding; global hotkey + text injection (ADR 0013); ghost / preview UI; server connector (WSS + HTTP); local file selection; local Nemotron INT8 fallback; Settings UI |
 | **Maps from** | `cohere-transcribe-local/desktop/` |
 
 `yap-desktop` ships to end-user machines. It must be code-signed and notarised per-platform. It contains no server-side logic and no knowledge data.
@@ -50,7 +50,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | GB-class server node: workload router, model pools, KB compiler, auth middleware, APIs |
 | **Primary language** | Python (ML inference services) + Rust (router / API server) |
 | **Deployment** | Docker Compose / Kubernetes on org-managed GB-class hardware |
-| **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); Streaming ASR pool (Moonshine GPU, WSS); Cohere batch pool (concurrent GPU workers); LLM pool (Scribe/polish/agents); ECAPA-TDNN + two-pass diarization service (ADR 0015); KB compiler service (ADR 0017); Auth middleware + identity DB (ADR 0016); APIs: live WSS, batch job queue, KB query |
+| **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); Streaming ASR pool (WSS); Cohere batch pool (concurrent GPU workers); LLM pool (Scribe/polish/agents); ECAPA-TDNN + two-pass diarization service (ADR 0015); KB compiler service (ADR 0017); Auth middleware + identity DB (ADR 0016); APIs: live WSS, batch job queue, KB query |
 | **Infrastructure-as-code** | `yap-server/infra/` contains Postgres migrations, Redis config, vector index config, S3 bucket/lifecycle policy, docker-compose/k8s manifests. The storage **data** lives on the running server node; the repo holds migrations + IaC only. |
 | **Maps from** | `cohere-transcribe-local/server/` plus `infra/yap-server-node/` after MVP staging |
 
@@ -111,7 +111,7 @@ The current `cohere-transcribe-local` workspace maps as follows:
 | `server/` | MVP staging area for `yap-server`; split in Phase 12 |
 | `infra/yap-server-node/` | `yap-server` host/bootstrap docs and scripts |
 | `docs/` | Stay in the monorepo through MVP; split or copy with repo ownership in Phase 12 |
-| Historical `transcribe.py`, `requirements.txt` | Not migrated; removed from the PR3 runtime after the local Moonshine fallback sidecar replaced the Python path |
+| Historical `transcribe.py`, `requirements.txt` | Not migrated; larger-recording transcription moved toward the server path while local live fallback moved to the Tauri runtime |
 | `PRODUCT.md`, `DESIGN.md` | `yap-desktop` (product docs) |
 | *New server code* | `server/` now; `yap-server` repo in Phase 12 |
 | *Knowledge data* | `yap-knowledge` (new repo) |

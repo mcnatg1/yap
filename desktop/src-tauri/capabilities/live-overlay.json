@@ -4,8 +4,7 @@
   "description": "Capability for the live overlay window",
   "windows": ["live-overlay"],
   "permissions": [
-    "core:default",
-    "core:window:allow-set-position",
-    "core:window:allow-set-size"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }

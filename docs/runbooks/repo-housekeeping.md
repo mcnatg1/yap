@@ -6,14 +6,15 @@ This repo stays a staged monorepo through the MVP. Keep cleanup changes small, t
 
 | Path | Owns | Rule |
 |------|------|------|
-| `desktop/` | Installed Yap client | React/Tauri app, local Moonshine fallback, desktop tests |
+| `desktop/` | Installed Yap client | React/Tauri app, local Nemotron fallback, desktop tests |
 | `desktop/src-tauri/src/live/` | Live dictation runtime | Mic capture, overlay state, hotkey/live stream code |
-| `desktop/src-tauri/src/stt/` | Local STT fallback | CrispASR sidecar, model pins, GPU preference, parity helpers |
+| `desktop/src-tauri/src/stt/` | Local STT fallback | Nemotron pins, shared artifact helpers, parity helpers |
 | `server/` | Future `yap-server` staging | Small API/router code only when it has tests |
 | `infra/yap-server-node/` | Server host bootstrap | Host scripts/env examples; no app code |
 | `docs/adr/` | Decisions | Why the architecture is this way |
 | `docs/specs/` | Build specs | What to implement next |
 | `docs/runbooks/` | Operations and maintenance | How to run, audit, clean, or recover things |
+| `docs/superpowers/` | Working implementation flow notes | Must name a canonical owner, merge/expiry target, and delete/archive condition |
 
 ## Naming rules
 

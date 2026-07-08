@@ -8,11 +8,11 @@ product
 
 Privacy-conscious people who need accurate text from audio or video files — journalists transcribing interviews, researchers working through field recordings, podcasters, students, and anyone who batch-processes media without sending it to a third-party cloud.
 
-They arrive with files already on disk (MP3, M4A, WAV, MP4, and similar formats), not with a microphone open for live dictation. Context is focused work: drop files, wait for local transcription, review and export text, occasionally polish wording before sharing. They care that processing stays on-device and that the app feels like a trustworthy utility, not a developer tool or a marketing site.
+They usually arrive with files already on disk (MP3, M4A, WAV, MP4, and similar formats). Live capture is explicit and secondary, used for local/offline fallback or saved sessions, not always-listening dictation. Context is focused work: drop files, wait for trusted transcription, review and export text, occasionally polish wording before sharing. They care that the current route is clear: local fallback stays on this device; team/server mode uses org-owned GB-class hardware, not third-party cloud.
 
 ## Product Purpose
 
-Yap is a desktop transcription app (Tauri + React in `desktop/`). Users drop audio or video files, transcribe through the best available trusted runtime, and get readable text saved beside the source or in a local transcripts folder. Local Moonshine is the offline/live fallback; higher-quality recording transcription belongs on the DGX/server Cohere path.
+Yap is a desktop transcription app (Tauri + React in `desktop/`). Users drop audio or video files, transcribe through the best available trusted runtime, and get readable text saved beside the source or in a local transcripts folder. Local Parakeet Q4 is the offline/live fallback; higher-quality recording transcription belongs on the DGX/server path.
 
 Success looks like: files in, accurate transcripts out, with minimal friction between drop → queue → transcript → copy/export. The interface should make the current file and its transcript the center of attention; model names, auth paths, and runner details stay in secondary status unless something needs attention.
 
@@ -23,7 +23,7 @@ Primary navigation:
 - **Transcripts** — history grouped by day for reopening past work
 - **Polish** — rewrite/cleanup pass on a selected transcript before export
 
-This is not live dictation (not a Wispr Flow clone). It is batch processing for people who already have recordings.
+This is not live-only dictation or a Wispr Flow clone. Batch recordings remain the core loop; live capture is a compact, explicit companion path.
 
 ## Brand Personality
 
@@ -36,23 +36,23 @@ Reference feel (specific traits, not category buckets):
 - **Wispr Flow** — practical sparse nav and compact status, adapted for batch files rather than live mic input
 - **Figma-style tools** — soft canvas, one generous work surface, secondary details tucked away until needed
 
-Emotional goal: users trust that their files never leave the machine and that the tool disappears into the task.
+Emotional goal: users trust the visible route — local fallback on this device, server work on org-owned hardware — and that the tool disappears into the task.
 
 ## Anti-references
 
-- Live dictation / always-listening mic UX (Wispr-style realtime capture is the wrong mental model)
+- Always-listening mic UX or live-only dictation (Wispr-style realtime capture is not the whole product)
 - SaaS dashboard density — this is a file-to-transcript tool, not an analytics hub
 - Marketing landing page inside the app: giant hero copy, gradient blobs, decorative sections, nested card grids
 - Developer-first chrome: leading with model IDs, Python paths, GPU jargon, or auth mechanism details on the main screen
 - Generic beige AI utility aesthetic with no identity (anonymous cream canvas with no purposeful accent discipline)
 - Modal-heavy flows where inline or progressive disclosure would suffice
-- Cloud-upload patterns that imply files leave the device
+- Cloud-upload patterns that hide where files are processed
 
 ## Design Principles
 
 1. **Drop audio, get text.** Every screen should reinforce the core loop; secondary capabilities (polish, history, setup) support it, they don't compete with it.
 2. **The transcript is the reward.** When transcription completes, the text surface becomes the hero; export and copy actions stay adjacent to the content.
-3. **Local, stated simply.** Say "Private on this device" or "Files stay on this machine" — not implementation details — unless an error requires technical context.
+3. **Trusted route, stated simply.** Say "Private on this device" for local fallback and "Org server" for team/server work — not implementation details — unless an error requires technical context.
 4. **One primary action per state.** Empty → drop; queued → transcribe; running → progress + cancel; done → read and export. Avoid competing primary buttons.
 5. **Technical setup is secondary.** Model, auth, runner, and output path belong in details/status areas until something needs attention.
 
@@ -61,7 +61,7 @@ Emotional goal: users trust that their files never leave the machine and that th
 Target WCAG 2.1 AA for text contrast and interactive states. Body and label text must remain readable on warm canvas and surface backgrounds (no washed-out muted gray for operational copy).
 
 - Respect `prefers-reduced-motion`: state feedback should crossfade or snap instead of choreographed entrance sequences.
-- Keyboard paths for navigation rail, queue actions, transcript copy/export, and command palette.
+- Keyboard paths for navigation rail, queue actions, transcript copy/export, and shipped shortcuts.
 - Tooltips and accessible names on icon-only actions (remove, reveal, copy, settings).
 - Window floor matches Tauri minimum size (`minWidth` 1122, `minHeight` 740; default 1122×760 in `desktop/src-tauri/tauri.conf.json`). Layout is designed for that footprint; responsive single-column at mobile widths (e.g. 360px) is not a current target unless `minWidth` is lowered later. No overlapping controls at minimum size; transcript reading comfortable at 15px+ with generous line height.
 - No information conveyed by color alone for queue status — pair color with label or icon.

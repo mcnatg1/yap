@@ -1,4 +1,8 @@
-use std::io::Write;
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use tauri::{
     menu::MenuBuilder,
@@ -7,10 +11,24 @@ use tauri::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 92.0;
-const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 38.0;
-const LIVE_OVERLAY_HOVER_SENSOR_HEIGHT: f64 = 4.0;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW,
+};
+
+const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 112.0;
+const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 40.0;
+const LIVE_OVERLAY_DEFAULT_WIDTH: f64 = 104.0;
+const LIVE_OVERLAY_SUCCESS_WIDTH: f64 = 168.0;
+const LIVE_OVERLAY_HOVER_SENSOR_WIDTH: f64 = 260.0;
+const LIVE_OVERLAY_HOVER_SENSOR_HEIGHT: f64 = 8.0;
+const LIVE_OVERLAY_MIN_ERROR_WIDTH: f64 = 180.0;
+const LIVE_OVERLAY_MAX_ERROR_WIDTH: f64 = 420.0;
 const LIVE_OVERLAY_TOP_BEZEL_OFFSET: f64 = 0.0;
+const LIVE_SHORTCUT_DOUBLE_TAP_MS: u64 = 320;
+const LIVE_SHORTCUT_HOLD_MS: u64 = 160;
 const LIVE_WAV_SAMPLE_RATE: u32 = 16_000;
 const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_START_DICTATING: &str = "start_dictating";
@@ -30,6 +48,30 @@ fn polish_num_gpu() -> u32 {
 #[tauri::command]
 fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
     current_setup_status()
+}
+
+#[tauri::command]
+fn list_local_compute_targets() -> Vec<LocalComputeTargetView> {
+    local_compute_targets()
+}
+
+#[tauri::command]
+fn set_local_compute_target(
+    live_state: tauri::State<'_, live::LiveSessionState>,
+    target_id: String,
+) -> Result<Vec<LocalComputeTargetView>, String> {
+    if live::state::is_live_session_started(live_state.snapshot().status) {
+        return Err("Stop live before changing local compute.".into());
+    }
+    if !local_compute_targets()
+        .iter()
+        .any(|target| target.id == target_id)
+    {
+        return Err("Compute target unavailable.".into());
+    }
+    stt::settings::set_local_compute_target(&target_id)
+        .map_err(|_| "Failed to save compute target.".to_string())?;
+    Ok(local_compute_targets())
 }
 
 #[tauri::command]
@@ -83,6 +125,16 @@ fn hide_live_overlay(
 }
 
 #[tauri::command]
+fn set_live_overlay_surface(
+    app: tauri::AppHandle,
+    surface: String,
+    error_message: Option<String>,
+) -> Result<(), String> {
+    let (width, height) = live_overlay_frame(&surface, error_message.as_deref());
+    ensure_live_overlay_size(&app, width, height)
+}
+
+#[tauri::command]
 async fn set_live_overlay_enabled(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
@@ -93,11 +145,6 @@ async fn set_live_overlay_enabled(
     } else {
         hide_live_overlay(app, state)
     }
-}
-
-#[tauri::command]
-fn get_live_hotkey(state: tauri::State<'_, live::LiveSessionState>) -> String {
-    state.snapshot().hotkey
 }
 
 #[tauri::command]
@@ -227,8 +274,17 @@ fn start_live_session(
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     stt_state: tauri::State<'_, stt::dispatch::SttState>,
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
+    active_capture_mode: Option<live::state::LiveCaptureMode>,
 ) -> live::state::LiveSessionView {
-    start_live_runtime(app, &state, &live_runtime, &stt_state, &runtime_state)
+    let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
+    start_live_runtime(
+        app,
+        &state,
+        &live_runtime,
+        &stt_state,
+        &runtime_state,
+        capture_mode,
+    )
 }
 
 #[tauri::command]
@@ -239,19 +295,6 @@ fn stop_live_session(
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> live::state::LiveSessionView {
     stop_live_runtime(app, &state, &live_runtime, &runtime_state)
-}
-
-#[tauri::command]
-fn save_live_session(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, live::LiveSessionState>,
-    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
-) -> Result<SavedLiveSession, String> {
-    let view = state.snapshot();
-    let saved = save_live_session_files(&live_runtime, &view)?
-        .ok_or_else(|| "Nothing to save yet.".to_string())?;
-    emit_live_saved(&app, &saved);
-    Ok(saved)
 }
 
 #[tauri::command]
@@ -281,8 +324,7 @@ async fn install_local_fallback(
     }
     tauri::async_runtime::spawn_blocking(|| {
         stt::settings::set_local_fallback_enabled(true)?;
-        stt::binary::ensure_binary()?;
-        stt::model::ensure_model()?;
+        stt::nemotron::ensure_model()?;
         Ok(current_setup_status())
     })
     .await
@@ -291,14 +333,10 @@ async fn install_local_fallback(
 
 #[tauri::command]
 fn remove_local_fallback(
-    state: tauri::State<'_, stt::dispatch::SttState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
     if live::state::is_live_session_started(live_state.snapshot().status) {
         return Err(live_setup_busy_error());
-    }
-    if let Ok(mut sidecar) = state.sidecar.lock() {
-        sidecar.shutdown();
     }
     remove_local_fallback_files()?;
     Ok(current_setup_status())
@@ -317,79 +355,59 @@ fn set_local_fallback_enabled(
 }
 
 fn current_setup_status() -> SetupStatus {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let binary_status = stt::binary::binary_install_status(&exe_dir)
-        .unwrap_or(stt::binary::BinaryInstallStatus::Unsupported);
-    let pin = stt::pin::load_pin().ok();
-    let model_installed = pin.as_ref().map(stt::model::is_installed).unwrap_or(false);
+    let model_installed = stt::nemotron::is_installed();
     let fallback_enabled = stt::settings::local_fallback_enabled();
-    let engine_ready = fallback_enabled
-        && pin.is_some()
-        && model_installed
-        && matches!(binary_status, stt::binary::BinaryInstallStatus::Installed);
+    let engine_ready = fallback_enabled && model_installed;
     log_line(&format!(
-        "setup_status engine_ready={engine_ready} fallback_enabled={fallback_enabled} binary={binary_status:?}"
+        "setup_status engine_ready={engine_ready} fallback_enabled={fallback_enabled} model=nemotron"
     ));
 
     SetupStatus {
-        model: pin
-            .as_ref()
-            .map(|pin| pin.gguf_file.clone())
-            .unwrap_or_else(|| "moonshine-streaming-tiny-q4_k.gguf".into()),
-        root: stt::model::models_dir().display().to_string(),
+        model: stt::nemotron::MODEL_LABEL.into(),
+        root: stt::nemotron::root_dir().display().to_string(),
         engine_ready,
-        engine_binary_status: binary_status.label().to_string(),
+        engine_binary_status: "Built in".into(),
         model_installed,
         fallback_enabled,
-        engine_status: compose_engine_status(binary_status, model_installed, fallback_enabled),
+        engine_status: compose_engine_status(model_installed, fallback_enabled),
     }
 }
 
-fn compose_engine_status(
-    binary_status: stt::binary::BinaryInstallStatus,
-    model_installed: bool,
-    fallback_enabled: bool,
-) -> String {
+fn local_compute_targets() -> Vec<LocalComputeTargetView> {
+    let selected_id = stt::settings::saved_compute_target().id();
+    let mut targets = vec![
+        LocalComputeTargetView {
+            id: "auto".into(),
+            label: "Auto (CPU)".into(),
+            selected: selected_id == "auto",
+        },
+        LocalComputeTargetView {
+            id: "cpu".into(),
+            label: "CPU".into(),
+            selected: selected_id == "cpu",
+        },
+    ];
+    if !targets.iter().any(|target| target.selected) {
+        if let Some(target) = targets.first_mut() {
+            target.selected = true;
+        }
+    }
+    targets
+}
+
+fn compose_engine_status(model_installed: bool, fallback_enabled: bool) -> String {
     if !fallback_enabled {
         return "Local fallback disabled".into();
     }
-    match binary_status {
-        stt::binary::BinaryInstallStatus::Installed if model_installed => {
-            "Transcription engine ready".to_string()
-        }
-        stt::binary::BinaryInstallStatus::Installed => "Local fallback model missing".into(),
-        stt::binary::BinaryInstallStatus::Downloadable => "Local fallback not installed".into(),
-        stt::binary::BinaryInstallStatus::Invalid => "Local fallback failed verification".into(),
-        stt::binary::BinaryInstallStatus::Unsupported => {
-            "Transcription engine requires manual install".into()
-        }
+    if model_installed {
+        "Transcription engine ready".into()
+    } else {
+        "Local fallback model missing".into()
     }
 }
 
 fn remove_local_fallback_files() -> Result<(), stt::dispatch::SttCommandError> {
-    let pin = stt::pin::load_pin().map_err(|_| stt::error::SttError::ModelCorrupt)?;
-    remove_if_exists(stt::binary::cached_binary_path(&pin.crispasr_version))?;
-    remove_if_exists(stt::model::models_dir().join(&pin.gguf_file))?;
-    remove_if_exists(stt::model::models_dir().join(&pin.tokenizer_file))?;
-    remove_if_exists(stt::model::models_dir().join(&pin.punc_file))?;
-    Ok(())
-}
-
-fn remove_if_exists(path: std::path::PathBuf) -> Result<(), stt::dispatch::SttCommandError> {
-    remove_one(path.clone())?;
-    let verified = path.with_extension("verified");
-    remove_one(verified)
-}
-
-fn remove_one(path: std::path::PathBuf) -> Result<(), stt::dispatch::SttCommandError> {
-    if !path.exists() {
-        return Ok(());
-    }
-    std::fs::remove_file(path)
-        .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::ModelMissing))
+    stt::nemotron::remove_model().map_err(stt::dispatch::SttCommandError::from)
 }
 
 #[tauri::command]
@@ -438,6 +456,14 @@ struct SetupStatus {
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LocalComputeTargetView {
+    id: String,
+    label: String,
+    selected: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SavedLiveSession {
     name: String,
     source_path: String,
@@ -452,9 +478,6 @@ impl SetupStatus {
         }
         if self.engine_ready && self.model_installed {
             return runtime::state::SetupState::FallbackReady;
-        }
-        if self.engine_binary_status != stt::binary::BinaryInstallStatus::Installed.label() {
-            return runtime::state::SetupState::SetupError;
         }
         runtime::state::SetupState::FallbackMissing
     }
@@ -728,7 +751,15 @@ fn start_live_from_app(app: &tauri::AppHandle) {
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
     let stt = app.state::<stt::dispatch::SttState>();
     let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-    let _ = start_live_runtime(app.clone(), &live, &live_runtime, &stt, &orchestrator);
+    let capture_mode = live.snapshot().capture_mode;
+    let _ = start_live_runtime(
+        app.clone(),
+        &live,
+        &live_runtime,
+        &stt,
+        &orchestrator,
+        capture_mode,
+    );
 }
 
 fn stop_live_from_app(app: &tauri::AppHandle) {
@@ -736,6 +767,175 @@ fn stop_live_from_app(app: &tauri::AppHandle) {
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
     let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
     let _ = stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveShortcutAction {
+    None,
+    ScheduleHold(u64),
+    Start(live::state::LiveCaptureMode),
+    Stop,
+}
+
+#[derive(Debug, Default)]
+struct LiveShortcutInteraction {
+    ignore_next_release: bool,
+    key_down: bool,
+    last_tap_at: Option<Instant>,
+    pending_press_at: Option<Instant>,
+    pending_press_id: u64,
+    starting_push_to_talk: bool,
+    stop_push_to_talk_after_start: bool,
+}
+
+impl LiveShortcutInteraction {
+    fn reset(&mut self) {
+        self.ignore_next_release = false;
+        self.key_down = false;
+        self.last_tap_at = None;
+        self.pending_press_at = None;
+        self.starting_push_to_talk = false;
+        self.stop_push_to_talk_after_start = false;
+    }
+
+    fn finish_push_to_talk_start(&mut self) -> bool {
+        self.starting_push_to_talk = false;
+        std::mem::take(&mut self.stop_push_to_talk_after_start)
+    }
+
+    fn pressed(
+        &mut self,
+        now: Instant,
+        active_mode: Option<live::state::LiveCaptureMode>,
+    ) -> LiveShortcutAction {
+        if self.key_down {
+            return LiveShortcutAction::None;
+        }
+        self.key_down = true;
+        if active_mode == Some(live::state::LiveCaptureMode::Toggle) {
+            self.ignore_next_release = true;
+            self.pending_press_at = None;
+            self.last_tap_at = None;
+            return LiveShortcutAction::Stop;
+        }
+        if active_mode.is_some() {
+            return LiveShortcutAction::None;
+        }
+        if self.last_tap_at.is_some_and(|then| {
+            now.duration_since(then) <= Duration::from_millis(LIVE_SHORTCUT_DOUBLE_TAP_MS)
+        }) {
+            self.pending_press_at = None;
+            self.last_tap_at = None;
+            return LiveShortcutAction::Start(live::state::LiveCaptureMode::Toggle);
+        }
+
+        self.pending_press_id = self.pending_press_id.wrapping_add(1);
+        self.pending_press_at = Some(now);
+        self.last_tap_at = None;
+        LiveShortcutAction::ScheduleHold(self.pending_press_id)
+    }
+
+    fn hold_elapsed(
+        &mut self,
+        press_id: u64,
+        now: Instant,
+        active_mode: Option<live::state::LiveCaptureMode>,
+    ) -> LiveShortcutAction {
+        let Some(pressed_at) = self.pending_press_at else {
+            return LiveShortcutAction::None;
+        };
+        if press_id != self.pending_press_id
+            || active_mode.is_some()
+            || now.duration_since(pressed_at) < Duration::from_millis(LIVE_SHORTCUT_HOLD_MS)
+        {
+            return LiveShortcutAction::None;
+        }
+
+        self.pending_press_at = None;
+        self.last_tap_at = None;
+        self.starting_push_to_talk = true;
+        LiveShortcutAction::Start(live::state::LiveCaptureMode::PushToTalk)
+    }
+
+    fn released(
+        &mut self,
+        now: Instant,
+        active_mode: Option<live::state::LiveCaptureMode>,
+    ) -> LiveShortcutAction {
+        self.key_down = false;
+        if self.ignore_next_release {
+            self.ignore_next_release = false;
+            return LiveShortcutAction::None;
+        }
+        if active_mode == Some(live::state::LiveCaptureMode::PushToTalk) {
+            return LiveShortcutAction::Stop;
+        }
+        if active_mode == Some(live::state::LiveCaptureMode::Toggle) {
+            return LiveShortcutAction::None;
+        }
+        if self.starting_push_to_talk {
+            self.stop_push_to_talk_after_start = true;
+            return LiveShortcutAction::None;
+        }
+        if self.pending_press_at.take().is_some() {
+            self.last_tap_at = Some(now);
+        }
+        LiveShortcutAction::None
+    }
+}
+
+fn handle_live_shortcut_action(
+    app: tauri::AppHandle,
+    interaction: Arc<Mutex<LiveShortcutInteraction>>,
+    action: LiveShortcutAction,
+) {
+    match action {
+        LiveShortcutAction::None => {}
+        LiveShortcutAction::ScheduleHold(press_id) => {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(LIVE_SHORTCUT_HOLD_MS));
+                let active_mode = {
+                    let live = app.state::<live::LiveSessionState>();
+                    live.snapshot().active_capture_mode
+                };
+                let action = interaction
+                    .lock()
+                    .expect("live shortcut state poisoned")
+                    .hold_elapsed(press_id, Instant::now(), active_mode);
+                handle_live_shortcut_action(app, interaction, action);
+            });
+        }
+        LiveShortcutAction::Start(capture_mode) => {
+            let live = app.state::<live::LiveSessionState>();
+            let live_runtime = app.state::<live::runtime::LiveRuntime>();
+            let stt = app.state::<stt::dispatch::SttState>();
+            let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
+            let view = start_live_runtime(
+                app.clone(),
+                &live,
+                &live_runtime,
+                &stt,
+                &orchestrator,
+                capture_mode,
+            );
+            if capture_mode == live::state::LiveCaptureMode::PushToTalk {
+                let should_stop = interaction
+                    .lock()
+                    .expect("live shortcut state poisoned")
+                    .finish_push_to_talk_start();
+                if should_stop
+                    && view.active_capture_mode == Some(live::state::LiveCaptureMode::PushToTalk)
+                {
+                    stop_live_from_app(&app);
+                }
+            }
+        }
+        LiveShortcutAction::Stop => {
+            std::thread::spawn(move || {
+                stop_live_from_app(&app);
+            });
+        }
+    }
 }
 
 fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -788,6 +988,7 @@ fn start_live_runtime(
     live_runtime: &live::runtime::LiveRuntime,
     stt: &stt::dispatch::SttState,
     orchestrator: &runtime::RuntimeOrchestratorState,
+    active_capture_mode: live::state::LiveCaptureMode,
 ) -> live::state::LiveSessionView {
     if live::state::is_live_session_started(live.snapshot().status) || live_runtime.is_active() {
         return live.snapshot();
@@ -795,8 +996,10 @@ fn start_live_runtime(
 
     if stt.is_transcribing() {
         let view = live.block_with_error(stt::error::SttError::Busy.user_message());
-        if let Err(error) = ensure_live_overlay(&app) {
-            log_line(&format!("live overlay busy show failed: {error}"));
+        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
+            if let Err(error) = ensure_live_overlay(&app) {
+                log_line(&format!("live overlay busy show failed: {error}"));
+            }
         }
         emit_live(&app, &view);
         return view;
@@ -806,8 +1009,10 @@ fn start_live_runtime(
     orchestrator.with(|orchestrator| orchestrator.set_setup(setup));
     if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
         let view = block_live_for_setup(live, setup);
-        if let Err(error) = ensure_live_overlay(&app) {
-            log_line(&format!("live overlay blocked show failed: {error}"));
+        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
+            if let Err(error) = ensure_live_overlay(&app) {
+                log_line(&format!("live overlay blocked show failed: {error}"));
+            }
         }
         emit_live(&app, &view);
         return view;
@@ -815,8 +1020,10 @@ fn start_live_runtime(
 
     if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
         let view = live.block_with_error(&runtime_error_to_stt(error).message);
-        if let Err(error) = ensure_live_overlay(&app) {
-            log_line(&format!("live overlay route error show failed: {error}"));
+        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
+            if let Err(error) = ensure_live_overlay(&app) {
+                log_line(&format!("live overlay route error show failed: {error}"));
+            }
         }
         emit_live(&app, &view);
         return view;
@@ -834,9 +1041,8 @@ fn start_live_runtime(
         view.level = Some(0.0);
         view.route = live::state::LiveRoute::LocalFallback;
         view.status = live::state::LiveSessionStatus::Armed;
-        view.visibility = live::state::LiveOverlayVisibility::Enabled;
+        view.active_capture_mode = Some(active_capture_mode);
     });
-    let _ = persist_live_view(&view);
     if let Err(error) = ensure_live_overlay(&app) {
         log_line(&format!("live overlay start show failed: {error}"));
     }
@@ -859,6 +1065,15 @@ fn stop_live_runtime(
     live_runtime: &live::runtime::LiveRuntime,
     orchestrator: &runtime::RuntimeOrchestratorState,
 ) -> live::state::LiveSessionView {
+    let snapshot = live.snapshot();
+    if snapshot.status == live::state::LiveSessionStatus::Saving
+        || (!live::state::is_live_session_started(snapshot.status) && !live_runtime.is_active())
+    {
+        return snapshot;
+    }
+
+    let saving = live.begin_saving();
+    emit_live(&app, &saving);
     live_runtime.stop();
     let before_stop = live.snapshot();
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
@@ -893,9 +1108,28 @@ fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
 fn ensure_idle_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     ensure_live_overlay_size(
         app,
-        LIVE_OVERLAY_COMPACT_WIDTH,
+        LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
         LIVE_OVERLAY_HOVER_SENSOR_HEIGHT,
     )
+}
+
+fn live_overlay_frame(surface: &str, error_message: Option<&str>) -> (f64, f64) {
+    let width = match surface {
+        "sensor" | "peek" => LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
+        "recording" | "processing" | "initializing" => LIVE_OVERLAY_COMPACT_WIDTH,
+        "success" => LIVE_OVERLAY_SUCCESS_WIDTH,
+        "feedback" => error_message.map_or(LIVE_OVERLAY_DEFAULT_WIDTH, |message| {
+            (message.len() as f64 * 6.8 + 74.0)
+                .clamp(LIVE_OVERLAY_MIN_ERROR_WIDTH, LIVE_OVERLAY_MAX_ERROR_WIDTH)
+        }),
+        _ => LIVE_OVERLAY_DEFAULT_WIDTH,
+    };
+    let height = if surface == "sensor" {
+        LIVE_OVERLAY_HOVER_SENSOR_HEIGHT
+    } else {
+        LIVE_OVERLAY_COMPACT_HEIGHT
+    };
+    (width, height)
 }
 
 fn ensure_live_overlay_size(app: &tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
@@ -906,6 +1140,16 @@ fn ensure_live_overlay_size(app: &tauri::AppHandle, width: f64, height: f64) -> 
         window
             .set_shadow(false)
             .map_err(|err| format!("Failed to hide live overlay shadow: {err}"))?;
+        window
+            .set_skip_taskbar(true)
+            .map_err(|err| format!("Failed to hide live overlay from taskbar: {err}"))?;
+        window
+            .set_closable(false)
+            .map_err(|err| format!("Failed to lock live overlay close control: {err}"))?;
+        window
+            .set_focusable(false)
+            .map_err(|err| format!("Failed to keep live overlay unfocusable: {err}"))?;
+        make_live_overlay_system_window(&window)?;
         position_live_overlay(app, &window, width)?;
         window
             .show()
@@ -924,13 +1168,19 @@ fn ensure_live_overlay_size(app: &tauri::AppHandle, width: f64, height: f64) -> 
     .position(x, y)
     .decorations(false)
     .resizable(false)
+    .closable(false)
     .transparent(true)
     .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
+    .focusable(false)
     .build()
     .map_err(|err| format!("Failed to create live overlay: {err}"))?;
+    window
+        .set_focusable(false)
+        .map_err(|err| format!("Failed to keep live overlay unfocusable: {err}"))?;
+    make_live_overlay_system_window(&window)?;
     position_live_overlay(app, &window, width)?;
     Ok(())
 }
@@ -948,8 +1198,9 @@ fn position_live_overlay(
 
 fn live_overlay_position(app: &tauri::AppHandle, width: f64) -> (f64, f64) {
     let monitor = app
-        .get_webview_window("main")
-        .and_then(|window| window.current_monitor().ok().flatten())
+        .cursor_position()
+        .ok()
+        .and_then(|cursor| app.monitor_from_point(cursor.x, cursor.y).ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten());
     if let Some(monitor) = monitor {
         let scale = monitor.scale_factor();
@@ -961,6 +1212,34 @@ fn live_overlay_position(app: &tauri::AppHandle, width: f64) -> (f64, f64) {
         );
     }
     (8.0, LIVE_OVERLAY_TOP_BEZEL_OFFSET)
+}
+
+#[cfg(target_os = "windows")]
+fn make_live_overlay_system_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|err| format!("Failed to read live overlay window handle: {err}"))?;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let next_style = (style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) & !WS_EX_APPWINDOW.0;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_style as isize);
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .map_err(|err| format!("Failed to refresh live overlay window style: {err}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn make_live_overlay_system_window(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -976,21 +1255,13 @@ pub fn run() {
     let runtime_state = runtime::RuntimeOrchestratorState::new();
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
-    let sidecar_for_monitor = std::sync::Arc::clone(&stt_state.sidecar);
-    let sidecar_for_exit = std::sync::Arc::clone(&stt_state.sidecar);
-    let transcribing_for_monitor = stt_state.transcribing_flag();
     let live_runtime_for_monitor = live_runtime.clone();
     let live_runtime_for_exit = live_runtime.clone();
+    let live_shortcut_interaction = Arc::new(Mutex::new(LiveShortcutInteraction::default()));
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
         live_runtime_for_monitor.unload_if_idle(std::time::Duration::from_secs(600));
-        if transcribing_for_monitor.load(std::sync::atomic::Ordering::Relaxed) {
-            continue;
-        }
-        if let Ok(mut sidecar) = sidecar_for_monitor.lock() {
-            sidecar.unload_if_idle();
-        }
     });
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
@@ -1006,56 +1277,34 @@ pub fn run() {
         .manage(live_runtime)
         .manage(runtime_state)
         .setup(move |app| {
+            let shortcut_interaction = Arc::clone(&live_shortcut_interaction);
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
-                    .with_handler(|app, _shortcut, event| {
-                        let live = app.state::<live::LiveSessionState>();
-                        let live_runtime = app.state::<live::runtime::LiveRuntime>();
-                        let stt = app.state::<stt::dispatch::SttState>();
-                        let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-                        match event.state() {
-                            ShortcutState::Pressed => {
-                                let snapshot = live.snapshot();
-                                if live::state::is_live_session_started(snapshot.status)
-                                    && snapshot.capture_mode
-                                        == live::state::LiveCaptureMode::PushToTalk
-                                {
-                                    return;
-                                }
-                                let view = if snapshot.capture_mode
-                                    == live::state::LiveCaptureMode::Toggle
-                                    && live::state::is_live_session_started(snapshot.status)
-                                {
-                                    stop_live_runtime(
-                                        app.clone(),
-                                        &live,
-                                        &live_runtime,
-                                        &orchestrator,
-                                    )
-                                } else {
-                                    start_live_runtime(
-                                        app.clone(),
-                                        &live,
-                                        &live_runtime,
-                                        &stt,
-                                        &orchestrator,
-                                    )
-                                };
-                                let _ = view;
+                    .with_handler(move |app, _shortcut, event| {
+                        let snapshot = {
+                            let live = app.state::<live::LiveSessionState>();
+                            live.snapshot()
+                        };
+                        let action = {
+                            let mut interaction = shortcut_interaction
+                                .lock()
+                                .expect("live shortcut state poisoned");
+                            if snapshot.status == live::state::LiveSessionStatus::Saving {
+                                interaction.reset();
+                                return;
                             }
-                            ShortcutState::Released => {
-                                if live.snapshot().capture_mode
-                                    == live::state::LiveCaptureMode::PushToTalk
-                                {
-                                    let _ = stop_live_runtime(
-                                        app.clone(),
-                                        &live,
-                                        &live_runtime,
-                                        &orchestrator,
-                                    );
-                                }
+                            match event.state() {
+                                ShortcutState::Pressed => interaction
+                                    .pressed(Instant::now(), snapshot.active_capture_mode),
+                                ShortcutState::Released => interaction
+                                    .released(Instant::now(), snapshot.active_capture_mode),
                             }
-                        }
+                        };
+                        handle_live_shortcut_action(
+                            app.clone(),
+                            Arc::clone(&shortcut_interaction),
+                            action,
+                        );
                     })
                     .build(),
             )?;
@@ -1089,14 +1338,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             setup_status,
+            list_local_compute_targets,
+            set_local_compute_target,
             install_local_fallback,
             remove_local_fallback,
             set_local_fallback_enabled,
             live_status,
             show_live_overlay,
             hide_live_overlay,
+            set_live_overlay_surface,
             set_live_overlay_enabled,
-            get_live_hotkey,
             set_live_hotkey,
             clear_live_hotkey,
             set_live_capture_mode,
@@ -1105,7 +1356,6 @@ pub fn run() {
             preflight_input_device,
             start_live_session,
             stop_live_session,
-            save_live_session,
             list_saved_live_sessions,
             show_main_workspace,
             polish_num_gpu,
@@ -1129,11 +1379,15 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "live-overlay" => {
+                api.prevent_close();
+            }
             tauri::RunEvent::Exit => {
                 live_runtime_for_exit.shutdown();
-                if let Ok(mut sidecar) = sidecar_for_exit.lock() {
-                    sidecar.shutdown();
-                }
             }
             _ => {}
         });
@@ -1149,7 +1403,7 @@ mod tests {
             model: "model".into(),
             root: "root".into(),
             engine_ready: true,
-            engine_binary_status: "Installed".into(),
+            engine_binary_status: "Built in".into(),
             model_installed: true,
             fallback_enabled: true,
             engine_status: "Transcription engine ready".into(),
@@ -1157,7 +1411,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(value["engineReady"], true);
-        assert_eq!(value["engineBinaryStatus"], "Installed");
+        assert_eq!(value["engineBinaryStatus"], "Built in");
         assert_eq!(value["modelInstalled"], true);
         assert_eq!(value["fallbackEnabled"], true);
         assert_eq!(value["engineStatus"], "Transcription engine ready");
@@ -1165,40 +1419,179 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_double_tap_starts_hands_free_and_release_is_ignored() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(40), None),
+            LiveShortcutAction::None
+        );
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(120), None),
+            LiveShortcutAction::Start(live::state::LiveCaptureMode::Toggle)
+        );
+        assert_eq!(
+            shortcut.released(
+                now + Duration::from_millis(150),
+                Some(live::state::LiveCaptureMode::Toggle),
+            ),
+            LiveShortcutAction::None
+        );
+        assert_eq!(
+            shortcut.pressed(
+                now + Duration::from_millis(240),
+                Some(live::state::LiveCaptureMode::Toggle),
+            ),
+            LiveShortcutAction::Stop
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(260), None),
+            LiveShortcutAction::None
+        );
+    }
+
+    #[test]
+    fn shortcut_reset_clears_stale_tap_state() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(40), None),
+            LiveShortcutAction::None
+        );
+        shortcut.reset();
+
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(120), None),
+            LiveShortcutAction::ScheduleHold(2)
+        );
+    }
+
+    #[test]
+    fn shortcut_ignores_repeated_pressed_events_until_release() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(20), None),
+            LiveShortcutAction::None
+        );
+        assert_eq!(
+            shortcut.hold_elapsed(
+                1,
+                now + Duration::from_millis(LIVE_SHORTCUT_HOLD_MS + 1),
+                None,
+            ),
+            LiveShortcutAction::Start(live::state::LiveCaptureMode::PushToTalk)
+        );
+    }
+
+    #[test]
+    fn shortcut_release_during_push_to_talk_start_requests_stop_after_start() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.hold_elapsed(
+                1,
+                now + Duration::from_millis(LIVE_SHORTCUT_HOLD_MS + 1),
+                None,
+            ),
+            LiveShortcutAction::Start(live::state::LiveCaptureMode::PushToTalk)
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(180), None),
+            LiveShortcutAction::None
+        );
+        assert!(shortcut.finish_push_to_talk_start());
+    }
+
+    #[test]
+    fn shortcut_hold_starts_push_to_talk_and_release_stops() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.hold_elapsed(
+                1,
+                now + Duration::from_millis(LIVE_SHORTCUT_HOLD_MS + 1),
+                None,
+            ),
+            LiveShortcutAction::Start(live::state::LiveCaptureMode::PushToTalk)
+        );
+        assert_eq!(
+            shortcut.released(
+                now + Duration::from_millis(260),
+                Some(live::state::LiveCaptureMode::PushToTalk),
+            ),
+            LiveShortcutAction::Stop
+        );
+    }
+
+    #[test]
+    fn shortcut_single_tap_does_not_start_recording() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(40), None),
+            LiveShortcutAction::None
+        );
+        assert_eq!(
+            shortcut.hold_elapsed(
+                1,
+                now + Duration::from_millis(LIVE_SHORTCUT_HOLD_MS + 1),
+                None,
+            ),
+            LiveShortcutAction::None
+        );
+    }
+
+    #[test]
     fn disabled_status_wins() {
         assert_eq!(
-            compose_engine_status(stt::binary::BinaryInstallStatus::Installed, true, false),
+            compose_engine_status(true, false),
             "Local fallback disabled"
         );
     }
 
     #[test]
-    fn runtime_setup_state_preserves_binary_and_model_failures() {
-        let missing_binary = SetupStatus {
-            model: "model".into(),
-            root: "root".into(),
-            engine_ready: false,
-            engine_binary_status: stt::binary::BinaryInstallStatus::Downloadable
-                .label()
-                .into(),
-            model_installed: true,
-            fallback_enabled: true,
-            engine_status: "Setup".into(),
-        };
+    fn runtime_setup_state_preserves_model_failures() {
         let missing_model = SetupStatus {
             model: "model".into(),
             root: "root".into(),
             engine_ready: false,
-            engine_binary_status: stt::binary::BinaryInstallStatus::Installed.label().into(),
+            engine_binary_status: "Built in".into(),
             model_installed: false,
             fallback_enabled: true,
             engine_status: "Setup".into(),
         };
 
-        assert_eq!(
-            missing_binary.runtime_setup_state(),
-            runtime::state::SetupState::SetupError
-        );
         assert_eq!(
             missing_model.runtime_setup_state(),
             runtime::state::SetupState::FallbackMissing
@@ -1228,6 +1621,7 @@ mod tests {
             status: live::state::LiveSessionStatus::Idle,
             route: live::state::LiveRoute::None,
             capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            active_capture_mode: None,
             hotkey: String::new(),
             input_device_id: None,
             input_device_label: None,
@@ -1249,6 +1643,7 @@ mod tests {
             status: live::state::LiveSessionStatus::Idle,
             route: live::state::LiveRoute::None,
             capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            active_capture_mode: None,
             hotkey: String::new(),
             input_device_id: None,
             input_device_label: None,

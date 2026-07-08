@@ -14,7 +14,7 @@ The desktop currently works, but its state is still UI-shaped:
 - Rust currently exposes setup status and local STT events, but not a client/runtime job state machine.
 - The queue can only say `queued`, `running`, `done`, or `error`, which is not enough for the product direction.
 
-The product direction is no longer "local model does everything." Yap is a thin desktop client with local Moonshine v2 tiny for live/offline fallback, server Cohere for official larger recordings, queued/blocking behavior when the server path is unavailable, and preprocessing/diarization as first-class pipeline stages.
+The product direction is no longer "local model does everything." Yap is a thin desktop client with local Nemotron INT8 for live/offline fallback, a server router for official larger recordings, queued/blocking behavior when the server path is unavailable, and preprocessing/diarization as first-class pipeline stages.
 
 The previous readiness helper was the wrong abstraction. It created side-state around the app instead of turning the app's real workflow into a state machine.
 
@@ -49,7 +49,7 @@ Use the canonical axes from [client-state-machine.md](../../specs/client-state-m
 |------|-------|---------|
 | React projection | `desktop/src/App.tsx` and `desktop/src/lib/app-types.ts` | Immediate cleanup of queue state and labels. |
 | Runtime orchestration | `desktop/src-tauri/src/runtime/` | Source of truth for runtime transitions and invariants. |
-| Local fallback execution | `desktop/src-tauri/src/stt/dispatch.rs` | Executes current Moonshine fallback path and emits job events. |
+| Local fallback execution | `desktop/src-tauri/src/live/runtime.rs`, `desktop/src-tauri/src/live/stream.rs`, `desktop/src-tauri/src/stt/nemotron.rs` | Captures mic audio, streams it through the warm Nemotron fallback, and emits live-session snapshots. |
 | UI rendering | `desktop/src/components/stacked-upload.tsx`, `queue-panel.tsx`, `app-sheets.tsx` | Renders typed snapshots without owning domain state. |
 | Docs | `docs/specs/client-state-machine.md`, ADR 0006/0014/0015 links | Keeps implementation aligned with server trajectory. |
 

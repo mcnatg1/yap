@@ -4,7 +4,6 @@ import { X } from "@phosphor-icons/react/X";
 
 import { runWindowAction } from "@/components/app/window-actions";
 import { Button } from "@/components/ui/button";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 
 export function AppChrome() {
   return (
@@ -12,10 +11,7 @@ export function AppChrome() {
       className="flex h-10 shrink-0 select-none items-center bg-background text-foreground"
       data-tauri-drag-region
     >
-      <div className="flex h-full items-center pl-2 md:hidden">
-        <SidebarTrigger aria-label="Open navigation" className="bg-secondary" size="icon-xs" />
-      </div>
-      <div className="min-w-2 flex-1 md:min-w-4" data-tauri-drag-region />
+      <div className="min-w-4 flex-1" data-tauri-drag-region />
       <div className="flex h-full">
         <Button
           aria-label="Minimize"

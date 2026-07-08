@@ -5,8 +5,8 @@ export type TranscriptHistoryEntry = {
   createdAt: string;
 };
 
-export const transcriptHistoryKey = "yap.transcriptHistory.v1";
-export const hiddenTranscriptHistoryKey = "yap.hiddenTranscriptHistory.v1";
+const transcriptHistoryKey = "yap.transcriptHistory.v1";
+const hiddenTranscriptHistoryKey = "yap.hiddenTranscriptHistory.v1";
 
 type HistoryStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -21,7 +21,7 @@ function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
   );
 }
 
-export function normalizeTranscriptHistory(value: unknown) {
+function normalizeTranscriptHistory(value: unknown) {
   if (!Array.isArray(value)) return [];
 
   const seen = new Set<string>();

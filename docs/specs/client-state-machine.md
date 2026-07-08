@@ -8,7 +8,7 @@ This is the build contract for the client workflow. It replaces the cosmetic rea
 ## Product Direction
 
 - Yap desktop is a thin client.
-- Local Moonshine v2 tiny is the live/offline fallback.
+- Local Nemotron INT8 is the live/offline fallback.
 - Larger recordings use the GB-class server Cohere path when available.
 - Without a server path, larger recordings queue or block instead of silently producing official-looking fallback output.
 - Preprocessing and diarization are future compute phases, but the client job model must reserve their state now.
@@ -51,7 +51,7 @@ These match ADR 0006's Rust-owned runtime shape.
 | State | Meaning |
 |-------|---------|
 | `idle` | No active STT/live/upload work. |
-| `fallback_ready` | Local Moonshine fallback is ready/warm. |
+| `fallback_ready` | Local Nemotron fallback is ready/warm. |
 | `fallback_running` | Local fallback is transcribing. |
 | `server_queued` | A recording is reserved for server processing. |
 | `server_uploading` | Desktop is uploading a server job. |
@@ -74,7 +74,7 @@ These match ADR 0006's Rust-owned runtime shape.
 | `preprocessing` | Normalization/VAD/chunk/LID/manifest work is active. | Preparing |
 | `uploading` | Desktop is uploading to server. | Uploading |
 | `server_processing_cohere` | Server Cohere batch job is processing. | Server |
-| `local_transcribing` | Moonshine fallback is transcribing. | Fallback |
+| `local_transcribing` | Nemotron fallback is transcribing. | Fallback |
 | `saving` | Client is writing output/history. | Saving |
 | `diarization_queued` | Speaker work is queued. | Speakers queued |
 | `diarization_running` | Speaker work is running. | Speakers |
@@ -173,7 +173,7 @@ Pipeline stages are orthogonal to the coarse job state:
 ```mermaid
 flowchart LR
     Intake["Intake"] --> Pre["Preprocessing: normalize, VAD, chunks, LID"]
-    Pre --> STT["Transcription: Moonshine fallback or server Cohere"]
+    Pre --> STT["Transcription: Nemotron fallback or server router"]
     STT --> Align["Alignment and timestamps"]
     Align --> Diar["Diarization: solo fallback or server two-pass"]
     Diar --> Post["Postprocess: history, OKF, KB handoff"]

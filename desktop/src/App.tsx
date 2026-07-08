@@ -45,6 +45,7 @@ import {
   recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
+  type LocalComputeTargetView,
   type LiveCaptureMode,
   type LiveInputDeviceView,
   type LiveSessionView,
@@ -73,15 +74,8 @@ import {
   stopLiveSession,
   type SavedLiveSession,
 } from "@/live";
-import {
-  listenTranscribeEvents,
-  SttInvokeError,
-  startTranscribe,
-  transcriptFileError,
-  type TranscribeBatchCompleteEvent,
-  type TranscribeFileCompleteEvent,
-  type TranscribeProgressEvent,
-} from "@/stt";
+import { listLocalComputeTargets, setLocalComputeTarget } from "@/settings";
+import { SttInvokeError, startTranscribe } from "@/stt";
 
 type SetupStatus = {
   model: string;
@@ -132,7 +126,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const [model, setModel] = useState("Moonshine v2 tiny");
+  const [model, setModel] = useState("Nemotron 3.5 ASR Streaming 0.6B INT8");
   const [auth, setAuth] = useState("Checking");
   const [engineBinaryStatus, setEngineBinaryStatus] = useState("Checking");
   const [engineReady, setEngineReady] = useState(false);
@@ -144,6 +138,10 @@ export default function App() {
   const [setupBusy, setSetupBusy] = useState(false);
   const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
   const [liveInputDevices, setLiveInputDevices] = useState<LiveInputDeviceView[]>([]);
+  const [localComputeTargets, setLocalComputeTargets] = useState<LocalComputeTargetView[]>([
+    { id: "auto", label: "Auto", selected: true },
+    { id: "cpu", label: "CPU", selected: false },
+  ]);
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveSettingsError, setLiveSettingsError] = useState("");
   const [selectedId, setSelectedId] = useState<number>();
@@ -159,7 +157,6 @@ export default function App() {
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
   const [previewText, setPreviewText] = useState("");
-  const pathToItemId = useRef<Map<string, number>>(new Map());
   const setupPrompted = useRef(false);
 
   const hasRunnable = useMemo(
@@ -190,55 +187,8 @@ export default function App() {
     if (!isTauri()) return;
 
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
     let unlistenLive: (() => void) | undefined;
     let unlistenLiveSaved: (() => void) | undefined;
-
-    void listenTranscribeEvents({
-      onProgress: (event) => {
-        updateItemProgress(event);
-      },
-      onFileComplete: (event) => {
-        applyFileResult(event);
-      },
-      onComplete: (event) => {
-        finishBatch(event);
-      },
-      onError: (error) => {
-        const message = error.message || "Transcription failed";
-        const pendingIds = new Set(pathToItemId.current.values());
-        setQueue((items) =>
-          items.map((entry) =>
-            pendingIds.has(entry.id) && !isRecordingFinished(entry.status)
-              ? {
-                  ...entry,
-                  error: message,
-                  pipeline: {
-                    ...entry.pipeline,
-                    transcription: "error",
-                  },
-                  progressMessage: undefined,
-                  progressPercent: undefined,
-                  progressPhase: undefined,
-                  status: "failed",
-                }
-              : entry,
-          ),
-        );
-        setRunning(false);
-        setRunningSince(undefined);
-        pathToItemId.current.clear();
-        setStatus("Needs attention");
-        setAuth("Check local engine");
-        toast.error(message);
-      },
-    }).then((stop) => {
-      if (cancelled) {
-        stop();
-        return;
-      }
-      unlisten = stop;
-    });
 
     void listenLiveSession(setLiveView).then((stop) => {
       if (cancelled) {
@@ -274,7 +224,6 @@ export default function App() {
 
     return () => {
       cancelled = true;
-      unlisten?.();
       unlistenLive?.();
       unlistenLiveSaved?.();
     };
@@ -306,92 +255,6 @@ export default function App() {
       unlisten?.();
     };
   }, [selectedItem?.status]);
-
-  function updateQueueItem(path: string, updater: (item: RecordingJobView) => RecordingJobView) {
-    setQueue((items) =>
-      items.map((entry) => (entry.path === path ? updater(entry) : entry)),
-    );
-  }
-
-  function updateItemProgress(event: TranscribeProgressEvent) {
-    updateQueueItem(event.path, (entry) => ({
-      ...entry,
-      error: undefined,
-      pipeline: {
-        ...entry.pipeline,
-        intake: "done",
-        transcription: "running",
-      },
-      progressPhase: event.phase,
-      progressPercent: event.percent,
-      progressMessage: event.message,
-      route: "localFallback",
-      status: event.phase === "writing" ? "saving" : "local_transcribing",
-    }));
-    setStatus(event.message);
-    const itemId = pathToItemId.current.get(event.path);
-    if (itemId !== undefined) setSelectedId(itemId);
-  }
-
-  function applyFileResult(event: TranscribeFileCompleteEvent) {
-    const { result } = event;
-    const itemId = pathToItemId.current.get(event.path);
-
-    if (result.error) {
-      const message = transcriptFileError(result) ?? "Transcription failed.";
-      updateQueueItem(event.path, (entry) => ({
-        ...entry,
-        error: message,
-        pipeline: {
-          ...entry.pipeline,
-          transcription: "error",
-        },
-        progressPhase: undefined,
-        progressPercent: undefined,
-        progressMessage: undefined,
-        status: "failed",
-      }));
-      toast.error(`${basename(event.path)}: ${message}`);
-      return;
-    }
-
-    updateQueueItem(event.path, (entry) => ({
-      ...entry,
-      output: result.output,
-      error: undefined,
-      pipeline: {
-        ...entry.pipeline,
-        intake: "done",
-        transcription: "done",
-        postprocessing: "done",
-      },
-      progressPhase: "done",
-      progressPercent: 100,
-      progressMessage: "Transcript saved",
-      status: "complete",
-    }));
-    recordHistoryEntries([
-      {
-        createdAt: new Date().toISOString(),
-        name: basename(event.path),
-        outputPath: result.output,
-        sourcePath: event.path,
-      },
-    ]);
-    void loadTranscriptText(result.output).catch(() => undefined);
-    if (itemId !== undefined) setSelectedId(itemId);
-  }
-
-  function finishBatch(event: TranscribeBatchCompleteEvent) {
-    setStatus(event.failed ? "Needs attention" : "Ready");
-    setAuth("Ready");
-    if (event.succeeded) {
-      toast.success(`Transcribed ${event.succeeded} file${event.succeeded === 1 ? "" : "s"}`);
-    }
-    setRunning(false);
-    setRunningSince(undefined);
-    pathToItemId.current.clear();
-  }
 
   useEffect(() => {
     void loadStatus();
@@ -444,7 +307,7 @@ export default function App() {
     try {
       const setup = await invoke<SetupStatus>("setup_status");
       applySetupStatus(setup);
-      await loadLiveControls();
+      await Promise.all([loadLiveControls(), loadComputeTargets()]);
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
@@ -455,6 +318,10 @@ export default function App() {
     const [live, devices] = await Promise.all([liveStatus(), listInputDevices()]);
     setLiveView(live);
     setLiveInputDevices(devices);
+  }
+
+  async function loadComputeTargets() {
+    setLocalComputeTargets(await listLocalComputeTargets());
   }
 
   function applySetupStatus(setup: SetupStatus) {
@@ -549,6 +416,21 @@ export default function App() {
       setSetupState("setup_error");
       toast.error(`Update failed: ${String(error)}`);
       await loadStatus();
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  async function updateLocalComputeTarget(targetId: string) {
+    if (!isTauri() || setupBusy) return;
+
+    setSetupBusy(true);
+    try {
+      setLocalComputeTargets(await setLocalComputeTarget(targetId));
+      toast.success("Local compute updated");
+    } catch (error) {
+      toast.error(String(error));
+      await loadComputeTargets();
     } finally {
       setSetupBusy(false);
     }
@@ -702,7 +584,6 @@ export default function App() {
       return;
     }
 
-    pathToItemId.current = new Map(pending.map((item) => [item.path, item.id]));
     setRunning(true);
     setRunningSince(Date.now());
     setStatus(`Transcribing 0/${pending.length}`);
@@ -758,7 +639,6 @@ export default function App() {
       );
       setRunning(false);
       setRunningSince(undefined);
-      pathToItemId.current.clear();
       setStatus("Needs attention");
       toast.error(message);
     }
@@ -1118,6 +998,7 @@ export default function App() {
         liveInputDevices={liveInputDevices}
         liveSettingsError={liveSettingsError}
         liveView={liveView}
+        localComputeTargets={localComputeTargets}
         onClearLiveHotkey={clearLiveShortcut}
         onInstallFallback={() => void installFallback()}
         onPreflightLiveInput={preflightLiveInput}
@@ -1132,6 +1013,7 @@ export default function App() {
         onSetLiveCaptureMode={updateLiveCaptureMode}
         onSetLiveHotkey={updateLiveHotkey}
         onSetLiveOverlayEnabled={updateLiveOverlay}
+        onSetLocalComputeTarget={(targetId) => void updateLocalComputeTarget(targetId)}
         onSkipSetup={skipSetup}
         onStartLive={startLive}
         onStopLive={stopLive}

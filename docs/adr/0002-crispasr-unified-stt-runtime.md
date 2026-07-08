@@ -2,8 +2,9 @@
 
 **Date:** 2026-06-30
 **Status:** Accepted
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and the moonshine-XOR-cohere exclusivity rule move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. CrispASR on the client is demoted to an **offline/degraded-mode fallback** (local Moonshine v2 tiny) for the team profile. The on-prem GB-class server node is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles. PR3 implements the client fallback slice only: one local Moonshine v2 tiny sidecar, not a local Cohere batch default.
-**Supersedes:** Implementation details in [ADR 0001](0001-dual-stt-backends.md) (PyTorch `transcribe.py`, `moonshine-voice` ONNX, per-invocation subprocess, “no GGUF” rule). The product split from ADR 0001 remains: Moonshine-class streaming for live/offline fallback, Cohere for larger recordings through the GB-class server path.
+**Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the committed local fallback pin is now Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. CrispASR remains historical runtime context and legacy helper code, not the active local live path.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and client/server routing move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. The on-prem GB-class server node is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles.
+**Supersedes:** Implementation details in [ADR 0001](0001-dual-stt-backends.md) (PyTorch `transcribe.py`, `moonshine-voice` ONNX, per-invocation subprocess, “no GGUF” rule). The product split from ADR 0001 remains: local streaming for live/offline fallback, server STT for larger recordings.
 
 ## Context
 
@@ -167,11 +168,11 @@ Honest assessment of this decision — revisit when Phase 2 ships or CrispASR pi
 
 The following are **required** for Phase 1–2 ship (see § Critical review):
 
-1. Pin CrispASR version in `desktop/crispasr-version.txt` (or equivalent); CI smoke-test `--server` + one file per release.
+1. Pin local STT runtime artifacts in code or manifest files; CI smoke-test the selected runtime with one fixture per release.
 2. Setup status: **“Transcription engine ready”** — sidecar health, model cache, not raw binary names.
 3. Settings: expose only operational fallback status/preference in PR3; higher-quality batch controls belong with the server Cohere connector.
 4. Structured sidecar error codes (`MODEL_MISSING`, `OOM`, `BAD_LANG`, `SIDEcar_CRASH`) → actionable toasts.
-5. No runtime backend selector in PR3; local fallback means the pinned Moonshine sidecar only.
+5. No runtime backend selector in PR3; local fallback means one pinned local runtime only.
 
 ## Implementation notes
 

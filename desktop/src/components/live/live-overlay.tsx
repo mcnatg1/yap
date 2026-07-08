@@ -1,28 +1,23 @@
-import { isTauri } from "@tauri-apps/api/core";
-import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
-import { ArrowCircleDown as ArrowDownCircle } from "@phosphor-icons/react/ArrowCircleDown";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Check } from "@phosphor-icons/react/Check";
 import { WarningCircle as CircleAlert } from "@phosphor-icons/react/WarningCircle";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { ChatText as MessageSquareText } from "@phosphor-icons/react/ChatText";
 import { Microphone as Mic } from "@phosphor-icons/react/Microphone";
-import { PencilSimple as Pencil } from "@phosphor-icons/react/PencilSimple";
 import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowCounterClockwise";
 import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
 import { X } from "@phosphor-icons/react/X";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
-  hoverSensorHeight,
-  idleSensorWidth,
   modelFromLiveView,
   overlayFrame,
   overlaySurface,
+  peekWidth,
   retractMs,
   successVisibleMs,
-  type OverlayPhase,
   type OverlayModel,
   type OverlaySurface,
 } from "@/components/live/live-overlay-state";
@@ -39,7 +34,7 @@ type LiveOverlayProps = {
   view: LiveSessionView;
 };
 
-const defaultWidth = 92;
+const idleSensorPollMs = 120;
 
 export function LiveOverlay({
   onCopyLast,
@@ -56,34 +51,15 @@ export function LiveOverlay({
   const [retracting, setRetracting] = useState(false);
   const [successVisible, setSuccessVisible] = useState(false);
   const [showInitializing, setShowInitializing] = useState(false);
-  const lockedProcessingWidthRef = useRef<number | undefined>(undefined);
-  const lastNonProcessingWidthRef = useRef(defaultWidth);
-  const previousPhaseRef = useRef<OverlayPhase>("idle");
   const previousEntrySurfaceRef = useRef<OverlaySurface>("sensor");
   const previousStatusRef = useRef(view.status);
   const retractTimerRef = useRef<number | undefined>(undefined);
-  const resizeRunningRef = useRef(false);
-  const resizeTargetRef = useRef({ height: hoverSensorHeight, width: idleSensorWidth });
   const successTimerRef = useRef<number | undefined>(undefined);
   const hasCopyableFinal = Boolean(model.finalText?.trim());
   const surface = overlaySurface(model, peeked, retracting, successVisible && hasCopyableFinal);
   const frame = overlayFrame(surface, model);
-  const width = model.phase === "processing"
-    ? lockedProcessingWidthRef.current ?? lastNonProcessingWidthRef.current
-    : frame.width;
-
-  useEffect(() => {
-    const previousPhase = previousPhaseRef.current;
-    previousPhaseRef.current = model.phase;
-    if (model.phase === "processing" && previousPhase !== "processing") {
-      lockedProcessingWidthRef.current = lastNonProcessingWidthRef.current;
-    } else if (model.phase !== "processing") {
-      lockedProcessingWidthRef.current = undefined;
-      if (model.phase !== "idle") {
-        lastNonProcessingWidthRef.current = overlayFrame(model.phase, model).width;
-      }
-    }
-  }, [model]);
+  const width = frame.width;
+  const rootFrameStyle: CSSProperties | undefined = isTauri() ? undefined : { height: frame.height, width };
 
   useEffect(() => {
     if (surface === "sensor" || (surface === "initializing" && !showInitializing)) {
@@ -139,8 +115,17 @@ export function LiveOverlay({
     if (surface === "sensor") {
       previousEntrySurfaceRef.current = "sensor";
     }
-    scheduleOverlayResize(width, frame.height);
-  }, [frame.height, surface, width]);
+    void setNativeOverlaySurface(surface, model.errorMessage);
+  }, [model.errorMessage, surface]);
+
+  useEffect(() => {
+    if (!isTauri() || surface !== "sensor") return;
+
+    const timer = window.setInterval(() => {
+      void setNativeOverlaySurface(surface, model.errorMessage);
+    }, idleSensorPollMs);
+    return () => window.clearInterval(timer);
+  }, [model.errorMessage, surface]);
 
   useEffect(() => {
     return () => {
@@ -157,26 +142,6 @@ export function LiveOverlay({
     successTimerRef.current = undefined;
   }
 
-  function scheduleOverlayResize(width: number, height: number) {
-    resizeTargetRef.current = { height, width };
-    if (!resizeRunningRef.current) {
-      void flushOverlayResize();
-    }
-  }
-
-  async function flushOverlayResize() {
-    resizeRunningRef.current = true;
-    try {
-      while (true) {
-        const target = resizeTargetRef.current;
-        await resizeOverlayWindow(target.width, target.height);
-        if (target === resizeTargetRef.current) break;
-      }
-    } finally {
-      resizeRunningRef.current = false;
-    }
-  }
-
   function cancelRetract() {
     if (retractTimerRef.current === undefined) return;
     window.clearTimeout(retractTimerRef.current);
@@ -187,6 +152,7 @@ export function LiveOverlay({
     cancelRetract();
     setRetracting(false);
     setPeeked(true);
+    setEntered(true);
   }
 
   function closeIdlePreview() {
@@ -204,27 +170,45 @@ export function LiveOverlay({
     return (
       <div
         className="live-overlay-root pointer-events-auto h-full w-full bg-transparent"
+        data-overlay-phase={model.phase}
+        data-overlay-surface={surface}
+        data-testid="live-overlay-root"
         onMouseEnter={openIdlePreview}
+        style={rootFrameStyle}
       />
     );
   }
   if (model.phase === "initializing" && !showInitializing) return null;
 
   return (
-    <div className="live-overlay-root pointer-events-none h-full w-full overflow-hidden bg-transparent p-0">
+    <div
+      className={cn(
+        "live-overlay-root h-full w-full overflow-hidden bg-transparent p-0",
+        surface === "peek" ? "pointer-events-auto" : "pointer-events-none",
+      )}
+      data-overlay-phase={model.phase}
+      data-overlay-surface={surface}
+      data-testid="live-overlay-root"
+      onMouseEnter={() => {
+        if (retracting) openIdlePreview();
+      }}
+      onMouseLeave={() => {
+        if (surface === "peek") closeIdlePreview();
+      }}
+      style={rootFrameStyle}
+    >
       <div
-        className="pointer-events-auto h-full w-full text-white"
-        onMouseLeave={() => {
-          if (surface !== "peek") return;
-          closeIdlePreview();
-        }}
+        className="pointer-events-auto h-full text-white"
+        data-testid="live-overlay-island"
         style={{
           backgroundColor: "black",
           borderBottomLeftRadius: 14,
           borderBottomRightRadius: 14,
+          marginInline: "auto",
           overflow: "hidden",
           transform: entered ? "translateY(0)" : "translateY(-100%)",
           transition: "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
+          width: surface === "peek" ? peekWidth : "100%",
         }}
       >
         {surface === "peek" ? (
@@ -247,18 +231,12 @@ export function LiveOverlay({
   );
 }
 
-async function resizeOverlayWindow(width: number, height: number) {
+async function setNativeOverlaySurface(surface: OverlaySurface, errorMessage?: string) {
   if (!isTauri()) return;
-
-  const window = getCurrentWindow();
-  await window.setSize(new LogicalSize(width, height));
-
-  const monitor = await currentMonitor();
-  if (!monitor) return;
-
-  const position = monitor.position.toLogical(monitor.scaleFactor);
-  const size = monitor.size.toLogical(monitor.scaleFactor);
-  await window.setPosition(new LogicalPosition(position.x + Math.max((size.width - width) / 2, 0), position.y));
+  await invoke("set_live_overlay_surface", {
+    errorMessage: errorMessage ?? null,
+    surface,
+  }).catch(() => undefined);
 }
 
 function PeekOverlayView({
@@ -301,10 +279,9 @@ function RecordingOverlayView({
     return <ErrorOverlayView message={model.errorMessage} onRetry={onRetryButtonPressed} />;
   }
   if (model.phase === "feedback") return <FailureIndicatorView onRetry={onRetryButtonPressed} />;
-  if (model.phase === "updateAvailable") return <UpdateAvailableOverlayView />;
 
   return (
-    <div className="relative grid h-full w-full place-items-center px-3">
+    <div className="relative grid h-full w-full place-items-center px-3" data-testid="live-recording-layout">
       <div className="absolute inset-0 grid place-items-center transition-opacity duration-200 ease-out">
         {model.phase === "initializing" ? (
           <InitializingDotsView />
@@ -316,20 +293,18 @@ function RecordingOverlayView({
       </div>
 
       {showsStopButton ? (
-        <div className="absolute inset-0 flex items-center justify-between px-2.5">
+        <div className="absolute inset-0 flex items-center justify-between px-2" data-testid="live-toggle-actions">
           <FreeFlowIconButton label="Cancel recording" onClick={onStopButtonPressed} tone="cancel">
             <X className="size-3" weight="bold" />
           </FreeFlowIconButton>
-          <div className="h-px w-11" />
+          <div className="h-px w-12" />
           <FreeFlowIconButton label="Finish recording" onClick={onStopButtonPressed} tone="confirm">
             <Check className="size-3" weight="bold" />
           </FreeFlowIconButton>
         </div>
       ) : (
         <div className="absolute inset-0 flex items-center px-3">
-          <div className="grid h-full w-6 place-items-center">
-            {model.isCommandMode ? <CommandModeIndicator /> : null}
-          </div>
+          <div className="w-6" />
           <div className="min-w-0 flex-1" />
         </div>
       )}
@@ -351,7 +326,7 @@ function IslandInlineButton({
       aria-label={label}
       className="size-8 rounded-full bg-white/10 p-0 text-white transition-colors hover:bg-white/20 hover:text-fuchsia-100 focus-visible:ring-white/60"
       onClick={onClick}
-      size="icon"
+      size="icon-tight"
       type="button"
       variant="ghost"
       title={label}
@@ -376,13 +351,13 @@ function FreeFlowIconButton({
     <Button
       aria-label={label}
       className={cn(
-        "size-[22px] rounded-full p-0 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.16)] focus-visible:ring-white/60",
+        "size-5 rounded-full p-0 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.16)] focus-visible:ring-white/60",
         tone === "confirm"
           ? "bg-white text-black hover:bg-emerald-100 hover:text-black"
           : "bg-white/18 hover:bg-red-500/85 hover:text-white",
       )}
       onClick={onClick}
-      size="icon-xs"
+      size="icon-tight"
       type="button"
       variant="ghost"
       title={label}
@@ -395,7 +370,7 @@ function FreeFlowIconButton({
 function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; showsActivityPulse?: boolean }) {
   const pulseTime = useAnimationTime(Boolean(showsActivityPulse));
   return (
-    <div className="flex h-6 w-11 items-center justify-center gap-[2.5px]">
+    <div aria-hidden="true" className="flex h-6 w-12 items-center justify-center gap-[2.5px]" data-testid="live-waveform">
       {waveformMultipliers.map((multiplier, index) => (
         <WaveformBar
           amplitude={barAmplitude(audioLevel, multiplier, index, pulseTime)}
@@ -500,10 +475,6 @@ function InitializingDotsView() {
   );
 }
 
-function CommandModeIndicator() {
-  return <Pencil className="size-4 text-white/90" weight="bold" />;
-}
-
 function SuccessOverlayView({ onCopyLast }: { onCopyLast?: () => void }) {
   return (
     <div className="flex h-full w-full items-center justify-center gap-2 px-3">
@@ -557,22 +528,13 @@ function FreeFlowNeutralButton({
       aria-label={label}
       className="size-[22px] shrink-0 rounded-full bg-white/12 p-0 text-white hover:bg-white/20 hover:text-fuchsia-100 focus-visible:ring-white/60"
       onClick={onClick}
-      size="icon-xs"
+      size="icon-tight"
       title={label}
       type="button"
       variant="ghost"
     >
       {children}
     </Button>
-  );
-}
-
-function UpdateAvailableOverlayView() {
-  return (
-    <button className="flex h-full w-full items-center justify-center gap-[7px] text-[11px] font-semibold text-white" type="button">
-      <ArrowDownCircle className="size-[13px] fill-white text-white" />
-      <span>Update Available</span>
-    </button>
   );
 }
 

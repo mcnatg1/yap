@@ -125,7 +125,7 @@ Frontend package changes should be minimal. Do not add `@gsap/react` unless a co
 |-----------|-------|-----------------------|
 | Team server ready and Phase 8 connector present | `serverLive` | Overlay labels route as server; audio streams to org GB-class node. |
 | Team server configured but connector absent | `blocked` or `localFallback` | Overlay labels the server route as unavailable; do not fake server streaming. |
-| Server missing/offline and fallback ready | `localFallback` | Overlay labels fallback/degraded; local Moonshine v2 tiny handles English live. |
+| Server missing/offline and fallback ready | `localFallback` | Overlay labels fallback/degraded; local Nemotron INT8 handles English live/offline fallback. |
 | No server and fallback missing/disabled | `blocked` | Overlay prompts setup; capture cannot start. |
 | Server drops mid-session and fallback ready | `localFallback` | Continue degraded if possible; preserve visible route change. |
 
@@ -151,7 +151,7 @@ The overlay must not hide a route downgrade. If audio leaves the device for team
 
 ## Acceptance Criteria
 
-- [ ] A mobile/narrow desktop user can open settings and configure live controls.
+- [ ] A narrow desktop window can open settings and configure live controls.
 - [ ] The overlay window can be shown/hidden independently of the main window.
 - [ ] Overlay states render from a typed `LiveSessionView`.
 - [ ] Hotkey settings persist and validate a user-selected chord.

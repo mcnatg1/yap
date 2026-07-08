@@ -1,4 +1,4 @@
-export const workspaceViews = ["home", "transcribe", "polish"] as const;
+const workspaceViews = ["home", "transcribe", "polish"] as const;
 
 export type WorkspaceView = (typeof workspaceViews)[number];
 
@@ -65,10 +65,10 @@ export type RecordingJobStatus =
   | "failed"
   | "cancelled";
 
-export type RecordingIntent = "live" | "recording";
-export type RecordingRoute = "localFallback" | "serverBatch" | "serverLive";
-export type PipelineStageStatus = "notStarted" | "queued" | "running" | "done" | "error" | "skipped";
-export type LiveOverlayVisibility = "enabled" | "hidden";
+type RecordingIntent = "live" | "recording";
+type RecordingRoute = "localFallback" | "serverBatch" | "serverLive";
+type PipelineStageStatus = "notStarted" | "queued" | "running" | "done" | "error" | "skipped";
+type LiveOverlayVisibility = "enabled" | "hidden";
 export type LiveCaptureMode = "pushToTalk" | "toggle";
 export type LiveSessionStatus =
   | "idle"
@@ -87,18 +87,25 @@ export type LiveInputDeviceView = {
   selected: boolean;
 };
 
+export type LocalComputeTargetView = {
+  id: string;
+  label: string;
+  selected: boolean;
+};
+
 export type LiveSessionView = {
   visibility: LiveOverlayVisibility;
   status: LiveSessionStatus;
   route: LiveRoute;
   captureMode: LiveCaptureMode;
+  activeCaptureMode?: LiveCaptureMode | null;
   hotkey: string;
-  inputDeviceId?: string;
-  inputDeviceLabel?: string;
-  level?: number;
-  partialText?: string;
-  finalText?: string;
-  error?: string;
+  inputDeviceId?: string | null;
+  inputDeviceLabel?: string | null;
+  level?: number | null;
+  partialText?: string | null;
+  finalText?: string | null;
+  error?: string | null;
 };
 
 export type RecordingPipelineState = {
@@ -213,10 +220,10 @@ export function setupStateLabel(state: SetupState) {
 
 export function fallbackModelLabel(model: string) {
   const normalized = model.toLowerCase();
-  if (normalized.includes("moonshine-streaming-tiny")) {
-    return "Moonshine v2 tiny";
+  if (normalized.includes("nemotron")) {
+    return "Nemotron 3.5 ASR Streaming 0.6B INT8";
   }
-  return model.replace("cstr/", "").replace(".gguf", "");
+  return model.replace("cstr/", "").replace(/\.(gguf|onnx)$/i, "");
 }
 
 export function serverConnectionLabel(state: ServerConnectionState) {
@@ -280,18 +287,6 @@ export function extension(path: string) {
   return dot === -1 ? "" : name.slice(dot).toLowerCase();
 }
 
-export function formatHistoryDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Saved";
-
-  return new Intl.DateTimeFormat(undefined, {
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    month: "short",
-  }).format(date);
-}
-
 function localDayKey(date: Date) {
   return [
     date.getFullYear(),
@@ -300,7 +295,7 @@ function localDayKey(date: Date) {
   ].join("-");
 }
 
-export function historyEntryTime(entry: { createdAt: string }) {
+function historyEntryTime(entry: { createdAt: string }) {
   const time = Date.parse(entry.createdAt);
   return Number.isFinite(time) ? time : 0;
 }

@@ -31,14 +31,14 @@ Keep ADRs focused on one decision (or one tightly related cluster). Prefer updat
 
 **Readable synthesis:** [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md) — layers, roadmap, two deployment profiles, hardening, viability assessment.
 
-ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 introduce the **team / server profile** (GB-class server node, two-pass diarization, auth, KB compiler, repo topology). Both profiles are normative; solo profile is the baseline for all users.
+ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 introduce the **team / server profile** (GB-class server node, two-pass diarization, auth, KB compiler, repo topology). ADR 0019 amends the local streaming model choice. Both profiles are normative; solo profile is the baseline for all users.
 
 ## Index
 
 | ADR | Title | Status |
 |-----|-------|--------|
-| [0001](0001-dual-stt-backends.md) | Dual STT backends: Moonshine live, Cohere batch | Accepted (implementation superseded by [0002](0002-crispasr-unified-stt-runtime.md)) |
-| [0002](0002-crispasr-unified-stt-runtime.md) | CrispASR unified STT runtime (warm daemon + GGUF) | Accepted |
+| [0001](0001-dual-stt-backends.md) | Dual STT backends: streaming live, server batch | Accepted (implementation superseded by [0002](0002-crispasr-unified-stt-runtime.md), local model amended by [0019](0019-local-streaming-model-selection.md)) |
+| [0002](0002-crispasr-unified-stt-runtime.md) | CrispASR unified STT runtime (warm daemon + GGUF) | Accepted (local model amended by [0019](0019-local-streaming-model-selection.md)) |
 | [0003](0003-long-term-voice-architecture.md) | Long-term voice OS — recordings, SpeechBrain LID, roadmap | Accepted (roadmap) |
 | [0004](0004-background-diarization-okf-agents.md) | Background pipeline — diarization, micro-batches, OKF, agents | Accepted (roadmap) |
 | [0005](0005-llama-server-agents.md) | Bundled llama-server for LLM agents (CPU-first) | Accepted |
@@ -55,6 +55,7 @@ ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 intr
 | [0016](0016-auth-identity-bridge.md) | Authentication and voice identity bridge (Entra ID + MSAL) | Accepted (roadmap — Phase 9) |
 | [0017](0017-knowledge-base-compiler.md) | Team knowledge base — source-of-truth, compiled disposable indexes, permission model | Accepted (roadmap — Phase 11) |
 | [0018](0018-three-repo-topology.md) | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | Accepted (roadmap — Phase 12) |
+| [0019](0019-local-streaming-model-selection.md) | Local streaming model selection — Nemotron INT8 client fallback | Accepted |
 
 **Build specs** (how, not why): [docs/specs/](../specs/) — STT sidecar, LLM sidecar, live UX, testing.
 

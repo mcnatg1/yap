@@ -1,4 +1,3 @@
-use std::io::{BufRead, BufReader, Write};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -10,11 +9,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tauri::{Emitter, Manager};
 
 use super::state::LiveSessionState;
-use super::stream::{self, LiveStreamProcess, StreamEvent};
+use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
-const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(1200);
+const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(2500);
 
 #[derive(Clone)]
 pub struct LiveRuntime {
@@ -26,7 +25,7 @@ pub struct LiveRuntime {
 struct LiveRuntimeInner {
     session: u64,
     capture: Option<cpal::Stream>,
-    stream: Option<WarmStream>,
+    stream: Option<SessionStream>,
     audio: Option<JoinHandle<()>>,
     level: Option<JoinHandle<()>>,
     vad_segments: Vec<VadSegment>,
@@ -37,19 +36,22 @@ struct LiveRuntimeInner {
     has_stream_for_test: bool,
 }
 
-struct WarmStream {
-    session: u64,
-    process: LiveStreamProcess,
-    pcm_tx: mpsc::SyncSender<PcmMessage>,
+struct SessionStream {
+    session: Arc<AtomicU64>,
+    samples_tx: mpsc::SyncSender<StreamMessage>,
     cancelled: Arc<AtomicBool>,
-    finishing: Arc<AtomicBool>,
-    writer: Option<JoinHandle<()>>,
-    reader: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<()>>,
 }
 
-struct PcmMessage {
-    session: u64,
-    bytes: Vec<u8>,
+enum StreamMessage {
+    Samples {
+        session: u64,
+        samples: Vec<f32>,
+    },
+    Finish {
+        session: u64,
+        done: mpsc::Sender<()>,
+    },
 }
 
 struct RawAudio {
@@ -91,7 +93,6 @@ impl LiveRuntime {
                 return Err("Live capture is already running.".into());
             }
             self.recorded_pcm.lock().expect("live pcm poisoned").clear();
-            inner.retire_stream();
             inner.session = inner.session.saturating_add(1);
             inner.last_used = Instant::now();
             inner.vad_segments.clear();
@@ -120,8 +121,6 @@ impl LiveRuntime {
             Ok(capture) => capture,
             Err(error) => {
                 self.active_session.store(0, Ordering::SeqCst);
-                let mut inner = self.inner.lock().expect("live runtime poisoned");
-                inner.retire_stream();
                 return Err(error);
             }
         };
@@ -134,6 +133,7 @@ impl LiveRuntime {
 
     pub fn stop(&self) {
         let mut inner = self.inner.lock().expect("live runtime poisoned");
+        inner.mark_stream_finishing();
         inner.stop_capture();
         inner.finish_stream();
         self.active_session.store(0, Ordering::SeqCst);
@@ -205,128 +205,46 @@ impl LiveRuntimeInner {
         app: tauri::AppHandle,
         session: u64,
     ) -> Result<(), String> {
-        if self
-            .stream
-            .as_mut()
-            .is_some_and(|stream| stream.session == session && stream.process.is_running())
-        {
+        if self.stream.as_ref().is_some_and(SessionStream::is_running) {
+            if let Some(stream) = self.stream.as_ref() {
+                stream.session.store(session, Ordering::SeqCst);
+            }
             return Ok(());
         }
         self.retire_stream();
 
-        let mut process =
-            stream::spawn_stream_child().map_err(|err| err.user_message().to_string())?;
-        let stdin = process
-            .take_stdin()
-            .ok_or_else(|| "Live stream stdin is unavailable.".to_string())?;
-        let stdout = process
-            .take_stdout()
-            .ok_or_else(|| "Live stream stdout is unavailable.".to_string())?;
-        let (pcm_tx, pcm_rx) = mpsc::sync_channel::<PcmMessage>(16);
+        let engine = LiveStreamEngine::new().map_err(|err| err.user_message().to_string())?;
+        let (samples_tx, samples_rx) = mpsc::sync_channel::<StreamMessage>(64);
         let cancelled = Arc::new(AtomicBool::new(false));
-        let finishing = Arc::new(AtomicBool::new(false));
+        let stream_session = Arc::new(AtomicU64::new(session));
 
-        let writer_cancelled = Arc::clone(&cancelled);
-        let writer_active_session = Arc::clone(&runtime.active_session);
-        let writer_runtime = runtime.clone();
-        let writer_app = app.clone();
-        let writer = std::thread::spawn(move || {
-            let mut stdin = stdin;
-            while !writer_cancelled.load(Ordering::Relaxed) {
-                match pcm_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(message) => {
-                        if !should_write_pcm(
-                            message.session,
-                            writer_active_session.load(Ordering::SeqCst),
-                            session,
-                        ) {
-                            continue;
-                        }
-                        if stdin.write_all(&message.bytes).is_err() {
-                            let crash_runtime = writer_runtime.clone();
-                            let crash_app = writer_app.clone();
-                            let crash_session = message.session;
-                            std::thread::spawn(move || {
-                                crash_runtime.handle_stream_crash(
-                                    crash_app,
-                                    crash_session,
-                                    "Live stream stopped.",
-                                );
-                            });
-                            break;
-                        }
-                        let _ = stdin.flush();
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
+        let worker = std::thread::spawn({
+            let active_session = Arc::clone(&runtime.active_session);
+            let stream_session = Arc::clone(&stream_session);
+            let cancelled = Arc::clone(&cancelled);
+            move || {
+                run_stream_worker(
+                    engine,
+                    samples_rx,
+                    stream_session,
+                    active_session,
+                    cancelled,
+                    app,
+                )
             }
         });
 
-        let reader_cancelled = Arc::clone(&cancelled);
-        let reader_finishing = Arc::clone(&finishing);
-        let active_session = Arc::clone(&runtime.active_session);
-        let reader_runtime = runtime.clone();
-        let reader = std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if reader_cancelled.load(Ordering::Relaxed) {
-                    return;
-                }
-                let Ok(line) = line else {
-                    break;
-                };
-                let Some(event) = stream::parse_stream_event(&line) else {
-                    continue;
-                };
-                let Some(session) =
-                    accepted_stream_session(active_session.load(Ordering::SeqCst), session)
-                else {
-                    continue;
-                };
-                let state = app.state::<LiveSessionState>();
-                match event {
-                    StreamEvent::Partial(text) => {
-                        let view = state.update_partial(&text);
-                        let _ = app.emit("live-session", &view);
-                    }
-                    StreamEvent::Final(text) => {
-                        let view = state.update_final(&text);
-                        let _ = app.emit("live-session", &view);
-                        std::thread::sleep(Duration::from_millis(180));
-                        if active_session.load(Ordering::SeqCst) == session {
-                            let view = state.return_to_listening();
-                            let _ = app.emit("live-session", &view);
-                        }
-                    }
-                }
-            }
-
-            let active = active_session.load(Ordering::SeqCst);
-            if should_report_stream_crash(
-                active,
-                session,
-                reader_cancelled.load(Ordering::Relaxed),
-                reader_finishing.load(Ordering::Relaxed),
-            ) {
-                reader_runtime.handle_stream_crash(app, active, "Live stream stopped.");
-            }
-        });
-
-        self.stream = Some(WarmStream {
-            session,
-            process,
-            pcm_tx,
+        self.stream = Some(SessionStream {
+            session: stream_session,
+            samples_tx,
             cancelled,
-            finishing,
-            writer: Some(writer),
-            reader: Some(reader),
+            worker: Some(worker),
         });
         Ok(())
     }
 
-    fn stream_tx(&self) -> Option<mpsc::SyncSender<PcmMessage>> {
-        self.stream.as_ref().map(|stream| stream.pcm_tx.clone())
+    fn stream_tx(&self) -> Option<mpsc::SyncSender<StreamMessage>> {
+        self.stream.as_ref().map(|stream| stream.samples_tx.clone())
     }
 
     fn start_level_worker(
@@ -392,43 +310,37 @@ impl LiveRuntimeInner {
     }
 
     fn finish_stream(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            stream.finish();
+        if let Some(stream) = self.stream.as_ref() {
+            stream.finish_session();
         }
-        #[cfg(test)]
-        {
-            self.has_stream_for_test = false;
-        }
+    }
+
+    fn mark_stream_finishing(&mut self) {
+        // sherpa keeps a warm recognizer after stop; Finish carries the session boundary.
     }
 }
 
-impl WarmStream {
-    fn finish(mut self) {
-        self.finishing.store(true, Ordering::SeqCst);
-        drop(self.pcm_tx);
-        if let Some(handle) = self.writer.take() {
-            let _ = handle.join();
-        }
-        // ponytail: bounded drain; move to protocol ack if CrispASR exposes one.
-        std::thread::sleep(STREAM_DRAIN_ON_STOP);
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.process.shutdown();
-        if let Some(handle) = self.reader.take() {
-            let _ = handle.join();
-        }
+impl SessionStream {
+    fn is_running(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
     }
 
-    fn shutdown(mut self, join_reader: bool) {
+    fn finish_session(&self) {
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = self.samples_tx.send(StreamMessage::Finish {
+            session: self.session.load(Ordering::SeqCst),
+            done: done_tx,
+        });
+        let _ = done_rx.recv_timeout(STREAM_DRAIN_ON_STOP);
+    }
+
+    fn shutdown(mut self, _join_reader: bool) {
         self.cancelled.store(true, Ordering::SeqCst);
-        self.process.shutdown();
-        drop(self.pcm_tx);
-        if let Some(handle) = self.writer.take() {
+        drop(self.samples_tx);
+        if let Some(handle) = self.worker.take() {
             let _ = handle.join();
-        }
-        if join_reader {
-            if let Some(handle) = self.reader.take() {
-                let _ = handle.join();
-            }
         }
     }
 }
@@ -437,7 +349,7 @@ fn open_capture(
     selected_device_id: Option<&str>,
     session: u64,
     active_session: Arc<AtomicU64>,
-    pcm_tx: mpsc::SyncSender<PcmMessage>,
+    samples_tx: mpsc::SyncSender<StreamMessage>,
     recorded_pcm: Arc<Mutex<Vec<u8>>>,
 ) -> Result<(cpal::Stream, mpsc::Receiver<f32>, JoinHandle<()>), String> {
     let host = cpal::default_host();
@@ -467,14 +379,14 @@ fn open_capture(
             let resampled = resampler.push(&mono);
             let bytes = f32_to_i16_le_bytes(&resampled);
             if !bytes.is_empty() {
-                // ponytail: in-memory live WAV; stream to file if dictation sessions get long.
+                // Keep live WAV data in memory for short dictation sessions.
                 recorded_pcm
                     .lock()
                     .expect("live pcm poisoned")
                     .extend_from_slice(&bytes);
-                let _ = pcm_tx.try_send(PcmMessage {
+                let _ = samples_tx.send(StreamMessage::Samples {
                     session: raw.session,
-                    bytes,
+                    samples: resampled,
                 });
             }
             let _ = level_tx.send(level);
@@ -557,21 +469,149 @@ fn claim_raw_audio_slot(raw_ready: &AtomicBool) -> bool {
         .is_ok()
 }
 
-fn should_write_pcm(message_session: u64, active_session: u64, stream_session: u64) -> bool {
-    message_session != 0 && message_session == active_session && message_session == stream_session
+fn run_stream_worker(
+    mut engine: LiveStreamEngine,
+    samples_rx: mpsc::Receiver<StreamMessage>,
+    stream_session: Arc<AtomicU64>,
+    active_session: Arc<AtomicU64>,
+    cancelled: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+) {
+    let mut active_stream_session = 0;
+    let mut buffer = Vec::<f32>::with_capacity(stream::chunk_samples() * 2);
+    let mut profile = StreamProfile::default();
+
+    while !cancelled.load(Ordering::Relaxed) {
+        match samples_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(StreamMessage::Samples { session, samples }) => {
+                if !should_accept_stream_samples(
+                    session,
+                    active_session.load(Ordering::SeqCst),
+                    stream_session.load(Ordering::SeqCst),
+                ) {
+                    continue;
+                }
+                if active_stream_session != session {
+                    engine.reset();
+                    buffer.clear();
+                    profile = StreamProfile::new(session);
+                    active_stream_session = session;
+                }
+                buffer.extend(samples);
+                drain_stream_buffer(&mut engine, &mut buffer, &mut profile, &app, false);
+            }
+            Ok(StreamMessage::Finish { session, done }) => {
+                if active_stream_session == session {
+                    drain_stream_buffer(&mut engine, &mut buffer, &mut profile, &app, true);
+                    let started = Instant::now();
+                    let final_text = engine.finish();
+                    profile.decode_elapsed += started.elapsed();
+                    if let Some(text) = final_text {
+                        emit_stream_final(&app, &text);
+                    }
+                    crate::stt::log_stt(&profile.summary());
+                    engine.reset();
+                    buffer.clear();
+                    active_stream_session = 0;
+                }
+                let _ = done.send(());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }
 
-fn accepted_stream_session(active_session: u64, stream_session: u64) -> Option<u64> {
-    (active_session != 0 && active_session == stream_session).then_some(active_session)
+fn drain_stream_buffer(
+    engine: &mut LiveStreamEngine,
+    buffer: &mut Vec<f32>,
+    profile: &mut StreamProfile,
+    app: &tauri::AppHandle,
+    flush_all: bool,
+) {
+    let chunk = stream::chunk_samples();
+    while buffer.len() >= chunk || (flush_all && !buffer.is_empty()) {
+        let take = if buffer.len() >= chunk {
+            chunk
+        } else {
+            buffer.len()
+        };
+        let samples = buffer.drain(..take).collect::<Vec<_>>();
+        profile.audio_samples += samples.len();
+        profile.chunks += 1;
+        let started = Instant::now();
+        let text = engine.accept_samples(&samples);
+        profile.decode_elapsed += started.elapsed();
+        if let Some(text) = text {
+            profile.mark_first_text();
+            emit_stream_partial(app, &text);
+        }
+    }
 }
 
-fn should_report_stream_crash(
+fn emit_stream_partial(app: &tauri::AppHandle, text: &str) {
+    let state = app.state::<LiveSessionState>();
+    let view = state.update_partial(text);
+    let _ = app.emit("live-session", &view);
+}
+
+fn emit_stream_final(app: &tauri::AppHandle, text: &str) {
+    let state = app.state::<LiveSessionState>();
+    let view = state.update_final(text);
+    let _ = app.emit("live-session", &view);
+    std::thread::sleep(Duration::from_millis(180));
+    let view = state.return_to_listening();
+    let _ = app.emit("live-session", &view);
+}
+
+#[derive(Default)]
+struct StreamProfile {
+    session: u64,
+    started: Option<Instant>,
+    first_text: Option<Duration>,
+    decode_elapsed: Duration,
+    audio_samples: usize,
+    chunks: usize,
+}
+
+impl StreamProfile {
+    fn new(session: u64) -> Self {
+        Self {
+            session,
+            started: Some(Instant::now()),
+            ..Default::default()
+        }
+    }
+
+    fn mark_first_text(&mut self) {
+        if self.first_text.is_none() {
+            self.first_text = self.started.map(|started| started.elapsed());
+        }
+    }
+
+    fn summary(&self) -> String {
+        let audio_ms = self.audio_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64;
+        let first_text_ms = self
+            .first_text
+            .map(|duration| duration.as_millis().to_string())
+            .unwrap_or_else(|| "none".into());
+        format!(
+            "live nemotron profile session={} chunks={} audio_ms={} decode_ms={} first_text_ms={}",
+            self.session,
+            self.chunks,
+            audio_ms,
+            self.decode_elapsed.as_millis(),
+            first_text_ms
+        )
+    }
+}
+
+fn should_accept_stream_samples(
+    message_session: u64,
     active_session: u64,
     stream_session: u64,
-    cancelled: bool,
-    finishing: bool,
 ) -> bool {
-    active_session != 0 && active_session == stream_session && !cancelled && !finishing
+    message_session != 0 && message_session == active_session && message_session == stream_session
 }
 
 fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
@@ -842,37 +882,10 @@ mod tests {
 
     #[test]
     fn stale_pcm_is_discarded_after_session_changes() {
-        assert!(should_write_pcm(2, 2, 2));
-        assert!(!should_write_pcm(1, 2, 2));
-        assert!(!should_write_pcm(2, 0, 2));
-        assert!(!should_write_pcm(2, 2, 0));
-    }
-
-    #[test]
-    fn stream_events_require_active_accepted_session() {
-        assert_eq!(accepted_stream_session(3, 3), Some(3));
-        assert_eq!(accepted_stream_session(0, 3), None);
-        assert_eq!(accepted_stream_session(3, 0), None);
-        assert_eq!(accepted_stream_session(3, 2), None);
-    }
-
-    #[test]
-    fn delayed_stale_stream_events_do_not_match_new_session() {
-        let old_stream_session = 4;
-        let new_active_session = 5;
-
-        assert_eq!(
-            accepted_stream_session(new_active_session, old_stream_session),
-            None
-        );
-    }
-
-    #[test]
-    fn graceful_stop_does_not_report_stream_crash() {
-        assert!(should_report_stream_crash(3, 3, false, false));
-        assert!(!should_report_stream_crash(3, 3, false, true));
-        assert!(!should_report_stream_crash(3, 3, true, false));
-        assert!(!should_report_stream_crash(0, 3, false, false));
+        assert!(should_accept_stream_samples(2, 2, 2));
+        assert!(!should_accept_stream_samples(1, 2, 2));
+        assert!(!should_accept_stream_samples(2, 0, 2));
+        assert!(!should_accept_stream_samples(2, 2, 0));
     }
 
     #[test]
@@ -897,5 +910,10 @@ mod tests {
 
         assert!(speech >= LiveAudioLevelNormalizer::MINIMUM_VISIBLE_ACTIVE_LEVEL);
         assert!(speech <= 1.0);
+    }
+
+    #[test]
+    fn stop_tail_silence_covers_final_silence_window() {
+        assert_eq!(stream::silence_samples(Duration::from_millis(500)), 8_000);
     }
 }

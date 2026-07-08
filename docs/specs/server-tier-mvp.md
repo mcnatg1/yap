@@ -9,7 +9,7 @@ The server tier introduces `yap-server` as a private service on an org-owned GB-
 
 ```text
 cohere-transcribe-local/
-  desktop/               installed client and local Moonshine fallback
+  desktop/               installed client and local Nemotron fallback
   server/                service/API staging area
   infra/yap-server-node/ GB-class host setup and firewall/runbook scripts
   docs/                  ADRs, specs, runbooks
