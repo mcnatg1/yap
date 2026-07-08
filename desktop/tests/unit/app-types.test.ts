@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { projectFallbackLifecycle } from "@/components/panels/app-sheets";
+import { liveSettingsLocked, projectFallbackLifecycle } from "@/components/panels/app-sheets";
 import {
   createInitialPipelineState,
   deriveSetupState,
@@ -109,6 +109,7 @@ describe("client recording workflow projection", () => {
 
   it("projects the full fallback lifecycle action matrix", () => {
     expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "missing" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "Local fallback is not installed.",
       value: "Not installed",
       primaryAction: { id: "install", disabled: false, label: "Install" },
       secondaryActions: [{ id: "open-folder", disabled: false, label: "Open folder" }],
@@ -131,12 +132,14 @@ describe("client recording workflow projection", () => {
       { commandPending: false, liveStatus: "idle" },
     );
     expect(verifying).toMatchObject({
+      detail: "Verifying files.",
       value: "Verifying files",
       secondaryActions: [{ id: "open-folder", disabled: false, label: "Open folder" }],
     });
     expect(verifying.primaryAction).toBeUndefined();
 
     expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "ready" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "Ready.",
       value: "Ready",
       primaryAction: { id: "reinstall", disabled: false, label: "Reinstall" },
       secondaryActions: [
@@ -148,6 +151,7 @@ describe("client recording workflow projection", () => {
     });
 
     expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "corrupted" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "Files failed verification.",
       value: "Files failed verification.",
       primaryAction: { id: "repair", disabled: false, label: "Repair" },
       secondaryActions: [
@@ -157,6 +161,7 @@ describe("client recording workflow projection", () => {
     });
 
     expect(projectFallbackLifecycle({ ...baseFallbackModel, status: "disabled" }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "Disabled.",
       value: "Disabled",
       primaryAction: { id: "enable", disabled: false, label: "Enable" },
       secondaryActions: [
@@ -178,6 +183,19 @@ describe("client recording workflow projection", () => {
         { id: "open-folder", disabled: false, label: "Open folder" },
       ],
     });
+
+    expect(projectFallbackLifecycle({
+      ...baseFallbackModel,
+      message: undefined,
+      status: "error",
+    }, { commandPending: false, liveStatus: "idle" })).toMatchObject({
+      detail: "Local fallback needs attention.",
+    });
+  });
+
+  it("treats saving as an active settings lock", () => {
+    expect(liveSettingsLocked("saving")).toBe(true);
+    expect(liveSettingsLocked("idle")).toBe(false);
   });
 
   it("locks install, remove, and verify while live is active but keeps cancel during downloads", () => {
