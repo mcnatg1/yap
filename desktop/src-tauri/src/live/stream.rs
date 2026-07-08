@@ -16,7 +16,7 @@ pub struct LiveStreamEngine {
 
 impl LiveStreamEngine {
     pub fn new() -> Result<Self, SttError> {
-        let paths = crate::stt::nemotron::resolve_model()?;
+        let paths = crate::stt::nemotron::local_fallback_start_paths()?;
         let started = Instant::now();
         let recognizer = OnlineRecognizer::create(&recognizer_config(&paths))
             .ok_or(SttError::SidecarUnreachable)?;
