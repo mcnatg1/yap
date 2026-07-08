@@ -664,7 +664,7 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Future (unnumbered):** multilingual live router — its own ADR once per-language streaming backends are chosen; server GPU removes the latency excuse.
 
-**Build specs:** [Client state machine](specs/client-state-machine.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Testing](specs/testing-strategy.md). Preprocessing and diarization get dedicated build specs when implementation begins.
+**Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Testing](specs/testing-strategy.md). Diarization gets a dedicated build spec when implementation begins.
 
 ---
 
