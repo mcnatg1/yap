@@ -11,7 +11,7 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
   test: {
-    exclude: ["e2e/**", "wdio/**", "node_modules/**", "dist/**"],
+    exclude: ["tests/e2e/**", "tests/wdio/**", "tests/results/**", "node_modules/**", "dist/**"],
   } satisfies InlineConfig,
   resolve: {
     alias: {

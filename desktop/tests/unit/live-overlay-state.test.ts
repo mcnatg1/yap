@@ -9,7 +9,7 @@ import {
   overlayFrame,
   overlaySurface,
   peekHeight,
-} from "./live-overlay-state";
+} from "@/components/live/live-overlay-state";
 
 const baseView: LiveSessionView = {
   captureMode: "pushToTalk",

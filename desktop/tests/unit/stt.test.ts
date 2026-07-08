@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isSttErrorCode, SttInvokeError, sttErrorMessage } from "./stt";
+import { isSttErrorCode, SttInvokeError, sttErrorMessage } from "@/stt";
 
 describe("stt error mapping", () => {
   it("maps every known code to a non-empty message", () => {

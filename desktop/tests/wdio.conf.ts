@@ -1,8 +1,11 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const binaryName = process.platform === "win32" ? "yap-desktop.exe" : "yap-desktop";
+const testsRoot = path.dirname(fileURLToPath(import.meta.url));
+const desktopRoot = path.resolve(testsRoot, "..");
 const appBinaryPath =
-  process.env.APP_BINARY ?? path.resolve("src-tauri", "target", "debug", binaryName);
+  process.env.APP_BINARY ?? path.join(desktopRoot, "src-tauri", "target", "debug", binaryName);
 
 export const config = {
   bail: 0,
@@ -24,7 +27,7 @@ export const config = {
     timeout: 60_000,
     ui: "bdd",
   },
-  outputDir: "./test-results/wdio",
+  outputDir: path.join(testsRoot, "results", "wdio"),
   reporters: ["spec"],
   runner: "local",
   services: [
@@ -41,12 +44,14 @@ export const config = {
       },
     ],
   ],
-  specs: ["./wdio/**/*.spec.js"],
+  specs: [path.join(testsRoot, "wdio", "**", "*.spec.js")],
   waitforTimeout: 10_000,
   async afterTest(_test, _context, result) {
     if (result.error) {
       const safeName = result.error.message.replace(/[^a-z0-9]+/gi, "-").slice(0, 80);
-      await browser.saveScreenshot(`./test-results/wdio/failure-${Date.now()}-${safeName}.png`);
+      await browser.saveScreenshot(
+        path.join(testsRoot, "results", "wdio", `failure-${Date.now()}-${safeName}.png`),
+      );
     }
   },
 };

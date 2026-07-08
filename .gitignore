@@ -15,6 +15,7 @@ desktop/dist/
 desktop/dist-portable/
 desktop/playwright-report/
 desktop/test-results/
+desktop/tests/results/
 desktop/src-tauri/target/
 .vite/
 .tools/
