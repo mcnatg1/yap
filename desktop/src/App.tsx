@@ -479,7 +479,7 @@ export default function App() {
     setModelInstalled(setup.modelInstalled);
   }
 
-  async function installFallback() {
+  async function installFallback(options: { force?: boolean } = {}) {
     if (!isTauri() || fallbackModelBusy) return;
 
     setFallbackCommandPending(true);
@@ -487,10 +487,14 @@ export default function App() {
     setFallbackEnabled(true);
     setStatus("Installing local fallback");
     try {
-      const view = await installFallbackModel();
+      const view = await installFallbackModel({ force: options.force });
       localStorage.removeItem(setupSkipKey);
       applyFallbackModelView(view, { fallbackEnabled: true });
-      toast.success("Local fallback installed");
+      if (view.status === "ready") {
+        toast.success(options.force ? "Local fallback reinstalled" : "Local fallback installed");
+      } else {
+        toast.info(view.message ?? "Local fallback install did not complete");
+      }
     } catch (error) {
       toast.error(`Install failed: ${String(error)}`);
       await loadStatus();
@@ -1142,7 +1146,7 @@ export default function App() {
         localComputeTargets={localComputeTargets}
         onCancelFallbackInstall={() => void cancelFallbackInstall()}
         onClearLiveHotkey={clearLiveShortcut}
-        onInstallFallback={() => void installFallback()}
+        onInstallFallback={(options) => void installFallback(options)}
         onOpenFallbackFolder={() => void openFallbackFolder()}
         onPreflightLiveInput={preflightLiveInput}
         onResetLiveHotkey={resetLiveHotkey}

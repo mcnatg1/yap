@@ -191,7 +191,7 @@ export function projectFallbackLifecycle(
     case "downloading":
       return {
         detail: fallbackDownloadDetail(fallbackModel),
-        primaryAction: createAction("cancel", options.commandPending || fallbackModel.status !== "downloading"),
+        primaryAction: createAction("cancel", fallbackModel.status !== "downloading"),
         secondaryActions: secondaryActions("downloading"),
         value: fallbackDownloadLabel(fallbackModel),
       };
@@ -276,7 +276,7 @@ export function SettingsSheet({
   onCancelFallbackInstall: () => void;
   onClearLiveHotkey: () => void;
   onOpenChange: (open: boolean) => void;
-  onInstallFallback: () => void;
+  onInstallFallback: (options?: { force?: boolean }) => void;
   onOpenFallbackFolder: () => void;
   onPreflightLiveInput: () => void;
   onResetLiveHotkey: () => void;
@@ -322,10 +322,12 @@ export function SettingsSheet({
   function runFallbackAction(actionId: FallbackLifecycleActionId) {
     switch (actionId) {
       case "install":
-      case "reinstall":
       case "repair":
       case "retry":
         onInstallFallback();
+        return;
+      case "reinstall":
+        onInstallFallback({ force: true });
         return;
       case "cancel":
         onCancelFallbackInstall();

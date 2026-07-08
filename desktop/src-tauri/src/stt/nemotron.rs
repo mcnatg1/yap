@@ -184,8 +184,7 @@ pub fn resolve_model() -> Result<NemotronPaths, SttError> {
 pub fn remove_model() -> Result<(), SttError> {
     let root = root_dir();
     for artifact in ARTIFACTS {
-        remove_if_exists(root.join(artifact.file))?;
-        remove_if_exists(root.join(artifact.file).with_extension("verified"))?;
+        remove_download_artifacts(&root.join(artifact.file))?;
     }
     let _ = std::fs::remove_dir(&root);
     Ok(())

@@ -7,8 +7,10 @@ export function fallbackModelStatus(): Promise<FallbackModelView> {
   return invoke<FallbackModelView>("fallback_model_status");
 }
 
-export function installFallbackModel(): Promise<FallbackModelView> {
-  return invoke<FallbackModelView>("fallback_model_install");
+export function installFallbackModel(options: { force?: boolean } = {}): Promise<FallbackModelView> {
+  return options.force
+    ? invoke<FallbackModelView>("fallback_model_install", { force: true })
+    : invoke<FallbackModelView>("fallback_model_install");
 }
 
 export function cancelFallbackModelInstall(): Promise<FallbackModelView> {

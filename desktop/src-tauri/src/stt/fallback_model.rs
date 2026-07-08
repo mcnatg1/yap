@@ -204,6 +204,7 @@ pub fn status(install_state: &FallbackModelInstallState) -> nemotron::FallbackMo
 pub async fn install(
     app: AppHandle,
     install_state: FallbackModelInstallState,
+    force: bool,
 ) -> Result<nemotron::FallbackModelView, SttCommandError> {
     let initial_view = fallback_model_phase_view(
         true,
@@ -232,7 +233,7 @@ pub async fn install(
                         .is_some_and(|token| token.load(Ordering::Relaxed))
                 };
                 nemotron::ensure_model_with_progress(
-                    false,
+                    force,
                     |view| progress.publish(view),
                     is_cancelled,
                 )?;

@@ -58,9 +58,10 @@ async fn fallback_model_install(
     app: tauri::AppHandle,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
+    force: Option<bool>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     ensure_fallback_setup_idle(&live_state)?;
-    stt::fallback_model::install(app, install_state.inner().clone()).await
+    stt::fallback_model::install(app, install_state.inner().clone(), force.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -377,9 +378,15 @@ async fn install_local_fallback(
 ) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
     ensure_fallback_setup_idle(&live_state)?;
     tauri::async_runtime::spawn_blocking(|| {
+        let previous_enabled = stt::settings::local_fallback_enabled();
         stt::settings::set_local_fallback_enabled(true)?;
-        stt::nemotron::local_fallback_start_paths()?;
-        Ok(current_setup_status())
+        match stt::nemotron::local_fallback_start_paths() {
+            Ok(_) => Ok(current_setup_status()),
+            Err(error) => {
+                let _ = stt::settings::set_local_fallback_enabled(previous_enabled);
+                Err(stt::dispatch::SttCommandError::from(error))
+            }
+        }
     })
     .await
     .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::SidecarCrash))?
