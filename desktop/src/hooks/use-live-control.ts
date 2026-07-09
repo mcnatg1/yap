@@ -31,11 +31,23 @@ const initialLiveView: LiveSessionView = {
   visibility: "enabled",
 };
 
-export function useLiveControl() {
+type UseLiveControlArgs = {
+  onLoadError?: (message: string) => void;
+};
+
+export function useLiveControl({ onLoadError }: UseLiveControlArgs = {}) {
   const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
   const [liveInputDevices, setLiveInputDevices] = useState<LiveInputDeviceView[]>([]);
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveSettingsError, setLiveSettingsError] = useState("");
+
+  const refreshLiveState = useCallback(async () => {
+    if (!isTauri()) return;
+
+    const [live, devices] = await Promise.all([liveStatus(), listInputDevices()]);
+    setLiveView(live);
+    setLiveInputDevices(devices);
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -56,13 +68,21 @@ export function useLiveControl() {
     };
   }, []);
 
-  const refreshLiveState = useCallback(async () => {
+  useEffect(() => {
     if (!isTauri()) return;
 
-    const [live, devices] = await Promise.all([liveStatus(), listInputDevices()]);
-    setLiveView(live);
-    setLiveInputDevices(devices);
-  }, []);
+    let cancelled = false;
+    void refreshLiveState().catch((error) => {
+      if (cancelled) return;
+      const message = String(error);
+      setLiveSettingsError(message);
+      onLoadError?.(message);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [onLoadError, refreshLiveState]);
 
   const updateLive = useCallback(
     async (action: () => Promise<LiveSessionView>, message?: string) => {
@@ -155,7 +175,6 @@ export function useLiveControl() {
     liveSettingsError,
     liveView,
     preflightLiveInput,
-    refreshLiveState,
     resetLiveHotkey,
     startLive,
     stopLive,

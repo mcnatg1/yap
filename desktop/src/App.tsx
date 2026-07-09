@@ -121,6 +121,10 @@ export default function App() {
   const [serverState, setServerState] = useState<ServerConnectionState>("not_set");
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
   const [computeTargetPending, setComputeTargetPending] = useState(false);
+  const handleLiveLoadError = useCallback((message: string) => {
+    setStatus("Setup check failed");
+    setAuth(message);
+  }, []);
   const {
     clearLivePasteShortcut,
     clearLiveShortcut,
@@ -129,7 +133,6 @@ export default function App() {
     liveSettingsError,
     liveView,
     preflightLiveInput,
-    refreshLiveState,
     resetLiveHotkey,
     startLive,
     stopLive,
@@ -138,7 +141,7 @@ export default function App() {
     updateLiveHotkey,
     updateLiveOverlay,
     updateLivePasteHotkey,
-  } = useLiveControl();
+  } = useLiveControl({ onLoadError: handleLiveLoadError });
   const [localComputeTargets, setLocalComputeTargets] = useState<LocalComputeTargetView[]>([
     { id: "auto", label: "Auto", selected: true },
     { id: "cpu", label: "CPU", selected: false },
@@ -372,7 +375,7 @@ export default function App() {
         fallbackEnabled: setup.fallbackEnabled,
         modelInstalled: setup.modelInstalled,
       });
-      await Promise.all([refreshLiveState(), loadComputeTargets()]);
+      await loadComputeTargets();
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
