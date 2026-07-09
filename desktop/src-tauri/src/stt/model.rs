@@ -1,12 +1,14 @@
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
 use crate::stt::error::SttError;
 
 const DOWNLOAD_BUFFER_BYTES: usize = 64 * 1024;
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DownloadProgress {
@@ -86,15 +88,37 @@ where
     P: FnMut(DownloadProgress),
     C: Fn() -> bool,
 {
-    let client = reqwest::blocking::Client::builder()
-        .build()
-        .map_err(|_| SttError::ModelMissing)?;
-    let mut response = client.get(url).send().map_err(|_| SttError::ModelMissing)?;
+    let client = download_client()?;
+    let mut response = client.get(url).send().map_err(reqwest_error_to_stt)?;
     if !response.status().is_success() {
         return Err(SttError::ModelMissing);
     }
     let total_bytes = response.content_length();
     stream_to_destination(&mut response, total_bytes, dest, on_progress, is_cancelled)
+}
+
+fn download_client() -> Result<reqwest::blocking::Client, SttError> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+        .timeout(DOWNLOAD_TOTAL_TIMEOUT)
+        .build()
+        .map_err(reqwest_error_to_stt)
+}
+
+fn reqwest_error_to_stt(error: reqwest::Error) -> SttError {
+    if error.is_timeout() {
+        SttError::Timeout
+    } else {
+        SttError::ModelMissing
+    }
+}
+
+fn io_error_to_stt(error: std::io::Error) -> SttError {
+    if error.kind() == ErrorKind::TimedOut {
+        SttError::Timeout
+    } else {
+        SttError::ModelMissing
+    }
 }
 
 fn progress_metrics(
@@ -126,7 +150,7 @@ where
 {
     let tmp = dest.with_extension("part");
     let result = (|| {
-        let mut file = std::fs::File::create(&tmp).map_err(|_| SttError::ModelMissing)?;
+        let mut file = std::fs::File::create(&tmp).map_err(io_error_to_stt)?;
         let mut buffer = [0u8; DOWNLOAD_BUFFER_BYTES];
         let mut downloaded_bytes = 0u64;
         let started_at = Instant::now();
@@ -136,15 +160,12 @@ where
                 return Err(SttError::ModelInstallCancelled);
             }
 
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| SttError::ModelMissing)?;
+            let read = reader.read(&mut buffer).map_err(io_error_to_stt)?;
             if read == 0 {
                 break;
             }
 
-            file.write_all(&buffer[..read])
-                .map_err(|_| SttError::ModelMissing)?;
+            file.write_all(&buffer[..read]).map_err(io_error_to_stt)?;
             downloaded_bytes += read as u64;
             on_progress(DownloadProgress {
                 downloaded_bytes,
@@ -163,7 +184,7 @@ where
             return Err(SttError::ModelInstallCancelled);
         }
 
-        std::fs::rename(&tmp, dest).map_err(|_| SttError::ModelMissing)?;
+        std::fs::rename(&tmp, dest).map_err(io_error_to_stt)?;
         on_progress(DownloadProgress {
             downloaded_bytes,
             total_bytes,
@@ -422,6 +443,20 @@ mod tests {
             stream_to_destination(&mut reader, Some(5), &dest, |_| {}, || false).unwrap_err();
 
         assert_eq!(error, SttError::ModelMissing);
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("part").exists());
+    }
+
+    #[test]
+    fn stream_to_destination_maps_timed_out_reads_to_timeout() {
+        let dir = TestDir::new("yap-download-timeout");
+        let dest = dir.path().join("model.bin");
+        let mut reader = ChunkedReader::with_error_after(&[b"abc"], ErrorKind::TimedOut);
+
+        let error =
+            stream_to_destination(&mut reader, Some(5), &dest, |_| {}, || false).unwrap_err();
+
+        assert_eq!(error, SttError::Timeout);
         assert!(!dest.exists());
         assert!(!dest.with_extension("part").exists());
     }

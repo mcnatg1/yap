@@ -827,23 +827,50 @@ fn should_accept_stream_samples(
 }
 
 fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
-    let mut first = None;
-    let mut default = None;
     let default_name = host
         .default_input_device()
         .and_then(|device| device.name().ok());
     let devices = host.input_devices().ok()?;
-    for (index, device) in devices.enumerate() {
-        let name = device.name().ok()?;
+    let named_devices = devices
+        .enumerate()
+        .filter_map(|(index, device)| {
+            let name = device.name().ok()?;
+            Some((index, device, name))
+        })
+        .collect::<Vec<_>>();
+    let selected_index = choose_capture_device_index(
+        named_devices
+            .iter()
+            .map(|(index, _, name)| (*index, Some(name.as_str()))),
+        default_name.as_deref(),
+        selected_id,
+    )?;
+    named_devices
+        .into_iter()
+        .find_map(|(index, device, _)| (index == selected_index).then_some(device))
+}
+
+fn choose_capture_device_index<'a, I>(
+    devices: I,
+    default_name: Option<&str>,
+    selected_id: Option<&str>,
+) -> Option<usize>
+where
+    I: IntoIterator<Item = (usize, Option<&'a str>)>,
+{
+    let mut first = None;
+    let mut default = None;
+    for (index, name) in devices {
+        let Some(name) = name else {
+            continue;
+        };
         let id = format!("{index}:{name}");
         if selected_id.is_some_and(|selected| selected == id) {
-            return Some(device);
+            return Some(index);
         }
-        if first.is_none() {
-            first = Some(device.clone());
-        }
-        if default.is_none() && default_name.as_deref() == Some(name.as_str()) {
-            default = Some(device);
+        first.get_or_insert(index);
+        if default.is_none() && default_name == Some(name) {
+            default = Some(index);
         }
     }
     default.or(first)
@@ -905,6 +932,16 @@ mod tests {
         assert!(!should_accept_stream_samples(1, 2, 2));
         assert!(!should_accept_stream_samples(2, 0, 2));
         assert!(!should_accept_stream_samples(2, 2, 0));
+    }
+
+    #[test]
+    fn capture_device_selection_skips_unreadable_names() {
+        let devices = [(0, None), (1, Some("USB mic"))];
+
+        assert_eq!(
+            choose_capture_device_index(devices, Some("USB mic"), None),
+            Some(1)
+        );
     }
 
     #[test]
