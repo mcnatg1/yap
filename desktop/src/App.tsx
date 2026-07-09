@@ -22,6 +22,7 @@ import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useServerConnection } from "@/hooks/use-server-connection";
+import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import {
   savedSessionToTranscriptHistoryEntry,
@@ -49,7 +50,6 @@ import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import {
   allowRecordingPlaybackPath,
 } from "@/lib/playback-registry";
-import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 import {
   availableQueuedServerSlots,
@@ -133,8 +133,15 @@ export default function App() {
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
-  const [polishedText, setPolishedText] = useState<Record<string, string>>({});
+  const {
+    clearTranscriptText,
+    forgetTranscriptText,
+    loadTranscriptPreviewText,
+    loadTranscriptText,
+    polishedText,
+    rememberPolishedText,
+    transcriptText,
+  } = useTranscriptText();
   const {
     forgetHistoryEntry,
     history,
@@ -784,23 +791,9 @@ export default function App() {
   function clearQueue() {
     if (!running) {
       setQueue([]);
-      setTranscriptText({});
+      clearTranscriptText();
     }
   }
-
-  async function loadTranscriptText(path: string) {
-    if (Object.prototype.hasOwnProperty.call(transcriptText, path)) return transcriptText[path];
-    if (!isTauri()) return "";
-
-    const text = await invoke<string>("read_text_file", { path });
-    setTranscriptText((current) => rememberText(current, path, text));
-    return text;
-  }
-
-  const loadTranscriptPreviewText = useCallback(async (path: string) => {
-    if (!isTauri()) return "";
-    return invoke<string>("read_text_preview", { maxChars: 600, path });
-  }, []);
 
   const loadHistoryPreviewText = useCallback(
     (entry: TranscriptHistoryEntry) => loadTranscriptPreviewText(entry.outputPath),
@@ -864,10 +857,7 @@ export default function App() {
       if (!rememberHiddenHistoryEntry(entry.outputPath)) return;
       if (!forgetHistoryEntry(entry.outputPath)) return;
       if (selectedHistoryOutput === entry.outputPath) setSelectedHistoryOutput(undefined);
-      setTranscriptText((current) => {
-        const { [entry.outputPath]: _deleted, ...next } = current;
-        return next;
-      });
+      forgetTranscriptText(entry.outputPath);
       toast.success("Deleted from device");
     } catch (error) {
       toast.error(String(error || "Delete failed"));
@@ -950,7 +940,7 @@ export default function App() {
           onLoadText={loadTranscriptText}
           onOpenHelp={() => handleRailAction("help")}
           onPolished={(outputPath, text) => {
-            setPolishedText((current) => rememberText(current, outputPath, text));
+            rememberPolishedText(outputPath, text);
             toast.success("Polished draft ready");
           }}
           onSave={savePolishedTranscript}
