@@ -142,10 +142,8 @@ pub fn build_manifest_windows(
 
     let target_window_ms = u64::from(config.target_window_ms.max(1));
     let max_window_ms = u64::from(config.max_window_ms.max(config.target_window_ms.max(1)));
-    let chunk_window_ms = target_window_ms.min(max_window_ms);
-
     if has_mixed_session_or_sample_rate(session_id, &sorted_frames) {
-        return build_error_windows(session_id, &sorted_frames, purpose, codec, chunk_window_ms);
+        return build_error_windows(session_id, &sorted_frames, purpose, codec, target_window_ms);
     }
 
     let assignments = sorted_frames
@@ -159,11 +157,8 @@ pub fn build_manifest_windows(
         match assignments[index].kind {
             VadKind::Speech => {
                 let speech_end = advance_while_kind(&assignments, index, VadKind::Speech);
-                let speech_windows = split_windows(
-                    &sorted_frames[index..speech_end],
-                    chunk_window_ms,
-                    max_window_ms,
-                );
+                let speech_windows =
+                    split_windows(&sorted_frames[index..speech_end], max_window_ms);
                 let last_window = speech_windows.len().saturating_sub(1);
                 let mut consumed = speech_end;
 
@@ -173,7 +168,12 @@ pub fn build_manifest_windows(
                     let start = index + relative_start;
                     let speech_chunk_end = index + relative_end;
                     let mut chunk_end = speech_chunk_end;
-                    let speech_end_ms = sorted_frames[speech_chunk_end - 1].end_ms();
+                    let assigned_speech_end_ms = sorted_frames[speech_chunk_end - 1].end_ms();
+                    let speech_end_ms = resolve_speech_boundary_ms(
+                        vad,
+                        sorted_frames[start].start_ms,
+                        assigned_speech_end_ms,
+                    );
 
                     if window_index == last_window {
                         chunk_end = extend_speech_tail(
@@ -182,6 +182,7 @@ pub fn build_manifest_windows(
                             start,
                             speech_chunk_end,
                             speech_end_ms,
+                            assigned_speech_end_ms,
                             config.tail_padding_ms,
                             max_window_ms,
                         );
@@ -223,11 +224,9 @@ pub fn build_manifest_windows(
             VadKind::Silence => {
                 let silence_end = advance_while_kind(&assignments, index, VadKind::Silence);
                 if config.preserve_silence_markers {
-                    for (relative_start, relative_end) in split_windows(
-                        &sorted_frames[index..silence_end],
-                        chunk_window_ms,
-                        max_window_ms,
-                    ) {
+                    for (relative_start, relative_end) in
+                        split_windows(&sorted_frames[index..silence_end], target_window_ms)
+                    {
                         let start = index + relative_start;
                         let end = index + relative_end;
                         let chunk_end_ms = sorted_frames[end - 1].end_ms();
@@ -253,11 +252,9 @@ pub fn build_manifest_windows(
             }
             VadKind::Error => {
                 let error_end = advance_while_kind(&assignments, index, VadKind::Error);
-                for (relative_start, relative_end) in split_windows(
-                    &sorted_frames[index..error_end],
-                    chunk_window_ms,
-                    max_window_ms,
-                ) {
+                for (relative_start, relative_end) in
+                    split_windows(&sorted_frames[index..error_end], target_window_ms)
+                {
                     let start = index + relative_start;
                     let end = index + relative_end;
                     let chunk_end_ms = sorted_frames[end - 1].end_ms();
@@ -314,7 +311,7 @@ fn build_error_windows(
     partition_identity_runs(frames)
         .into_iter()
         .flat_map(|run| {
-            split_windows(run, window_ms, window_ms)
+            split_windows(run, window_ms)
                 .into_iter()
                 .filter_map(|(start, end)| {
                     let chunk_frames = &run[start..end];
@@ -335,6 +332,23 @@ fn build_error_windows(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+fn resolve_speech_boundary_ms(
+    vad: &[VadDecision],
+    chunk_start_ms: u64,
+    assigned_end_ms: u64,
+) -> u64 {
+    vad.iter()
+        .filter(|decision| {
+            decision.kind != VadKind::Speech
+                && decision.start_ms > chunk_start_ms
+                && decision.start_ms < assigned_end_ms
+                && decision.end_ms > chunk_start_ms
+        })
+        .map(|decision| decision.start_ms)
+        .min()
+        .unwrap_or(assigned_end_ms)
 }
 
 fn partition_identity_runs(frames: &[AudioFrame]) -> Vec<&[AudioFrame]> {
@@ -405,18 +419,14 @@ fn advance_while_kind(assignments: &[FrameVadAssignment], start: usize, kind: Va
     end
 }
 
-fn split_windows(
-    frames: &[AudioFrame],
-    target_window_ms: u64,
-    max_window_ms: u64,
-) -> Vec<(usize, usize)> {
+fn split_windows(frames: &[AudioFrame], window_ms: u64) -> Vec<(usize, usize)> {
     if frames.is_empty() {
         return Vec::new();
     }
 
     let mut windows = Vec::new();
     let mut start = 0;
-    let hard_limit_ms = target_window_ms.min(max_window_ms).max(1);
+    let window_ms = window_ms.max(1);
 
     while start < frames.len() {
         let chunk_start_ms = frames[start].start_ms;
@@ -424,7 +434,7 @@ fn split_windows(
         while end < frames.len() {
             let candidate_end_ms = frames[end].end_ms();
             let candidate_duration_ms = candidate_end_ms.saturating_sub(chunk_start_ms);
-            if candidate_duration_ms > hard_limit_ms {
+            if candidate_duration_ms > window_ms {
                 break;
             }
             end += 1;
@@ -443,6 +453,7 @@ fn extend_speech_tail(
     chunk_start: usize,
     speech_chunk_end: usize,
     speech_end_ms: u64,
+    assigned_speech_end_ms: u64,
     tail_padding_ms: u32,
     max_window_ms: u64,
 ) -> usize {
@@ -450,7 +461,13 @@ fn extend_speech_tail(
         return speech_chunk_end;
     }
 
-    let allowed_tail_end_ms = speech_end_ms.saturating_add(u64::from(tail_padding_ms));
+    let already_covered_tail_ms = assigned_speech_end_ms.saturating_sub(speech_end_ms);
+    let remaining_tail_ms = u64::from(tail_padding_ms).saturating_sub(already_covered_tail_ms);
+    if remaining_tail_ms == 0 {
+        return speech_chunk_end;
+    }
+
+    let allowed_tail_end_ms = assigned_speech_end_ms.saturating_add(remaining_tail_ms);
     let allowed_chunk_end_ms = frames[chunk_start].start_ms.saturating_add(max_window_ms);
     let final_allowed_end_ms = allowed_tail_end_ms.min(allowed_chunk_end_ms);
 
@@ -824,6 +841,98 @@ mod tests {
                 rms: 0.6,
             }]
         );
+    }
+
+    #[test]
+    fn build_manifest_windows_does_not_double_apply_tail_padding_when_vad_is_already_padded() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+            frame(7, 4, 60, 20, 16_000),
+            frame(7, 5, 80, 20, 16_000),
+        ];
+        let vad = vec![
+            VadDecision {
+                kind: VadKind::Speech,
+                rms: 0.6,
+                threshold: 0.2,
+                start_ms: 0,
+                end_ms: 60,
+            },
+            VadDecision {
+                kind: VadKind::Silence,
+                rms: 0.0,
+                threshold: 0.2,
+                start_ms: 40,
+                end_ms: 100,
+            },
+        ];
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].start_ms, 0);
+        assert_eq!(chunks[0].duration_ms, 60);
+        assert_eq!(
+            chunks[0].vad_segments,
+            vec![VadSegment {
+                start_ms: 0,
+                end_ms: 40,
+                kind: VadKind::Speech,
+                rms: 0.6,
+            }]
+        );
+    }
+
+    #[test]
+    fn build_manifest_windows_allows_speech_to_grow_to_max_window_ms() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+            frame(7, 4, 60, 20, 16_000),
+            frame(7, 5, 80, 20, 16_000),
+            frame(7, 6, 100, 20, 16_000),
+        ];
+        let vad = vec![VadDecision {
+            kind: VadKind::Speech,
+            rms: 0.6,
+            threshold: 0.2,
+            start_ms: 0,
+            end_ms: 120,
+        }];
+        let mut config = window_config(false);
+        config.tail_padding_ms = 0;
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            config,
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].start_ms, 0);
+        assert_eq!(chunks[0].duration_ms, 80);
+        assert_eq!(chunks[1].start_ms, 80);
+        assert_eq!(chunks[1].duration_ms, 40);
+        assert!(chunks.iter().all(|chunk| chunk.vad_segments
+            == vec![VadSegment {
+                start_ms: chunk.start_ms,
+                end_ms: chunk.start_ms + u64::from(chunk.duration_ms),
+                kind: VadKind::Speech,
+                rms: 0.6,
+            }]));
     }
 
     #[test]

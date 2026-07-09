@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn end_ms_uses_saturating_frame_coverage() {
-        assert_eq!(frame(11, 100, 20, 320).end_ms(), 120);
+        assert_eq!(frame(11, u64::MAX - 5, 10, 320).end_ms(), u64::MAX);
     }
 
     #[test]
