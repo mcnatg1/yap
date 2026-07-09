@@ -135,7 +135,7 @@ fn system_time_to_unix_millis(time: std::time::SystemTime) -> Option<u64> {
     u64::try_from(millis).ok()
 }
 
-fn transcript_text(view: &live::state::LiveSessionView) -> Option<String> {
+pub(crate) fn transcript_text(view: &live::state::LiveSessionView) -> Option<String> {
     view.final_text
         .as_deref()
         .or(view.partial_text.as_deref())
@@ -243,6 +243,7 @@ mod tests {
             capture_mode: live::state::LiveCaptureMode::PushToTalk,
             active_capture_mode: None,
             hotkey: String::new(),
+            paste_hotkey: String::new(),
             input_device_id: None,
             input_device_label: None,
             level: None,

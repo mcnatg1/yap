@@ -8,7 +8,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -17,10 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW,
 };
 
-const LIVE_OVERLAY_COMPACT_WIDTH: f64 = 112.0;
 const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 40.0;
 const LIVE_OVERLAY_DEFAULT_WIDTH: f64 = 104.0;
-const LIVE_OVERLAY_SUCCESS_WIDTH: f64 = 168.0;
 const LIVE_OVERLAY_HOVER_SENSOR_WIDTH: f64 = 260.0;
 const LIVE_OVERLAY_HOVER_SENSOR_HEIGHT: f64 = 8.0;
 const LIVE_OVERLAY_MIN_ERROR_WIDTH: f64 = 180.0;
@@ -210,7 +208,11 @@ fn set_live_hotkey(
     hotkey: String,
 ) -> Result<live::state::LiveSessionView, String> {
     let next = live::hotkeys::parse_hotkey(&hotkey)?;
-    let previous = state.snapshot().hotkey;
+    let snapshot = state.snapshot();
+    if configured_hotkey_matches_shortcut(&snapshot.paste_hotkey, &next) {
+        return Err("Dictation shortcut must differ from paste shortcut.".into());
+    }
+    let previous = snapshot.hotkey;
     if !previous.is_empty() {
         if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
             let _ = app.global_shortcut().unregister(shortcut);
@@ -242,6 +244,54 @@ fn clear_live_hotkey(
         }
     }
     let view = state.update(|view| view.hotkey.clear());
+    persist_live_view(&view)?;
+    emit_live(&app, &view);
+    Ok(view)
+}
+
+#[tauri::command]
+fn set_live_paste_hotkey(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+    hotkey: String,
+) -> Result<live::state::LiveSessionView, String> {
+    let next = live::hotkeys::parse_hotkey(&hotkey)?;
+    let snapshot = state.snapshot();
+    if configured_hotkey_matches_shortcut(&snapshot.hotkey, &next) {
+        return Err("Paste shortcut must differ from dictation shortcut.".into());
+    }
+    let previous = snapshot.paste_hotkey;
+    if !previous.is_empty() {
+        if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
+            let _ = app.global_shortcut().unregister(shortcut);
+        }
+    }
+    if let Err(error) = app.global_shortcut().register(next) {
+        if !previous.is_empty() {
+            if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
+                let _ = app.global_shortcut().register(shortcut);
+            }
+        }
+        return Err(format!("Shortcut is unavailable: {error}"));
+    }
+    let view = state.update(|view| view.paste_hotkey = hotkey.trim().to_string());
+    persist_live_view(&view)?;
+    emit_live(&app, &view);
+    Ok(view)
+}
+
+#[tauri::command]
+fn clear_live_paste_hotkey(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<live::state::LiveSessionView, String> {
+    let previous = state.snapshot().paste_hotkey;
+    if !previous.is_empty() {
+        if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
+            let _ = app.global_shortcut().unregister(shortcut);
+        }
+    }
+    let view = state.update(|view| view.paste_hotkey.clear());
     persist_live_view(&view)?;
     emit_live(&app, &view);
     Ok(view)
@@ -590,6 +640,7 @@ fn persist_live_view(view: &live::state::LiveSessionView) -> Result<(), String> 
     live::settings::save(&live::settings::LiveSettings {
         overlay_enabled: view.visibility == live::state::LiveOverlayVisibility::Enabled,
         hotkey: (!view.hotkey.is_empty()).then(|| view.hotkey.clone()),
+        paste_hotkey: (!view.paste_hotkey.is_empty()).then(|| view.paste_hotkey.clone()),
         capture_mode: view.capture_mode,
         input_device_id: view.input_device_id.clone(),
     })
@@ -631,6 +682,26 @@ fn stop_live_from_app(app: &tauri::AppHandle) {
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
     let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
     let _ = stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator);
+}
+
+fn paste_last_live_transcript(app: &tauri::AppHandle) {
+    let live = app.state::<live::LiveSessionState>();
+    if let Some(text) = live::recordings::transcript_text(&live.snapshot()) {
+        paste_live_text(&text);
+    }
+}
+
+fn paste_live_text(text: &str) {
+    if let Err(error) = live::paste::paste_text(text) {
+        log_line(&format!("live paste failed: {error}"));
+    }
+}
+
+fn configured_hotkey_matches_shortcut(configured: &str, shortcut: &Shortcut) -> bool {
+    !configured.trim().is_empty()
+        && live::hotkeys::parse_hotkey(configured)
+            .map(|configured| configured == *shortcut)
+            .unwrap_or(false)
 }
 
 fn handle_live_shortcut_action(
@@ -827,10 +898,14 @@ fn stop_live_runtime(
     let before_stop = live.snapshot();
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();
+    let transcript = live::recordings::transcript_text(&before_stop);
     match live::recordings::save_session_files(live_runtime, &before_stop) {
         Ok(Some(saved)) => emit_live_saved(&app, &saved),
         Ok(None) => {}
         Err(error) => log_line(&format!("live save failed: {error}")),
+    }
+    if let Some(text) = transcript {
+        paste_live_text(&text);
     }
     if view.visibility == live::state::LiveOverlayVisibility::Enabled {
         if let Err(error) = ensure_idle_live_overlay(&app) {
@@ -851,7 +926,11 @@ fn block_live_for_setup(
 }
 
 fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
-    ensure_live_overlay_size(app, LIVE_OVERLAY_COMPACT_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
+    ensure_live_overlay_size(
+        app,
+        LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
+        LIVE_OVERLAY_COMPACT_HEIGHT,
+    )
 }
 
 fn ensure_idle_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
@@ -864,9 +943,9 @@ fn ensure_idle_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
 
 fn live_overlay_frame(surface: &str, error_message: Option<&str>) -> (f64, f64) {
     let width = match surface {
-        "sensor" | "peek" => LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
-        "recording" | "processing" | "initializing" => LIVE_OVERLAY_COMPACT_WIDTH,
-        "success" => LIVE_OVERLAY_SUCCESS_WIDTH,
+        "sensor" | "peek" | "recording" | "processing" | "initializing" | "success" => {
+            LIVE_OVERLAY_HOVER_SENSOR_WIDTH
+        }
         "feedback" => error_message.map_or(LIVE_OVERLAY_DEFAULT_WIDTH, |message| {
             (message.len() as f64 * 6.8 + 74.0)
                 .clamp(LIVE_OVERLAY_MIN_ERROR_WIDTH, LIVE_OVERLAY_MAX_ERROR_WIDTH)
@@ -1001,6 +1080,7 @@ pub fn run() {
     let stt_state = stt::dispatch::SttState::new();
     let live_settings = live::settings::load();
     let live_shortcut = live_settings.hotkey.clone();
+    let live_paste_shortcut = live_settings.paste_hotkey.clone();
     let runtime_state = runtime::RuntimeOrchestratorState::new();
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
@@ -1032,11 +1112,20 @@ pub fn run() {
             let shortcut_interaction = Arc::clone(&live_shortcut_interaction);
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
-                    .with_handler(move |app, _shortcut, event| {
+                    .with_handler(move |app, shortcut, event| {
                         let snapshot = {
                             let live = app.state::<live::LiveSessionState>();
                             live.snapshot()
                         };
+                        if configured_hotkey_matches_shortcut(&snapshot.paste_hotkey, shortcut) {
+                            if event.state() == ShortcutState::Pressed {
+                                paste_last_live_transcript(app);
+                            }
+                            return;
+                        }
+                        if !configured_hotkey_matches_shortcut(&snapshot.hotkey, shortcut) {
+                            return;
+                        }
                         let action = {
                             let mut interaction = shortcut_interaction
                                 .lock()
@@ -1069,6 +1158,18 @@ pub fn run() {
                             view.error = Some("Live shortcut is unavailable.".into());
                             view.route = live::state::LiveRoute::Blocked;
                             view.status = live::state::LiveSessionStatus::Blocked;
+                        });
+                        emit_live(app.handle(), &view);
+                    }
+                }
+            }
+            if let Some(hotkey) = live_paste_shortcut.as_deref() {
+                if let Ok(shortcut) = live::hotkeys::parse_hotkey(hotkey) {
+                    if let Err(error) = app.handle().global_shortcut().register(shortcut) {
+                        log_line(&format!("live paste hotkey unavailable: {error}"));
+                        let live = app.state::<live::LiveSessionState>();
+                        let view = live.update(|view| {
+                            view.error = Some("Paste shortcut is unavailable.".into());
                         });
                         emit_live(app.handle(), &view);
                     }
@@ -1109,6 +1210,8 @@ pub fn run() {
             set_live_overlay_enabled,
             set_live_hotkey,
             clear_live_hotkey,
+            set_live_paste_hotkey,
+            clear_live_paste_hotkey,
             set_live_capture_mode,
             list_input_devices,
             set_input_device,
@@ -1242,6 +1345,7 @@ mod tests {
         let live = live::LiveSessionState::new(live::settings::LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: live::state::LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });

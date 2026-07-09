@@ -12,16 +12,25 @@ describe("Yap live overlay window", () => {
         focused: await core.invoke("plugin:window|is_focused", { label }),
         inner,
         outer,
+        scaleFactor: await core.invoke("plugin:window|scale_factor", { label }),
         visible: await core.invoke("plugin:window|is_visible", { label }),
       };
     });
+    const logicalInner = {
+      height: overlay.inner.height / overlay.scaleFactor,
+      width: overlay.inner.width / overlay.scaleFactor,
+    };
+    const logicalOuter = {
+      height: overlay.outer.height / overlay.scaleFactor,
+      width: overlay.outer.width / overlay.scaleFactor,
+    };
     expect(overlay.visible).toBe(true);
     expect(overlay.focused).toBe(false);
     expect(overlay.closable).toBe(false);
-    expect(overlay.inner.width).toBeLessThanOrEqual(180);
-    expect(overlay.inner.height).toBeLessThanOrEqual(60);
-    expect(overlay.outer.width).toBeLessThanOrEqual(220);
-    expect(overlay.outer.height).toBeLessThanOrEqual(80);
+    expect(logicalInner.width).toBeLessThanOrEqual(260);
+    expect(logicalInner.height).toBeLessThanOrEqual(60);
+    expect(logicalOuter.width).toBeLessThanOrEqual(300);
+    expect(logicalOuter.height).toBeLessThanOrEqual(80);
 
     await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
   });

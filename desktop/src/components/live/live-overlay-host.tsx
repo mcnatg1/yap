@@ -19,6 +19,7 @@ const previewEventName = "yap-live-overlay-preview";
 const previewLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
   hotkey: "Ctrl+Shift+Space",
+  pasteHotkey: "",
   route: "none",
   status: "idle",
   visibility: "enabled",
@@ -58,11 +59,6 @@ export function LiveOverlayHost() {
 
   return (
     <LiveOverlay
-      onCopyLast={() => {
-        const text = view.finalText?.trim();
-        if (!text) return;
-        void navigator.clipboard.writeText(text).catch(() => undefined);
-      }}
       onOpenScratch={() => void showMainWorkspace("home")}
       onOpenTransform={() => void showMainWorkspace("polish")}
       onRetry={() => void startToggleSession(previewMode, setView)}
@@ -107,6 +103,7 @@ function previewLiveViewFromSearch(): LiveSessionView {
     error: params.get("error") ?? undefined,
     finalText: params.get("finalText") ?? undefined,
     hotkey: params.get("hotkey") ?? previewLiveView.hotkey,
+    pasteHotkey: params.get("pasteHotkey") ?? previewLiveView.pasteHotkey,
     inputDeviceId: params.get("inputDeviceId") ?? undefined,
     inputDeviceLabel: params.get("inputDeviceLabel") ?? undefined,
     level: numberParam(params.get("level")),

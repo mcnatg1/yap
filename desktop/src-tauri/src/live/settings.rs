@@ -9,6 +9,7 @@ pub const DEFAULT_HOTKEY: &str = "Ctrl+Shift+Space";
 pub struct LiveSettings {
     pub overlay_enabled: bool,
     pub hotkey: Option<String>,
+    pub paste_hotkey: Option<String>,
     pub capture_mode: LiveCaptureMode,
     pub input_device_id: Option<String>,
 }
@@ -18,6 +19,7 @@ impl Default for LiveSettings {
         Self {
             overlay_enabled: true,
             hotkey: Some(DEFAULT_HOTKEY.into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         }
@@ -66,6 +68,7 @@ mod tests {
         let settings = LiveSettings::default();
 
         assert_eq!(settings.hotkey.as_deref(), Some(DEFAULT_HOTKEY));
+        assert_eq!(settings.paste_hotkey, None);
         assert_eq!(settings.capture_mode, LiveCaptureMode::PushToTalk);
         assert!(settings.overlay_enabled);
     }

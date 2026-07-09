@@ -20,13 +20,21 @@ export const idleSensorWidth = 260;
 export const peekHeight = 40;
 export const peekWidth = 150;
 export const retractMs = 180;
-export const successVisibleMs = 10_000;
+export const successVisibleMs = 2_500;
 
 const defaultWidth = 104;
 const activeWidth = 112;
 const successWidth = 168;
 const minErrorWidth = 180;
 const maxErrorWidth = 420;
+
+export function overlayIslandWidth(surface: OverlaySurface, model: OverlayModel) {
+  if (surface === "peek") return peekWidth;
+  if (surface === "success") return successWidth;
+  if (surface === "recording" || surface === "processing" || surface === "initializing") return activeWidth;
+  if (surface === "feedback") return overlayFrame(surface, model).width;
+  return defaultWidth;
+}
 
 export function modelFromLiveView(view: LiveSessionView): OverlayModel {
   const triggerMode = triggerModeFromCaptureMode(view.activeCaptureMode ?? view.captureMode);
@@ -70,14 +78,14 @@ export function overlaySurface(model: OverlayModel, peeked: boolean, retracting:
 export function overlayFrame(surface: OverlaySurface, model: OverlayModel) {
   if (surface === "sensor") return { height: hoverSensorHeight, width: idleSensorWidth };
   if (surface === "peek") return { height: peekHeight, width: idleSensorWidth };
-  if (surface === "success") return { height: compactHeight, width: successWidth };
-  if (surface === "processing") return { height: compactHeight, width: activeWidth };
+  if (surface === "success") return { height: compactHeight, width: idleSensorWidth };
+  if (surface === "processing") return { height: compactHeight, width: idleSensorWidth };
   if (surface === "feedback") {
     if (!model.errorMessage) return { height: compactHeight, width: defaultWidth };
     return { height: compactHeight, width: Math.min(maxErrorWidth, Math.max(minErrorWidth, model.errorMessage.length * 6.8 + 74)) };
   }
-  if (surface === "recording") return { height: compactHeight, width: activeWidth };
-  return { height: compactHeight, width: defaultWidth };
+  if (surface === "recording" || surface === "initializing") return { height: compactHeight, width: idleSensorWidth };
+  return { height: compactHeight, width: idleSensorWidth };
 }
 
 function triggerModeFromCaptureMode(captureMode: LiveCaptureMode): "hold" | "toggle" {
