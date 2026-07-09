@@ -5,11 +5,21 @@ type NativeSurfaceRequest = {
   surface: OverlaySurface;
 };
 
+type PendingSurfaceRequest = NativeSurfaceRequest & {
+  attempts: number;
+};
+
 type NativeSurfaceInvoke = (request: NativeSurfaceRequest) => Promise<void>;
 
-export function createNativeSurfaceSync(invokeNative: NativeSurfaceInvoke) {
-  let latest: NativeSurfaceRequest | undefined;
+export function createNativeSurfaceSync(
+  invokeNative: NativeSurfaceInvoke,
+  options: { maxRetries?: number; retryDelayMs?: number } = {},
+) {
+  const maxRetries = options.maxRetries ?? 2;
+  const retryDelayMs = options.retryDelayMs ?? 80;
+  let latest: PendingSurfaceRequest | undefined;
   let running = false;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
   async function drain() {
     if (running) return;
@@ -21,7 +31,13 @@ export function createNativeSurfaceSync(invokeNative: NativeSurfaceInvoke) {
         try {
           await invokeNative(request);
         } catch {
-          // Native overlay resize is best-effort; React remains the visual source of truth.
+          if (!latest && request.attempts < maxRetries) {
+            retryTimer = setTimeout(() => {
+              retryTimer = undefined;
+              latest = { ...request, attempts: request.attempts + 1 };
+              void drain();
+            }, retryDelayMs);
+          }
         }
       }
     } finally {
@@ -31,7 +47,11 @@ export function createNativeSurfaceSync(invokeNative: NativeSurfaceInvoke) {
   }
 
   return (request: NativeSurfaceRequest) => {
-    latest = request;
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+    }
+    latest = { ...request, attempts: 0 };
     void drain();
   };
 }
