@@ -49,50 +49,57 @@ fn save_session_parts_to_dir(
 
     std::fs::create_dir_all(dir)
         .map_err(|err| format!("Failed to create live recordings folder: {err}"))?;
-    let (name, transcript_path, audio_path) = reserve_session_paths(dir, created_at_ms)?;
     let transcript_body =
         transcript.unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
 
-    write_new_text_file(&transcript_path, &format!("{transcript_body}\n"))
-        .map_err(|err| format!("Failed to save live transcript: {err}"))?;
-    if !pcm.is_empty() && write_pcm16_wav(&audio_path, pcm).is_err() {
-        return Ok(Some(SavedLiveSession {
-            name,
-            source_path: transcript_path.display().to_string(),
-            output_path: transcript_path.display().to_string(),
-            created_at_ms,
-        }));
-    }
-
-    Ok(Some(SavedLiveSession {
-        name,
-        source_path: if pcm.is_empty() {
-            transcript_path.display().to_string()
-        } else {
-            audio_path.display().to_string()
-        },
-        output_path: transcript_path.display().to_string(),
-        created_at_ms,
-    }))
-}
-
-fn reserve_session_paths(
-    dir: &std::path::Path,
-    created_at_ms: u64,
-) -> Result<(String, std::path::PathBuf, std::path::PathBuf), String> {
     for suffix in 0..1000 {
-        let name = if suffix == 0 {
-            format!("live-{created_at_ms}")
-        } else {
-            format!("live-{created_at_ms}-{suffix}")
-        };
-        let transcript_path = dir.join(format!("{name}.txt"));
-        let audio_path = dir.join(format!("{name}.wav"));
-        if !transcript_path.exists() && !audio_path.exists() {
-            return Ok((name, transcript_path, audio_path));
+        let (name, transcript_path, audio_path) = session_paths(dir, created_at_ms, suffix);
+        if audio_path.exists() {
+            continue;
+        }
+        match write_new_text_file(&transcript_path, &format!("{transcript_body}\n")) {
+            Ok(()) => {
+                if !pcm.is_empty() && write_pcm16_wav(&audio_path, pcm).is_err() {
+                    return Ok(Some(SavedLiveSession {
+                        name,
+                        source_path: transcript_path.display().to_string(),
+                        output_path: transcript_path.display().to_string(),
+                        created_at_ms,
+                    }));
+                }
+
+                return Ok(Some(SavedLiveSession {
+                    name,
+                    source_path: if pcm.is_empty() {
+                        transcript_path.display().to_string()
+                    } else {
+                        audio_path.display().to_string()
+                    },
+                    output_path: transcript_path.display().to_string(),
+                    created_at_ms,
+                }));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("Failed to save live transcript: {err}")),
         }
     }
+
     Err("Failed to allocate a live recording filename.".into())
+}
+
+fn session_paths(
+    dir: &std::path::Path,
+    created_at_ms: u64,
+    suffix: usize,
+) -> (String, std::path::PathBuf, std::path::PathBuf) {
+    let name = if suffix == 0 {
+        format!("live-{created_at_ms}")
+    } else {
+        format!("live-{created_at_ms}-{suffix}")
+    };
+    let transcript_path = dir.join(format!("{name}.txt"));
+    let audio_path = dir.join(format!("{name}.wav"));
+    (name, transcript_path, audio_path)
 }
 
 pub fn list_session_files() -> Result<Vec<SavedLiveSession>, String> {
@@ -444,6 +451,26 @@ mod tests {
     }
 
     #[test]
+    fn recordings_dir_uses_absolute_override_or_app_data() {
+        let override_dir = std::env::temp_dir().join("custom-live-recordings");
+        assert_eq!(
+            recordings_dir_from(|key| (key == "YAP_LIVE_RECORDINGS_DIR")
+                .then(|| override_dir.display().to_string())),
+            override_dir
+        );
+
+        let local = std::env::temp_dir().join("local-data");
+        assert_eq!(
+            recordings_dir_from(|key| match key {
+                "YAP_LIVE_RECORDINGS_DIR" => Some("relative-live-recordings".into()),
+                "LOCALAPPDATA" => Some(local.display().to_string()),
+                _ => None,
+            }),
+            local.join("Yap").join("live-recordings")
+        );
+    }
+
+    #[test]
     fn save_session_files_restores_pcm_when_directory_create_fails() {
         let runtime = live::runtime::LiveRuntime::new();
         runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
@@ -458,6 +485,24 @@ mod tests {
         assert!(err.contains("Failed to create live recordings folder"));
         assert_eq!(runtime.take_recorded_pcm(), vec![1, 0, 2, 0]);
         std::fs::remove_file(dir_file).ok();
+    }
+
+    #[test]
+    fn save_session_parts_returns_transcript_only_when_wav_write_fails() {
+        let dir =
+            std::env::temp_dir().join(format!("yap-live-wav-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("live-42.wav.part");
+        std::fs::create_dir_all(&partial).unwrap();
+
+        let saved = save_session_parts_to_dir(&dir, 42, Some("hello".into()), &[1, 0])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(saved.source_path, saved.output_path);
+        assert!(std::path::Path::new(&saved.output_path).exists());
+        assert!(!dir.join("live-42.wav").exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -481,6 +526,40 @@ mod tests {
             std::fs::read_to_string(second.output_path).unwrap(),
             "second\n"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_session_parts_retries_concurrent_same_millisecond_saves() {
+        let dir = std::env::temp_dir().join(format!(
+            "yap-live-concurrent-collision-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_dir = dir.clone();
+        let left_barrier = std::sync::Arc::clone(&barrier);
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            save_session_parts_to_dir(&left_dir, 456, Some("left".into()), &[])
+                .unwrap()
+                .unwrap()
+        });
+        let right_dir = dir.clone();
+        let right_barrier = std::sync::Arc::clone(&barrier);
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            save_session_parts_to_dir(&right_dir, 456, Some("right".into()), &[])
+                .unwrap()
+                .unwrap()
+        });
+
+        let first = left.join().unwrap();
+        let second = right.join().unwrap();
+
+        assert_ne!(first.name, second.name);
+        assert!(std::path::Path::new(&first.output_path).exists());
+        assert!(std::path::Path::new(&second.output_path).exists());
         std::fs::remove_dir_all(dir).ok();
     }
 

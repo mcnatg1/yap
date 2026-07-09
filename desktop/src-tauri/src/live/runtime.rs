@@ -226,6 +226,19 @@ impl LiveRuntime {
             }
         };
         let mut inner = self.inner.lock().expect("live runtime poisoned");
+        if !should_install_capture(
+            session,
+            inner.session,
+            self.active_session.load(Ordering::SeqCst),
+            inner.capture.is_some(),
+        ) {
+            inner.last_used = Instant::now();
+            drop(inner);
+            drop(capture);
+            drop(level);
+            drop(audio);
+            return Ok(());
+        }
         inner.capture = Some(capture);
         inner.audio = Some(audio);
         inner.start_level_worker(app, level, session, Arc::clone(&self.active_session));
@@ -849,6 +862,18 @@ fn should_accept_stream_samples(
     message_session != 0 && message_session == active_session && message_session == stream_session
 }
 
+fn should_install_capture(
+    requested_session: u64,
+    inner_session: u64,
+    active_session: u64,
+    has_capture: bool,
+) -> bool {
+    requested_session != 0
+        && requested_session == inner_session
+        && requested_session == active_session
+        && !has_capture
+}
+
 fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
     let default_name = host
         .default_input_device()
@@ -955,6 +980,14 @@ mod tests {
         assert!(!should_accept_stream_samples(1, 2, 2));
         assert!(!should_accept_stream_samples(2, 0, 2));
         assert!(!should_accept_stream_samples(2, 2, 0));
+    }
+
+    #[test]
+    fn stale_capture_install_is_rejected_after_stop_or_new_session() {
+        assert!(should_install_capture(2, 2, 2, false));
+        assert!(!should_install_capture(2, 2, 0, false));
+        assert!(!should_install_capture(2, 3, 2, false));
+        assert!(!should_install_capture(2, 2, 2, true));
     }
 
     #[test]

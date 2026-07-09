@@ -1,7 +1,19 @@
+use std::io::{Read, Write};
+
 #[tauri::command]
 pub fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
     ensure_main_window(&window)?;
     read_text_file_at(path)
+}
+
+#[tauri::command]
+pub fn read_text_preview(
+    window: tauri::WebviewWindow,
+    path: String,
+    max_chars: Option<usize>,
+) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    read_text_preview_at(path, max_chars.unwrap_or(600))
 }
 
 fn read_text_file_at(path: String) -> Result<String, String> {
@@ -13,6 +25,24 @@ fn read_text_file_at(path: String) -> Result<String, String> {
 
     let path = canonical_existing_path(&path)?;
     std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
+}
+
+fn read_text_preview_at(path: String, max_chars: usize) -> Result<String, String> {
+    let path = std::path::PathBuf::from(path);
+
+    if !is_transcript_path(&path) {
+        return Err("Only transcript text files can be read.".into());
+    }
+
+    let max_chars = max_chars.clamp(1, 4_000);
+    let path = canonical_existing_path(&path)?;
+    let file =
+        std::fs::File::open(&path).map_err(|err| format!("Failed to read transcript: {err}"))?;
+    let mut text = String::new();
+    std::io::Read::take(file, (max_chars.saturating_mul(4).saturating_add(4)) as u64)
+        .read_to_string(&mut text)
+        .map_err(|err| format!("Failed to read transcript: {err}"))?;
+    Ok(text.chars().take(max_chars).collect())
 }
 
 #[tauri::command]
@@ -34,7 +64,7 @@ fn write_polished_text_at(path: String, text: String) -> Result<String, String> 
 
     let path = canonical_existing_path(&path)?;
     let output = polished_path(&path)?;
-    std::fs::write(&output, text)
+    write_text_atomically(&output, &text)
         .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
     Ok(output.display().to_string())
 }
@@ -46,6 +76,45 @@ fn polished_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "Transcript path has no file name.".to_string())?;
 
     Ok(path.with_file_name(format!("{stem}.polished.txt")))
+}
+
+fn write_text_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing file name")
+        })?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    std::fs::remove_file(path.with_file_name(format!("{file_name}.part"))).ok();
+    for attempt in 0..32 {
+        let tmp = path.with_file_name(format!("{file_name}.{pid}.{nonce}.{attempt}.part"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(mut file) => {
+                let write_result = file.write_all(text.as_bytes());
+                drop(file);
+                let result = write_result.and_then(|_| std::fs::rename(&tmp, path));
+                if result.is_err() {
+                    std::fs::remove_file(&tmp).ok();
+                }
+                return result;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve temporary transcript path",
+    ))
 }
 
 #[tauri::command]
@@ -199,6 +268,18 @@ mod tests {
     }
 
     #[test]
+    fn read_text_preview_caps_transcript_text() {
+        let dir = temp_test_dir("preview-cap");
+        let transcript = dir.join("take.txt");
+        std::fs::write(&transcript, "abcdef").unwrap();
+
+        let preview = read_text_preview_at(transcript.display().to_string(), 3).unwrap();
+
+        assert_eq!(preview, "abc");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn app_open_path_allows_only_recordings_and_transcripts() {
         assert!(is_yap_media_or_transcript_path(std::path::Path::new(
             "recording.mp3"
@@ -324,5 +405,68 @@ mod tests {
     fn polished_path_writes_sibling_file() {
         let path = polished_path(std::path::Path::new("C:/recordings/take.txt")).unwrap();
         assert_eq!(path.file_name().unwrap(), "take.polished.txt");
+    }
+
+    #[test]
+    fn atomic_text_write_replaces_stale_partial_file() {
+        let dir = temp_test_dir("atomic-polish-write");
+        let output = dir.join("take.polished.txt");
+        let partial = dir.join("take.polished.txt.part");
+        std::fs::write(&partial, "stale").unwrap();
+
+        write_text_atomically(&output, "polished").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "polished");
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn atomic_text_write_replaces_existing_output() {
+        let dir = temp_test_dir("atomic-polish-overwrite");
+        let output = dir.join("take.polished.txt");
+        std::fs::write(&output, "old").unwrap();
+
+        write_text_atomically(&output, "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "new");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn atomic_text_write_uses_unique_temps_for_concurrent_writes() {
+        let dir = temp_test_dir("atomic-polish-concurrent");
+        let output = dir.join("take.polished.txt");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_output = output.clone();
+        let left_barrier = std::sync::Arc::clone(&barrier);
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            write_text_atomically(&left_output, "left")
+        });
+        let right_output = output.clone();
+        let right_barrier = std::sync::Arc::clone(&barrier);
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            write_text_atomically(&right_output, "right")
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+
+        let text = std::fs::read_to_string(&output).unwrap();
+        assert!(text == "left" || text == "right");
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "part")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

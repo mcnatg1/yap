@@ -1234,6 +1234,7 @@ pub fn run() {
             polish_num_gpu,
             start_transcribe,
             file_actions::read_text_file,
+            file_actions::read_text_preview,
             file_actions::write_polished_text,
             file_actions::open_app_path,
             file_actions::reveal_app_path,

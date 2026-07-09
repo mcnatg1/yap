@@ -881,6 +881,11 @@ export default function App() {
     return text;
   }
 
+  async function loadTranscriptPreviewText(path: string) {
+    if (!isTauri()) return "";
+    return invoke<string>("read_text_preview", { maxChars: 600, path });
+  }
+
   async function copyTranscript(item: RecordingJobView) {
     if (!item.output) return;
 
@@ -1008,7 +1013,7 @@ export default function App() {
     setPreviewText(undefined);
 
     try {
-      setPreviewText(await loadTranscriptText(entry.outputPath));
+      setPreviewText(await loadTranscriptPreviewText(entry.outputPath));
     } catch {
       setPreviewText("Preview unavailable. Open the transcript file from the actions menu.");
     }
@@ -1041,7 +1046,7 @@ export default function App() {
           onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
           onDelete={(entry) => void deleteHistoryEntry(entry)}
           onHide={hideHistoryEntry}
-          onLoadPreviewText={(entry) => loadTranscriptText(entry.outputPath)}
+          onLoadPreviewText={(entry) => loadTranscriptPreviewText(entry.outputPath)}
           onOpen={(entry) => void openAppPath(entry.outputPath)}
           onOpenHelp={() => handleRailAction("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}

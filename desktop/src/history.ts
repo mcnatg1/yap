@@ -81,11 +81,17 @@ export function hideTranscriptHistory(outputPaths: string[], outputPath: string)
 }
 
 export function canDeleteTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
-  const output = entry.outputPath.toLowerCase();
-  const source = entry.sourcePath.toLowerCase();
+  const output = entry.outputPath.replace(/\\/g, "/").toLowerCase();
+  const source = entry.sourcePath.replace(/\\/g, "/").toLowerCase();
+  const outputName = output.split("/").pop() ?? "";
+  const sourceName = source.split("/").pop() ?? "";
+  const outputDir = output.slice(0, -outputName.length);
+  const sourceDir = source.slice(0, -sourceName.length);
+  const stem = outputName.endsWith(".txt") ? outputName.slice(0, -4) : "";
   return (
-    entry.name.startsWith("live-") &&
-    output.endsWith(".txt") &&
-    (source === output || source.endsWith(".wav"))
+    stem.startsWith("live-") &&
+    output.includes("/yap/live-recordings/") &&
+    entry.name.toLowerCase().startsWith("live-") &&
+    (source === output || (sourceDir === outputDir && sourceName === `${stem}.wav`))
   );
 }
