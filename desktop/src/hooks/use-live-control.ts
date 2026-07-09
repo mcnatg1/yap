@@ -31,11 +31,7 @@ const initialLiveView: LiveSessionView = {
   visibility: "enabled",
 };
 
-type UseLiveControlArgs = {
-  onLoadError?: (message: string) => void;
-};
-
-export function useLiveControl({ onLoadError }: UseLiveControlArgs = {}) {
+export function useLiveControl() {
   const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
   const [liveInputDevices, setLiveInputDevices] = useState<LiveInputDeviceView[]>([]);
   const [liveBusy, setLiveBusy] = useState(false);
@@ -67,22 +63,6 @@ export function useLiveControl({ onLoadError }: UseLiveControlArgs = {}) {
       unlistenLive?.();
     };
   }, []);
-
-  useEffect(() => {
-    if (!isTauri()) return;
-
-    let cancelled = false;
-    void refreshLiveState().catch((error) => {
-      if (cancelled) return;
-      const message = String(error);
-      setLiveSettingsError(message);
-      onLoadError?.(message);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [onLoadError, refreshLiveState]);
 
   const updateLive = useCallback(
     async (action: () => Promise<LiveSessionView>, message?: string) => {
@@ -175,6 +155,7 @@ export function useLiveControl({ onLoadError }: UseLiveControlArgs = {}) {
     liveSettingsError,
     liveView,
     preflightLiveInput,
+    refreshLiveState,
     resetLiveHotkey,
     startLive,
     stopLive,
