@@ -3,6 +3,8 @@
 Tauri desktop app for the local Nemotron INT8 fallback. Yap targets installed desktop
 windows, not phone/mobile layouts. See `..\README.md` for the repo map.
 
+`desktop/src-tauri/src/audio/` is responsible for deterministic local preprocessing only; ASR routing and model-heavy inference remain server-side.
+
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
 node -v  # should be v24.x
