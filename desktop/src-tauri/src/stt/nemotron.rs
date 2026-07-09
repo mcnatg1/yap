@@ -443,8 +443,15 @@ fn status_view(
 }
 
 fn remove_if_exists(path: PathBuf) -> Result<(), SttError> {
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|_| SttError::ModelMissing)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => {
+            std::fs::remove_dir_all(path).map_err(|_| SttError::ModelMissing)?;
+        }
+        Ok(_) => {
+            std::fs::remove_file(path).map_err(|_| SttError::ModelMissing)?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(SttError::ModelMissing),
     }
     Ok(())
 }
@@ -712,6 +719,21 @@ mod tests {
         std::fs::write(&path, b"current").unwrap();
         std::fs::write(path.with_extension("verified"), b"marker").unwrap();
         std::fs::write(path.with_extension("part"), b"partial").unwrap();
+
+        remove_download_artifacts(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!path.with_extension("verified").exists());
+        assert!(!path.with_extension("part").exists());
+    }
+
+    #[test]
+    fn remove_download_artifacts_cleans_stale_artifact_directories() {
+        let dir = TestDir::new();
+        let path = dir.path().join(ARTIFACTS[0].file);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(path.with_extension("verified")).unwrap();
+        std::fs::create_dir_all(path.with_extension("part")).unwrap();
 
         remove_download_artifacts(&path).unwrap();
 
