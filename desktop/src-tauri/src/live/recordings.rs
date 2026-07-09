@@ -228,6 +228,27 @@ fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()
 }
 
 fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
+    let partial = partial_wav_path(path)?;
+    std::fs::remove_file(&partial).ok();
+    if let Err(err) = write_pcm16_wav_bytes(&partial, pcm) {
+        std::fs::remove_file(&partial).ok();
+        return Err(err);
+    }
+    std::fs::rename(&partial, path).map_err(|err| {
+        std::fs::remove_file(&partial).ok();
+        format!("Failed to finalize live audio: {err}")
+    })
+}
+
+fn partial_wav_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Live recording path has no file name.".to_string())?;
+    Ok(path.with_file_name(format!("{file_name}.part")))
+}
+
+fn write_pcm16_wav_bytes(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
     let data_len =
         u32::try_from(pcm.len()).map_err(|_| "Live recording is too large to save.".to_string())?;
     let riff_len = 36u32
@@ -327,6 +348,38 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4);
         assert_eq!(&bytes[44..], pcm);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn write_pcm16_wav_replaces_stale_partial_file() {
+        let path = std::env::temp_dir().join(format!("yap-live-stale-{}.wav", std::process::id()));
+        let partial = partial_wav_path(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&partial).ok();
+        std::fs::write(&partial, b"stale").unwrap();
+
+        write_pcm16_wav(&path, &[1, 0]).unwrap();
+
+        assert!(path.exists());
+        assert!(!partial.exists());
+        assert_ne!(std::fs::read(&path).unwrap(), b"stale");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn write_pcm16_wav_does_not_create_final_file_when_partial_fails() {
+        let dir = std::env::temp_dir().join(format!("yap-live-partial-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.wav");
+        let partial = partial_wav_path(&path).unwrap();
+        std::fs::create_dir_all(&partial).unwrap();
+
+        let err = write_pcm16_wav(&path, &[1, 0]).unwrap_err();
+
+        assert!(err.contains("Failed to save live audio"));
+        assert!(!path.exists());
+        assert!(partial.is_dir());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
