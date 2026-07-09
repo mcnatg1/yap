@@ -57,6 +57,7 @@ pub struct LiveSessionView {
     pub capture_mode: LiveCaptureMode,
     pub active_capture_mode: Option<LiveCaptureMode>,
     pub hotkey: String,
+    pub paste_hotkey: String,
     pub input_device_id: Option<String>,
     pub input_device_label: Option<String>,
     pub level: Option<f32>,
@@ -78,6 +79,7 @@ impl LiveSessionView {
             capture_mode: settings.capture_mode,
             active_capture_mode: None,
             hotkey: settings.hotkey.clone().unwrap_or_default(),
+            paste_hotkey: settings.paste_hotkey.clone().unwrap_or_default(),
             input_device_id: settings.input_device_id.clone(),
             input_device_label: settings.input_device_id.clone(),
             level: Some(0.0),
@@ -314,6 +316,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
@@ -336,6 +339,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::Toggle,
             input_device_id: None,
         });
@@ -352,6 +356,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
@@ -367,6 +372,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
@@ -387,6 +393,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::Toggle,
             input_device_id: None,
         });
@@ -413,6 +420,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::Toggle,
             input_device_id: None,
         });
@@ -430,6 +438,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
@@ -448,6 +457,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
@@ -464,6 +474,7 @@ mod tests {
         let state = LiveSessionState::new(LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });

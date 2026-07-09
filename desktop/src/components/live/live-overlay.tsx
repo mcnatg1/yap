@@ -1,7 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Check } from "@phosphor-icons/react/Check";
 import { WarningCircle as CircleAlert } from "@phosphor-icons/react/WarningCircle";
-import { Copy } from "@phosphor-icons/react/Copy";
 import { ChatText as MessageSquareText } from "@phosphor-icons/react/ChatText";
 import { Microphone as Mic } from "@phosphor-icons/react/Microphone";
 import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowCounterClockwise";
@@ -14,8 +13,8 @@ import { Button } from "@/components/ui/button";
 import {
   modelFromLiveView,
   overlayFrame,
+  overlayIslandWidth,
   overlaySurface,
-  peekWidth,
   retractMs,
   successVisibleMs,
   type OverlayModel,
@@ -25,7 +24,6 @@ import { type LiveSessionView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
 type LiveOverlayProps = {
-  onCopyLast?: () => void;
   onOpenScratch?: () => void;
   onOpenTransform?: () => void;
   onRetry?: () => void;
@@ -37,7 +35,6 @@ type LiveOverlayProps = {
 const idleSensorPollMs = 120;
 
 export function LiveOverlay({
-  onCopyLast,
   onOpenScratch,
   onOpenTransform,
   onRetry,
@@ -58,6 +55,7 @@ export function LiveOverlay({
   const hasCopyableFinal = Boolean(model.finalText?.trim());
   const surface = overlaySurface(model, peeked, retracting, successVisible && hasCopyableFinal);
   const frame = overlayFrame(surface, model);
+  const islandWidth = overlayIslandWidth(surface, model);
   const width = frame.width;
   const rootFrameStyle: CSSProperties | undefined = isTauri() ? undefined : { height: frame.height, width };
 
@@ -208,7 +206,7 @@ export function LiveOverlay({
           overflow: "hidden",
           transform: entered ? "translateY(0)" : "translateY(-100%)",
           transition: "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
-          width: surface === "peek" ? peekWidth : "100%",
+          width: islandWidth,
         }}
       >
         {surface === "peek" ? (
@@ -218,7 +216,7 @@ export function LiveOverlay({
             onStart={onStart}
           />
         ) : surface === "success" ? (
-          <SuccessOverlayView onCopyLast={onCopyLast} />
+          <SuccessOverlayView />
         ) : (
           <RecordingOverlayView
             model={model}
@@ -475,16 +473,13 @@ function InitializingDotsView() {
   );
 }
 
-function SuccessOverlayView({ onCopyLast }: { onCopyLast?: () => void }) {
+function SuccessOverlayView() {
   return (
     <div className="flex h-full w-full items-center justify-center gap-2 px-3">
       <span className="grid size-5 place-items-center rounded-full bg-emerald-500/90">
         <Check className="size-3.5 text-black" weight="bold" />
       </span>
       <span className="text-[12px] font-semibold leading-none text-white">Saved</span>
-      <FreeFlowNeutralButton label="Copy last dictation" onClick={onCopyLast}>
-        <Copy className="size-3.5" weight="bold" />
-      </FreeFlowNeutralButton>
     </div>
   );
 }

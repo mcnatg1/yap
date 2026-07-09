@@ -59,7 +59,8 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await setLiveView(page, { captureMode: "pushToTalk", level: 0, route: "localFallback", status: "armed" });
   await expect(root).toHaveAttribute("data-overlay-phase", "recording");
   await waitForIslandMotion();
-  await expectFrame(root, { height: 40, width: 112 });
+  await expectFrame(root, { height: 40, width: 260 });
+  await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
   await expectNoClippedChildren(root);
 
   const holdFrame = await boxOf(root);
@@ -73,7 +74,8 @@ test("live overlay state machine keeps the island compact and collision-free", a
 
   await setLiveView(page, { captureMode: "toggle", level: 0.84, route: "localFallback", status: "speaking" });
   await expect(root).toHaveAttribute("data-overlay-phase", "recording");
-  await expectFrame(root, { height: 40, width: 112 });
+  await expectFrame(root, { height: 40, width: 260 });
+  await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
 
   const cancel = page.getByRole("button", { name: "Cancel recording" });
   const waveform = page.getByTestId("live-waveform");
@@ -97,12 +99,14 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await expect(page.getByRole("button", { name: "Finish recording" })).toHaveCount(0);
 
   await setLiveView(page, { activeCaptureMode: "pushToTalk", captureMode: "toggle", level: 0.72, route: "localFallback", status: "speaking" });
-  await expectFrame(root, { height: 40, width: 112 });
+  await expectFrame(root, { height: 40, width: 260 });
+  await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
   await expect(page.getByRole("button", { name: "Cancel recording" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Finish recording" })).toHaveCount(0);
 
   await setLiveView(page, { activeCaptureMode: "toggle", captureMode: "pushToTalk", level: 0.84, route: "localFallback", status: "speaking" });
-  await expectFrame(root, { height: 40, width: 112 });
+  await expectFrame(root, { height: 40, width: 260 });
+  await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
   await expect(page.getByRole("button", { name: "Cancel recording" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Finish recording" })).toBeVisible();
 
@@ -116,8 +120,9 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await setLiveView(page, { captureMode: "toggle", finalText: "Saved dictation", level: 0, route: "none", status: "idle" });
   await expect(root).toHaveAttribute("data-overlay-surface", "success");
   await waitForIslandMotion();
-  await expectFrame(root, { height: 40, width: 168 });
-  await expectInside(root, [page.getByRole("button", { name: "Copy last dictation" })]);
+  await expectFrame(root, { height: 40, width: 260 });
+  await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 168 });
+  await expect(page.getByText("Saved")).toBeVisible();
   await expectNoClippedChildren(root);
 
   await setLiveView(page, { error: "Mic denied", finalText: undefined, level: 0, route: "blocked", status: "blocked" });
@@ -146,14 +151,16 @@ test("live overlay tolerates rapid state churn without active-frame jitter", asy
 
   for (const state of activeStates) {
     await setLiveView(page, state);
-    await expectFrame(root, { height: 40, width: 112 });
+    await expectFrame(root, { height: 40, width: 260 });
+    await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
     await expectNoClippedChildren(root);
   }
 
   await setLiveView(page, { finalText: "Saved dictation", level: 0, route: "none", status: "idle" });
   await expect(root).toHaveAttribute("data-overlay-surface", "success");
   await waitForIslandMotion();
-  await expectFrame(root, { height: 40, width: 168 });
+  await expectFrame(root, { height: 40, width: 260 });
+  await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 168 });
   await expectNoClippedChildren(root);
 });
 

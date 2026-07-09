@@ -7,6 +7,7 @@ import {
   idleSensorWidth,
   modelFromLiveView,
   overlayFrame,
+  overlayIslandWidth,
   overlaySurface,
   peekHeight,
 } from "@/components/live/live-overlay-state";
@@ -14,6 +15,7 @@ import {
 const baseView: LiveSessionView = {
   captureMode: "pushToTalk",
   hotkey: "Control+Win",
+  pasteHotkey: "",
   route: "localFallback",
   status: "idle",
   visibility: "enabled",
@@ -27,6 +29,7 @@ describe("live overlay state projection", () => {
     expect(overlayFrame("sensor", model)).toEqual({ height: hoverSensorHeight, width: idleSensorWidth });
     expect(overlaySurface(model, true, false, false)).toBe("peek");
     expect(overlayFrame("peek", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
+    expect(overlayIslandWidth("peek", model)).toBe(150);
   });
 
   it("treats armed, listening, and speaking as active recording surfaces", () => {
@@ -46,7 +49,8 @@ describe("live overlay state projection", () => {
     const model = modelFromLiveView({ ...baseView, captureMode: "toggle", status: "listening" });
 
     expect(model.recordingTriggerMode).toBe("toggle");
-    expect(overlayFrame("recording", model)).toEqual({ height: 40, width: 112 });
+    expect(overlayFrame("recording", model)).toEqual({ height: 40, width: idleSensorWidth });
+    expect(overlayIslandWidth("recording", model)).toBe(112);
   });
 
   it("uses the active gesture mode over the saved setting", () => {
@@ -64,9 +68,11 @@ describe("live overlay state projection", () => {
     });
 
     expect(held.recordingTriggerMode).toBe("hold");
-    expect(overlayFrame("recording", held)).toEqual({ height: 40, width: 112 });
+    expect(overlayFrame("recording", held)).toEqual({ height: 40, width: idleSensorWidth });
+    expect(overlayIslandWidth("recording", held)).toBe(112);
     expect(handsFree.recordingTriggerMode).toBe("toggle");
-    expect(overlayFrame("recording", handsFree)).toEqual({ height: 40, width: 112 });
+    expect(overlayFrame("recording", handsFree)).toEqual({ height: 40, width: idleSensorWidth });
+    expect(overlayIslandWidth("recording", handsFree)).toBe(112);
   });
 
   it("keeps settling and saving in the compact processing surface", () => {
@@ -74,7 +80,8 @@ describe("live overlay state projection", () => {
       const model = modelFromLiveView({ ...baseView, status });
 
       expect(model.phase).toBe("processing");
-      expect(overlayFrame("processing", model).height).toBe(40);
+      expect(overlayFrame("processing", model)).toEqual({ height: 40, width: idleSensorWidth });
+      expect(overlayIslandWidth("processing", model)).toBe(112);
     }
   });
 
@@ -83,6 +90,8 @@ describe("live overlay state projection", () => {
     const blocked = modelFromLiveView({ ...baseView, error: "Mic denied", route: "blocked", status: "blocked" });
 
     expect(overlaySurface(idleWithText, false, false, true)).toBe("success");
+    expect(overlayFrame("success", idleWithText)).toEqual({ height: 40, width: idleSensorWidth });
+    expect(overlayIslandWidth("success", idleWithText)).toBe(168);
     expect(overlaySurface(blocked, false, false, false)).toBe("feedback");
     expect(overlayFrame("feedback", blocked).width).toBeGreaterThanOrEqual(180);
   });

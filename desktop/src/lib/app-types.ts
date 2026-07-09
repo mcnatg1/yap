@@ -121,6 +121,7 @@ export type LiveSessionView = {
   captureMode: LiveCaptureMode;
   activeCaptureMode?: LiveCaptureMode | null;
   hotkey: string;
+  pasteHotkey: string;
   inputDeviceId?: string | null;
   inputDeviceLabel?: string | null;
   level?: number | null;

@@ -59,6 +59,7 @@ import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import { cn } from "@/lib/utils";
 import {
   clearLiveHotkey,
+  clearLivePasteHotkey,
   listInputDevices,
   listSavedLiveSessions,
   listenLiveSession,
@@ -68,6 +69,7 @@ import {
   setLiveCaptureMode,
   setLiveHotkey,
   setLiveOverlayEnabled,
+  setLivePasteHotkey,
   showLiveOverlay,
   startLiveSession,
   stopLiveSession,
@@ -105,6 +107,7 @@ const batchServerUnavailableMessage = "Server batch transcription is not wired y
 const initialLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
   hotkey: defaultLiveHotkey,
+  pasteHotkey: "",
   route: "none",
   status: "idle",
   visibility: "enabled",
@@ -638,12 +641,21 @@ export default function App() {
     void updateLive(next ? () => setLiveHotkey(next) : clearLiveHotkey, next ? "Live shortcut updated" : "Live shortcut cleared");
   }
 
+  function updateLivePasteHotkey(hotkey: string) {
+    const next = hotkey.trim();
+    void updateLive(next ? () => setLivePasteHotkey(next) : clearLivePasteHotkey, next ? "Paste shortcut updated" : "Paste shortcut cleared");
+  }
+
   function resetLiveHotkey() {
     void updateLive(() => setLiveHotkey(defaultLiveHotkey), "Live shortcut reset");
   }
 
   function clearLiveShortcut() {
     void updateLive(clearLiveHotkey, "Live shortcut cleared");
+  }
+
+  function clearLivePasteShortcut() {
+    void updateLive(clearLivePasteHotkey, "Paste shortcut cleared");
   }
 
   function updateLiveCaptureMode(captureMode: LiveCaptureMode) {
@@ -1146,6 +1158,7 @@ export default function App() {
         localComputeTargets={localComputeTargets}
         onCancelFallbackInstall={() => void cancelFallbackInstall()}
         onClearLiveHotkey={clearLiveShortcut}
+        onClearLivePasteHotkey={clearLivePasteShortcut}
         onInstallFallback={(options) => void installFallback(options)}
         onOpenFallbackFolder={() => void openFallbackFolder()}
         onPreflightLiveInput={preflightLiveInput}
@@ -1161,6 +1174,7 @@ export default function App() {
         onSetLiveCaptureMode={updateLiveCaptureMode}
         onSetLiveHotkey={updateLiveHotkey}
         onSetLiveOverlayEnabled={updateLiveOverlay}
+        onSetLivePasteHotkey={updateLivePasteHotkey}
         onSetLocalComputeTarget={(targetId) => void updateLocalComputeTarget(targetId)}
         onSkipSetup={skipSetup}
         onStartLive={startLive}
