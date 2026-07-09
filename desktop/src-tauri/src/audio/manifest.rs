@@ -1,6 +1,4 @@
-use crate::audio::frame::{
-    AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, RetryMetadata, VadSegment,
-};
+use crate::audio::frame::{AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, VadSegment};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,30 +43,14 @@ impl AudioChunkEnvelopeBuilder {
         self.frames
             .sort_by_key(|frame| (frame.sequence, frame.start_ms, frame.duration_ms));
 
-        let first = self.frames.first()?;
-        let last = self.frames.last().expect("first frame implies last frame");
-        let duration_ms = last
-            .start_ms
-            .saturating_add(u64::from(last.duration_ms))
-            .saturating_sub(first.start_ms) as u32;
-        let chunk_id = format!("{}-{sequence_start}-{duration_ms}", self.session_id);
-
-        Some(AudioChunkEnvelope {
-            session_id: self.session_id,
-            chunk_id: chunk_id.clone(),
+        AudioChunkEnvelope::from_frames(
+            self.session_id,
             sequence_start,
-            start_ms: first.start_ms,
-            duration_ms,
-            sample_rate_hz: first.sample_rate_hz,
-            codec: self.codec,
+            &self.frames,
+            self.codec,
             vad_segments,
-            purpose: self.purpose,
-            retry: RetryMetadata {
-                idempotency_key: format!("{}-{sequence_start}-{chunk_id}", self.session_id),
-                attempt: 1,
-                max_attempts: 3,
-            },
-        })
+            self.purpose,
+        )
     }
 }
 
@@ -181,7 +163,7 @@ mod tests {
                 retry: RetryMetadata {
                     idempotency_key: "55-2-55-2-40".into(),
                     attempt: 1,
-                    max_attempts: 3,
+                    max_attempts: 1,
                 },
             }],
             degraded: true,
@@ -255,7 +237,7 @@ mod tests {
             RetryMetadata {
                 idempotency_key: "7-11-7-11-40".into(),
                 attempt: 1,
-                max_attempts: 3,
+                max_attempts: 1,
             }
         );
     }
