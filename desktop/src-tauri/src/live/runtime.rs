@@ -87,6 +87,11 @@ struct RecordedPcmBuffer {
     max_bytes: usize,
 }
 
+pub(crate) struct RecordedPcm {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) capped: bool,
+}
+
 impl RecordedPcmBuffer {
     fn new() -> Self {
         Self {
@@ -132,17 +137,21 @@ impl RecordedPcmBuffer {
         }
     }
 
-    fn take(&mut self) -> Vec<u8> {
+    fn take(&mut self) -> RecordedPcm {
+        let capped = self.capped;
         self.capped = false;
-        std::mem::take(&mut self.bytes)
+        RecordedPcm {
+            bytes: std::mem::take(&mut self.bytes),
+            capped,
+        }
     }
 
-    fn restore(&mut self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
+    fn restore(&mut self, pcm: RecordedPcm) {
+        if pcm.bytes.is_empty() {
             return;
         }
-        self.bytes = bytes;
-        self.capped = false;
+        self.bytes = pcm.bytes;
+        self.capped = pcm.capped;
     }
 
     #[cfg(test)]
@@ -300,11 +309,11 @@ impl LiveRuntime {
         self.active_session.store(0, Ordering::SeqCst);
     }
 
-    pub fn take_recorded_pcm(&self) -> Vec<u8> {
+    pub(crate) fn take_recorded_pcm(&self) -> RecordedPcm {
         self.recorded_pcm.lock().expect("live pcm poisoned").take()
     }
 
-    pub(crate) fn restore_recorded_pcm(&self, pcm: Vec<u8>) {
+    pub(crate) fn restore_recorded_pcm(&self, pcm: RecordedPcm) {
         self.recorded_pcm
             .lock()
             .expect("live pcm poisoned")
@@ -319,6 +328,14 @@ impl LiveRuntime {
             .append(bytes);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_recorded_pcm_limit_for_test(&self, max_bytes: usize) {
+        self.recorded_pcm
+            .lock()
+            .expect("live pcm poisoned")
+            .max_bytes = max_bytes;
+    }
+
     fn discard_recorded_pcm(&self) {
         let _ = self.take_recorded_pcm();
     }
@@ -328,7 +345,7 @@ impl LiveRuntime {
             return;
         }
         let state = app.state::<LiveSessionState>();
-        let before_crash = state.snapshot();
+        let before_crash = state.mark_transcription_degraded();
         self.active_session.store(0, Ordering::SeqCst);
         {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
@@ -1090,7 +1107,8 @@ mod tests {
 
         let pcm = runtime.take_recorded_pcm();
 
-        assert_eq!(pcm, vec![1, 2, 3, 4]);
+        assert_eq!(pcm.bytes, vec![1, 2, 3, 4]);
+        assert!(!pcm.capped);
         let retained = runtime.recorded_pcm.lock().unwrap();
         assert!(retained.is_empty());
         assert_eq!(retained.capacity(), 0);
@@ -1104,7 +1122,9 @@ mod tests {
         assert_eq!(pcm.append(&[5, 6, 7, 8]), RecordedPcmAppendStatus::Capped);
 
         assert!(pcm.was_capped());
-        assert_eq!(pcm.take(), vec![1, 2, 3, 4, 5, 6]);
+        let taken = pcm.take();
+        assert_eq!(taken.bytes, vec![1, 2, 3, 4, 5, 6]);
+        assert!(taken.capped);
     }
 
     #[test]

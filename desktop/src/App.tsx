@@ -111,6 +111,7 @@ const initialLiveView: LiveSessionView = {
   pasteHotkey: "",
   route: "none",
   status: "idle",
+  transcriptionDegraded: false,
   visibility: "enabled",
 };
 

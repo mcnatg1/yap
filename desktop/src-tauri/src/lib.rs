@@ -979,7 +979,11 @@ fn stop_live_runtime(
             "live stream stop completed with {finish_status:?}"
         ));
     }
-    let before_stop = live.snapshot();
+    let before_stop = if finish_status.should_report() {
+        live.mark_transcription_degraded()
+    } else {
+        live.snapshot()
+    };
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();
     let transcript = live::recordings::transcript_text(&before_stop);

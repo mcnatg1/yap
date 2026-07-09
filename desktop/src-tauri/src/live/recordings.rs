@@ -3,6 +3,9 @@ use std::io::Write;
 use crate::{file_actions, live};
 
 const LIVE_WAV_SAMPLE_RATE: u32 = 16_000;
+const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
+const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Audio was saved.";
+const AUDIO_CAPPED_WARNING: &str = "Live audio was capped at 10 minutes.";
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +32,8 @@ fn save_session_files_to_dir(
     let transcript = transcript_text(view);
     let pcm = live_runtime.take_recorded_pcm();
     let created_at_ms = unix_millis_now()?;
-    match save_session_parts_to_dir(dir, created_at_ms, transcript, &pcm) {
+    let warning = session_warning(view, pcm.capped);
+    match save_session_parts_to_dir(dir, created_at_ms, transcript, &pcm.bytes, warning) {
         Ok(saved) => Ok(saved),
         Err(error) => {
             live_runtime.restore_recorded_pcm(pcm);
@@ -43,6 +47,7 @@ fn save_session_parts_to_dir(
     created_at_ms: u64,
     transcript: Option<String>,
     pcm: &[u8],
+    warning: Option<String>,
 ) -> Result<Option<SavedLiveSession>, String> {
     if transcript.is_none() && pcm.is_empty() {
         return Ok(None);
@@ -66,9 +71,7 @@ fn save_session_parts_to_dir(
                         source_path: transcript_path.display().to_string(),
                         output_path: transcript_path.display().to_string(),
                         created_at_ms,
-                        warning: Some(
-                            "Live audio could not be saved. Transcript was saved.".into(),
-                        ),
+                        warning: combine_warning(warning, AUDIO_SAVE_FAILED_WARNING),
                     }));
                 }
 
@@ -81,7 +84,7 @@ fn save_session_parts_to_dir(
                     },
                     output_path: transcript_path.display().to_string(),
                     created_at_ms,
-                    warning: None,
+                    warning,
                 }));
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -90,6 +93,28 @@ fn save_session_parts_to_dir(
     }
 
     Err("Failed to allocate a live recording filename.".into())
+}
+
+fn session_warning(view: &live::state::LiveSessionView, audio_capped: bool) -> Option<String> {
+    let warning = view
+        .transcription_degraded
+        .then_some(TRANSCRIPT_DEGRADED_WARNING.to_string());
+    if audio_capped {
+        combine_warning(warning, AUDIO_CAPPED_WARNING)
+    } else {
+        warning
+    }
+}
+
+fn combine_warning(base: Option<String>, next: impl AsRef<str>) -> Option<String> {
+    let next = next.as_ref();
+    if next.is_empty() {
+        return base;
+    }
+    match base {
+        Some(base) if !base.is_empty() => Some(format!("{base} {next}")),
+        _ => Some(next.to_string()),
+    }
 }
 
 fn session_paths(
@@ -240,11 +265,45 @@ fn fix_word_casing(word: &str) -> String {
 }
 
 fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "live transcript already exists",
+        ));
+    }
+    let partial = partial_text_path(path)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)?;
-    file.write_all(text.as_bytes())
+        .open(&partial)?;
+    let result = file.write_all(text.as_bytes());
+    drop(file);
+    let result = result.and_then(|_| {
+        if path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "live transcript already exists",
+            ));
+        }
+        std::fs::rename(&partial, path)
+    });
+    if result.is_err() {
+        std::fs::remove_file(&partial).ok();
+    }
+    result
+}
+
+fn partial_text_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing transcript file name",
+            )
+        })?;
+    Ok(path.with_file_name(format!("{file_name}.part")))
 }
 
 fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
@@ -330,6 +389,7 @@ mod tests {
             level: None,
             partial_text: partial_text.map(str::to_string),
             final_text: final_text.map(str::to_string),
+            transcription_degraded: false,
             error: None,
         }
     }
@@ -489,8 +549,43 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("Failed to create live recordings folder"));
-        assert_eq!(runtime.take_recorded_pcm(), vec![1, 0, 2, 0]);
+        let restored = runtime.take_recorded_pcm();
+        assert_eq!(restored.bytes, vec![1, 0, 2, 0]);
+        assert!(!restored.capped);
         std::fs::remove_file(dir_file).ok();
+    }
+
+    #[test]
+    fn save_session_files_warns_when_transcript_was_degraded() {
+        let runtime = live::runtime::LiveRuntime::new();
+        runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
+        let dir = std::env::temp_dir().join(format!("yap-live-degraded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut view = live_view(Some("hello"), None);
+        view.transcription_degraded = true;
+
+        let saved = save_session_files_to_dir(&runtime, &view, &dir)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(saved.warning.as_deref(), Some(TRANSCRIPT_DEGRADED_WARNING));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_session_files_warns_when_audio_was_capped() {
+        let runtime = live::runtime::LiveRuntime::new();
+        runtime.set_recorded_pcm_limit_for_test(2);
+        runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
+        let dir = std::env::temp_dir().join(format!("yap-live-capped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let saved = save_session_files_to_dir(&runtime, &live_view(Some("hello"), None), &dir)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(saved.warning.as_deref(), Some(AUDIO_CAPPED_WARNING));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -501,17 +596,29 @@ mod tests {
         let partial = dir.join("live-42.wav.part");
         std::fs::create_dir_all(&partial).unwrap();
 
-        let saved = save_session_parts_to_dir(&dir, 42, Some("hello".into()), &[1, 0])
+        let saved = save_session_parts_to_dir(&dir, 42, Some("hello".into()), &[1, 0], None)
             .unwrap()
             .unwrap();
 
         assert_eq!(saved.source_path, saved.output_path);
-        assert_eq!(
-            saved.warning.as_deref(),
-            Some("Live audio could not be saved. Transcript was saved.")
-        );
+        assert_eq!(saved.warning.as_deref(), Some(AUDIO_SAVE_FAILED_WARNING));
         assert!(std::path::Path::new(&saved.output_path).exists());
         assert!(!dir.join("live-42.wav").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_new_text_file_does_not_scan_partial_transcripts() {
+        let dir =
+            std::env::temp_dir().join(format!("yap-live-text-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("live-77.txt");
+        let partial = partial_text_path(&transcript).unwrap();
+        std::fs::write(&partial, "stale").unwrap();
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+
+        assert!(sessions.is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -520,10 +627,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yap-live-collision-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let first = save_session_parts_to_dir(&dir, 123, Some("first".into()), &[])
+        let first = save_session_parts_to_dir(&dir, 123, Some("first".into()), &[], None)
             .unwrap()
             .unwrap();
-        let second = save_session_parts_to_dir(&dir, 123, Some("second".into()), &[])
+        let second = save_session_parts_to_dir(&dir, 123, Some("second".into()), &[], None)
             .unwrap()
             .unwrap();
 
@@ -551,7 +658,7 @@ mod tests {
         let left_barrier = std::sync::Arc::clone(&barrier);
         let left = std::thread::spawn(move || {
             left_barrier.wait();
-            save_session_parts_to_dir(&left_dir, 456, Some("left".into()), &[])
+            save_session_parts_to_dir(&left_dir, 456, Some("left".into()), &[], None)
                 .unwrap()
                 .unwrap()
         });
@@ -559,7 +666,7 @@ mod tests {
         let right_barrier = std::sync::Arc::clone(&barrier);
         let right = std::thread::spawn(move || {
             right_barrier.wait();
-            save_session_parts_to_dir(&right_dir, 456, Some("right".into()), &[])
+            save_session_parts_to_dir(&right_dir, 456, Some("right".into()), &[], None)
                 .unwrap()
                 .unwrap()
         });

@@ -63,6 +63,7 @@ pub struct LiveSessionView {
     pub level: Option<f32>,
     pub partial_text: Option<String>,
     pub final_text: Option<String>,
+    pub transcription_degraded: bool,
     pub error: Option<String>,
 }
 
@@ -85,6 +86,7 @@ impl LiveSessionView {
             level: Some(0.0),
             partial_text: None,
             final_text: None,
+            transcription_degraded: false,
             error: None,
         }
     }
@@ -127,6 +129,7 @@ impl LiveSessionState {
         self.update(|view| {
             view.error = None;
             view.level = Some(0.0);
+            view.transcription_degraded = false;
             let route = live_route_for(setup, server_ready);
             view.route = route;
             view.active_capture_mode = (route != LiveRoute::Blocked).then_some(view.capture_mode);
@@ -192,6 +195,7 @@ impl LiveSessionState {
             view.final_text = None;
             view.level = Some(0.0);
             view.partial_text = None;
+            view.transcription_degraded = false;
             view.route = LiveRoute::LocalFallback;
             view.status = LiveSessionStatus::Listening;
             view.active_capture_mode.get_or_insert(view.capture_mode);
@@ -252,8 +256,17 @@ impl LiveSessionState {
             if !is_live_session_started(view.status) {
                 return;
             }
+            view.transcription_degraded = true;
             view.error =
                 Some("Live transcription is catching up. Audio will still be saved.".into());
+        })
+    }
+
+    pub fn mark_transcription_degraded(&self) -> LiveSessionView {
+        self.update(|view| {
+            if is_live_session_started(view.status) {
+                view.transcription_degraded = true;
+            }
         })
     }
 
@@ -529,9 +542,11 @@ mod tests {
             warning.error.as_deref(),
             Some("Live transcription is catching up. Audio will still be saved.")
         );
+        assert!(warning.transcription_degraded);
 
         let partial = state.update_partial("caught up");
         assert_eq!(partial.error, None);
+        assert!(partial.transcription_degraded);
     }
 
     #[test]

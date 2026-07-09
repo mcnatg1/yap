@@ -127,6 +127,7 @@ export type LiveSessionView = {
   level?: number | null;
   partialText?: string | null;
   finalText?: string | null;
+  transcriptionDegraded?: boolean;
   error?: string | null;
 };
 
