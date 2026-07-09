@@ -18,24 +18,15 @@ pub fn read_text_preview(
 
 fn read_text_file_at(path: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
-
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be read.".into());
-    }
-
-    let path = canonical_existing_path(&path)?;
+    let path = canonical_transcript_path(&path, "read")?;
     std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
 }
 
 fn read_text_preview_at(path: String, max_chars: usize) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
 
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be read.".into());
-    }
-
     let max_chars = max_chars.clamp(1, 4_000);
-    let path = canonical_existing_path(&path)?;
+    let path = canonical_transcript_path(&path, "read")?;
     let file =
         std::fs::File::open(&path).map_err(|err| format!("Failed to read transcript: {err}"))?;
     let mut text = String::new();
@@ -57,12 +48,7 @@ pub fn write_polished_text(
 
 fn write_polished_text_at(path: String, text: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
-
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be polished.".into());
-    }
-
-    let path = canonical_existing_path(&path)?;
+    let path = canonical_transcript_path(&path, "polished")?;
     let output = polished_path(&path)?;
     write_text_atomically(&output, &text)
         .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
@@ -211,6 +197,20 @@ fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf,
         .map_err(|err| format!("Failed to resolve file path: {err}"))
 }
 
+fn canonical_transcript_path(
+    path: &std::path::Path,
+    action: &str,
+) -> Result<std::path::PathBuf, String> {
+    if !is_transcript_path(path) {
+        return Err(format!("Only transcript text files can be {action}."));
+    }
+    let path = canonical_existing_path(path)?;
+    if !path.is_file() || !is_transcript_path(&path) {
+        return Err(format!("Only transcript text files can be {action}."));
+    }
+    Ok(path)
+}
+
 pub(crate) fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.label() == crate::MAIN_WINDOW_LABEL {
         Ok(())
@@ -276,6 +276,44 @@ mod tests {
         let preview = read_text_preview_at(transcript.display().to_string(), 3).unwrap();
 
         assert_eq!(preview, "abc");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_read_rejects_directory_after_canonicalization() {
+        let dir = temp_test_dir("txt-dir");
+        let transcript_dir = dir.join("take.txt");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let error = read_text_file_at(transcript_dir.display().to_string()).unwrap_err();
+
+        assert_eq!(error, "Only transcript text files can be read.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_actions_reject_resolved_non_transcript_files() {
+        let dir = temp_test_dir("txt-symlink");
+        let target = dir.join("secret.json");
+        let link = dir.join("take.txt");
+        std::fs::write(&target, "{}").unwrap();
+        if create_file_symlink(&target, &link).is_err() {
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+
+        assert_eq!(
+            read_text_file_at(link.display().to_string()).unwrap_err(),
+            "Only transcript text files can be read."
+        );
+        assert_eq!(
+            read_text_preview_at(link.display().to_string(), 10).unwrap_err(),
+            "Only transcript text files can be read."
+        );
+        assert_eq!(
+            write_polished_text_at(link.display().to_string(), "safe".into()).unwrap_err(),
+            "Only transcript text files can be polished."
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -468,5 +506,21 @@ mod tests {
             .count();
         assert_eq!(leftovers, 0);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
     }
 }
