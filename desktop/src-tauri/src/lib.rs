@@ -1,10 +1,10 @@
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -250,7 +250,7 @@ fn set_live_hotkey(
     ensure_main_command(&window)?;
     let next = live::hotkeys::parse_hotkey(&hotkey)?;
     let snapshot = state.snapshot();
-    if configured_hotkey_matches_shortcut(&snapshot.paste_hotkey, &next) {
+    if live::actions::configured_hotkey_matches_shortcut(&snapshot.paste_hotkey, &next) {
         return Err("Dictation shortcut must differ from paste shortcut.".into());
     }
     let previous = snapshot.hotkey;
@@ -302,7 +302,7 @@ fn set_live_paste_hotkey(
     ensure_main_command(&window)?;
     let next = live::hotkeys::parse_hotkey(&hotkey)?;
     let snapshot = state.snapshot();
-    if configured_hotkey_matches_shortcut(&snapshot.hotkey, &next) {
+    if live::actions::configured_hotkey_matches_shortcut(&snapshot.hotkey, &next) {
         return Err("Paste shortcut must differ from dictation shortcut.".into());
     }
     let previous = snapshot.paste_hotkey;
@@ -443,7 +443,7 @@ fn start_live_session(
     ensure_main_or_overlay_command(&window)?;
     warm_live_on_intent(&app, &live_runtime);
     let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
-    Ok(start_live_runtime(
+    Ok(live::actions::start_live_runtime(
         app,
         &state,
         &live_runtime,
@@ -462,7 +462,7 @@ fn stop_live_session(
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> Result<live::state::LiveSessionView, String> {
     ensure_main_or_overlay_command(&window)?;
-    Ok(stop_live_runtime(
+    Ok(live::actions::stop_live_runtime(
         app,
         &state,
         &live_runtime,
@@ -487,7 +487,7 @@ fn show_main_workspace(
     ensure_main_or_overlay_command(&window)?;
     match workspace.as_str() {
         "home" | "transcribe" | "polish" => {
-            show_main_window(&app);
+            live::actions::show_main_window(&app);
             let _ = app.emit("open-workspace", workspace);
             Ok(())
         }
@@ -724,235 +724,6 @@ fn emit_live_saved(app: &tauri::AppHandle, saved: &live::recordings::SavedLiveSe
     let _ = app.emit("live-session-saved", saved);
 }
 
-pub(crate) fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
-pub(crate) fn start_live_from_app(app: &tauri::AppHandle) {
-    let live = app.state::<live::LiveSessionState>();
-    let live_runtime = app.state::<live::runtime::LiveRuntime>();
-    let stt = app.state::<stt::dispatch::SttState>();
-    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-    let capture_mode = live.snapshot().capture_mode;
-    let _ = start_live_runtime(
-        app.clone(),
-        &live,
-        &live_runtime,
-        &stt,
-        &orchestrator,
-        capture_mode,
-    );
-}
-
-pub(crate) fn stop_live_from_app(app: &tauri::AppHandle) {
-    let live = app.state::<live::LiveSessionState>();
-    let live_runtime = app.state::<live::runtime::LiveRuntime>();
-    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-    let _ = stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator);
-}
-
-fn paste_last_live_transcript(app: &tauri::AppHandle) {
-    let live = app.state::<live::LiveSessionState>();
-    if let Some(text) = live::recordings::transcript_text(&live.snapshot()) {
-        paste_live_text(&text);
-    }
-}
-
-fn paste_live_text(text: &str) {
-    if let Err(error) = live::paste::paste_text(text) {
-        log_line(&format!("live paste failed: {error}"));
-    }
-}
-
-fn configured_hotkey_matches_shortcut(configured: &str, shortcut: &Shortcut) -> bool {
-    !configured.trim().is_empty()
-        && live::hotkeys::parse_hotkey(configured)
-            .map(|configured| configured == *shortcut)
-            .unwrap_or(false)
-}
-
-fn handle_live_shortcut_action(
-    app: tauri::AppHandle,
-    interaction: Arc<Mutex<live::hotkeys::LiveShortcutInteraction>>,
-    action: live::hotkeys::LiveShortcutAction,
-) {
-    match action {
-        live::hotkeys::LiveShortcutAction::None => {}
-        live::hotkeys::LiveShortcutAction::ScheduleHold(press_id) => {
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(live::hotkeys::SHORTCUT_HOLD_MS));
-                let active_mode = {
-                    let live = app.state::<live::LiveSessionState>();
-                    live.snapshot().active_capture_mode
-                };
-                let action = interaction
-                    .lock()
-                    .expect("live shortcut state poisoned")
-                    .hold_elapsed(press_id, Instant::now(), active_mode);
-                handle_live_shortcut_action(app, interaction, action);
-            });
-        }
-        live::hotkeys::LiveShortcutAction::Start(capture_mode) => {
-            let live = app.state::<live::LiveSessionState>();
-            let live_runtime = app.state::<live::runtime::LiveRuntime>();
-            let stt = app.state::<stt::dispatch::SttState>();
-            let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-            let view = start_live_runtime(
-                app.clone(),
-                &live,
-                &live_runtime,
-                &stt,
-                &orchestrator,
-                capture_mode,
-            );
-            if capture_mode == live::state::LiveCaptureMode::PushToTalk {
-                let should_stop = interaction
-                    .lock()
-                    .expect("live shortcut state poisoned")
-                    .finish_push_to_talk_start();
-                if should_stop
-                    && view.active_capture_mode == Some(live::state::LiveCaptureMode::PushToTalk)
-                {
-                    stop_live_from_app(&app);
-                }
-            }
-        }
-        live::hotkeys::LiveShortcutAction::Stop => {
-            std::thread::spawn(move || {
-                stop_live_from_app(&app);
-            });
-        }
-    }
-}
-
-fn start_live_runtime(
-    app: tauri::AppHandle,
-    live: &live::LiveSessionState,
-    live_runtime: &live::runtime::LiveRuntime,
-    stt: &stt::dispatch::SttState,
-    orchestrator: &runtime::RuntimeOrchestratorState,
-    active_capture_mode: live::state::LiveCaptureMode,
-) -> live::state::LiveSessionView {
-    if live::state::is_live_session_started(live.snapshot().status) || live_runtime.is_active() {
-        return live.snapshot();
-    }
-
-    if stt.is_transcribing() {
-        let view = live.block_with_error(stt::error::SttError::Busy.user_message());
-        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = live::overlay_window::ensure_active(&app) {
-                log_line(&format!("live overlay busy show failed: {error}"));
-            }
-        }
-        emit_live(&app, &view);
-        return view;
-    }
-
-    let setup = current_setup_status().runtime_setup_state();
-    orchestrator.with(|orchestrator| orchestrator.set_setup(setup));
-    if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
-        let view = block_live_for_setup(live, setup);
-        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = live::overlay_window::ensure_active(&app) {
-                log_line(&format!("live overlay blocked show failed: {error}"));
-            }
-        }
-        emit_live(&app, &view);
-        return view;
-    }
-
-    if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
-        let view = live.block_with_error(&runtime_error_to_stt(error).message);
-        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = live::overlay_window::ensure_active(&app) {
-                log_line(&format!("live overlay route error show failed: {error}"));
-            }
-        }
-        emit_live(&app, &view);
-        return view;
-    }
-
-    let requested_device_id = live.snapshot().input_device_id;
-    let resolved = live::devices::resolve_input_device(requested_device_id.as_deref());
-
-    let view = live.update(|view| {
-        view.error = resolved
-            .recovered
-            .then(|| "Selected microphone unavailable. Using default.".into());
-        view.input_device_id = requested_device_id.clone();
-        view.input_device_label = resolved.label.clone();
-        view.level = Some(0.0);
-        view.route = live::state::LiveRoute::LocalFallback;
-        view.status = live::state::LiveSessionStatus::Armed;
-        view.active_capture_mode = Some(active_capture_mode);
-    });
-    if let Err(error) = live::overlay_window::ensure_active(&app) {
-        log_line(&format!("live overlay start show failed: {error}"));
-    }
-    emit_live(&app, &view);
-
-    match live_runtime.start_local(app.clone(), requested_device_id) {
-        Ok(()) => live.snapshot(),
-        Err(message) => {
-            orchestrator.with(|orchestrator| orchestrator.finish_active_work());
-            let view = live.block_with_error(&message);
-            emit_live(&app, &view);
-            view
-        }
-    }
-}
-
-fn stop_live_runtime(
-    app: tauri::AppHandle,
-    live: &live::LiveSessionState,
-    live_runtime: &live::runtime::LiveRuntime,
-    orchestrator: &runtime::RuntimeOrchestratorState,
-) -> live::state::LiveSessionView {
-    let snapshot = live.snapshot();
-    if snapshot.status == live::state::LiveSessionStatus::Saving
-        || (!live::state::is_live_session_started(snapshot.status) && !live_runtime.is_active())
-    {
-        return snapshot;
-    }
-
-    let saving = live.begin_saving();
-    emit_live(&app, &saving);
-    let finish_status = live_runtime.stop();
-    if finish_status.should_report() {
-        log_line(&format!(
-            "live stream stop completed with {finish_status:?}"
-        ));
-    }
-    let before_stop = if finish_status.should_report() {
-        live.mark_transcription_degraded()
-    } else {
-        live.snapshot()
-    };
-    orchestrator.with(|orchestrator| orchestrator.finish_active_work());
-    let view = live.stop();
-    let transcript = live::recordings::transcript_text(&before_stop);
-    match live::recordings::save_session_files(live_runtime, &before_stop) {
-        Ok(Some(saved)) => emit_live_saved(&app, &saved),
-        Ok(None) => {}
-        Err(error) => log_line(&format!("live save failed: {error}")),
-    }
-    if let Some(text) = transcript {
-        paste_live_text(&text);
-    }
-    if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-        if let Err(error) = live::overlay_window::ensure_idle(&app) {
-            log_line(&format!("live overlay idle show failed: {error}"));
-        }
-    } else if let Some(window) = app.get_webview_window(live::overlay_window::WINDOW_LABEL) {
-        let _ = window.hide();
-    }
-    emit_live(&app, &view);
-    view
-}
-
 fn block_live_for_setup(
     live: &live::LiveSessionState,
     setup: runtime::state::SetupState,
@@ -1017,13 +788,19 @@ pub fn run() {
                             let live = app.state::<live::LiveSessionState>();
                             live.snapshot()
                         };
-                        if configured_hotkey_matches_shortcut(&snapshot.paste_hotkey, shortcut) {
+                        if live::actions::configured_hotkey_matches_shortcut(
+                            &snapshot.paste_hotkey,
+                            shortcut,
+                        ) {
                             if event.state() == ShortcutState::Pressed {
-                                paste_last_live_transcript(app);
+                                live::actions::paste_last_live_transcript(app);
                             }
                             return;
                         }
-                        if !configured_hotkey_matches_shortcut(&snapshot.hotkey, shortcut) {
+                        if !live::actions::configured_hotkey_matches_shortcut(
+                            &snapshot.hotkey,
+                            shortcut,
+                        ) {
                             return;
                         }
                         let action = {
@@ -1041,7 +818,7 @@ pub fn run() {
                                     .released(Instant::now(), snapshot.active_capture_mode),
                             }
                         };
-                        handle_live_shortcut_action(
+                        live::actions::handle_live_shortcut_action(
                             app.clone(),
                             Arc::clone(&shortcut_interaction),
                             action,

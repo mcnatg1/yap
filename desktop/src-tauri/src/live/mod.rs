@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod devices;
 pub mod hotkeys;
 pub mod overlay_window;

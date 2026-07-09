@@ -1,3 +1,5 @@
+use crate::live::actions;
+
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -22,9 +24,9 @@ pub(crate) fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .tooltip("Yap")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            SHOW_APP => crate::show_main_window(app),
-            START_DICTATING => crate::start_live_from_app(app),
-            STOP_RECORDING => crate::stop_live_from_app(app),
+            SHOW_APP => actions::show_main_window(app),
+            START_DICTATING => actions::start_live_from_app(app),
+            STOP_RECORDING => actions::stop_live_from_app(app),
             QUIT => app.exit(0),
             _ => {}
         })
@@ -40,7 +42,7 @@ pub(crate) fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
                     ..
                 }
             ) {
-                crate::show_main_window(tray.app_handle());
+                actions::show_main_window(tray.app_handle());
             }
         });
 
