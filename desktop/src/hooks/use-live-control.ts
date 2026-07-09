@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView } from "@/lib/app-types";
 import {
   clearLiveHotkey,
-  clearLivePasteHotkey,
   listInputDevices,
   listenLiveSession,
   liveStatus,
@@ -14,7 +13,6 @@ import {
   setLiveCaptureMode,
   setLiveHotkey,
   setLiveOverlayEnabled,
-  setLivePasteHotkey,
   startLiveSession,
   stopLiveSession,
 } from "@/live";
@@ -101,24 +99,12 @@ export function useLiveControl() {
     [updateLive],
   );
 
-  const updateLivePasteHotkey = useCallback(
-    (hotkey: string) => {
-      const next = hotkey.trim();
-      void updateLive(next ? () => setLivePasteHotkey(next) : clearLivePasteHotkey, next ? "Paste shortcut updated" : "Paste shortcut cleared");
-    },
-    [updateLive],
-  );
-
   const resetLiveHotkey = useCallback(() => {
     void updateLive(() => setLiveHotkey(defaultLiveHotkey), "Live shortcut reset");
   }, [updateLive]);
 
   const clearLiveShortcut = useCallback(() => {
     void updateLive(clearLiveHotkey, "Live shortcut cleared");
-  }, [updateLive]);
-
-  const clearLivePasteShortcut = useCallback(() => {
-    void updateLive(clearLivePasteHotkey, "Paste shortcut cleared");
   }, [updateLive]);
 
   const updateLiveCaptureMode = useCallback(
@@ -148,7 +134,6 @@ export function useLiveControl() {
   }, [updateLive]);
 
   return {
-    clearLivePasteShortcut,
     clearLiveShortcut,
     liveBusy,
     liveInputDevices,
@@ -163,6 +148,5 @@ export function useLiveControl() {
     updateLiveCaptureMode,
     updateLiveHotkey,
     updateLiveOverlay,
-    updateLivePasteHotkey,
   };
 }

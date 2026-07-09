@@ -320,7 +320,7 @@ git commit -m "Gate cross app paste behavior"
 - Test: Rust tests beside the live command helpers
 
 **Interfaces:**
-- Commands: `set_live_hotkey`, `clear_live_hotkey`, `set_live_paste_hotkey`, `clear_live_paste_hotkey`, `set_live_capture_mode`, `set_input_device`.
+- Commands: `set_live_hotkey`, `clear_live_hotkey`, `set_live_capture_mode`, `set_input_device`.
 
 - [ ] **Step 1: Add failing tests**
 

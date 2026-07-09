@@ -258,7 +258,6 @@ export function SettingsSheet({
   localComputeTargets,
   onCancelFallbackInstall,
   onClearLiveHotkey,
-  onClearLivePasteHotkey,
   onOpenChange,
   onInstallFallback,
   onOpenFallbackFolder,
@@ -271,7 +270,6 @@ export function SettingsSheet({
   onSetLiveCaptureMode,
   onSetLiveHotkey,
   onSetLiveOverlayEnabled,
-  onSetLivePasteHotkey,
   onSetLocalComputeTarget,
   onSkipSetup,
   onStartLive,
@@ -291,7 +289,6 @@ export function SettingsSheet({
   localComputeTargets: LocalComputeTargetView[];
   onCancelFallbackInstall: () => void;
   onClearLiveHotkey: () => void;
-  onClearLivePasteHotkey: () => void;
   onOpenChange: (open: boolean) => void;
   onInstallFallback: (options?: { force?: boolean }) => void;
   onOpenFallbackFolder: () => void;
@@ -304,7 +301,6 @@ export function SettingsSheet({
   onSetLiveCaptureMode: (captureMode: LiveCaptureMode) => void;
   onSetLiveHotkey: (hotkey: string) => void;
   onSetLiveOverlayEnabled: (enabled: boolean) => void;
-  onSetLivePasteHotkey: (hotkey: string) => void;
   onSetLocalComputeTarget: (targetId: string) => void;
   onSkipSetup: () => void;
   onStartLive: () => void;
@@ -322,7 +318,6 @@ export function SettingsSheet({
   const [section, setSection] = useState<SettingsSection>(fallbackModel && fallbackModel.status !== "ready" ? "system" : "general");
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const [hotkeyDraft, setHotkeyDraft] = useState(liveView.hotkey);
-  const [pasteHotkeyDraft, setPasteHotkeyDraft] = useState(liveView.pasteHotkey);
   const selectedComputeTarget = localComputeTargets.find((target) => target.selected)?.id ?? "auto";
   const fallbackLifecycle = projectFallbackLifecycle(fallbackModel, {
     commandPending: fallbackActionPending,
@@ -332,10 +327,6 @@ export function SettingsSheet({
   useEffect(() => {
     setHotkeyDraft(liveView.hotkey);
   }, [liveView.hotkey]);
-
-  useEffect(() => {
-    setPasteHotkeyDraft(liveView.pasteHotkey);
-  }, [liveView.pasteHotkey]);
 
   useEffect(() => {
     if (open && fallbackModel && fallbackModel.status !== "ready") {
@@ -439,32 +430,6 @@ export function SettingsSheet({
                         value={hotkeyDraft}
                         onChange={(event) => setHotkeyDraft(event.currentTarget.value)}
                       />
-                    </SettingsRow>
-                    <SettingsRow
-                      action={
-                        <Button disabled={liveBusy || liveActive || pasteHotkeyDraft === liveView.pasteHotkey} onClick={() => onSetLivePasteHotkey(pasteHotkeyDraft)} type="button" variant="secondary">
-                          Apply
-                        </Button>
-                      }
-                      detail={liveActive ? "Stop live first." : "Pastes the last saved dictation."}
-                      label="Paste last"
-                      value={liveView.pasteHotkey || "Off"}
-                    >
-                      <div className="flex max-w-[360px] gap-2">
-                        <Input
-                          className="min-w-0 flex-1"
-                          disabled={liveBusy || liveActive}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") onSetLivePasteHotkey(pasteHotkeyDraft);
-                          }}
-                          placeholder="Ctrl+Shift+V"
-                          value={pasteHotkeyDraft}
-                          onChange={(event) => setPasteHotkeyDraft(event.currentTarget.value)}
-                        />
-                        <Button disabled={liveBusy || liveActive || !liveView.pasteHotkey} onClick={onClearLivePasteHotkey} type="button" variant="ghost">
-                          Clear
-                        </Button>
-                      </div>
                     </SettingsRow>
                     <SettingsRow
                       action={

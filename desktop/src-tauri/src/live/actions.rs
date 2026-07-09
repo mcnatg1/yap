@@ -38,19 +38,6 @@ pub(crate) fn stop_live_from_app(app: &tauri::AppHandle) {
     let _ = stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator);
 }
 
-pub(crate) fn paste_last_live_transcript(app: &tauri::AppHandle) {
-    let live = app.state::<live::LiveSessionState>();
-    if let Some(text) = live::recordings::transcript_text(&live.snapshot()) {
-        paste_live_text(&text);
-    }
-}
-
-fn paste_live_text(text: &str) {
-    if let Err(error) = live::paste::paste_text(text) {
-        crate::log_line(&format!("live paste failed: {error}"));
-    }
-}
-
 pub(crate) fn configured_hotkey_matches_shortcut(configured: &str, shortcut: &Shortcut) -> bool {
     !configured.trim().is_empty()
         && live::hotkeys::parse_hotkey(configured)
@@ -217,14 +204,10 @@ pub(crate) fn stop_live_runtime(
     };
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();
-    let transcript = live::recordings::transcript_text(&before_stop);
     match live::recordings::save_session_files(live_runtime, &before_stop) {
         Ok(Some(saved)) => crate::emit_live_saved(&app, &saved),
         Ok(None) => {}
         Err(error) => crate::log_line(&format!("live save failed: {error}")),
-    }
-    if let Some(text) = transcript {
-        paste_live_text(&text);
     }
     if view.visibility == live::state::LiveOverlayVisibility::Enabled {
         if let Err(error) = live::overlay_window::ensure_idle(&app) {
