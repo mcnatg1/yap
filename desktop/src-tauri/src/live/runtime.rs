@@ -18,7 +18,7 @@ use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
-const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(2500);
+const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 
 #[derive(Clone)]
 pub struct LiveRuntime {
@@ -395,7 +395,8 @@ fn open_capture(
                     .lock()
                     .expect("live pcm poisoned")
                     .extend_from_slice(&bytes);
-                let _ = samples_tx.send(StreamMessage::Samples {
+                // ponytail: if the decoder falls behind, keep the WAV and drop the live chunk.
+                let _ = samples_tx.try_send(StreamMessage::Samples {
                     session: raw.session,
                     samples: resampled,
                 });

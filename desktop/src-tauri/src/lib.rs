@@ -941,6 +941,30 @@ fn ensure_idle_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     )
 }
 
+fn recover_live_overlay(app: &tauri::AppHandle) {
+    let view = app.state::<live::LiveSessionState>().snapshot();
+    if view.visibility != live::state::LiveOverlayVisibility::Enabled {
+        return;
+    }
+    if app
+        .get_webview_window("live-overlay")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let result = if live::state::is_live_session_started(view.status)
+        || view.status == live::state::LiveSessionStatus::Blocked
+    {
+        ensure_live_overlay(app)
+    } else {
+        ensure_idle_live_overlay(app)
+    };
+    if let Err(error) = result {
+        log_line(&format!("live overlay recovery failed: {error}"));
+    }
+}
+
 fn live_overlay_frame(surface: &str, error_message: Option<&str>) -> (f64, f64) {
     let width = match surface {
         "sensor" | "peek" | "recording" | "processing" | "initializing" | "success" => {
@@ -1184,6 +1208,13 @@ pub fn run() {
                     if let Err(error) = live_runtime.warm(app) {
                         log_line(&format!("live warmup skipped: {error}"));
                     }
+                });
+            }
+            {
+                let app = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    recover_live_overlay(&app);
                 });
             }
             let startup_live = app.state::<live::LiveSessionState>().snapshot();

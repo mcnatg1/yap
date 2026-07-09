@@ -216,6 +216,12 @@ impl LiveSessionState {
 
     pub fn update_partial(&self, text: &str) -> LiveSessionView {
         self.update(|view| {
+            if matches!(
+                view.status,
+                LiveSessionStatus::Idle | LiveSessionStatus::Blocked
+            ) {
+                return;
+            }
             view.error = None;
             view.partial_text = Some(text.to_string());
             if view.status != LiveSessionStatus::Saving {
@@ -226,6 +232,12 @@ impl LiveSessionState {
 
     pub fn update_final(&self, text: &str) -> LiveSessionView {
         self.update(|view| {
+            if matches!(
+                view.status,
+                LiveSessionStatus::Idle | LiveSessionStatus::Blocked
+            ) {
+                return;
+            }
             view.error = None;
             view.partial_text = None;
             view.final_text = Some(append_final_text(view.final_text.as_deref(), text));
@@ -376,6 +388,7 @@ mod tests {
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
+        state.update(|view| view.status = LiveSessionStatus::Speaking);
         state.update_final("hello.");
 
         let view = state.stop();
@@ -424,6 +437,7 @@ mod tests {
             capture_mode: LiveCaptureMode::Toggle,
             input_device_id: None,
         });
+        state.update(|view| view.status = LiveSessionStatus::Speaking);
         state.update_partial("draft");
         state.begin_saving();
 
@@ -461,6 +475,7 @@ mod tests {
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         });
+        state.update(|view| view.status = LiveSessionStatus::Speaking);
         state.update_final("kept.");
 
         let view = state.block_with_error("Live stream stopped.");
@@ -484,5 +499,24 @@ mod tests {
 
         assert_eq!(view.status, LiveSessionStatus::Speaking);
         assert_eq!(view.level, Some(0.35));
+    }
+
+    #[test]
+    fn stale_stream_text_does_not_reopen_idle_session() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+
+        state.update_partial("late partial");
+        state.update_final("late final");
+        let view = state.snapshot();
+
+        assert_eq!(view.status, LiveSessionStatus::Idle);
+        assert_eq!(view.partial_text, None);
+        assert_eq!(view.final_text, None);
     }
 }
