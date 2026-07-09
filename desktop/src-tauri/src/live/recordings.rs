@@ -4,7 +4,7 @@ use crate::{file_actions, live};
 
 const LIVE_WAV_SAMPLE_RATE: u32 = 16_000;
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedLiveSession {
     pub name: String,
@@ -17,10 +17,24 @@ pub fn save_session_files(
     live_runtime: &live::runtime::LiveRuntime,
     view: &live::state::LiveSessionView,
 ) -> Result<Option<SavedLiveSession>, String> {
+    save_session_files_to_dir(live_runtime, view, &recordings_dir())
+}
+
+fn save_session_files_to_dir(
+    live_runtime: &live::runtime::LiveRuntime,
+    view: &live::state::LiveSessionView,
+    dir: &std::path::Path,
+) -> Result<Option<SavedLiveSession>, String> {
     let transcript = transcript_text(view);
     let pcm = live_runtime.take_recorded_pcm();
     let created_at_ms = unix_millis_now()?;
-    save_session_parts_to_dir(&recordings_dir(), created_at_ms, transcript, &pcm)
+    match save_session_parts_to_dir(dir, created_at_ms, transcript, &pcm) {
+        Ok(saved) => Ok(saved),
+        Err(error) => {
+            live_runtime.restore_recorded_pcm(pcm);
+            Err(error)
+        }
+    }
 }
 
 fn save_session_parts_to_dir(
@@ -427,6 +441,23 @@ mod tests {
             "No live transcript captured.\n"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_session_files_restores_pcm_when_directory_create_fails() {
+        let runtime = live::runtime::LiveRuntime::new();
+        runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
+        let dir_file =
+            std::env::temp_dir().join(format!("yap-live-dir-file-{}", std::process::id()));
+        std::fs::remove_file(&dir_file).ok();
+        std::fs::write(&dir_file, b"not a directory").unwrap();
+
+        let err = save_session_files_to_dir(&runtime, &live_view(Some("hello"), None), &dir_file)
+            .unwrap_err();
+
+        assert!(err.contains("Failed to create live recordings folder"));
+        assert_eq!(runtime.take_recorded_pcm(), vec![1, 0, 2, 0]);
+        std::fs::remove_file(dir_file).ok();
     }
 
     #[test]

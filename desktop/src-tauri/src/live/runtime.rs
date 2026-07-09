@@ -129,6 +129,14 @@ impl RecordedPcmBuffer {
         std::mem::take(&mut self.bytes)
     }
 
+    fn restore(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.bytes = bytes;
+        self.capped = false;
+    }
+
     #[cfg(test)]
     fn reserve(&mut self, additional: usize) {
         self.bytes.reserve(additional);
@@ -265,6 +273,21 @@ impl LiveRuntime {
 
     pub fn take_recorded_pcm(&self) -> Vec<u8> {
         self.recorded_pcm.lock().expect("live pcm poisoned").take()
+    }
+
+    pub(crate) fn restore_recorded_pcm(&self, pcm: Vec<u8>) {
+        self.recorded_pcm
+            .lock()
+            .expect("live pcm poisoned")
+            .restore(pcm);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_recorded_pcm_for_test(&self, bytes: &[u8]) {
+        self.recorded_pcm
+            .lock()
+            .expect("live pcm poisoned")
+            .append(bytes);
     }
 
     fn discard_recorded_pcm(&self) {
