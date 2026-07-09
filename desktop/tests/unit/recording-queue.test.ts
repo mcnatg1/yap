@@ -51,4 +51,17 @@ describe("recording queue storage", () => {
       { id: 2, path: "C:/take.wav", status: "queued_server" },
     ]);
   });
+
+  it("bounds persisted queue payloads", () => {
+    const jobs = normalizeRecordingQueue(
+      Array.from({ length: 205 }, (_, index) => ({
+        id: index + 1,
+        path: `C:/take-${index + 1}.wav`,
+      })).reverse(),
+    );
+
+    expect(jobs).toHaveLength(200);
+    expect(jobs[0].id).toBe(1);
+    expect(jobs.at(-1)?.id).toBe(200);
+  });
 });

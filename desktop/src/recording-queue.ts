@@ -7,6 +7,7 @@ import {
 } from "@/lib/app-types";
 
 const recordingQueueKey = "yap.recordingQueue.v1";
+const maxStoredQueueJobs = 200;
 
 type QueueStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -35,6 +36,7 @@ export function normalizeRecordingQueue(value: unknown): RecordingJobView[] {
       return true;
     })
     .sort((a, b) => a.id - b.id)
+    .slice(0, maxStoredQueueJobs)
     .map((item) => ({
       error: item.error,
       id: item.id,
