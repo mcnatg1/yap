@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/table";
 import { canDeleteTranscriptHistoryEntry, maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
+import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
 import { createPreviewTextLoader } from "@/lib/history-preview-loader";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
@@ -178,6 +179,7 @@ export function HistoryPanel({
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
+  const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
   const previewTextByPathRef = useRef(previewTextByPath);
   const previewLoaderRef = useRef(createPreviewTextLoader());
@@ -234,18 +236,30 @@ export function HistoryPanel({
     };
   }, [entries, onLoadPreviewText, searchFilter]);
 
-  const visibleGroups = useMemo(() => {
+  useEffect(() => {
+    setRenderLimit(historyRenderWindowSize);
+  }, [entries, searchFilter]);
+
+  const filteredEntries = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
-    const filtered = query
+    return query
       ? entries.filter((entry) =>
           `${entry.name} ${entry.sourcePath} ${previewTextByPath[entry.outputPath] ?? ""}`
             .toLowerCase()
             .includes(query),
         )
       : entries;
-
-    return groupHistoryByDay(filtered);
   }, [entries, previewTextByPath, searchFilter]);
+
+  const historyWindow = useMemo(
+    () => renderHistoryWindow(filteredEntries, renderLimit),
+    [filteredEntries, renderLimit],
+  );
+
+  const visibleGroups = useMemo(
+    () => groupHistoryByDay(historyWindow.visibleEntries),
+    [historyWindow.visibleEntries],
+  );
 
   return (
     <Card className="surface-workspace-inset min-w-0 bg-card py-0">
@@ -367,6 +381,17 @@ export function HistoryPanel({
                       </Table>
                     </section>
                   ))}
+                  {historyWindow.hiddenCount ? (
+                    <Button
+                      className="self-center"
+                      onClick={() => setRenderLimit(historyWindow.nextLimit)}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Show older
+                    </Button>
+                  ) : null}
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
