@@ -27,6 +27,7 @@ import { useTranscriptFileActions } from "@/hooks/use-transcript-file-actions";
 import { useTranscriptPreview } from "@/hooks/use-transcript-preview";
 import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
+import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
 import {
   savedSessionToTranscriptHistoryEntry,
   type TranscriptHistoryEntry,
@@ -41,12 +42,9 @@ import {
   isRecordingFinished,
   isRecordingRetryable,
   isRecordingRunnable,
-  isWorkspaceView,
   recordingStatusForStartFailure,
   type FallbackModelView,
-  type RailAction,
   type RecordingJobView,
-  type WorkspaceView,
   workspaceCopy,
 } from "@/lib/app-types";
 import {
@@ -122,11 +120,6 @@ export default function App() {
     updateLiveOverlay,
     updateLivePasteHotkey,
   } = useLiveControl();
-  const [activeRail, setActiveRail] = useState<RailAction>("home");
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
-  const [railCollapsed, setRailCollapsed] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
   const {
     clearTranscriptText,
     forgetTranscriptText,
@@ -176,6 +169,24 @@ export default function App() {
   const queueProgress = queue.length ? Math.round((completed / queue.length) * 100) : 0;
   const runningItem = queue.find((item) => isRecordingActive(item.status));
   const elapsedSeconds = useElapsedSeconds(runningSince);
+  const {
+    activeRail,
+    closeDetails,
+    detailsOpen,
+    helpOpen,
+    onDetailsOpenChange,
+    onHelpOpenChange,
+    openWorkspace,
+    railCollapsed,
+    setRailCollapsed,
+    showDetails,
+    workspaceView,
+  } = useWorkspaceNavigation({
+    onOpenDetails: () => void loadStatus(),
+    onOpenPolish: () => {
+      setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
+    },
+  });
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
   const showHistory = workspaceView === "home";
@@ -221,8 +232,7 @@ export default function App() {
       const recorded = recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
       if (!recorded) return;
       selectHistoryEntry(entry);
-      setActiveRail("home");
-      setWorkspaceView("home");
+      openWorkspace("home");
       setStatus("Ready");
       void loadTranscriptText(entry.outputPath).catch(() => undefined);
       if (entry.warning) {
@@ -275,33 +285,6 @@ export default function App() {
       unlistenFallbackStatus?.();
     };
   }, []);
-
-  useEffect(() => {
-    if (!isTauri()) return;
-
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    void listen<unknown>("open-workspace", (event) => {
-      if (!isWorkspaceView(event.payload)) return;
-      const action = event.payload;
-      setActiveRail(action);
-      setWorkspaceView(action);
-      if (action === "polish") {
-        setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
-      }
-    }).then((stop) => {
-      if (cancelled) {
-        stop();
-        return;
-      }
-      unlisten = stop;
-    });
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [selectedItem?.status]);
 
   useEffect(() => {
     void loadStatus();
@@ -388,8 +371,7 @@ export default function App() {
     }
 
     setupPrompted.current = true;
-    setActiveRail("details");
-    setDetailsOpen(true);
+    showDetails();
   }
 
   function applyFallbackModelView(
@@ -552,8 +534,7 @@ export default function App() {
 
   function skipSetup() {
     localStorage.setItem(setupSkipKey, "true");
-    setDetailsOpen(false);
-    if (activeRail === "details") setActiveRail(workspaceView);
+    closeDetails();
   }
 
   async function addPaths(paths: string[]) {
@@ -603,14 +584,12 @@ export default function App() {
 
     const newItems = createQueuedServerRecordingJobs(addable, batchServerQueuedMessage);
     setQueue((current) => [...current, ...newItems]);
-    setActiveRail("transcribe");
-    setWorkspaceView("transcribe");
+    openWorkspace("transcribe");
     selectQueueItem(newItems[newItems.length - 1].id);
   }
 
   function goToTranscribe() {
-    setActiveRail("transcribe");
-    setWorkspaceView("transcribe");
+    openWorkspace("transcribe");
   }
 
   async function pickFiles() {
@@ -631,26 +610,6 @@ export default function App() {
       else if (selected) await addPaths([selected]);
     } catch (error) {
       toast.error(`Picker failed: ${String(error)}`);
-    }
-  }
-
-  function handleRailAction(action: RailAction) {
-    setActiveRail(action);
-
-    if (action === "details") {
-      setDetailsOpen(true);
-      void loadStatus();
-      return;
-    }
-    if (action === "help") {
-      setHelpOpen(true);
-      return;
-    }
-
-    setWorkspaceView(action);
-
-    if (action === "polish") {
-      setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
     }
   }
 
@@ -801,8 +760,7 @@ export default function App() {
 
   function openHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
     selectHistoryEntry(entry, origin);
-    setActiveRail("home");
-    setWorkspaceView("home");
+    openWorkspace("home");
   }
 
   const workspaceLeftPane = (
@@ -834,7 +792,7 @@ export default function App() {
           onHide={hideHistoryEntry}
           onLoadPreviewText={loadHistoryPreviewText}
           onOpen={(entry) => void openAppPath(entry.outputPath)}
-          onOpenHelp={() => handleRailAction("help")}
+          onOpenHelp={() => openWorkspace("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
           onReveal={(entry) => void revealPath(entry.outputPath)}
           onSelect={openHistoryEntry}
@@ -846,7 +804,7 @@ export default function App() {
         <PolishPanel
           item={selectedItem}
           onLoadText={loadTranscriptText}
-          onOpenHelp={() => handleRailAction("help")}
+          onOpenHelp={() => openWorkspace("help")}
           onPolished={(outputPath, text) => {
             rememberPolishedText(outputPath, text);
             toast.success("Polished draft ready");
@@ -865,7 +823,7 @@ export default function App() {
         item={selectedItem}
         onCopy={copyTranscript}
         onOpen={(path) => void openAppPath(path)}
-        onOpenHelp={() => handleRailAction("help")}
+        onOpenHelp={() => openWorkspace("help")}
         onRetry={(id) => void retryItem(id)}
         onReveal={(path) => void revealPath(path)}
         running={running}
@@ -892,8 +850,8 @@ export default function App() {
         auth={auth}
         description={workspace.description}
         historyCount={history.length}
-        onOpenDetails={() => handleRailAction("details")}
-        onOpenHelp={() => handleRailAction("help")}
+        onOpenDetails={() => openWorkspace("details")}
+        onOpenHelp={() => openWorkspace("help")}
         status={status}
         title={workspace.title}
       />
@@ -904,7 +862,7 @@ export default function App() {
           onDragLeave={recordingDrop.onDragLeave}
           onDragOver={recordingDrop.onDragOver}
           onDrop={recordingDrop.onDrop}
-          onOpenHelp={() => handleRailAction("help")}
+          onOpenHelp={() => openWorkspace("help")}
           onPickFiles={() => void pickFiles()}
         />
       ) : null}
@@ -921,7 +879,7 @@ export default function App() {
       onOpenChange={(open) => setRailCollapsed(!open)}
       open={!railCollapsed}
     >
-      <AppSidebar active={activeRail} onAction={handleRailAction} />
+      <AppSidebar active={activeRail} onAction={openWorkspace} />
       <SidebarInset className="flex min-h-0 flex-col overflow-hidden">
         <AppChrome />
         <div className="min-h-0 w-full min-w-0 flex-1 overflow-hidden bg-background pb-4 pr-4 pt-0">
@@ -945,10 +903,7 @@ export default function App() {
         onOpenFallbackFolder={() => void openFallbackFolder()}
         onPreflightLiveInput={preflightLiveInput}
         onResetLiveHotkey={resetLiveHotkey}
-        onOpenChange={(open) => {
-          setDetailsOpen(open);
-          if (!open && activeRail === "details") setActiveRail(workspaceView);
-        }}
+        onOpenChange={onDetailsOpenChange}
         onRemoveFallback={() => void removeFallback()}
         onSetInputDevice={updateInputDevice}
         onSetFallbackEnabled={(enabled) => void setFallbackEnabledSetting(enabled)}
@@ -966,10 +921,7 @@ export default function App() {
         status={status}
       />
       <HelpSheet
-        onOpenChange={(open) => {
-          setHelpOpen(open);
-          if (!open && activeRail === "help") setActiveRail(workspaceView);
-        }}
+        onOpenChange={onHelpOpenChange}
         open={helpOpen}
       />
       <TranscriptReviewDialog
@@ -981,7 +933,7 @@ export default function App() {
         onOpenChange={(open) => {
           if (!open) closeHistoryReview();
         }}
-        onOpenHelp={() => handleRailAction("help")}
+        onOpenHelp={() => openWorkspace("help")}
         onRetry={(id) => void retryItem(id)}
         onReveal={(path) => void revealPath(path)}
         open={workspaceView === "home" && Boolean(selectedHistoryItem)}
