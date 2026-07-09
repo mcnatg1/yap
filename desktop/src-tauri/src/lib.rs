@@ -1394,6 +1394,45 @@ mod tests {
     }
 
     #[test]
+    fn live_overlay_frame_matches_frontend_surface_contract() {
+        for surface in [
+            "peek",
+            "recording",
+            "processing",
+            "initializing",
+            "success",
+        ] {
+            assert_eq!(
+                live_overlay_frame(surface, None),
+                (LIVE_OVERLAY_HOVER_SENSOR_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
+            );
+        }
+        assert_eq!(
+            live_overlay_frame("sensor", None),
+            (
+                LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
+                LIVE_OVERLAY_HOVER_SENSOR_HEIGHT
+            )
+        );
+    }
+
+    #[test]
+    fn live_overlay_feedback_frame_clamps_error_width() {
+        assert_eq!(
+            live_overlay_frame("feedback", None),
+            (LIVE_OVERLAY_DEFAULT_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
+        );
+        assert_eq!(
+            live_overlay_frame("feedback", Some("short")).0,
+            LIVE_OVERLAY_MIN_ERROR_WIDTH
+        );
+        assert_eq!(
+            live_overlay_frame("feedback", Some(&"x".repeat(200))).0,
+            LIVE_OVERLAY_MAX_ERROR_WIDTH
+        );
+    }
+
+    #[test]
     fn start_live_setup_missing_blocks_without_claiming_server() {
         let live = live::LiveSessionState::new(live::settings::LiveSettings {
             overlay_enabled: true,
