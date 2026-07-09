@@ -4,6 +4,63 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { isWorkspaceView, type RailAction, type WorkspaceView } from "@/lib/app-types";
 
+export type WorkspaceNavigationState = {
+  activeRail: RailAction;
+  detailsOpen: boolean;
+  helpOpen: boolean;
+  railCollapsed: boolean;
+  workspaceView: WorkspaceView;
+};
+
+export type WorkspaceNavigationAction =
+  | { type: "closeDetails" }
+  | { type: "closeHelp" }
+  | { type: "openWorkspace"; action: RailAction }
+  | { type: "setDetailsOpen"; open: boolean }
+  | { type: "setHelpOpen"; open: boolean }
+  | { type: "setRailCollapsed"; collapsed: boolean }
+  | { type: "showDetails" };
+
+export const initialWorkspaceNavigationState: WorkspaceNavigationState = {
+  activeRail: "home",
+  detailsOpen: false,
+  helpOpen: false,
+  railCollapsed: false,
+  workspaceView: "home",
+};
+
+export function workspaceNavigationStateForAction(
+  state: WorkspaceNavigationState,
+  action: WorkspaceNavigationAction,
+): WorkspaceNavigationState {
+  switch (action.type) {
+    case "closeDetails":
+      return {
+        ...state,
+        activeRail: state.activeRail === "details" ? state.workspaceView : state.activeRail,
+        detailsOpen: false,
+      };
+    case "closeHelp":
+      return {
+        ...state,
+        activeRail: state.activeRail === "help" ? state.workspaceView : state.activeRail,
+        helpOpen: false,
+      };
+    case "openWorkspace":
+      if (action.action === "details") return { ...state, activeRail: "details", detailsOpen: true };
+      if (action.action === "help") return { ...state, activeRail: "help", helpOpen: true };
+      return { ...state, activeRail: action.action, workspaceView: action.action };
+    case "setDetailsOpen":
+      return action.open ? { ...state, detailsOpen: true } : workspaceNavigationStateForAction(state, { type: "closeDetails" });
+    case "setHelpOpen":
+      return action.open ? { ...state, helpOpen: true } : workspaceNavigationStateForAction(state, { type: "closeHelp" });
+    case "setRailCollapsed":
+      return { ...state, railCollapsed: action.collapsed };
+    case "showDetails":
+      return { ...state, activeRail: "details", detailsOpen: true };
+  }
+}
+
 export function useWorkspaceNavigation({
   onOpenDetails,
   onOpenPolish,
@@ -11,11 +68,7 @@ export function useWorkspaceNavigation({
   onOpenDetails: () => void;
   onOpenPolish: () => void;
 }) {
-  const [activeRail, setActiveRail] = useState<RailAction>("home");
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [railCollapsed, setRailCollapsed] = useState(false);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
+  const [navigation, setNavigation] = useState(initialWorkspaceNavigationState);
   const onOpenDetailsRef = useRef(onOpenDetails);
   const onOpenPolishRef = useRef(onOpenPolish);
 
@@ -25,25 +78,13 @@ export function useWorkspaceNavigation({
   }, [onOpenDetails, onOpenPolish]);
 
   const openWorkspace = useCallback((action: RailAction) => {
-    setActiveRail(action);
-
-    if (action === "details") {
-      setDetailsOpen(true);
-      onOpenDetailsRef.current();
-      return;
-    }
-    if (action === "help") {
-      setHelpOpen(true);
-      return;
-    }
-
-    setWorkspaceView(action);
+    setNavigation((state) => workspaceNavigationStateForAction(state, { type: "openWorkspace", action }));
+    if (action === "details") onOpenDetailsRef.current();
     if (action === "polish") onOpenPolishRef.current();
   }, []);
 
   const showDetails = useCallback(() => {
-    setActiveRail("details");
-    setDetailsOpen(true);
+    setNavigation((state) => workspaceNavigationStateForAction(state, { type: "showDetails" }));
   }, []);
 
   useEffect(() => {
@@ -68,42 +109,32 @@ export function useWorkspaceNavigation({
   }, [openWorkspace]);
 
   const closeDetails = useCallback(() => {
-    setDetailsOpen(false);
-    if (activeRail === "details") setActiveRail(workspaceView);
-  }, [activeRail, workspaceView]);
-
-  const closeHelp = useCallback(() => {
-    setHelpOpen(false);
-    if (activeRail === "help") setActiveRail(workspaceView);
-  }, [activeRail, workspaceView]);
+    setNavigation((state) => workspaceNavigationStateForAction(state, { type: "closeDetails" }));
+  }, []);
 
   const onDetailsOpenChange = useCallback((open: boolean) => {
-    if (open) {
-      setDetailsOpen(true);
-      return;
-    }
-    closeDetails();
-  }, [closeDetails]);
+    setNavigation((state) => workspaceNavigationStateForAction(state, { type: "setDetailsOpen", open }));
+  }, []);
 
   const onHelpOpenChange = useCallback((open: boolean) => {
-    if (open) {
-      setHelpOpen(true);
-      return;
-    }
-    closeHelp();
-  }, [closeHelp]);
+    setNavigation((state) => workspaceNavigationStateForAction(state, { type: "setHelpOpen", open }));
+  }, []);
+
+  const setRailCollapsed = useCallback((collapsed: boolean) => {
+    setNavigation((state) => workspaceNavigationStateForAction(state, { type: "setRailCollapsed", collapsed }));
+  }, []);
 
   return {
-    activeRail,
+    activeRail: navigation.activeRail,
     closeDetails,
-    detailsOpen,
-    helpOpen,
+    detailsOpen: navigation.detailsOpen,
+    helpOpen: navigation.helpOpen,
     onDetailsOpenChange,
     onHelpOpenChange,
     openWorkspace,
-    railCollapsed,
+    railCollapsed: navigation.railCollapsed,
     setRailCollapsed,
     showDetails,
-    workspaceView,
+    workspaceView: navigation.workspaceView,
   };
 }
