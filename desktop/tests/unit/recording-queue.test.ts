@@ -48,6 +48,7 @@ describe("recording queue storage", () => {
       intent: "recording",
       name: "take.wav",
       path: "C:/take.wav",
+      playbackPath: "C:/take.wav",
       pipeline: createInitialPipelineState(),
       route: "serverBatch",
       status: "queued_server",
@@ -61,6 +62,7 @@ describe("recording queue storage", () => {
     expect(readRecordingQueue(storage)).toMatchObject([
       { id: 2, path: "C:/take.wav", status: "queued_server" },
     ]);
+    expect(readRecordingQueue(storage)[0].playbackPath).toBeUndefined();
   });
 
   it("bounds persisted queue payloads", () => {

@@ -74,7 +74,7 @@ function RecordingPlayer({
   const [durationSeconds, setDurationSeconds] = useState<number>();
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const recordingPath = item.playbackPath ?? (item.intent === "recording" ? item.path : undefined);
+  const recordingPath = item.playbackPath;
   const recordingSrc = useMemo(() => (isTauri() && recordingPath ? convertFileSrc(recordingPath) : undefined), [recordingPath]);
   const recordingStatus = failed
     ? "Playback unavailable"

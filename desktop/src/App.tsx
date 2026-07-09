@@ -736,6 +736,7 @@ export default function App() {
         intent: "recording",
         name: basename(path),
         path,
+        playbackPath: path,
         pipeline: createInitialPipelineState(),
         route: "serverBatch",
         status: "queued_server",
