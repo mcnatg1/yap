@@ -305,7 +305,7 @@ fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
 }
 
 fn is_recording_media_path(path: &std::path::Path) -> bool {
-    has_extension(path, crate::RECORDING_EXTENSIONS)
+    crate::batch_recordings::is_supported_recording_path(path)
 }
 
 fn is_live_transcript_file(path: &std::path::Path) -> bool {
