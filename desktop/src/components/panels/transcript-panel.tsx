@@ -33,6 +33,7 @@ import {
   type RecordingJobStatus,
   type RecordingJobView,
 } from "@/lib/app-types";
+import { projectTranscriptText } from "@/lib/transcript-text";
 import { cn } from "@/lib/utils";
 
 function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: number) {
@@ -373,6 +374,7 @@ export function TranscriptPanel({
   const isDone = isRecordingFinished(item?.status);
   const isRunning = item ? isRecordingActive(item.status) : false;
   const isError = item?.status === "failed";
+  const transcriptText = projectTranscriptText(text);
 
   useEffect(() => {
     if (!isDone || !item?.output) return;
@@ -473,14 +475,16 @@ export function TranscriptPanel({
         <ScrollArea className="min-h-[280px] flex-1 bg-[var(--surface-transcript)]">
           <div className={cn("min-h-[280px]", variant === "modal" ? "p-8 pt-7" : "p-5")}>
             {isDone ? (
-              text ? (
-                <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{text}</pre>
+              transcriptText.state === "ready" ? (
+                <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{transcriptText.text}</pre>
+              ) : transcriptText.state === "empty" ? (
+                <p className="text-[15px] leading-7 text-muted-foreground">{transcriptText.text}</p>
               ) : (
                 <div className="flex flex-col gap-3">
                   <Skeleton className="h-4 w-3/4" />
                   <Skeleton className="h-4 w-full" />
                   <Skeleton className="h-4 w-5/6" />
-                  <p className="text-sm text-muted-foreground">Loading transcript…</p>
+                  <p className="text-sm text-muted-foreground">{transcriptText.text}</p>
                 </div>
               )
             ) : isError ? (

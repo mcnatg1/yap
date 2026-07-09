@@ -283,11 +283,7 @@ function RecordingOverlayView({
       </div>
 
       {showsStopButton ? (
-        <div className="absolute inset-0 flex items-center justify-between px-2" data-testid="live-toggle-actions">
-          <FreeFlowIconButton label="Cancel recording" onClick={onStopButtonPressed} tone="cancel">
-            <X className="size-3" weight="bold" />
-          </FreeFlowIconButton>
-          <div className="h-px w-12" />
+        <div className="absolute inset-0 flex items-center justify-end px-2" data-testid="live-toggle-actions">
           <FreeFlowIconButton label="Finish recording" onClick={onStopButtonPressed} tone="confirm">
             <Check className="size-3" weight="bold" />
           </FreeFlowIconButton>

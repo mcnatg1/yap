@@ -79,3 +79,13 @@ export function removeTranscriptHistory(entries: TranscriptHistoryEntry[], outpu
 export function hideTranscriptHistory(outputPaths: string[], outputPath: string) {
   return normalizeHiddenTranscriptHistory([outputPath, ...outputPaths]);
 }
+
+export function canDeleteTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  const output = entry.outputPath.toLowerCase();
+  const source = entry.sourcePath.toLowerCase();
+  return (
+    entry.name.startsWith("live-") &&
+    output.endsWith(".txt") &&
+    (source === output || source.endsWith(".wav"))
+  );
+}

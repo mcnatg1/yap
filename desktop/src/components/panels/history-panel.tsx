@@ -45,7 +45,7 @@ import {
   TableCell,
   TableRow,
 } from "@/components/ui/table";
-import type { TranscriptHistoryEntry } from "@/history";
+import { canDeleteTranscriptHistoryEntry, type TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { createPreviewTextLoader } from "@/lib/history-preview-loader";
 import { cn } from "@/lib/utils";
@@ -68,6 +68,7 @@ function HistoryActionMenu({
   onReveal: (entry: TranscriptHistoryEntry) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const canDelete = canDeleteTranscriptHistoryEntry(entry);
 
   return (
     <>
@@ -108,16 +109,18 @@ function HistoryActionMenu({
             <EyeSlash />
             Hide
           </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={(event) => {
-              event.preventDefault();
-              setConfirmDelete(true);
-            }}
-            variant="destructive"
-          >
-            <Trash2 />
-            Delete
-          </DropdownMenuItem>
+          {canDelete ? (
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault();
+                setConfirmDelete(true);
+              }}
+              variant="destructive"
+            >
+              <Trash2 />
+              Delete
+            </DropdownMenuItem>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
 

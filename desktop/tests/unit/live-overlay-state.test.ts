@@ -45,7 +45,7 @@ describe("live overlay state projection", () => {
     expect(overlaySurface(model, false, false, false)).toBe("recording");
   });
 
-  it("reserves the hands-free confirm/cancel island width", () => {
+  it("reserves the hands-free finish island width", () => {
     const model = modelFromLiveView({ ...baseView, captureMode: "toggle", status: "listening" });
 
     expect(model.recordingTriggerMode).toBe("toggle");

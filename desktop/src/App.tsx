@@ -167,7 +167,7 @@ export default function App() {
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
-  const [previewText, setPreviewText] = useState("");
+  const [previewText, setPreviewText] = useState<string | undefined>();
   const setupPrompted = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
@@ -886,8 +886,8 @@ export default function App() {
 
     try {
       const text = await loadTranscriptText(item.output);
-      await navigator.clipboard.writeText(text || item.output);
-      toast.success(text ? "Transcript copied" : "Path copied");
+      await navigator.clipboard.writeText(text);
+      toast.success(text.trim() ? "Transcript copied" : "Empty transcript copied");
     } catch {
       toast.error("Copy failed");
     }
@@ -1005,7 +1005,7 @@ export default function App() {
 
   async function previewHistoryEntry(entry: TranscriptHistoryEntry) {
     setPreviewEntry(entry);
-    setPreviewText("");
+    setPreviewText(undefined);
 
     try {
       setPreviewText(await loadTranscriptText(entry.outputPath));
