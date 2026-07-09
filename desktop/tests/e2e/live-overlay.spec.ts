@@ -12,6 +12,14 @@ const tolerance = 1;
 
 test.describe.configure({ timeout: 45_000 });
 
+test("live overlay hidden idle state renders no sensor", async ({ page }) => {
+  await page.setViewportSize({ width: 260, height: 90 });
+  await page.goto(`${previewUrl}&visibility=hidden&status=idle`);
+
+  await expect(page.getByTestId("live-overlay-root")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Start dictating" })).toHaveCount(0);
+});
+
 test("live overlay state machine keeps the island compact and collision-free", async ({ page }) => {
   await page.setViewportSize({ width: 260, height: 90 });
   await page.goto(previewUrl);

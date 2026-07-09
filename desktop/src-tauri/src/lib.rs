@@ -181,9 +181,16 @@ fn hide_live_overlay(
 #[tauri::command]
 fn set_live_overlay_surface(
     app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
     surface: String,
     error_message: Option<String>,
 ) -> Result<(), String> {
+    let snapshot = state.snapshot();
+    if snapshot.visibility == live::state::LiveOverlayVisibility::Hidden
+        && !live::state::is_live_session_started(snapshot.status)
+    {
+        return Ok(());
+    }
     let (width, height) = live_overlay_frame(&surface, error_message.as_deref());
     ensure_live_overlay_size(&app, width, height)
 }
@@ -894,7 +901,12 @@ fn stop_live_runtime(
 
     let saving = live.begin_saving();
     emit_live(&app, &saving);
-    live_runtime.stop();
+    let finish_status = live_runtime.stop();
+    if finish_status.should_report() {
+        log_line(&format!(
+            "live stream stop completed with {finish_status:?}"
+        ));
+    }
     let before_stop = live.snapshot();
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let view = live.stop();

@@ -32,8 +32,6 @@ type LiveOverlayProps = {
   view: LiveSessionView;
 };
 
-const idleSensorPollMs = 120;
-
 export function LiveOverlay({
   onOpenScratch,
   onOpenTransform,
@@ -58,6 +56,7 @@ export function LiveOverlay({
   const islandWidth = overlayIslandWidth(surface, model);
   const width = frame.width;
   const rootFrameStyle: CSSProperties | undefined = isTauri() ? undefined : { height: frame.height, width };
+  const hiddenIdle = view.visibility === "hidden" && model.phase === "idle";
 
   useEffect(() => {
     if (surface === "sensor" || (surface === "initializing" && !showInitializing)) {
@@ -110,20 +109,12 @@ export function LiveOverlay({
   }, [hasCopyableFinal, view.status]);
 
   useEffect(() => {
+    if (hiddenIdle) return;
     if (surface === "sensor") {
       previousEntrySurfaceRef.current = "sensor";
     }
     void setNativeOverlaySurface(surface, model.errorMessage);
-  }, [model.errorMessage, surface]);
-
-  useEffect(() => {
-    if (!isTauri() || surface !== "sensor") return;
-
-    const timer = window.setInterval(() => {
-      void setNativeOverlaySurface(surface, model.errorMessage);
-    }, idleSensorPollMs);
-    return () => window.clearInterval(timer);
-  }, [model.errorMessage, surface]);
+  }, [hiddenIdle, model.errorMessage, surface]);
 
   useEffect(() => {
     return () => {
@@ -164,6 +155,7 @@ export function LiveOverlay({
     }, retractMs);
   }
 
+  if (hiddenIdle) return null;
   if (surface === "sensor") {
     return (
       <div

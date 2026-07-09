@@ -142,13 +142,23 @@ impl LiveRuntime {
         inner.ensure_stream(self.clone(), app, session)
     }
 
-    pub fn stop(&self) {
+    pub fn stop(&self) -> StreamFinishStatus {
+        let finisher = {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            inner.stop_capture();
+            inner.stream_finisher()
+        };
+        let finish_status = finisher
+            .as_ref()
+            .map(StreamFinisher::finish_session)
+            .unwrap_or(StreamFinishStatus::NoStream);
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        inner.mark_stream_finishing();
-        inner.stop_capture();
-        inner.finish_stream();
+        if finish_status.should_retire_stream() {
+            inner.retire_stream_detached_reader();
+        }
         self.active_session.store(0, Ordering::SeqCst);
         inner.last_used = Instant::now();
+        finish_status
     }
 
     pub fn unload_if_idle(&self, threshold: Duration) {
@@ -320,14 +330,8 @@ impl LiveRuntimeInner {
         }
     }
 
-    fn finish_stream(&mut self) {
-        if let Some(stream) = self.stream.as_ref() {
-            stream.finish_session();
-        }
-    }
-
-    fn mark_stream_finishing(&mut self) {
-        // sherpa keeps a warm recognizer after stop; Finish carries the session boundary.
+    fn stream_finisher(&self) -> Option<StreamFinisher> {
+        self.stream.as_ref().map(SessionStream::finisher)
     }
 }
 
@@ -338,20 +342,68 @@ impl SessionStream {
             .is_some_and(|worker| !worker.is_finished())
     }
 
-    fn finish_session(&self) {
-        let (done_tx, done_rx) = mpsc::channel();
-        let _ = self.samples_tx.send(StreamMessage::Finish {
+    fn finisher(&self) -> StreamFinisher {
+        StreamFinisher {
+            samples_tx: self.samples_tx.clone(),
             session: self.session.load(Ordering::SeqCst),
-            done: done_tx,
-        });
-        let _ = done_rx.recv_timeout(STREAM_DRAIN_ON_STOP);
+        }
     }
 
-    fn shutdown(mut self, _join_reader: bool) {
+    fn shutdown(mut self, join_reader: bool) {
         self.cancelled.store(true, Ordering::SeqCst);
         drop(self.samples_tx);
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
+        if join_reader {
+            if let Some(handle) = self.worker.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+struct StreamFinisher {
+    samples_tx: mpsc::SyncSender<StreamMessage>,
+    session: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFinishStatus {
+    Completed,
+    BackedUp,
+    Disconnected,
+    NoStream,
+    TimedOut,
+}
+
+impl StreamFinishStatus {
+    fn should_retire_stream(self) -> bool {
+        !matches!(
+            self,
+            StreamFinishStatus::Completed | StreamFinishStatus::NoStream
+        )
+    }
+
+    pub(crate) fn should_report(self) -> bool {
+        !matches!(
+            self,
+            StreamFinishStatus::Completed | StreamFinishStatus::NoStream
+        )
+    }
+}
+
+impl StreamFinisher {
+    fn finish_session(&self) -> StreamFinishStatus {
+        let (done_tx, done_rx) = mpsc::channel();
+        match self.samples_tx.try_send(StreamMessage::Finish {
+            session: self.session,
+            done: done_tx,
+        }) {
+            Ok(()) => match done_rx.recv_timeout(STREAM_DRAIN_ON_STOP) {
+                Ok(()) => StreamFinishStatus::Completed,
+                Err(mpsc::RecvTimeoutError::Timeout) => StreamFinishStatus::TimedOut,
+                Err(mpsc::RecvTimeoutError::Disconnected) => StreamFinishStatus::Disconnected,
+            },
+            Err(mpsc::TrySendError::Full(_)) => StreamFinishStatus::BackedUp,
+            Err(mpsc::TrySendError::Disconnected(_)) => StreamFinishStatus::Disconnected,
         }
     }
 }
@@ -519,7 +571,7 @@ fn run_stream_worker(
                     let final_text = engine.finish();
                     profile.decode_elapsed += started.elapsed();
                     if let Some(text) = final_text {
-                        emit_stream_final(&app, &text);
+                        emit_stream_final(&app, session, &text);
                     }
                     crate::stt::log_stt(&profile.summary());
                     engine.reset();
@@ -556,18 +608,34 @@ fn drain_stream_buffer(
         profile.decode_elapsed += started.elapsed();
         if let Some(text) = text {
             profile.mark_first_text();
-            emit_stream_partial(app, &text);
+            emit_stream_partial(app, profile.session, &text);
         }
     }
 }
 
-fn emit_stream_partial(app: &tauri::AppHandle, text: &str) {
+fn emit_stream_partial(app: &tauri::AppHandle, session: u64, text: &str) {
+    if app
+        .state::<LiveRuntime>()
+        .active_session
+        .load(Ordering::SeqCst)
+        != session
+    {
+        return;
+    }
     let state = app.state::<LiveSessionState>();
     let view = state.update_partial(text);
     let _ = app.emit("live-session", &view);
 }
 
-fn emit_stream_final(app: &tauri::AppHandle, text: &str) {
+fn emit_stream_final(app: &tauri::AppHandle, session: u64, text: &str) {
+    if app
+        .state::<LiveRuntime>()
+        .active_session
+        .load(Ordering::SeqCst)
+        != session
+    {
+        return;
+    }
     let state = app.state::<LiveSessionState>();
     let view = state.update_final(text);
     let _ = app.emit("live-session", &view);
@@ -720,5 +788,36 @@ mod tests {
     #[test]
     fn stop_tail_silence_covers_final_silence_window() {
         assert_eq!(stream::silence_samples(Duration::from_millis(1500)), 24_000);
+    }
+
+    #[test]
+    fn stream_finisher_reports_backed_up_channel() {
+        let (samples_tx, _samples_rx) = mpsc::sync_channel(0);
+        let finisher = StreamFinisher {
+            samples_tx,
+            session: 1,
+        };
+
+        let status = finisher.finish_session();
+
+        assert_eq!(status, StreamFinishStatus::BackedUp);
+        assert!(status.should_retire_stream());
+        assert!(status.should_report());
+    }
+
+    #[test]
+    fn stream_finisher_reports_disconnected_channel() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+        drop(samples_rx);
+        let finisher = StreamFinisher {
+            samples_tx,
+            session: 1,
+        };
+
+        let status = finisher.finish_session();
+
+        assert_eq!(status, StreamFinishStatus::Disconnected);
+        assert!(status.should_retire_stream());
+        assert!(status.should_report());
     }
 }

@@ -70,7 +70,6 @@ import {
   setLiveHotkey,
   setLiveOverlayEnabled,
   setLivePasteHotkey,
-  showLiveOverlay,
   startLiveSession,
   stopLiveSession,
   type SavedLiveSession,
@@ -346,7 +345,7 @@ export default function App() {
   }, [history, selectedHistoryOutput]);
 
   useEffect(() => {
-    if (selectedItem?.output && !transcriptText[selectedItem.output]) {
+    if (selectedItem?.output && !Object.prototype.hasOwnProperty.call(transcriptText, selectedItem.output)) {
       void loadTranscriptText(selectedItem.output).catch(() => toast.error("Preview unavailable"));
     }
   }, [selectedItem?.output, transcriptText]);
@@ -672,7 +671,6 @@ export default function App() {
 
   function startLive() {
     void updateLive(async () => {
-      await showLiveOverlay();
       return startLiveSession();
     });
   }
@@ -875,7 +873,7 @@ export default function App() {
   }
 
   async function loadTranscriptText(path: string) {
-    if (transcriptText[path]) return transcriptText[path];
+    if (Object.prototype.hasOwnProperty.call(transcriptText, path)) return transcriptText[path];
     if (!isTauri()) return "";
 
     const text = await invoke<string>("read_text_file", { path });

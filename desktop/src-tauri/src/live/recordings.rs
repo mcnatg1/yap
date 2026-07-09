@@ -19,25 +19,38 @@ pub fn save_session_files(
 ) -> Result<Option<SavedLiveSession>, String> {
     let transcript = transcript_text(view);
     let pcm = live_runtime.recorded_pcm();
+    let created_at_ms = unix_millis_now()?;
+    save_session_parts_to_dir(&recordings_dir(), created_at_ms, transcript, &pcm)
+}
+
+fn save_session_parts_to_dir(
+    dir: &std::path::Path,
+    created_at_ms: u64,
+    transcript: Option<String>,
+    pcm: &[u8],
+) -> Result<Option<SavedLiveSession>, String> {
     if transcript.is_none() && pcm.is_empty() {
         return Ok(None);
     }
 
-    let dir = recordings_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create live recordings folder: {err}"))?;
-    let created_at_ms = unix_millis_now()?;
-    let name = format!("live-{created_at_ms}");
-    let transcript_path = dir.join(format!("{name}.txt"));
-    let audio_path = dir.join(format!("{name}.wav"));
+    let (name, transcript_path, audio_path) = reserve_session_paths(dir, created_at_ms)?;
     let transcript_body =
         transcript.unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
 
-    if !pcm.is_empty() {
-        write_pcm16_wav(&audio_path, &pcm)?;
-    }
-    std::fs::write(&transcript_path, format!("{transcript_body}\n"))
+    write_new_text_file(&transcript_path, &format!("{transcript_body}\n"))
         .map_err(|err| format!("Failed to save live transcript: {err}"))?;
+    if !pcm.is_empty() {
+        if write_pcm16_wav(&audio_path, pcm).is_err() {
+            return Ok(Some(SavedLiveSession {
+                name,
+                source_path: transcript_path.display().to_string(),
+                output_path: transcript_path.display().to_string(),
+                created_at_ms,
+            }));
+        }
+    }
 
     Ok(Some(SavedLiveSession {
         name,
@@ -49,6 +62,25 @@ pub fn save_session_files(
         output_path: transcript_path.display().to_string(),
         created_at_ms,
     }))
+}
+
+fn reserve_session_paths(
+    dir: &std::path::Path,
+    created_at_ms: u64,
+) -> Result<(String, std::path::PathBuf, std::path::PathBuf), String> {
+    for suffix in 0..1000 {
+        let name = if suffix == 0 {
+            format!("live-{created_at_ms}")
+        } else {
+            format!("live-{created_at_ms}-{suffix}")
+        };
+        let transcript_path = dir.join(format!("{name}.txt"));
+        let audio_path = dir.join(format!("{name}.wav"));
+        if !transcript_path.exists() && !audio_path.exists() {
+            return Ok((name, transcript_path, audio_path));
+        }
+    }
+    Err("Failed to allocate a live recording filename.".into())
 }
 
 pub fn list_session_files() -> Result<Vec<SavedLiveSession>, String> {
@@ -95,8 +127,6 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             continue;
         }
 
-        normalize_transcript(&path)?;
-
         let audio_path = path.with_extension("wav");
         let source_path = if audio_path.exists() {
             audio_path
@@ -104,10 +134,17 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             path.clone()
         };
         let created_at_ms = entry
-            .metadata()
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(system_time_to_unix_millis)
+            .path()
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(created_at_ms_from_live_stem)
+            .or_else(|| {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(system_time_to_unix_millis)
+            })
             .unwrap_or(0);
         sessions.push(SavedLiveSession {
             name: stem.to_string(),
@@ -123,6 +160,10 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             .then_with(|| b.name.cmp(&a.name))
     });
     Ok(sessions)
+}
+
+fn created_at_ms_from_live_stem(stem: &str) -> Option<u64> {
+    stem.strip_prefix("live-")?.split('-').next()?.parse().ok()
 }
 
 pub(crate) fn unix_millis_now() -> Result<u64, String> {
@@ -178,16 +219,12 @@ fn fix_word_casing(word: &str) -> String {
     }
 }
 
-fn normalize_transcript(path: &std::path::Path) -> Result<(), String> {
-    let current = std::fs::read_to_string(path)
-        .map_err(|err| format!("Failed to read saved live transcript: {err}"))?;
-    let cleaned = clean_transcript_text(&current);
-    if cleaned.is_empty() || cleaned.trim_end() == current.trim_end() {
-        return Ok(());
-    }
-
-    std::fs::write(path, format!("{cleaned}\n"))
-        .map_err(|err| format!("Failed to repair saved live transcript: {err}"))
+fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())
 }
 
 fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
@@ -197,8 +234,11 @@ fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
         .checked_add(data_len)
         .ok_or_else(|| "Live recording is too large to save.".to_string())?;
     let byte_rate = LIVE_WAV_SAMPLE_RATE * 2;
-    let mut file =
-        std::fs::File::create(path).map_err(|err| format!("Failed to save live audio: {err}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| format!("Failed to save live audio: {err}"))?;
 
     file.write_all(b"RIFF").map_err(wav_write_error)?;
     file.write_all(&riff_len.to_le_bytes())
@@ -275,6 +315,7 @@ mod tests {
     fn write_pcm16_wav_writes_standard_header_and_data() {
         let path = std::env::temp_dir().join(format!("yap-live-{}.wav", std::process::id()));
         let pcm = [0, 0, 255, 127];
+        std::fs::remove_file(&path).ok();
 
         write_pcm16_wav(&path, &pcm).unwrap();
 
@@ -309,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_live_session_scan_repairs_streaming_artifacts() {
+    fn saved_live_session_scan_does_not_rewrite_streaming_artifacts() {
         let dir = std::env::temp_dir().join(format!("yap-live-clean-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let transcript = dir.join("live-201.txt");
@@ -320,13 +361,13 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
-            "Thank you.\n"
+            "  THank   you.. \n"
         );
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn saved_live_session_scan_repairs_old_empty_placeholder() {
+    fn saved_live_session_scan_does_not_rewrite_old_empty_placeholder() {
         let dir = std::env::temp_dir().join(format!("yap-live-placeholder-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let transcript = dir.join("live-202.txt");
@@ -337,8 +378,46 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
-            "Transcript unavailable for this live recording.\n"
+            "No live transcript captured.\n"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_session_parts_avoids_same_millisecond_overwrite() {
+        let dir = std::env::temp_dir().join(format!("yap-live-collision-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = save_session_parts_to_dir(&dir, 123, Some("first".into()), &[])
+            .unwrap()
+            .unwrap();
+        let second = save_session_parts_to_dir(&dir, 123, Some("second".into()), &[])
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(first.name, second.name);
+        assert_eq!(
+            std::fs::read_to_string(first.output_path).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.output_path).unwrap(),
+            "second\n"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saved_live_session_scan_uses_filename_timestamp() {
+        let dir = std::env::temp_dir().join(format!("yap-live-timestamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("live-999-1.txt");
+        std::fs::write(&transcript, "hello\n").unwrap();
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].created_at_ms, 999);
         std::fs::remove_dir_all(dir).ok();
     }
 }
