@@ -1,7 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,6 +20,7 @@ import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { useLocalComputeTargets } from "@/hooks/use-local-compute-targets";
 import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
+import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useServerConnection } from "@/hooks/use-server-connection";
 import {
   hideTranscriptHistory,
@@ -105,7 +105,6 @@ export default function App() {
   const initialQueue = useMemo(() => readRecordingQueue(), []);
   const [queue, setQueue] = useState<RecordingJobView[]>(initialQueue);
   const nextRecordingId = useRef(nextRecordingQueueId(initialQueue));
-  const [dragging, setDragging] = useState(false);
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
@@ -154,6 +153,7 @@ export default function App() {
   const historyRef = useRef(history);
   const queueRef = useRef(queue);
   const previewRequest = useRef(0);
+  const recordingDrop = useRecordingDrop(addPaths);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => isRecordingRunnable(item.status)),
@@ -312,18 +312,7 @@ export default function App() {
     if (!isTauri()) {
       setStatus("Preview");
       setAuth("Tauri bridge");
-      return;
     }
-
-    const unlistenDrag = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === "enter") setDragging(true);
-      if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
-      if (event.payload.type === "drop") void addPaths(event.payload.paths);
-    });
-
-    return () => {
-      void unlistenDrag.then((fn) => fn());
-    };
   }, []);
 
   useEffect(() => {
@@ -1064,17 +1053,10 @@ export default function App() {
 
       {workspaceView === "transcribe" ? (
         <DropHero
-          dragging={dragging}
-          onDragLeave={() => setDragging(false)}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragging(true);
-          }}
-          onDrop={(event) => {
-            event.preventDefault();
-            setDragging(false);
-            if (!isTauri()) toast.info("Preview only");
-          }}
+          dragging={recordingDrop.dragging}
+          onDragLeave={recordingDrop.onDragLeave}
+          onDragOver={recordingDrop.onDragOver}
+          onDrop={recordingDrop.onDrop}
           onOpenHelp={() => handleRailAction("help")}
           onPickFiles={() => void pickFiles()}
         />
