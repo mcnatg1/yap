@@ -9,6 +9,8 @@ import {
   normalizeHiddenTranscriptHistory,
   readTranscriptHistory,
   readVisibleTranscriptHistory,
+  recordVisibleTranscriptHistoryEntries,
+  savedSessionToTranscriptHistoryEntry,
 } from "@/history";
 
 describe("transcript history storage", () => {
@@ -83,6 +85,43 @@ describe("transcript history storage", () => {
 
     expect(readVisibleTranscriptHistory(storage).map((entry) => entry.outputPath)).toEqual([visible]);
     expect(filterHiddenTranscriptHistory(readTranscriptHistory(storage), [hidden])).toHaveLength(1);
+  });
+
+  it("records only visible incoming history entries", () => {
+    const hidden = {
+      createdAt: "2026-01-03T00:00:00.000Z",
+      name: "hidden",
+      outputPath: "hidden.txt",
+      sourcePath: "hidden.wav",
+    };
+    const visible = {
+      createdAt: "2026-01-04T00:00:00.000Z",
+      name: "visible",
+      outputPath: "visible.txt",
+      sourcePath: "visible.wav",
+    };
+
+    const next = recordVisibleTranscriptHistoryEntries([], [hidden, visible], ["hidden.txt"]);
+
+    expect(next).toEqual([visible]);
+  });
+
+  it("projects saved live sessions into history entries", () => {
+    const entry = savedSessionToTranscriptHistoryEntry({
+      createdAtMs: Date.UTC(2026, 0, 1),
+      name: "live-1",
+      outputPath: "live-1.txt",
+      sourcePath: "live-1.wav",
+      warning: null,
+    });
+
+    expect(entry).toEqual({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-1",
+      outputPath: "live-1.txt",
+      sourcePath: "live-1.wav",
+      warning: undefined,
+    });
   });
 
   it("only exposes delete for Yap-owned live history entries", () => {

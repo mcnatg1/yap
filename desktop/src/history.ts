@@ -6,6 +6,14 @@ export type TranscriptHistoryEntry = {
   warning?: string;
 };
 
+export type SavedTranscriptSession = {
+  createdAtMs: number;
+  name: string;
+  sourcePath: string;
+  outputPath: string;
+  warning?: string | null;
+};
+
 const transcriptHistoryKey = "yap.transcriptHistory.v1";
 const hiddenTranscriptHistoryKey = "yap.hiddenTranscriptHistory.v1";
 export const maxTranscriptHistoryEntries = 500;
@@ -90,6 +98,19 @@ export function recordTranscriptHistory(entries: TranscriptHistoryEntry[], entry
   return normalizeTranscriptHistory([entry, ...entries.filter((item) => item.outputPath !== entry.outputPath)]);
 }
 
+export function recordVisibleTranscriptHistoryEntries(
+  current: TranscriptHistoryEntry[],
+  entries: TranscriptHistoryEntry[],
+  hiddenOutputPaths: string[],
+) {
+  const hidden = new Set(normalizeHiddenTranscriptHistory(hiddenOutputPaths));
+  const visibleEntries = entries.filter((entry) => !hidden.has(entry.outputPath));
+  if (!visibleEntries.length) return current;
+
+  const visibleHistory = filterHiddenTranscriptHistory(current, hiddenOutputPaths);
+  return visibleEntries.reduce(recordTranscriptHistory, visibleHistory);
+}
+
 export function removeTranscriptHistory(entries: TranscriptHistoryEntry[], outputPath: string) {
   return entries.filter((entry) => entry.outputPath !== outputPath);
 }
@@ -127,4 +148,18 @@ export function historyEntryPlaybackPath(entry: TranscriptHistoryEntry) {
   return stem && sourceDir === outputDir && sourceName === `${stem}.wav`
     ? entry.sourcePath
     : undefined;
+}
+
+export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSession): TranscriptHistoryEntry {
+  const createdAt = Number.isFinite(session.createdAtMs) && session.createdAtMs > 0
+    ? new Date(session.createdAtMs).toISOString()
+    : new Date().toISOString();
+
+  return {
+    createdAt,
+    name: session.name,
+    outputPath: session.outputPath,
+    sourcePath: session.sourcePath,
+    warning: session.warning ?? undefined,
+  };
 }

@@ -20,11 +20,11 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import {
   hideTranscriptHistory,
-  filterHiddenTranscriptHistory,
   readHiddenTranscriptHistory,
   readVisibleTranscriptHistory,
-  recordTranscriptHistory,
+  recordVisibleTranscriptHistoryEntries,
   removeTranscriptHistory,
+  savedSessionToTranscriptHistoryEntry,
   writeHiddenTranscriptHistory,
   writeTranscriptHistory,
   type TranscriptHistoryEntry,
@@ -124,20 +124,6 @@ const initialLiveView: LiveSessionView = {
   transcriptionDegraded: false,
   visibility: "enabled",
 };
-
-function savedLiveSessionToHistoryEntry(session: SavedLiveSession): TranscriptHistoryEntry {
-  const createdAt = Number.isFinite(session.createdAtMs) && session.createdAtMs > 0
-    ? new Date(session.createdAtMs).toISOString()
-    : new Date().toISOString();
-
-  return {
-    name: session.name,
-    sourcePath: session.sourcePath,
-    outputPath: session.outputPath,
-    createdAt,
-    warning: session.warning ?? undefined,
-  };
-}
 
 type ReviewMorphOrigin = {
   height: number;
@@ -255,7 +241,7 @@ export default function App() {
     });
 
     void listen<SavedLiveSession>("live-session-saved", (event) => {
-      const entry = savedLiveSessionToHistoryEntry(event.payload);
+      const entry = savedSessionToTranscriptHistoryEntry(event.payload);
       const recorded = recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
       if (!recorded) return;
       setSelectedHistoryOutput(entry.outputPath);
@@ -300,7 +286,7 @@ export default function App() {
       .then((sessions) => {
         if (cancelled) return;
         recordVisibleHistoryEntries(
-          sessions.map(savedLiveSessionToHistoryEntry),
+          sessions.map(savedSessionToTranscriptHistoryEntry),
           "Live transcript history could not be synced.",
         );
       })
@@ -1003,12 +989,8 @@ export default function App() {
   function recordVisibleHistoryEntries(entries: TranscriptHistoryEntry[], warning: string) {
     if (!entries.length) return false;
     const hiddenHistoryOutputs = readHiddenTranscriptHistory();
-    const hiddenHistorySet = new Set(hiddenHistoryOutputs);
-    const visibleEntries = entries.filter((entry) => !hiddenHistorySet.has(entry.outputPath));
-    if (!visibleEntries.length) return false;
-
-    const visibleHistory = filterHiddenTranscriptHistory(historyRef.current, hiddenHistoryOutputs);
-    const next = visibleEntries.reduce(recordTranscriptHistory, visibleHistory);
+    const next = recordVisibleTranscriptHistoryEntries(historyRef.current, entries, hiddenHistoryOutputs);
+    if (next === historyRef.current) return false;
     try {
       writeTranscriptHistory(next);
     } catch (error) {
