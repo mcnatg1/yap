@@ -248,6 +248,7 @@ fn set_live_hotkey(
     hotkey: String,
 ) -> Result<live::state::LiveSessionView, String> {
     ensure_main_command(&window)?;
+    ensure_live_hotkey_idle(state.snapshot().status)?;
     let next = live::hotkeys::parse_hotkey(&hotkey)?;
     let snapshot = state.snapshot();
     let previous = snapshot.hotkey;
@@ -259,10 +260,12 @@ fn set_live_hotkey(
     if let Err(error) = app.global_shortcut().register(next) {
         if !previous.is_empty() {
             if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
-                let _ = app.global_shortcut().register(shortcut);
+                if let Err(restore_error) = app.global_shortcut().register(shortcut) {
+                    return Err(shortcut_restore_error(error, restore_error));
+                }
             }
         }
-        return Err(format!("Shortcut is unavailable: {error}"));
+        return Err(shortcut_unavailable_error(error));
     }
     let view = state.update(|view| view.hotkey = hotkey.trim().to_string());
     persist_live_view(&view)?;
@@ -277,6 +280,7 @@ fn clear_live_hotkey(
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<live::state::LiveSessionView, String> {
     ensure_main_command(&window)?;
+    ensure_live_hotkey_idle(state.snapshot().status)?;
     let previous = state.snapshot().hotkey;
     if !previous.is_empty() {
         if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
@@ -667,6 +671,27 @@ fn persist_live_view(view: &live::state::LiveSessionView) -> Result<(), String> 
     })
 }
 
+fn ensure_live_hotkey_idle(status: live::state::LiveSessionStatus) -> Result<(), String> {
+    if live::state::is_live_session_started(status) {
+        return Err("Stop live before changing the shortcut.".into());
+    }
+    Ok(())
+}
+
+fn shortcut_unavailable_error(error: impl std::fmt::Display) -> String {
+    format!("Shortcut is unavailable: {error}")
+}
+
+fn shortcut_restore_error(
+    new_error: impl std::fmt::Display,
+    restore_error: impl std::fmt::Display,
+) -> String {
+    format!(
+        "{}; failed to restore previous shortcut: {restore_error}",
+        shortcut_unavailable_error(new_error)
+    )
+}
+
 fn live_shortcuts_to_register(settings: &live::settings::LiveSettings) -> Vec<String> {
     settings
         .hotkey
@@ -1004,6 +1029,48 @@ mod tests {
         assert_eq!(
             live_shortcuts_to_register(&settings),
             vec!["Ctrl+Shift+Space".to_string()]
+        );
+    }
+
+    #[test]
+    fn live_hotkey_mutation_rejects_started_statuses() {
+        for status in [
+            live::state::LiveSessionStatus::Armed,
+            live::state::LiveSessionStatus::Listening,
+            live::state::LiveSessionStatus::Speaking,
+            live::state::LiveSessionStatus::Settling,
+            live::state::LiveSessionStatus::Saving,
+        ] {
+            assert_eq!(
+                ensure_live_hotkey_idle(status),
+                Err("Stop live before changing the shortcut.".into())
+            );
+        }
+    }
+
+    #[test]
+    fn live_hotkey_mutation_allows_idle_statuses() {
+        for status in [
+            live::state::LiveSessionStatus::Idle,
+            live::state::LiveSessionStatus::Blocked,
+        ] {
+            assert_eq!(ensure_live_hotkey_idle(status), Ok(()));
+        }
+    }
+
+    #[test]
+    fn shortcut_registration_errors_surface_to_callers() {
+        assert_eq!(
+            shortcut_unavailable_error("already registered"),
+            "Shortcut is unavailable: already registered"
+        );
+    }
+
+    #[test]
+    fn failed_hotkey_reregister_surfaces_an_error() {
+        assert_eq!(
+            shortcut_restore_error("already registered", "previous shortcut unavailable"),
+            "Shortcut is unavailable: already registered; failed to restore previous shortcut: previous shortcut unavailable"
         );
     }
 
