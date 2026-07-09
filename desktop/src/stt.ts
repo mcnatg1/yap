@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type SttErrorCode =
   | "MODEL_MISSING"
   | "MODEL_CORRUPT"
+  | "MODEL_INSTALL_CANCELLED"
   | "BAD_LANG"
   | "OOM"
   | "AUDIO_DECODE"
@@ -21,6 +22,7 @@ type SttFailure = {
 const sttErrorCodes: readonly SttErrorCode[] = [
   "MODEL_MISSING",
   "MODEL_CORRUPT",
+  "MODEL_INSTALL_CANCELLED",
   "BAD_LANG",
   "OOM",
   "AUDIO_DECODE",
@@ -42,6 +44,8 @@ export function sttErrorMessage(code: SttErrorCode): string {
       return "Local fallback model isn't installed yet.";
     case "MODEL_CORRUPT":
       return "Model file failed verification.";
+    case "MODEL_INSTALL_CANCELLED":
+      return "Local fallback install was cancelled.";
     case "BAD_LANG":
       return "That language isn't supported.";
     case "OOM":

@@ -806,6 +806,29 @@ mod tests {
     }
 
     #[test]
+    fn stream_finisher_reports_completed_channel() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || match samples_rx.recv().unwrap() {
+            StreamMessage::Finish { session, done } => {
+                assert_eq!(session, 42);
+                done.send(()).unwrap();
+            }
+            StreamMessage::Samples { .. } => panic!("expected finish message"),
+        });
+        let finisher = StreamFinisher {
+            samples_tx,
+            session: 42,
+        };
+
+        let status = finisher.finish_session();
+
+        assert_eq!(status, StreamFinishStatus::Completed);
+        assert!(!status.should_retire_stream());
+        assert!(!status.should_report());
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn stream_finisher_reports_disconnected_channel() {
         let (samples_tx, samples_rx) = mpsc::sync_channel(1);
         drop(samples_rx);
