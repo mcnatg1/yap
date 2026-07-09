@@ -23,6 +23,7 @@ import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useServerConnection } from "@/hooks/use-server-connection";
 import { useTranscriptFileActions } from "@/hooks/use-transcript-file-actions";
+import { useTranscriptPreview } from "@/hooks/use-transcript-preview";
 import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import {
@@ -158,13 +159,10 @@ export default function App() {
   const historyPlaybackPaths = useRegisteredPlayback(queue, setQueue, history);
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
-  const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
-  const [previewText, setPreviewText] = useState<string | undefined>();
   const setupPrompted = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
   const queueRef = useRef(queue);
-  const previewRequest = useRef(0);
   const recordingDrop = useRecordingDrop(addPaths);
 
   const hasRunnable = useMemo(
@@ -806,6 +804,12 @@ export default function App() {
     (entry: TranscriptHistoryEntry) => loadTranscriptPreviewText(entry.outputPath),
     [loadTranscriptPreviewText],
   );
+  const {
+    closeTranscriptPreview,
+    previewEntry,
+    previewHistoryEntry,
+    previewText,
+  } = useTranscriptPreview(loadHistoryPreviewText);
 
   function hideHistoryEntry(outputPath: string) {
     if (!rememberHiddenHistoryEntry(outputPath)) return;
@@ -844,22 +848,6 @@ export default function App() {
     );
     setActiveRail("home");
     setWorkspaceView("home");
-  }
-
-  async function previewHistoryEntry(entry: TranscriptHistoryEntry) {
-    const request = previewRequest.current + 1;
-    previewRequest.current = request;
-    setPreviewEntry(entry);
-    setPreviewText(undefined);
-
-    try {
-      const text = await loadTranscriptPreviewText(entry.outputPath);
-      if (previewRequest.current === request) setPreviewText(text);
-    } catch {
-      if (previewRequest.current === request) {
-        setPreviewText("Preview unavailable. Open the transcript file from the actions menu.");
-      }
-    }
   }
 
   const workspaceLeftPane = (
@@ -1053,11 +1041,7 @@ export default function App() {
         onCopy={(entry) => void copyTranscript(historyJob(entry))}
         onOpen={(entry) => void openAppPath(entry.outputPath)}
         onOpenChange={(open) => {
-          if (!open) {
-            previewRequest.current += 1;
-            setPreviewEntry(undefined);
-            setPreviewText(undefined);
-          }
+          if (!open) closeTranscriptPreview();
         }}
         onReveal={(entry) => void revealPath(entry.outputPath)}
         text={previewText}
