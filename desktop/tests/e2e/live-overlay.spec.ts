@@ -85,17 +85,15 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await expectFrame(root, { height: 40, width: 260 });
   await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
 
-  const cancel = page.getByRole("button", { name: "Cancel recording" });
   const waveform = page.getByTestId("live-waveform");
   const finish = page.getByRole("button", { name: "Finish recording" });
-  await expect(cancel).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel recording" })).toHaveCount(0);
   await expect(finish).toBeVisible();
-  await expectInside(root, [cancel, waveform, finish]);
-  await expectNoHorizontalOverlap(cancel, waveform);
+  await expectInside(root, [waveform, finish]);
   await expectNoHorizontalOverlap(waveform, finish);
   await expectNoClippedChildren(root);
 
-  await cancel.click();
+  await finish.click();
   await expect(root).toHaveAttribute("data-overlay-phase", "processing");
   await expect(page.getByRole("button", { name: "Cancel recording" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Finish recording" })).toHaveCount(0);
@@ -115,7 +113,7 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await setLiveView(page, { activeCaptureMode: "toggle", captureMode: "pushToTalk", level: 0.84, route: "localFallback", status: "speaking" });
   await expectFrame(root, { height: 40, width: 260 });
   await expectFrame(page.getByTestId("live-overlay-island"), { height: 40, width: 112 });
-  await expect(page.getByRole("button", { name: "Cancel recording" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel recording" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Finish recording" })).toBeVisible();
 
   const handsFreeFrame = await boxOf(root);
