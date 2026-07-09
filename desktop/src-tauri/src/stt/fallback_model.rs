@@ -315,13 +315,20 @@ pub fn verify(
     })
 }
 
-pub fn remove() -> Result<nemotron::FallbackModelView, SttCommandError> {
+pub fn remove(
+    install_state: &FallbackModelInstallState,
+) -> Result<nemotron::FallbackModelView, SttCommandError> {
+    ensure_model_mutation_idle(install_state)?;
     nemotron::remove_model().map_err(SttCommandError::from)?;
     settings::set_local_fallback_enabled(false)?;
     Ok(nemotron::model_status(false))
 }
 
-pub fn set_enabled(enabled: bool) -> Result<nemotron::FallbackModelView, SttCommandError> {
+pub fn set_enabled(
+    install_state: &FallbackModelInstallState,
+    enabled: bool,
+) -> Result<nemotron::FallbackModelView, SttCommandError> {
+    ensure_model_mutation_idle(install_state)?;
     settings::set_local_fallback_enabled(enabled)?;
     Ok(nemotron::model_status(enabled))
 }
@@ -449,6 +456,15 @@ fn fallback_model_command_error(code: &str, error: &impl std::fmt::Display) -> S
     }
 }
 
+fn ensure_model_mutation_idle(
+    install_state: &FallbackModelInstallState,
+) -> Result<(), SttCommandError> {
+    if install_state.snapshot().phase.is_some() {
+        return Err(SttCommandError::from(SttError::Busy));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +584,21 @@ mod tests {
         let _ = cancel_install(&state).unwrap();
 
         assert!(cancellation.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn model_mutation_rejects_active_install_or_verify() {
+        let state = FallbackModelInstallState::new();
+        state
+            .begin(
+                FallbackModelInstallPhase::Installing,
+                fallback_test_view(nemotron::FallbackModelStatus::Downloading),
+                true,
+            )
+            .unwrap();
+
+        let error = ensure_model_mutation_idle(&state).unwrap_err();
+
+        assert_eq!(error.code, SttError::Busy.code());
     }
 }

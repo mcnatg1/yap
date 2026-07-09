@@ -102,22 +102,24 @@ fn fallback_model_verify(
 #[tauri::command]
 fn fallback_model_remove(
     window: tauri::WebviewWindow,
+    install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
-    stt::fallback_model::remove()
+    stt::fallback_model::remove(install_state.inner())
 }
 
 #[tauri::command]
 fn fallback_model_set_enabled(
     window: tauri::WebviewWindow,
+    install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
     enabled: bool,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
-    stt::fallback_model::set_enabled(enabled)
+    stt::fallback_model::set_enabled(install_state.inner(), enabled)
 }
 
 #[tauri::command]

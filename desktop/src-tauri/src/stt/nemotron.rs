@@ -457,6 +457,33 @@ fn remove_download_artifacts(path: &Path) -> Result<(), SttError> {
     remove_if_exists(path.to_path_buf())?;
     remove_if_exists(path.with_extension("verified"))?;
     remove_if_exists(path.with_extension("part"))?;
+    remove_unique_partial_artifacts(path)?;
+    Ok(())
+}
+
+fn remove_unique_partial_artifacts(path: &Path) -> Result<(), SttError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if !parent.exists() {
+        return Ok(());
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{file_name}.");
+
+    let entries = std::fs::read_dir(parent).map_err(|_| SttError::ModelMissing)?;
+    for entry in entries {
+        let entry = entry.map_err(|_| SttError::ModelMissing)?;
+        let candidate = entry.path();
+        let Some(candidate_name) = candidate.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if candidate_name.starts_with(&prefix) && candidate_name.ends_with(".part") {
+            remove_if_exists(candidate)?;
+        }
+    }
     Ok(())
 }
 
@@ -713,15 +740,38 @@ mod tests {
     fn remove_download_artifacts_cleans_file_marker_and_partial() {
         let dir = TestDir::new();
         let path = dir.path().join(ARTIFACTS[0].file);
+        let unique_partial = path.with_file_name(format!(
+            "{}.123.456.0.part",
+            path.file_name().and_then(|name| name.to_str()).unwrap()
+        ));
         std::fs::write(&path, b"current").unwrap();
         std::fs::write(path.with_extension("verified"), b"marker").unwrap();
         std::fs::write(path.with_extension("part"), b"partial").unwrap();
+        std::fs::write(&unique_partial, b"unique partial").unwrap();
 
         remove_download_artifacts(&path).unwrap();
 
         assert!(!path.exists());
         assert!(!path.with_extension("verified").exists());
         assert!(!path.with_extension("part").exists());
+        assert!(!unique_partial.exists());
+    }
+
+    #[test]
+    fn remove_download_artifacts_rejects_unique_partial_directories() {
+        let dir = TestDir::new();
+        let path = dir.path().join(ARTIFACTS[0].file);
+        let unique_partial = path.with_file_name(format!(
+            "{}.123.456.0.part",
+            path.file_name().and_then(|name| name.to_str()).unwrap()
+        ));
+        std::fs::write(&path, b"current").unwrap();
+        std::fs::create_dir_all(&unique_partial).unwrap();
+
+        let error = remove_download_artifacts(&path).unwrap_err();
+
+        assert_eq!(error, SttError::ModelCorrupt);
+        assert!(unique_partial.is_dir());
     }
 
     #[test]
