@@ -47,6 +47,7 @@ export function LiveOverlay({
   const [retracting, setRetracting] = useState(false);
   const [successVisible, setSuccessVisible] = useState(false);
   const [showInitializing, setShowInitializing] = useState(false);
+  const prefersReducedMotion = usePrefersReducedMotion();
   const previousEntrySurfaceRef = useRef<OverlaySurface>("sensor");
   const previousStatusRef = useRef(view.status);
   const retractTimerRef = useRef<number | undefined>(undefined);
@@ -65,6 +66,12 @@ export function LiveOverlay({
       return;
     }
 
+    if (prefersReducedMotion) {
+      previousEntrySurfaceRef.current = surface;
+      setEntered(true);
+      return;
+    }
+
     if (previousEntrySurfaceRef.current === "sensor") {
       setEntered(false);
       const frame = window.requestAnimationFrame(() => setEntered(true));
@@ -74,7 +81,7 @@ export function LiveOverlay({
 
     previousEntrySurfaceRef.current = surface;
     setEntered(true);
-  }, [showInitializing, surface]);
+  }, [prefersReducedMotion, showInitializing, surface]);
 
   useEffect(() => {
     if (model.phase !== "initializing") {
@@ -82,9 +89,14 @@ export function LiveOverlay({
       return;
     }
 
+    if (prefersReducedMotion) {
+      setShowInitializing(true);
+      return;
+    }
+
     const timer = window.setTimeout(() => setShowInitializing(true), 200);
     return () => window.clearTimeout(timer);
-  }, [model.phase]);
+  }, [model.phase, prefersReducedMotion]);
 
   useEffect(() => {
     if (model.phase === "idle") return;
@@ -198,7 +210,7 @@ export function LiveOverlay({
           marginInline: "auto",
           overflow: "hidden",
           transform: entered ? "translateY(0)" : "translateY(-100%)",
-          transition: "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
+          transition: prefersReducedMotion ? "none" : "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
           width: islandWidth,
         }}
       >
@@ -443,12 +455,14 @@ function processingPulse(index: number, time: number) {
 }
 
 function InitializingDotsView() {
+  const prefersReducedMotion = usePrefersReducedMotion();
   const [activeDot, setActiveDot] = useState(0);
 
   useEffect(() => {
+    if (prefersReducedMotion) return;
     const timer = window.setInterval(() => setActiveDot((value) => (value + 1) % 3), 500);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [prefersReducedMotion]);
 
   return (
     <div className="flex items-center justify-center gap-1">
@@ -523,10 +537,11 @@ function FreeFlowNeutralButton({
 }
 
 function useAnimationTime(enabled: boolean) {
+  const prefersReducedMotion = usePrefersReducedMotion();
   const [time, setTime] = useState<number | undefined>(undefined);
 
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || prefersReducedMotion) {
       setTime(undefined);
       return;
     }
@@ -542,7 +557,25 @@ function useAnimationTime(enabled: boolean) {
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [enabled]);
+  }, [enabled, prefersReducedMotion]);
 
   return time;
+}
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefersReducedMotion(media.matches);
+
+    function handleChange(event: MediaQueryListEvent) {
+      setPrefersReducedMotion(event.matches);
+    }
+
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefersReducedMotion;
 }

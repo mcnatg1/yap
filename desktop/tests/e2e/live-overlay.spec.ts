@@ -20,6 +20,27 @@ test("live overlay hidden idle state renders no sensor", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Start dictating" })).toHaveCount(0);
 });
 
+test("live overlay respects reduced motion", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 260, height: 90 });
+  await page.goto(previewUrl);
+
+  const root = page.getByTestId("live-overlay-root");
+  await page.mouse.move(130, 3);
+  await expect(root).toHaveAttribute("data-overlay-surface", "peek");
+
+  const island = page.getByTestId("live-overlay-island");
+  await expectIslandTranslationY(island, 0);
+  await expect(island).toHaveCSS("transition-duration", "0s");
+
+  await setLiveView(page, { captureMode: "pushToTalk", level: 0.12, route: "localFallback", status: "speaking" });
+  const waveform = page.getByTestId("live-waveform");
+  const before = await waveformBarHeights(waveform);
+  await page.waitForTimeout(180);
+  await expect(waveform).toBeVisible();
+  expect(await waveformBarHeights(waveform)).toEqual(before);
+});
+
 test("live overlay state machine keeps the island compact and collision-free", async ({ page }) => {
   await page.setViewportSize({ width: 260, height: 90 });
   await page.goto(previewUrl);
@@ -240,6 +261,12 @@ async function expectIslandTranslationY(locator: Locator, expectedY: number) {
     return new DOMMatrixReadOnly(transform).m42;
   });
   expect(y).toBeCloseTo(expectedY, tolerance);
+}
+
+async function waveformBarHeights(locator: Locator) {
+  return locator.locator("span").evaluateAll((bars) =>
+    bars.map((bar) => Math.round(bar.getBoundingClientRect().height * 100) / 100),
+  );
 }
 
 async function boxOf(locator: Locator): Promise<Box> {
