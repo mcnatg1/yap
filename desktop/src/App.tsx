@@ -18,6 +18,7 @@ import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog"
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
+import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import {
   hideTranscriptHistory,
@@ -45,9 +46,6 @@ import {
   serverConnectionLabel,
   type FallbackModelView,
   type LocalComputeTargetView,
-  type LiveCaptureMode,
-  type LiveInputDeviceView,
-  type LiveSessionView,
   type RailAction,
   type RecordingJobView,
   type ServerConnectionState,
@@ -68,20 +66,7 @@ import {
   writeRecordingQueue,
 } from "@/recording-queue";
 import {
-  clearLiveHotkey,
-  clearLivePasteHotkey,
-  listInputDevices,
   listSavedLiveSessions,
-  listenLiveSession,
-  liveStatus,
-  preflightInputDevice,
-  setInputDevice,
-  setLiveCaptureMode,
-  setLiveHotkey,
-  setLiveOverlayEnabled,
-  setLivePasteHotkey,
-  startLiveSession,
-  stopLiveSession,
   type SavedLiveSession,
 } from "@/live";
 import {
@@ -111,18 +96,7 @@ type SetupStatus = {
 };
 
 const setupSkipKey = "yap-local-fallback-setup-skipped";
-const defaultLiveHotkey = "Ctrl+Shift+Space";
 const batchServerQueuedMessage = "Queued until a transcription server is connected.";
-
-const initialLiveView: LiveSessionView = {
-  captureMode: "pushToTalk",
-  hotkey: defaultLiveHotkey,
-  pasteHotkey: "",
-  route: "none",
-  status: "idle",
-  transcriptionDegraded: false,
-  visibility: "enabled",
-};
 
 type ReviewMorphOrigin = {
   height: number;
@@ -147,14 +121,28 @@ export default function App() {
   const [serverState, setServerState] = useState<ServerConnectionState>("not_set");
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
   const [computeTargetPending, setComputeTargetPending] = useState(false);
-  const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
-  const [liveInputDevices, setLiveInputDevices] = useState<LiveInputDeviceView[]>([]);
+  const {
+    clearLivePasteShortcut,
+    clearLiveShortcut,
+    liveBusy,
+    liveInputDevices,
+    liveSettingsError,
+    liveView,
+    preflightLiveInput,
+    refreshLiveState,
+    resetLiveHotkey,
+    startLive,
+    stopLive,
+    updateInputDevice,
+    updateLiveCaptureMode,
+    updateLiveHotkey,
+    updateLiveOverlay,
+    updateLivePasteHotkey,
+  } = useLiveControl();
   const [localComputeTargets, setLocalComputeTargets] = useState<LocalComputeTargetView[]>([
     { id: "auto", label: "Auto", selected: true },
     { id: "cpu", label: "CPU", selected: false },
   ]);
-  const [liveBusy, setLiveBusy] = useState(false);
-  const [liveSettingsError, setLiveSettingsError] = useState("");
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
@@ -231,18 +219,9 @@ export default function App() {
     if (!isTauri()) return;
 
     let cancelled = false;
-    let unlistenLive: (() => void) | undefined;
     let unlistenLiveSaved: (() => void) | undefined;
     let unlistenFallbackProgress: (() => void) | undefined;
     let unlistenFallbackStatus: (() => void) | undefined;
-
-    void listenLiveSession(setLiveView).then((stop) => {
-      if (cancelled) {
-        stop();
-        return;
-      }
-      unlistenLive = stop;
-    });
 
     void listen<SavedLiveSession>("live-session-saved", (event) => {
       const entry = savedSessionToTranscriptHistoryEntry(event.payload);
@@ -298,7 +277,6 @@ export default function App() {
 
     return () => {
       cancelled = true;
-      unlistenLive?.();
       unlistenLiveSaved?.();
       unlistenFallbackProgress?.();
       unlistenFallbackStatus?.();
@@ -394,17 +372,11 @@ export default function App() {
         fallbackEnabled: setup.fallbackEnabled,
         modelInstalled: setup.modelInstalled,
       });
-      await Promise.all([loadLiveControls(), loadComputeTargets()]);
+      await Promise.all([refreshLiveState(), loadComputeTargets()]);
     } catch (error) {
       setStatus("Setup check failed");
       setAuth(String(error));
     }
-  }
-
-  async function loadLiveControls() {
-    const [live, devices] = await Promise.all([liveStatus(), listInputDevices()]);
-    setLiveView(live);
-    setLiveInputDevices(devices);
   }
 
   async function loadComputeTargets() {
@@ -639,73 +611,6 @@ export default function App() {
     localStorage.setItem(setupSkipKey, "true");
     setDetailsOpen(false);
     if (activeRail === "details") setActiveRail(workspaceView);
-  }
-
-  async function updateLive(action: () => Promise<LiveSessionView>, message?: string) {
-    if (!isTauri() || liveBusy) return;
-
-    setLiveBusy(true);
-    try {
-      setLiveSettingsError("");
-      const view = await action();
-      setLiveView(view);
-      setLiveInputDevices(await listInputDevices());
-      if (message) toast.success(message);
-    } catch (error) {
-      const message = String(error);
-      setLiveSettingsError(message);
-      toast.error(message);
-    } finally {
-      setLiveBusy(false);
-    }
-  }
-
-  function updateLiveOverlay(enabled: boolean) {
-    void updateLive(() => setLiveOverlayEnabled(enabled), enabled ? "Live overlay enabled" : "Live overlay hidden");
-  }
-
-  function updateLiveHotkey(hotkey: string) {
-    const next = hotkey.trim();
-    void updateLive(next ? () => setLiveHotkey(next) : clearLiveHotkey, next ? "Live shortcut updated" : "Live shortcut cleared");
-  }
-
-  function updateLivePasteHotkey(hotkey: string) {
-    const next = hotkey.trim();
-    void updateLive(next ? () => setLivePasteHotkey(next) : clearLivePasteHotkey, next ? "Paste shortcut updated" : "Paste shortcut cleared");
-  }
-
-  function resetLiveHotkey() {
-    void updateLive(() => setLiveHotkey(defaultLiveHotkey), "Live shortcut reset");
-  }
-
-  function clearLiveShortcut() {
-    void updateLive(clearLiveHotkey, "Live shortcut cleared");
-  }
-
-  function clearLivePasteShortcut() {
-    void updateLive(clearLivePasteHotkey, "Paste shortcut cleared");
-  }
-
-  function updateLiveCaptureMode(captureMode: LiveCaptureMode) {
-    void updateLive(() => setLiveCaptureMode(captureMode));
-  }
-
-  function updateInputDevice(deviceId?: string) {
-    void updateLive(() => setInputDevice(deviceId));
-  }
-
-  function preflightLiveInput() {
-    void updateLive(preflightInputDevice);
-  }
-
-  function startLive() {
-    void updateLive(async () => {
-      return startLiveSession();
-    });
-  }
-
-  function stopLive() {
-    void updateLive(stopLiveSession);
   }
 
   async function addPaths(paths: string[]) {
