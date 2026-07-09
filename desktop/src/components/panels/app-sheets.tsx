@@ -115,6 +115,12 @@ export function liveSettingsLocked(status: LiveSessionStatus) {
 }
 
 export function projectLiveOverlayAction(status: LiveSessionStatus, liveBusy: boolean) {
+  if (status === "saving") {
+    return {
+      disabled: true,
+      label: "Saving",
+    };
+  }
   const liveActive = liveSettingsLocked(status);
   return {
     disabled: liveBusy,

@@ -19,7 +19,12 @@ export function createPreviewTextLoader() {
       if (!readText) return Promise.resolve("");
 
       const active = inFlight.get(entry.outputPath);
-      if (active) return active;
+      if (active) {
+        return active.then((text) => {
+          onLoaded(entry.outputPath, text);
+          return text;
+        });
+      }
 
       const pending = readText(entry)
         .then((text) => {

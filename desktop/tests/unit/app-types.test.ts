@@ -211,6 +211,10 @@ describe("client recording workflow projection", () => {
       disabled: false,
       label: "Start",
     });
+    expect(projectLiveOverlayAction("saving", false)).toEqual({
+      disabled: true,
+      label: "Saving",
+    });
   });
 
   it("locks install, remove, and verify while live is active but keeps cancel during downloads", () => {

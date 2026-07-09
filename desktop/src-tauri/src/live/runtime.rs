@@ -18,6 +18,8 @@ use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
+const MAX_RECORDED_PCM_SECONDS: usize = 10 * 60;
+const MAX_RECORDED_PCM_BYTES: usize = TARGET_SAMPLE_RATE as usize * 2 * MAX_RECORDED_PCM_SECONDS;
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 
@@ -25,7 +27,7 @@ const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
-    recorded_pcm: Arc<Mutex<Vec<u8>>>,
+    recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
 }
 
 struct LiveRuntimeInner {
@@ -65,6 +67,89 @@ struct RawAudio {
     samples: Vec<f32>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RecordedPcmAppendStatus {
+    Stored,
+    Capped,
+}
+
+struct RecordedPcmBuffer {
+    bytes: Vec<u8>,
+    capped: bool,
+    max_bytes: usize,
+}
+
+impl RecordedPcmBuffer {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            capped: false,
+            max_bytes: MAX_RECORDED_PCM_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limit_for_test(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            capped: false,
+            max_bytes,
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> RecordedPcmAppendStatus {
+        if bytes.is_empty() {
+            return RecordedPcmAppendStatus::Stored;
+        }
+        let remaining = self.max_bytes.saturating_sub(self.bytes.len());
+        if remaining == 0 {
+            self.capped = true;
+            return RecordedPcmAppendStatus::Capped;
+        }
+        let accepted = remaining.min(bytes.len()) & !1;
+        if accepted == 0 {
+            self.capped = true;
+            return RecordedPcmAppendStatus::Capped;
+        }
+        if self.bytes.try_reserve(accepted).is_err() {
+            self.capped = true;
+            return RecordedPcmAppendStatus::Capped;
+        }
+        self.bytes.extend_from_slice(&bytes[..accepted]);
+        if accepted < bytes.len() {
+            self.capped = true;
+            RecordedPcmAppendStatus::Capped
+        } else {
+            RecordedPcmAppendStatus::Stored
+        }
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        self.capped = false;
+        std::mem::take(&mut self.bytes)
+    }
+
+    #[cfg(test)]
+    fn reserve(&mut self, additional: usize) {
+        self.bytes.reserve(additional);
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+
+    #[cfg(test)]
+    fn was_capped(&self) -> bool {
+        self.capped
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VadSegment {
     pub start_ms: u64,
@@ -76,7 +161,7 @@ impl LiveRuntime {
         Self {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
-            recorded_pcm: Arc::new(Mutex::new(Vec::new())),
+            recorded_pcm: Arc::new(Mutex::new(RecordedPcmBuffer::new())),
         }
     }
 
@@ -179,7 +264,7 @@ impl LiveRuntime {
     }
 
     pub fn take_recorded_pcm(&self) -> Vec<u8> {
-        std::mem::take(&mut *self.recorded_pcm.lock().expect("live pcm poisoned"))
+        self.recorded_pcm.lock().expect("live pcm poisoned").take()
     }
 
     fn discard_recorded_pcm(&self) {
@@ -447,7 +532,7 @@ fn open_capture(
     session: u64,
     active_session: Arc<AtomicU64>,
     samples_tx: mpsc::SyncSender<StreamMessage>,
-    recorded_pcm: Arc<Mutex<Vec<u8>>>,
+    recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
 ) -> Result<(cpal::Stream, mpsc::Receiver<f32>, JoinHandle<()>), String> {
     let host = cpal::default_host();
     let device = resolve_capture_device(&host, selected_device_id)
@@ -480,8 +565,8 @@ fn open_capture(
                 recorded_pcm
                     .lock()
                     .expect("live pcm poisoned")
-                    .extend_from_slice(&bytes);
-                // ponytail: if the decoder falls behind, keep the WAV and drop the live chunk.
+                    .append(&bytes);
+                // If the decoder falls behind, keep the saved WAV path bounded and drop the live chunk.
                 let _ = samples_tx.try_send(StreamMessage::Samples {
                     session: raw.session,
                     samples: resampled,
@@ -838,7 +923,7 @@ mod tests {
         {
             let mut pcm = runtime.recorded_pcm.lock().unwrap();
             pcm.reserve(1024);
-            pcm.extend_from_slice(&[1, 2, 3, 4]);
+            assert_eq!(pcm.append(&[1, 2, 3, 4]), RecordedPcmAppendStatus::Stored);
         }
 
         let pcm = runtime.take_recorded_pcm();
@@ -847,6 +932,17 @@ mod tests {
         let retained = runtime.recorded_pcm.lock().unwrap();
         assert!(retained.is_empty());
         assert_eq!(retained.capacity(), 0);
+    }
+
+    #[test]
+    fn recorded_pcm_buffer_caps_retained_audio() {
+        let mut pcm = RecordedPcmBuffer::with_limit_for_test(6);
+
+        assert_eq!(pcm.append(&[1, 2, 3, 4]), RecordedPcmAppendStatus::Stored);
+        assert_eq!(pcm.append(&[5, 6, 7, 8]), RecordedPcmAppendStatus::Capped);
+
+        assert!(pcm.was_capped());
+        assert_eq!(pcm.take(), vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

@@ -201,17 +201,21 @@ export function HistoryPanel({
       for (const entry of entries) {
         if (cancelled) break;
         if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
-        await previewLoaderRef.current.load(
-          entry,
-          previewTextByPathRef.current,
-          onLoadPreviewText,
-          (outputPath, text) => {
-            if (cancelled) return;
-            setPreviewTextByPath((current) =>
-              current[outputPath] === undefined ? { ...current, [outputPath]: text } : current,
-            );
-          },
-        );
+        try {
+          await previewLoaderRef.current.load(
+            entry,
+            previewTextByPathRef.current,
+            onLoadPreviewText,
+            (outputPath, text) => {
+              if (cancelled) return;
+              setPreviewTextByPath((current) =>
+                current[outputPath] === undefined ? { ...current, [outputPath]: text } : current,
+              );
+            },
+          );
+        } catch {
+          // Keep search indexing the rest of history when one transcript moved or is unreadable.
+        }
       }
     })();
 

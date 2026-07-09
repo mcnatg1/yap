@@ -28,6 +28,28 @@ describe("history preview loader", () => {
     expect(loaded[entry.outputPath]).toBe("hello");
   });
 
+  it("notifies each concurrent caller when a shared read completes", async () => {
+    const loader = createPreviewTextLoader();
+    const entry = { outputPath: "C:\\recordings\\live-shared.txt" };
+    const loaded: string[] = [];
+
+    const [first, second] = await Promise.all([
+      loader.load(entry, {}, async () => "shared text", (path, text) => {
+        loaded.push(`first:${path}:${text}`);
+      }),
+      loader.load(entry, {}, async () => "unexpected", (path, text) => {
+        loaded.push(`second:${path}:${text}`);
+      }),
+    ]);
+
+    expect(first).toBe("shared text");
+    expect(second).toBe("shared text");
+    expect(loaded).toEqual([
+      `first:${entry.outputPath}:shared text`,
+      `second:${entry.outputPath}:shared text`,
+    ]);
+  });
+
   it("returns cached empty previews without reading again", async () => {
     const loader = createPreviewTextLoader();
     const entry = { outputPath: "C:\\recordings\\live-empty.txt" };
