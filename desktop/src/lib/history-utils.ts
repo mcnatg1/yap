@@ -1,14 +1,17 @@
 import { historyEntryPlaybackPath, type TranscriptHistoryEntry } from "@/history";
 import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
 
-export function historyEntryToRecordingJob(entry: TranscriptHistoryEntry): RecordingJobView {
+export function historyEntryToRecordingJob(
+  entry: TranscriptHistoryEntry,
+  restoredPlaybackPath?: string,
+): RecordingJobView {
   return {
     id: 0,
     intent: "live",
     name: entry.name,
     output: entry.outputPath,
     path: entry.sourcePath,
-    playbackPath: historyEntryPlaybackPath(entry),
+    playbackPath: restoredPlaybackPath ?? historyEntryPlaybackPath(entry),
     pipeline: {
       ...createInitialPipelineState(),
       intake: "done",

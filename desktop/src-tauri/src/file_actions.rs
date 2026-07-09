@@ -1,8 +1,16 @@
 use std::io::{Read, Write};
 
+use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
+
+#[derive(Deserialize, Serialize)]
+struct RecordingPlaybackRegistry {
+    version: u32,
+    paths: Vec<String>,
+}
 
 #[tauri::command]
 pub fn allow_recording_playback_path(
@@ -11,11 +19,28 @@ pub fn allow_recording_playback_path(
     path: String,
 ) -> Result<String, String> {
     ensure_main_window(&window)?;
-    let path = playable_recording_path(path)?;
-    app.asset_protocol_scope()
-        .allow_file(&path)
-        .map_err(|err| format!("Failed to allow recording playback: {err}"))?;
+    let path = register_playback_path_at(path, &recording_playback_registry_path())?;
+    allow_asset_playback_path(&app, &path)?;
     Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub fn restore_recording_playback_path(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    let path = registered_playback_path_at(path, &recording_playback_registry_path())?;
+    allow_asset_playback_path(&app, &path)?;
+    Ok(path.display().to_string())
+}
+
+fn allow_asset_playback_path(app: &tauri::AppHandle, path: &std::path::Path) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_file(path)
+        .map_err(|err| format!("Failed to allow recording playback: {err}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -209,6 +234,87 @@ fn playable_recording_path(path: String) -> Result<std::path::PathBuf, String> {
         return Err("Choose a supported audio or video file.".into());
     }
     Ok(path)
+}
+
+fn register_playback_path_at(
+    path: String,
+    registry_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let path = playable_recording_path(path)?;
+    let mut paths = read_registered_playback_paths(registry_path);
+    paths.retain(|registered| !same_registry_path(registered, &path));
+    paths.insert(0, path.clone());
+    if paths.len() > MAX_REGISTERED_PLAYBACK_PATHS {
+        paths.truncate(MAX_REGISTERED_PLAYBACK_PATHS);
+    }
+    write_registered_playback_paths(registry_path, &paths)?;
+    Ok(path)
+}
+
+fn registered_playback_path_at(
+    path: String,
+    registry_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let path = playable_recording_path(path)?;
+    if read_registered_playback_paths(registry_path)
+        .iter()
+        .any(|registered| same_registry_path(registered, &path))
+    {
+        return Ok(path);
+    }
+    Err("Recording file is not registered for playback.".into())
+}
+
+fn recording_playback_registry_path() -> std::path::PathBuf {
+    crate::paths::app_data_dir().join("recording-playback-registry.json")
+}
+
+fn read_registered_playback_paths(registry_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(text) = std::fs::read_to_string(registry_path) else {
+        return Vec::new();
+    };
+    let Ok(registry) = serde_json::from_str::<RecordingPlaybackRegistry>(&text) else {
+        return Vec::new();
+    };
+
+    registry
+        .paths
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute() && is_recording_media_path(path))
+        .take(MAX_REGISTERED_PLAYBACK_PATHS)
+        .collect()
+}
+
+fn write_registered_playback_paths(
+    registry_path: &std::path::Path,
+    paths: &[std::path::PathBuf],
+) -> Result<(), String> {
+    if let Some(parent) = registry_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to prepare playback registry: {err}"))?;
+    }
+
+    let registry = RecordingPlaybackRegistry {
+        version: 1,
+        paths: paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    };
+    let text = serde_json::to_string_pretty(&registry)
+        .map_err(|err| format!("Failed to serialize playback registry: {err}"))?;
+    write_text_atomically(registry_path, &text)
+        .map_err(|err| format!("Failed to save playback registry: {err}"))
+}
+
+fn same_registry_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    if cfg!(windows) {
+        return left
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy());
+    }
+    left == right
 }
 
 fn deletable_yap_owned_live_transcript_path_from_dir(
@@ -535,6 +641,49 @@ mod tests {
         let error = playable_recording_path(missing.display().to_string()).unwrap_err();
 
         assert_eq!(error, "File no longer exists.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_registry_restores_registered_recordings() {
+        let dir = temp_test_dir("playback-registry");
+        let registry = dir.join("registry.json");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let registered = register_playback_path_at(media.display().to_string(), &registry).unwrap();
+        let restored = registered_playback_path_at(media.display().to_string(), &registry).unwrap();
+
+        assert_eq!(restored, registered);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_registry_rejects_unregistered_recordings() {
+        let dir = temp_test_dir("playback-registry-unregistered");
+        let registry = dir.join("registry.json");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let error =
+            registered_playback_path_at(media.display().to_string(), &registry).unwrap_err();
+
+        assert_eq!(error, "Recording file is not registered for playback.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_registry_recovers_from_invalid_json() {
+        let dir = temp_test_dir("playback-registry-invalid");
+        let registry = dir.join("registry.json");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&registry, "not-json").unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        register_playback_path_at(media.display().to_string(), &registry).unwrap();
+        let restored = registered_playback_path_at(media.display().to_string(), &registry).unwrap();
+
+        assert_eq!(restored.file_name().unwrap(), "meeting.wav");
         std::fs::remove_dir_all(dir).ok();
     }
 

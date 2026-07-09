@@ -1363,6 +1363,7 @@ pub fn run() {
             polish_num_gpu,
             start_transcribe,
             file_actions::allow_recording_playback_path,
+            file_actions::restore_recording_playback_path,
             file_actions::read_text_file,
             file_actions::read_text_preview,
             file_actions::write_polished_text,

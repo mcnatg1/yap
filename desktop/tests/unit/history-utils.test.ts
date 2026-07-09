@@ -44,4 +44,19 @@ describe("history job projection", () => {
     expect(job.intent).toBe("live");
     expect(job.playbackPath).toBeUndefined();
   });
+
+  it("accepts a native-restored playback path for registered imports", () => {
+    const restoredPath = "\\\\?\\C:\\Users\\me\\Downloads\\meeting.wav";
+    const job = historyEntryToRecordingJob(
+      {
+        createdAt: "2026-01-01T00:00:00.000Z",
+        name: "meeting",
+        outputPath: "C:\\Users\\me\\Documents\\meeting.txt",
+        sourcePath: "C:\\Users\\me\\Downloads\\meeting.wav",
+      },
+      restoredPath,
+    );
+
+    expect(job.playbackPath).toBe(restoredPath);
+  });
 });

@@ -54,6 +54,14 @@ import {
   workspaceCopy,
 } from "@/lib/app-types";
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
+import {
+  allowRecordingPlaybackPath,
+  applyRestoredQueuePlaybackPaths,
+  mergeHistoryPlaybackPaths,
+  restoreHistoryPlaybackPaths,
+  restoreQueuePlaybackPaths,
+  trimHistoryPlaybackPaths,
+} from "@/lib/playback-registry";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 import {
@@ -110,11 +118,6 @@ const setupSkipKey = "yap-local-fallback-setup-skipped";
 const defaultLiveHotkey = "Ctrl+Shift+Space";
 const batchServerQueuedMessage = "Queued until a transcription server is connected.";
 
-async function allowRecordingPlaybackPath(path: string) {
-  if (!isTauri()) return path;
-  return invoke<string>("allow_recording_playback_path", { path });
-}
-
 const initialLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
   hotkey: defaultLiveHotkey,
@@ -165,6 +168,7 @@ export default function App() {
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readVisibleTranscriptHistory());
+  const [historyPlaybackPaths, setHistoryPlaybackPaths] = useState<Record<string, string>>({});
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
@@ -185,13 +189,17 @@ export default function App() {
   const runningItem = queue.find((item) => isRecordingActive(item.status));
   const elapsedSeconds = useElapsedSeconds(runningSince);
   const serverLabel = serverConnectionLabel(serverState);
+  const historyJob = useCallback(
+    (entry: TranscriptHistoryEntry) => historyEntryToRecordingJob(entry, historyPlaybackPaths[entry.outputPath]),
+    [historyPlaybackPaths],
+  );
   const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
-  const selectedHistoryItem = selectedHistoryEntry ? historyEntryToRecordingJob(selectedHistoryEntry) : undefined;
+  const selectedHistoryItem = selectedHistoryEntry ? historyJob(selectedHistoryEntry) : undefined;
   const selectedItem =
     queue.find((item) => item.id === selectedId) ??
     selectedHistoryItem ??
     [...queue].reverse().find((item) => isRecordingFinished(item.status)) ??
-    (history[0] ? historyEntryToRecordingJob(history[0]) : undefined) ??
+    (history[0] ? historyJob(history[0]) : undefined) ??
     queue[0];
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
@@ -222,6 +230,38 @@ export default function App() {
       toast.warning("Queued recordings could not be saved.");
     }
   }, [queue]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void restoreQueuePlaybackPaths(queue).then((restored) => {
+      if (cancelled) return;
+      if (restored.length) {
+        setQueue((current) => applyRestoredQueuePlaybackPaths(current, restored));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [queue]);
+
+  useEffect(() => {
+    setHistoryPlaybackPaths((current) => trimHistoryPlaybackPaths(current, history));
+  }, [history]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void restoreHistoryPlaybackPaths(history, historyPlaybackPaths).then((restored) => {
+      if (cancelled) return;
+      if (restored.length) {
+        setHistoryPlaybackPaths((current) => mergeHistoryPlaybackPaths(current, restored));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [history, historyPlaybackPaths]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -1108,7 +1148,7 @@ export default function App() {
       {showHistory ? (
         <HistoryPanel
           entries={history}
-          onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
+          onCopy={(entry) => void copyTranscript(historyJob(entry))}
           onDelete={(entry) => void deleteHistoryEntry(entry)}
           onHide={hideHistoryEntry}
           onLoadPreviewText={loadHistoryPreviewText}
@@ -1279,7 +1319,7 @@ export default function App() {
       />
       <TranscriptPreviewDialog
         entry={previewEntry}
-        onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
+        onCopy={(entry) => void copyTranscript(historyJob(entry))}
         onOpen={(entry) => void openAppPath(entry.outputPath)}
         onOpenChange={(open) => {
           if (!open) {
