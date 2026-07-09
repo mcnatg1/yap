@@ -56,6 +56,7 @@ import {
   workspaceCopy,
 } from "@/lib/app-types";
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
+import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 import {
   clearLiveHotkey,
@@ -877,7 +878,7 @@ export default function App() {
     if (!isTauri()) return "";
 
     const text = await invoke<string>("read_text_file", { path });
-    setTranscriptText((current) => ({ ...current, [path]: text }));
+    setTranscriptText((current) => rememberText(current, path, text));
     return text;
   }
 
@@ -1062,7 +1063,7 @@ export default function App() {
           onLoadText={loadTranscriptText}
           onOpenHelp={() => handleRailAction("help")}
           onPolished={(outputPath, text) => {
-            setPolishedText((current) => ({ ...current, [outputPath]: text }));
+            setPolishedText((current) => rememberText(current, outputPath, text));
             toast.success("Polished draft ready");
           }}
           onSave={savePolishedTranscript}
