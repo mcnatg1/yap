@@ -13,7 +13,7 @@ use crate::audio::preprocess::{
     AudioLevelNormalizer as LiveAudioLevelNormalizer, LinearResampler,
 };
 
-use super::state::{LiveLevelView, LiveSessionState};
+use super::state::{LiveLevelView, LiveSessionState, LiveSessionStatus};
 use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
@@ -222,6 +222,9 @@ impl LiveRuntime {
         };
 
         let state = app.state::<LiveSessionState>();
+        if !should_continue_capture_start(state.snapshot().status) {
+            return Ok(());
+        }
         let view = state.clear_for_new_session();
         let _ = app.emit("live-session", &view);
 
@@ -951,6 +954,10 @@ fn should_install_capture(
         && !has_capture
 }
 
+fn should_continue_capture_start(status: LiveSessionStatus) -> bool {
+    status == LiveSessionStatus::Armed
+}
+
 fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
     let default_name = host
         .default_input_device()
@@ -1065,6 +1072,13 @@ mod tests {
         assert!(!should_install_capture(2, 2, 0, false));
         assert!(!should_install_capture(2, 3, 2, false));
         assert!(!should_install_capture(2, 2, 2, true));
+    }
+
+    #[test]
+    fn capture_start_aborts_if_stop_changed_armed_state() {
+        assert!(should_continue_capture_start(LiveSessionStatus::Armed));
+        assert!(!should_continue_capture_start(LiveSessionStatus::Saving));
+        assert!(!should_continue_capture_start(LiveSessionStatus::Idle));
     }
 
     #[test]
