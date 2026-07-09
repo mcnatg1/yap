@@ -98,7 +98,7 @@ impl LiveRuntime {
             if inner.capture.is_some() {
                 return Err("Live capture is already running.".into());
             }
-            self.recorded_pcm.lock().expect("live pcm poisoned").clear();
+            self.discard_recorded_pcm();
             inner.session = inner.session.saturating_add(1);
             inner.last_used = Instant::now();
             inner.vad_segments.clear();
@@ -178,8 +178,12 @@ impl LiveRuntime {
         self.active_session.store(0, Ordering::SeqCst);
     }
 
-    pub fn recorded_pcm(&self) -> Vec<u8> {
-        self.recorded_pcm.lock().expect("live pcm poisoned").clone()
+    pub fn take_recorded_pcm(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.recorded_pcm.lock().expect("live pcm poisoned"))
+    }
+
+    fn discard_recorded_pcm(&self) {
+        let _ = self.take_recorded_pcm();
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -826,6 +830,23 @@ mod tests {
         assert!(!claim_raw_audio_slot(&ready));
         ready.store(true, Ordering::Release);
         assert!(claim_raw_audio_slot(&ready));
+    }
+
+    #[test]
+    fn taking_recorded_pcm_releases_buffer_without_clone() {
+        let runtime = LiveRuntime::new();
+        {
+            let mut pcm = runtime.recorded_pcm.lock().unwrap();
+            pcm.reserve(1024);
+            pcm.extend_from_slice(&[1, 2, 3, 4]);
+        }
+
+        let pcm = runtime.take_recorded_pcm();
+
+        assert_eq!(pcm, vec![1, 2, 3, 4]);
+        let retained = runtime.recorded_pcm.lock().unwrap();
+        assert!(retained.is_empty());
+        assert_eq!(retained.capacity(), 0);
     }
 
     #[test]

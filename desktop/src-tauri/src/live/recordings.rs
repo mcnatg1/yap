@@ -18,7 +18,7 @@ pub fn save_session_files(
     view: &live::state::LiveSessionView,
 ) -> Result<Option<SavedLiveSession>, String> {
     let transcript = transcript_text(view);
-    let pcm = live_runtime.recorded_pcm();
+    let pcm = live_runtime.take_recorded_pcm();
     let created_at_ms = unix_millis_now()?;
     save_session_parts_to_dir(&recordings_dir(), created_at_ms, transcript, &pcm)
 }
