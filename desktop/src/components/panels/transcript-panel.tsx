@@ -74,7 +74,8 @@ function RecordingPlayer({
   const [durationSeconds, setDurationSeconds] = useState<number>();
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const recordingSrc = useMemo(() => (isTauri() ? convertFileSrc(item.path) : undefined), [item.path]);
+  const recordingPath = item.playbackPath ?? (item.intent === "recording" ? item.path : undefined);
+  const recordingSrc = useMemo(() => (isTauri() && recordingPath ? convertFileSrc(recordingPath) : undefined), [recordingPath]);
   const recordingStatus = failed
     ? "Playback unavailable"
     : isRecordingFinished(item.status)
@@ -144,7 +145,7 @@ function RecordingPlayer({
     };
   }, [recordingSrc]);
 
-  if (!recordingSrc) return null;
+  if (!recordingPath || !recordingSrc) return null;
 
   function setDisplaySeconds(seconds: number) {
     const wholeSeconds = Math.floor(seconds);
@@ -224,7 +225,7 @@ function RecordingPlayer({
                 {durationSeconds === undefined ? "Local file" : formatElapsed(Math.floor(durationSeconds))}
               </Badge>
             </div>
-            <p className="truncate text-xs text-muted-foreground" id={statusId} title={item.path}>
+            <p className="truncate text-xs text-muted-foreground" id={statusId} title={recordingPath}>
               {recordingStatus}
             </p>
           </div>
@@ -232,7 +233,7 @@ function RecordingPlayer({
         <ButtonGroup aria-label="Recording actions">
           <Button
             aria-label={`Open recording ${item.name}`}
-            onClick={() => onOpen(item.path)}
+            onClick={() => onOpen(recordingPath)}
             size="sm"
             type="button"
             variant="secondary"
@@ -242,7 +243,7 @@ function RecordingPlayer({
           </Button>
           <Button
             aria-label={`Reveal recording ${item.name}`}
-            onClick={() => onReveal(item.path)}
+            onClick={() => onReveal(recordingPath)}
             size="sm"
             type="button"
             variant="ghost"
@@ -532,7 +533,9 @@ export function TranscriptPanel({
                   )}
                 </Badge>
                 <p className="text-[15px] leading-7 text-muted-foreground">
-                  The finished transcript will appear here as soon as the local run completes.
+                  {item.route === "serverBatch"
+                    ? "The finished transcript will appear here after a transcription server is connected."
+                    : "The finished transcript will appear here as soon as the local run completes."}
                 </p>
               </div>
             ) : (

@@ -113,3 +113,18 @@ export function canDeleteTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
     (source === output || (sourceDir === outputDir && sourceName === `${stem}.wav`))
   );
 }
+
+export function historyEntryPlaybackPath(entry: TranscriptHistoryEntry) {
+  if (!canDeleteTranscriptHistoryEntry(entry)) return undefined;
+  const output = entry.outputPath.replace(/\\/g, "/").toLowerCase();
+  const source = entry.sourcePath.replace(/\\/g, "/").toLowerCase();
+  const outputName = output.split("/").pop() ?? "";
+  const sourceName = source.split("/").pop() ?? "";
+  const outputDir = output.slice(0, -outputName.length);
+  const sourceDir = source.slice(0, -sourceName.length);
+  const stem = outputName.endsWith(".txt") ? outputName.slice(0, -4) : "";
+
+  return stem && sourceDir === outputDir && sourceName === `${stem}.wav`
+    ? entry.sourcePath
+    : undefined;
+}

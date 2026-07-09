@@ -147,23 +147,17 @@ pub fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(),
 pub fn delete_history_entry_files(
     window: tauri::WebviewWindow,
     output_path: String,
-    source_path: String,
 ) -> Result<(), String> {
     ensure_main_window(&window)?;
-    delete_history_entry_files_at(output_path, source_path)
+    delete_history_entry_files_at(output_path)
 }
 
-fn delete_history_entry_files_at(output_path: String, source_path: String) -> Result<(), String> {
-    delete_history_entry_files_at_from_dir(
-        output_path,
-        source_path,
-        &crate::live::recordings::recordings_dir(),
-    )
+fn delete_history_entry_files_at(output_path: String) -> Result<(), String> {
+    delete_history_entry_files_at_from_dir(output_path, &crate::live::recordings::recordings_dir())
 }
 
 fn delete_history_entry_files_at_from_dir(
     output_path: String,
-    _source_path: String,
     owned_dir: &std::path::Path,
 ) -> Result<(), String> {
     let output = deletable_yap_owned_live_transcript_path_from_dir(output_path, owned_dir)?;
@@ -202,7 +196,7 @@ fn deletable_yap_owned_live_transcript_path_from_dir(
         .canonicalize()
         .map_err(|_| "Only Yap-owned live transcripts can be deleted from device.".to_string())?;
 
-    if !path.starts_with(&owned_dir) || !is_live_transcript_file(&path) {
+    if !path.is_file() || !path.starts_with(&owned_dir) || !is_live_transcript_file(&path) {
         return Err("Only Yap-owned live transcripts can be deleted from device.".into());
     }
     Ok(path)
@@ -210,7 +204,7 @@ fn deletable_yap_owned_live_transcript_path_from_dir(
 
 fn matching_owned_live_recording_path(output: &std::path::Path) -> Option<std::path::PathBuf> {
     let audio = output.with_extension("wav");
-    audio.exists().then_some(audio)
+    audio.is_file().then_some(audio)
 }
 
 fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
@@ -472,12 +466,7 @@ mod tests {
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&audio, b"RIFF").unwrap();
 
-        delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            audio.display().to_string(),
-            &dir,
-        )
-        .unwrap();
+        delete_history_entry_files_at_from_dir(transcript.display().to_string(), &dir).unwrap();
 
         assert!(!transcript.exists());
         assert!(!audio.exists());
@@ -493,12 +482,8 @@ mod tests {
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&audio, b"RIFF").unwrap();
 
-        delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            audio.display().to_string(),
-            &owned_dir,
-        )
-        .unwrap();
+        delete_history_entry_files_at_from_dir(transcript.display().to_string(), &owned_dir)
+            .unwrap();
 
         assert!(!transcript.exists());
         assert!(audio.exists());
@@ -516,16 +501,41 @@ mod tests {
         std::fs::write(&matching_audio, b"RIFF").unwrap();
         std::fs::write(&other_audio, b"RIFF").unwrap();
 
-        delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            other_audio.display().to_string(),
-            &dir,
-        )
-        .unwrap();
+        delete_history_entry_files_at_from_dir(transcript.display().to_string(), &dir).unwrap();
 
         assert!(!transcript.exists());
         assert!(!matching_audio.exists());
         assert!(other_audio.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn delete_history_entry_files_ignores_directory_shaped_audio() {
+        let dir = temp_test_dir("delete-audio-dir");
+        let transcript = dir.join("live-304.txt");
+        let audio_dir = dir.join("live-304.wav");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        delete_history_entry_files_at_from_dir(transcript.display().to_string(), &dir).unwrap();
+
+        assert!(!transcript.exists());
+        assert!(audio_dir.is_dir());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn delete_history_entry_files_rejects_directory_shaped_transcript() {
+        let dir = temp_test_dir("delete-transcript-dir");
+        let transcript_dir = dir.join("live-305.txt");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let err =
+            delete_history_entry_files_at_from_dir(transcript_dir.display().to_string(), &dir)
+                .unwrap_err();
+
+        assert!(err.contains("Yap-owned live transcripts"));
+        assert!(transcript_dir.is_dir());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -538,12 +548,9 @@ mod tests {
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&audio, b"RIFF").unwrap();
 
-        let err = delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            audio.display().to_string(),
-            &owned_dir,
-        )
-        .unwrap_err();
+        let err =
+            delete_history_entry_files_at_from_dir(transcript.display().to_string(), &owned_dir)
+                .unwrap_err();
 
         assert!(err.contains("Yap-owned live transcripts"));
         assert!(transcript.exists());
@@ -558,12 +565,8 @@ mod tests {
         let transcript = dir.join("notes.txt");
         std::fs::write(&transcript, "do not delete\n").unwrap();
 
-        let err = delete_history_entry_files_at_from_dir(
-            transcript.display().to_string(),
-            transcript.display().to_string(),
-            &dir,
-        )
-        .unwrap_err();
+        let err = delete_history_entry_files_at_from_dir(transcript.display().to_string(), &dir)
+            .unwrap_err();
 
         assert!(err.contains("Yap-owned live transcripts"));
         assert!(transcript.exists());

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { EyeSlash } from "@phosphor-icons/react/EyeSlash";
 import { FileText } from "@phosphor-icons/react/FileText";
@@ -45,13 +45,13 @@ import {
   TableCell,
   TableRow,
 } from "@/components/ui/table";
-import { canDeleteTranscriptHistoryEntry, type TranscriptHistoryEntry } from "@/history";
+import { canDeleteTranscriptHistoryEntry, maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { createPreviewTextLoader } from "@/lib/history-preview-loader";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 
-const maxHistoryPreviewCacheEntries = 120;
+const maxHistoryPreviewCacheEntries = maxTranscriptHistoryEntries;
 
 function HistoryActionMenu({
   entry,
@@ -186,20 +186,20 @@ export function HistoryPanel({
     previewTextByPathRef.current = previewTextByPath;
   }, [previewTextByPath]);
 
-  async function loadPreviewText(entry: TranscriptHistoryEntry) {
+  const loadPreviewText = useCallback(async (entry: TranscriptHistoryEntry) => {
     return previewLoaderRef.current.load(
       entry,
       previewTextByPathRef.current,
       onLoadPreviewText,
-        (outputPath, text) => {
-          setPreviewTextByPath((current) =>
-            current[outputPath] === undefined
-              ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
-              : current,
+      (outputPath, text) => {
+        setPreviewTextByPath((current) =>
+          current[outputPath] === undefined
+            ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
+            : current,
         );
       },
     );
-  }
+  }, [onLoadPreviewText]);
 
   useEffect(() => {
     if (!searchFilter.trim() || !onLoadPreviewText) return;

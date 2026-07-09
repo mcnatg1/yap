@@ -2,7 +2,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -472,10 +472,10 @@ impl LiveRuntimeInner {
     fn stop_capture(&mut self) {
         self.capture.take();
         if let Some(handle) = self.audio.take() {
-            let _ = handle.join();
+            join_worker(handle);
         }
         if let Some(handle) = self.level.take() {
-            let _ = handle.join();
+            join_worker(handle);
         }
         #[cfg(test)]
         {
@@ -657,10 +657,11 @@ fn open_capture(
                     }
                     StreamSendStatus::Disconnected => {
                         if !audio_decoder_disconnected_reported.swap(true, Ordering::AcqRel) {
-                            audio_runtime.handle_stream_crash(
+                            spawn_stream_crash_handler(
                                 audio_app.clone(),
+                                audio_runtime.clone(),
                                 raw.session,
-                                "Live transcription stopped unexpectedly.",
+                                "Live transcription stopped unexpectedly.".to_string(),
                             );
                         }
                     }
@@ -726,10 +727,24 @@ fn capture_error_handler(
     move |err| {
         let message = format!("Microphone input stopped: {err}");
         crate::stt::log_yap(&format!("live input stream error: {err}"));
-        let runtime = runtime.clone();
-        let app = app.clone();
-        std::thread::spawn(move || runtime.handle_stream_crash(app, session, &message));
+        spawn_stream_crash_handler(app.clone(), runtime.clone(), session, message);
     }
+}
+
+fn spawn_stream_crash_handler(
+    app: tauri::AppHandle,
+    runtime: LiveRuntime,
+    session: u64,
+    message: String,
+) {
+    std::thread::spawn(move || runtime.handle_stream_crash(app, session, &message));
+}
+
+fn join_worker(handle: JoinHandle<()>) {
+    if handle.thread().id() == thread::current().id() {
+        return;
+    }
+    let _ = handle.join();
 }
 
 fn build_capture_stream<T>(
@@ -1056,6 +1071,28 @@ mod tests {
 
         assert!(!inner.has_capture_for_test);
         assert!(!inner.has_stream_for_test);
+    }
+
+    #[test]
+    fn stop_capture_detaches_current_audio_worker_without_deadlock() {
+        let inner = Arc::new(Mutex::new(LiveRuntimeInner::for_test()));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_inner = Arc::clone(&inner);
+        let handle = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            worker_inner.lock().unwrap().stop_capture();
+            done_tx.send(()).unwrap();
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        inner.lock().unwrap().audio = Some(handle);
+        go_tx.send(()).unwrap();
+
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(inner.lock().unwrap().audio.is_none());
     }
 
     #[test]

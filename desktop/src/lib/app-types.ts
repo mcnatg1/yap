@@ -143,6 +143,7 @@ export type RecordingPipelineState = {
 export type RecordingJobView = {
   id: number;
   path: string;
+  playbackPath?: string;
   name: string;
   intent: RecordingIntent;
   status: RecordingJobStatus;

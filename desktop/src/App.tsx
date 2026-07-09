@@ -1035,10 +1035,9 @@ export default function App() {
     try {
       await invoke("delete_history_entry_files", {
         outputPath: entry.outputPath,
-        sourcePath: entry.sourcePath,
       });
-      rememberHiddenHistoryEntry(entry.outputPath);
-      forgetHistoryEntry(entry.outputPath);
+      if (!rememberHiddenHistoryEntry(entry.outputPath)) return;
+      if (!forgetHistoryEntry(entry.outputPath)) return;
       setTranscriptText((current) => {
         const { [entry.outputPath]: _deleted, ...next } = current;
         return next;

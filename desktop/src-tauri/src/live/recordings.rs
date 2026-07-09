@@ -161,7 +161,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
     {
         let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
         let path = entry.path();
-        if !file_actions::is_transcript_path(&path) {
+        if !path.is_file() || !file_actions::is_transcript_path(&path) {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -172,7 +172,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
         }
 
         let audio_path = path.with_extension("wav");
-        let source_path = if audio_path.exists() {
+        let source_path = if audio_path.is_file() {
             audio_path
         } else {
             path.clone()
@@ -479,6 +479,25 @@ mod tests {
         assert_eq!(sessions[0].name, "live-200");
         assert_eq!(sessions[0].output_path, transcript.display().to_string());
         assert_eq!(sessions[0].source_path, audio.display().to_string());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saved_live_session_scan_ignores_directory_shaped_entries() {
+        let dir = std::env::temp_dir().join(format!("yap-live-dir-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript_dir = dir.join("live-203.txt");
+        let transcript = dir.join("live-204.txt");
+        let audio_dir = dir.join("live-204.wav");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].output_path, transcript.display().to_string());
+        assert_eq!(sessions[0].source_path, transcript.display().to_string());
         std::fs::remove_dir_all(dir).ok();
     }
 

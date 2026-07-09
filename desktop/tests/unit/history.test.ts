@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   canDeleteTranscriptHistoryEntry,
   filterHiddenTranscriptHistory,
+  historyEntryPlaybackPath,
   hideTranscriptHistory,
   maxTranscriptHistoryEntries,
   normalizeHiddenTranscriptHistory,
@@ -112,5 +113,31 @@ describe("transcript history storage", () => {
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
       sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-999.wav",
     })).toBe(false);
+  });
+
+  it("only exposes playback for matching Yap-owned live audio", () => {
+    const outputPath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt";
+    const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav";
+
+    expect(historyEntryPlaybackPath({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-123",
+      outputPath,
+      sourcePath,
+    })).toBe(sourcePath);
+
+    expect(historyEntryPlaybackPath({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-123",
+      outputPath,
+      sourcePath: outputPath,
+    })).toBeUndefined();
+
+    expect(historyEntryPlaybackPath({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "meeting-notes",
+      outputPath: "C:\\Users\\me\\Documents\\meeting-notes.txt",
+      sourcePath: "C:\\Users\\me\\Downloads\\meeting.mp3",
+    })).toBeUndefined();
   });
 });
