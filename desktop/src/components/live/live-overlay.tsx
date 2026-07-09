@@ -20,6 +20,7 @@ import {
   type OverlayModel,
   type OverlaySurface,
 } from "@/components/live/live-overlay-state";
+import { createNativeSurfaceSync } from "@/components/live/native-surface-sync";
 import { type LiveSessionView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
@@ -113,7 +114,7 @@ export function LiveOverlay({
     if (surface === "sensor") {
       previousEntrySurfaceRef.current = "sensor";
     }
-    void setNativeOverlaySurface(surface, model.errorMessage);
+    setNativeOverlaySurface({ errorMessage: model.errorMessage, surface });
   }, [hiddenIdle, model.errorMessage, surface]);
 
   useEffect(() => {
@@ -221,13 +222,13 @@ export function LiveOverlay({
   );
 }
 
-async function setNativeOverlaySurface(surface: OverlaySurface, errorMessage?: string) {
+const setNativeOverlaySurface = createNativeSurfaceSync(async ({ surface, errorMessage }) => {
   if (!isTauri()) return;
   await invoke("set_live_overlay_surface", {
     errorMessage: errorMessage ?? null,
     surface,
-  }).catch(() => undefined);
-}
+  });
+});
 
 function PeekOverlayView({
   onOpenScratch,
