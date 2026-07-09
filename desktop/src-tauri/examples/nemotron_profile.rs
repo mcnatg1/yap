@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use yap_desktop_lib::live::runtime::{downmix_to_mono, LinearResampler};
+use yap_desktop_lib::audio::preprocess::{downmix_to_mono, LinearResampler};
 use yap_desktop_lib::live::stream::{self, LiveStreamEngine};
 use yap_desktop_lib::stt::parity::word_error_rate;
 
