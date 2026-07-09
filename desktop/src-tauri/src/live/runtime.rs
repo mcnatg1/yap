@@ -28,6 +28,7 @@ pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
     recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
+    warming: Arc<AtomicBool>,
 }
 
 struct LiveRuntimeInner {
@@ -170,6 +171,7 @@ impl LiveRuntime {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
             recorded_pcm: Arc::new(Mutex::new(RecordedPcmBuffer::new())),
+            warming: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -246,9 +248,16 @@ impl LiveRuntime {
     }
 
     pub fn warm(&self, app: tauri::AppHandle) -> Result<(), String> {
-        let mut inner = self.inner.lock().expect("live runtime poisoned");
-        let session = inner.session;
-        inner.ensure_stream(self.clone(), app, session)
+        if !claim_warmup(&self.warming) {
+            return Ok(());
+        }
+        let result = {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            let session = inner.session;
+            inner.ensure_stream(self.clone(), app, session)
+        };
+        release_warmup(&self.warming);
+        result
     }
 
     pub fn stop(&self) -> StreamFinishStatus {
@@ -701,6 +710,16 @@ fn claim_raw_audio_slot(raw_ready: &AtomicBool) -> bool {
         .is_ok()
 }
 
+fn claim_warmup(warming: &AtomicBool) -> bool {
+    warming
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+fn release_warmup(warming: &AtomicBool) {
+    warming.store(false, Ordering::Release);
+}
+
 fn run_stream_worker(
     mut engine: LiveStreamEngine,
     samples_rx: mpsc::Receiver<StreamMessage>,
@@ -1008,6 +1027,16 @@ mod tests {
         assert!(!claim_raw_audio_slot(&ready));
         ready.store(true, Ordering::Release);
         assert!(claim_raw_audio_slot(&ready));
+    }
+
+    #[test]
+    fn warmup_latch_allows_one_in_flight_warm() {
+        let warming = AtomicBool::new(false);
+
+        assert!(claim_warmup(&warming));
+        assert!(!claim_warmup(&warming));
+        release_warmup(&warming);
+        assert!(claim_warmup(&warming));
     }
 
     #[test]
