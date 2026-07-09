@@ -90,6 +90,7 @@ import {
   verifyFallbackModel,
 } from "@/settings";
 import { SttInvokeError, startTranscribe } from "@/stt";
+import { serverConnectionStatus } from "@/server";
 
 type SetupStatus = {
   model: string;
@@ -154,7 +155,7 @@ export default function App() {
   const [fallbackEnabled, setFallbackEnabled] = useState(true);
   const [fallbackModel, setFallbackModel] = useState<FallbackModelView | null>(null);
   const [modelInstalled, setModelInstalled] = useState(false);
-  const [serverState] = useState<ServerConnectionState>("not_set");
+  const [serverState, setServerState] = useState<ServerConnectionState>("not_set");
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
   const [computeTargetPending, setComputeTargetPending] = useState(false);
   const [liveView, setLiveView] = useState<LiveSessionView>(initialLiveView);
@@ -386,10 +387,12 @@ export default function App() {
     if (!isTauri()) return;
 
     try {
-      const [setup, view] = await Promise.all([
+      const [setup, view, server] = await Promise.all([
         invoke<SetupStatus>("setup_status"),
         fallbackModelStatus(),
+        serverConnectionStatus(),
       ]);
+      setServerState(server);
       applySetupStatus(setup);
       applyFallbackModelView(view, {
         authText: setup.engineReady ? "Ready" : "Setup",

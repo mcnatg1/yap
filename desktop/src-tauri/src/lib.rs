@@ -58,6 +58,15 @@ fn setup_status(
 }
 
 #[tauri::command]
+fn server_connection_status(
+    window: tauri::WebviewWindow,
+    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
+) -> Result<runtime::state::ServerConnectorState, String> {
+    ensure_main_command(&window)?;
+    Ok(runtime_state.with(|orchestrator| orchestrator.server()))
+}
+
+#[tauri::command]
 fn fallback_model_status(
     window: tauri::WebviewWindow,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
@@ -1377,6 +1386,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             setup_status,
+            server_connection_status,
             fallback_model_status,
             fallback_model_install,
             fallback_model_cancel_install,
@@ -1474,6 +1484,14 @@ mod tests {
         assert_eq!(value["fallbackEnabled"], true);
         assert_eq!(value["engineStatus"], "Transcription engine ready");
         assert!(value.get("python_ready").is_none());
+    }
+
+    #[test]
+    fn server_state_serializes_for_frontend() {
+        let value =
+            serde_json::to_value(runtime::state::ServerConnectorState::SignInRequired).unwrap();
+
+        assert_eq!(value, "sign_in_required");
     }
 
     #[test]
