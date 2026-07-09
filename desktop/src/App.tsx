@@ -57,6 +57,7 @@ import {
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
+import { nextRecordingQueueId, readRecordingQueue, writeRecordingQueue } from "@/recording-queue";
 import {
   clearLiveHotkey,
   clearLivePasteHotkey,
@@ -134,8 +135,9 @@ type ReviewMorphOrigin = {
 };
 
 export default function App() {
-  const [queue, setQueue] = useState<RecordingJobView[]>([]);
-  const nextRecordingId = useRef(1);
+  const initialQueue = useMemo(() => readRecordingQueue(), []);
+  const [queue, setQueue] = useState<RecordingJobView[]>(initialQueue);
+  const nextRecordingId = useRef(nextRecordingQueueId(initialQueue));
   const [dragging, setDragging] = useState(false);
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
@@ -210,6 +212,15 @@ export default function App() {
   useEffect(() => {
     historyRef.current = history;
   }, [history]);
+
+  useEffect(() => {
+    try {
+      writeRecordingQueue(queue);
+    } catch (error) {
+      console.warn("Queued recordings could not be saved.", error);
+      toast.warning("Queued recordings could not be saved.");
+    }
+  }, [queue]);
 
   useEffect(() => {
     if (!isTauri()) return;

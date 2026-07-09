@@ -1,0 +1,54 @@
+import { describe, expect, it } from "vitest";
+
+import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import { nextRecordingQueueId, normalizeRecordingQueue, readRecordingQueue, writeRecordingQueue } from "@/recording-queue";
+
+function storageWith(value: string) {
+  const storage = { value };
+  return {
+    getItem: () => storage.value,
+    setItem(_key: string, next: string) {
+      storage.value = next;
+    },
+  };
+}
+
+describe("recording queue storage", () => {
+  it("hydrates only queued server recordings and resumes ids", () => {
+    const jobs = normalizeRecordingQueue([
+      { id: 3, name: "meeting.wav", path: "C:/meeting.wav", error: "Queued" },
+      { id: 4, path: "C:/notes.txt" },
+      { id: 5, path: "C:/meeting.wav" },
+      { id: 6, path: "C:/demo.mp3" },
+    ]);
+
+    expect(jobs).toMatchObject([
+      { id: 3, path: "C:/meeting.wav", route: "serverBatch", status: "queued_server" },
+      { id: 6, name: "demo.mp3", path: "C:/demo.mp3", route: "serverBatch", status: "queued_server" },
+    ]);
+    expect(nextRecordingQueueId(jobs)).toBe(7);
+  });
+
+  it("stores only queued server jobs", () => {
+    const storage = storageWith("[]");
+    const queued: RecordingJobView = {
+      error: "Server queued",
+      id: 2,
+      intent: "recording",
+      name: "take.wav",
+      path: "C:/take.wav",
+      pipeline: createInitialPipelineState(),
+      route: "serverBatch",
+      status: "queued_server",
+    };
+
+    writeRecordingQueue([
+      queued,
+      { ...queued, id: 3, path: "C:/done.wav", status: "complete" },
+    ], storage);
+
+    expect(readRecordingQueue(storage)).toMatchObject([
+      { id: 2, path: "C:/take.wav", status: "queued_server" },
+    ]);
+  });
+});
