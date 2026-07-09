@@ -114,6 +114,14 @@ export function liveSettingsLocked(status: LiveSessionStatus) {
   return liveLocksFallbackActions(status);
 }
 
+export function projectLiveOverlayAction(status: LiveSessionStatus, liveBusy: boolean) {
+  const liveActive = liveSettingsLocked(status);
+  return {
+    disabled: liveBusy,
+    label: liveActive ? "Stop" : "Start",
+  };
+}
+
 function fallbackDownloadLabel(view: FallbackModelView) {
   const percent = typeof view.progressPercent === "number" ? Math.max(0, Math.min(100, Math.round(view.progressPercent))) : null;
   return percent === null ? "Downloading" : `Downloading ${percent}%`;
@@ -300,6 +308,7 @@ export function SettingsSheet({
   status: string;
 }) {
   const liveActive = liveSettingsLocked(liveView.status);
+  const liveOverlayAction = projectLiveOverlayAction(liveView.status, liveBusy);
   const fallbackLocked = liveActive;
   const micLabelId = useId();
   const computeLabelId = useId();
@@ -505,9 +514,9 @@ export function SettingsSheet({
                     </SettingsRow>
                     <SettingsRow
                       action={
-                        <Button disabled={liveBusy || liveActive} onClick={liveActive ? onStopLive : onStartLive} type="button">
+                        <Button disabled={liveOverlayAction.disabled} onClick={liveActive ? onStopLive : onStartLive} type="button">
                           <Mic data-icon="inline-start" />
-                          {liveActive ? "Stop" : "Start"}
+                          {liveOverlayAction.label}
                         </Button>
                       }
                       detail={liveView.error || liveSettingsError || "Small overlay stays available for live dictation."}

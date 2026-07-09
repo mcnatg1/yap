@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { liveSettingsLocked, projectFallbackLifecycle } from "@/components/panels/app-sheets";
+import { liveSettingsLocked, projectFallbackLifecycle, projectLiveOverlayAction } from "@/components/panels/app-sheets";
 import {
   createInitialPipelineState,
   deriveSetupState,
@@ -196,6 +196,21 @@ describe("client recording workflow projection", () => {
   it("treats saving as an active settings lock", () => {
     expect(liveSettingsLocked("saving")).toBe(true);
     expect(liveSettingsLocked("idle")).toBe(false);
+  });
+
+  it("keeps the settings Stop action available while live is active", () => {
+    expect(projectLiveOverlayAction("speaking", false)).toEqual({
+      disabled: false,
+      label: "Stop",
+    });
+    expect(projectLiveOverlayAction("speaking", true)).toEqual({
+      disabled: true,
+      label: "Stop",
+    });
+    expect(projectLiveOverlayAction("idle", false)).toEqual({
+      disabled: false,
+      label: "Start",
+    });
   });
 
   it("locks install, remove, and verify while live is active but keeps cancel during downloads", () => {

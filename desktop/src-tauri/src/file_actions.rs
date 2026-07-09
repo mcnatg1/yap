@@ -87,7 +87,7 @@ fn delete_history_entry_files_at_from_dir(
     source_path: String,
     owned_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let output = deletable_transcript_path(output_path)?;
+    let output = deletable_yap_owned_live_transcript_path_from_dir(output_path, owned_dir)?;
     let source = deletable_yap_owned_recording_path_from_dir(source_path, owned_dir)?;
 
     if let Some(source) = source.filter(|source| source != &output) {
@@ -110,14 +110,21 @@ fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
-fn deletable_transcript_path(path: String) -> Result<std::path::PathBuf, String> {
+fn deletable_yap_owned_live_transcript_path_from_dir(
+    path: String,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let path = std::path::PathBuf::from(path);
     if !is_transcript_path(&path) {
         return Err("Only transcript text files can be deleted.".into());
     }
     let path = canonical_existing_path(&path)?;
-    if !is_transcript_path(&path) {
-        return Err("Only transcript text files can be deleted.".into());
+    let owned_dir = owned_dir
+        .canonicalize()
+        .map_err(|_| "Only Yap-owned live transcripts can be deleted from device.".to_string())?;
+
+    if !path.starts_with(&owned_dir) || !is_live_transcript_file(&path) {
+        return Err("Only Yap-owned live transcripts can be deleted from device.".into());
     }
     Ok(path)
 }
@@ -169,6 +176,14 @@ fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
         path,
         &["txt", "mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"],
     )
+}
+
+fn is_live_transcript_file(path: &std::path::Path) -> bool {
+    is_transcript_path(path)
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.starts_with("live-"))
 }
 
 fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
@@ -240,7 +255,7 @@ mod tests {
     fn delete_history_entry_files_keeps_imported_source_audio() {
         let owned_dir = temp_test_dir("delete-owned-dir");
         let imported_dir = temp_test_dir("delete-imported-source");
-        let transcript = imported_dir.join("clip.txt");
+        let transcript = owned_dir.join("live-301.txt");
         let audio = imported_dir.join("clip.wav");
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&audio, b"RIFF").unwrap();
@@ -256,6 +271,47 @@ mod tests {
         assert!(audio.exists());
         std::fs::remove_dir_all(owned_dir).ok();
         std::fs::remove_dir_all(imported_dir).ok();
+    }
+
+    #[test]
+    fn delete_history_entry_files_rejects_imported_transcript() {
+        let owned_dir = temp_test_dir("delete-owned-dir");
+        let imported_dir = temp_test_dir("delete-imported-transcript");
+        let transcript = imported_dir.join("clip.txt");
+        let audio = imported_dir.join("clip.wav");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(&audio, b"RIFF").unwrap();
+
+        let err = delete_history_entry_files_at_from_dir(
+            transcript.display().to_string(),
+            audio.display().to_string(),
+            &owned_dir,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Yap-owned live transcripts"));
+        assert!(transcript.exists());
+        assert!(audio.exists());
+        std::fs::remove_dir_all(owned_dir).ok();
+        std::fs::remove_dir_all(imported_dir).ok();
+    }
+
+    #[test]
+    fn delete_history_entry_files_rejects_non_live_owned_transcript() {
+        let dir = temp_test_dir("delete-non-live-owned");
+        let transcript = dir.join("notes.txt");
+        std::fs::write(&transcript, "do not delete\n").unwrap();
+
+        let err = delete_history_entry_files_at_from_dir(
+            transcript.display().to_string(),
+            transcript.display().to_string(),
+            &dir,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Yap-owned live transcripts"));
+        assert!(transcript.exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
