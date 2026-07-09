@@ -18,6 +18,7 @@ use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
+const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 
 #[derive(Clone)]
@@ -403,17 +404,34 @@ impl StreamFinishStatus {
 impl StreamFinisher {
     fn finish_session(&self) -> StreamFinishStatus {
         let (done_tx, done_rx) = mpsc::channel();
-        match self.samples_tx.try_send(StreamMessage::Finish {
+        let mut message = StreamMessage::Finish {
             session: self.session,
             done: done_tx,
-        }) {
-            Ok(()) => match done_rx.recv_timeout(STREAM_DRAIN_ON_STOP) {
-                Ok(()) => StreamFinishStatus::Completed,
-                Err(mpsc::RecvTimeoutError::Timeout) => StreamFinishStatus::TimedOut,
-                Err(mpsc::RecvTimeoutError::Disconnected) => StreamFinishStatus::Disconnected,
-            },
-            Err(mpsc::TrySendError::Full(_)) => StreamFinishStatus::BackedUp,
-            Err(mpsc::TrySendError::Disconnected(_)) => StreamFinishStatus::Disconnected,
+        };
+        let started = Instant::now();
+
+        loop {
+            match self.samples_tx.try_send(message) {
+                Ok(()) => {
+                    return match done_rx.recv_timeout(STREAM_DRAIN_ON_STOP) {
+                        Ok(()) => StreamFinishStatus::Completed,
+                        Err(mpsc::RecvTimeoutError::Timeout) => StreamFinishStatus::TimedOut,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            StreamFinishStatus::Disconnected
+                        }
+                    };
+                }
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    if started.elapsed() >= STREAM_FINISH_ENQUEUE_TIMEOUT {
+                        return StreamFinishStatus::BackedUp;
+                    }
+                    message = returned;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return StreamFinishStatus::Disconnected;
+                }
+            }
         }
     }
 }
@@ -828,6 +846,41 @@ mod tests {
         assert_eq!(status, StreamFinishStatus::BackedUp);
         assert!(status.should_retire_stream());
         assert!(status.should_report());
+    }
+
+    #[test]
+    fn stream_finisher_waits_briefly_for_queue_space() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+        samples_tx
+            .try_send(StreamMessage::Samples {
+                session: 42,
+                samples: vec![1.0],
+            })
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            match samples_rx.recv().unwrap() {
+                StreamMessage::Samples { session, .. } => assert_eq!(session, 42),
+                StreamMessage::Finish { .. } => panic!("expected queued samples first"),
+            }
+            match samples_rx.recv().unwrap() {
+                StreamMessage::Finish { session, done } => {
+                    assert_eq!(session, 42);
+                    done.send(()).unwrap();
+                }
+                StreamMessage::Samples { .. } => panic!("expected finish message"),
+            }
+        });
+        let finisher = StreamFinisher {
+            samples_tx,
+            session: 42,
+        };
+
+        let status = finisher.finish_session();
+
+        assert_eq!(status, StreamFinishStatus::Completed);
+        assert!(!status.should_retire_stream());
+        worker.join().unwrap();
     }
 
     #[test]

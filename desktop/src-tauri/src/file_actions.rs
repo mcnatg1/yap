@@ -84,11 +84,11 @@ fn delete_history_entry_files_at(output_path: String, source_path: String) -> Re
 
 fn delete_history_entry_files_at_from_dir(
     output_path: String,
-    source_path: String,
+    _source_path: String,
     owned_dir: &std::path::Path,
 ) -> Result<(), String> {
     let output = deletable_yap_owned_live_transcript_path_from_dir(output_path, owned_dir)?;
-    let source = deletable_yap_owned_recording_path_from_dir(source_path, owned_dir)?;
+    let source = matching_owned_live_recording_path(&output);
 
     if let Some(source) = source.filter(|source| source != &output) {
         std::fs::remove_file(&source)
@@ -129,26 +129,9 @@ fn deletable_yap_owned_live_transcript_path_from_dir(
     Ok(path)
 }
 
-fn deletable_yap_owned_recording_path_from_dir(
-    path: String,
-    owned_dir: &std::path::Path,
-) -> Result<Option<std::path::PathBuf>, String> {
-    let path = std::path::PathBuf::from(path);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let path = path
-        .canonicalize()
-        .map_err(|err| format!("Failed to resolve recording path: {err}"))?;
-    let Ok(owned_dir) = owned_dir.canonicalize() else {
-        return Ok(None);
-    };
-
-    if path.starts_with(owned_dir) && is_yap_media_or_transcript_path(&path) {
-        Ok(Some(path))
-    } else {
-        Ok(None)
-    }
+fn matching_owned_live_recording_path(output: &std::path::Path) -> Option<std::path::PathBuf> {
+    let audio = output.with_extension("wav");
+    audio.exists().then_some(audio)
 }
 
 fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
@@ -271,6 +254,29 @@ mod tests {
         assert!(audio.exists());
         std::fs::remove_dir_all(owned_dir).ok();
         std::fs::remove_dir_all(imported_dir).ok();
+    }
+
+    #[test]
+    fn delete_history_entry_files_ignores_mismatched_owned_source() {
+        let dir = temp_test_dir("delete-mismatched-owned-source");
+        let transcript = dir.join("live-302.txt");
+        let matching_audio = dir.join("live-302.wav");
+        let other_audio = dir.join("live-303.wav");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(&matching_audio, b"RIFF").unwrap();
+        std::fs::write(&other_audio, b"RIFF").unwrap();
+
+        delete_history_entry_files_at_from_dir(
+            transcript.display().to_string(),
+            other_audio.display().to_string(),
+            &dir,
+        )
+        .unwrap();
+
+        assert!(!transcript.exists());
+        assert!(!matching_audio.exists());
+        assert!(other_audio.exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

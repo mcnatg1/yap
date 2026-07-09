@@ -41,4 +41,13 @@ describe("history preview loader", () => {
     expect(text).toBe("");
     expect(reads).toBe(0);
   });
+
+  it("rejects failed reads so the row can show its fallback state", async () => {
+    const loader = createPreviewTextLoader();
+    const entry = { outputPath: "C:\\recordings\\missing.txt" };
+
+    await expect(loader.load(entry, {}, async () => {
+      throw new Error("missing");
+    }, () => undefined)).rejects.toThrow("missing");
+  });
 });

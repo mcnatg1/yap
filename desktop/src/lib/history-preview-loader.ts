@@ -26,7 +26,6 @@ export function createPreviewTextLoader() {
           onLoaded(entry.outputPath, text);
           return text;
         })
-        .catch(() => "")
         .finally(() => {
           inFlight.delete(entry.outputPath);
         });
