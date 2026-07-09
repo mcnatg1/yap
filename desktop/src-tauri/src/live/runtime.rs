@@ -136,6 +136,12 @@ impl LiveRuntime {
         Ok(())
     }
 
+    pub fn warm(&self, app: tauri::AppHandle) -> Result<(), String> {
+        let mut inner = self.inner.lock().expect("live runtime poisoned");
+        let session = inner.session;
+        inner.ensure_stream(self.clone(), app, session)
+    }
+
     pub fn stop(&self) {
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         inner.mark_stream_finishing();
@@ -712,6 +718,6 @@ mod tests {
 
     #[test]
     fn stop_tail_silence_covers_final_silence_window() {
-        assert_eq!(stream::silence_samples(Duration::from_millis(500)), 8_000);
+        assert_eq!(stream::silence_samples(Duration::from_millis(1500)), 24_000);
     }
 }

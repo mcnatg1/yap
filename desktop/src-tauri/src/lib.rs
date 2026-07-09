@@ -1085,6 +1085,7 @@ pub fn run() {
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
     let fallback_model_install_state = stt::fallback_model::FallbackModelInstallState::new();
+    let live_runtime_for_warmup = live_runtime.clone();
     let live_runtime_for_monitor = live_runtime.clone();
     let live_runtime_for_exit = live_runtime.clone();
     let live_shortcut_interaction =
@@ -1176,6 +1177,15 @@ pub fn run() {
                 }
             }
             install_tray(app.handle())?;
+            {
+                let app = app.handle().clone();
+                let live_runtime = live_runtime_for_warmup.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = live_runtime.warm(app) {
+                        log_line(&format!("live warmup skipped: {error}"));
+                    }
+                });
+            }
             let startup_live = app.state::<live::LiveSessionState>().snapshot();
             if startup_live.visibility == live::state::LiveOverlayVisibility::Enabled {
                 let result = if startup_live.status == live::state::LiveSessionStatus::Idle {

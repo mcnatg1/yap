@@ -6,7 +6,7 @@ use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 use crate::stt::error::SttError;
 
 const SAMPLE_RATE: i32 = 16_000;
-const TAIL_SILENCE: Duration = Duration::from_millis(500);
+const TAIL_SILENCE: Duration = Duration::from_millis(1500);
 
 pub struct LiveStreamEngine {
     recognizer: OnlineRecognizer,
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn tail_silence_is_bounded() {
-        assert_eq!(silence_samples(Duration::from_millis(500)), 8_000);
+        assert_eq!(silence_samples(Duration::from_millis(1500)), 24_000);
     }
 
     #[test]
