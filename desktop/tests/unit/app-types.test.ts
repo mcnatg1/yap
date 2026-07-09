@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { liveSettingsLocked, projectFallbackLifecycle, projectLiveOverlayAction } from "@/components/panels/app-sheets";
 import {
+  acceptedRecordingDrops,
   createInitialPipelineState,
   deriveSetupState,
   deriveSetupStateFromFallbackModel,
@@ -81,6 +82,19 @@ describe("client recording workflow projection", () => {
     expect(isRecordingRetryable("blocked_server_unavailable")).toBe(false);
     expect(isRecordingRetryable("blocked_sign_in_required")).toBe(true);
     expect(isRecordingRetryable("blocked_setup_required")).toBe(false);
+  });
+
+  it("accepts only new supported recording drops while preserving allocated ids", () => {
+    expect(acceptedRecordingDrops(["C:/a.wav"], [
+      { id: 10, path: "C:/a.wav" },
+      { id: 11, path: "C:/b.txt" },
+      { id: 12, path: "C:/c.wav" },
+      { id: 13, path: "C:/c.wav" },
+      { id: 14, path: "C:/d.mp3" },
+    ])).toEqual([
+      { id: 12, path: "C:/c.wav" },
+      { id: 14, path: "C:/d.mp3" },
+    ]);
   });
 
   it("maps rejected starts into recoverable job states", () => {

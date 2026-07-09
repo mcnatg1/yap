@@ -30,12 +30,11 @@ import {
 } from "@/history";
 import {
   acceptedFormats,
+  acceptedRecordingDrops,
   audioExtensions,
-  audioExts,
   basename,
   createInitialPipelineState,
   deriveSetupStateFromFallbackModel,
-  extension,
   isFallbackModelBusy,
   isRecordingActive,
   isRecordingFinished,
@@ -135,7 +134,7 @@ type ReviewMorphOrigin = {
 
 export default function App() {
   const [queue, setQueue] = useState<RecordingJobView[]>([]);
-  const [nextId, setNextId] = useState(1);
+  const nextRecordingId = useRef(1);
   const [dragging, setDragging] = useState(false);
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
@@ -681,17 +680,20 @@ export default function App() {
   }
 
   function addPaths(paths: string[]) {
+    const firstId = nextRecordingId.current;
+    nextRecordingId.current += paths.length;
+    const incoming = paths.map((path, index) => ({ id: firstId + index, path }));
+
     setQueue((current) => {
-      const existing = new Set(current.map((item) => item.path));
-      const accepted = paths.filter((path) => audioExts.has(extension(path)) && !existing.has(path));
+      const accepted = acceptedRecordingDrops(current.map((item) => item.path), incoming);
       if (paths.length && !accepted.length) {
         toast.warning(`Drop ${acceptedFormats} files.`);
         return current;
       }
 
-      const newItems: RecordingJobView[] = accepted.map((path, index) => ({
+      const newItems: RecordingJobView[] = accepted.map(({ id, path }) => ({
         error: batchServerUnavailableMessage,
-        id: nextId + index,
+        id,
         intent: "recording",
         name: basename(path),
         path,
@@ -699,7 +701,6 @@ export default function App() {
         route: "serverBatch",
         status: "blocked_server_unavailable",
       }));
-      setNextId((id) => id + newItems.length);
       if (newItems.length) {
         setActiveRail("transcribe");
         setWorkspaceView("transcribe");

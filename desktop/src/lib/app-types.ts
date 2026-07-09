@@ -154,6 +154,11 @@ export type RecordingJobView = {
   pipeline: RecordingPipelineState;
 };
 
+export type QueuedRecordingPath = {
+  id: number;
+  path: string;
+};
+
 export type SetupSnapshot = {
   engineReady: boolean;
   fallbackEnabled: boolean;
@@ -181,6 +186,19 @@ export function createInitialPipelineState(): RecordingPipelineState {
     diarization: "notStarted",
     postprocessing: "notStarted",
   };
+}
+
+export function acceptedRecordingDrops(
+  currentPaths: Iterable<string>,
+  incoming: QueuedRecordingPath[],
+) {
+  const existing = new Set(currentPaths);
+  const seen = new Set<string>();
+  return incoming.filter(({ path }) => {
+    if (!audioExts.has(extension(path)) || existing.has(path) || seen.has(path)) return false;
+    seen.add(path);
+    return true;
+  });
 }
 
 export function deriveSetupState(snapshot: SetupSnapshot): SetupState {
