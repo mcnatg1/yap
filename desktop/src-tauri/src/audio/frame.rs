@@ -62,6 +62,10 @@ impl AudioFrame {
 
         ((sample_count as u128) * 1_000 / u128::from(sample_rate_hz)) as u32
     }
+
+    pub fn end_ms(&self) -> u64 {
+        self.start_ms.saturating_add(u64::from(self.duration_ms))
+    }
 }
 
 impl AudioChunkEnvelope {
@@ -129,6 +133,11 @@ mod tests {
     #[test]
     fn duration_ms_from_samples_returns_zero_for_zero_sample_rate() {
         assert_eq!(AudioFrame::duration_ms_from_samples(320, 0), 0);
+    }
+
+    #[test]
+    fn end_ms_uses_saturating_frame_coverage() {
+        assert_eq!(frame(11, 100, 20, 320).end_ms(), 120);
     }
 
     #[test]
