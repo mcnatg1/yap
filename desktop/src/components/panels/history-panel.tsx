@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { EyeSlash } from "@phosphor-icons/react/EyeSlash";
 import { FileText } from "@phosphor-icons/react/FileText";
@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/table";
 import type { TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
+import { createPreviewTextLoader } from "@/lib/history-preview-loader";
 import { cn } from "@/lib/utils";
 
 function HistoryActionMenu({
@@ -172,38 +173,52 @@ export function HistoryPanel({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
+  const previewTextByPathRef = useRef(previewTextByPath);
+  const previewLoaderRef = useRef(createPreviewTextLoader());
+
+  useEffect(() => {
+    previewTextByPathRef.current = previewTextByPath;
+  }, [previewTextByPath]);
 
   async function loadPreviewText(entry: TranscriptHistoryEntry) {
-    const cached = previewTextByPath[entry.outputPath];
-    if (cached !== undefined || !onLoadPreviewText) return cached ?? "";
-
-    const text = await onLoadPreviewText(entry);
-    setPreviewTextByPath((current) => ({ ...current, [entry.outputPath]: text }));
-    return text;
+    return previewLoaderRef.current.load(
+      entry,
+      previewTextByPathRef.current,
+      onLoadPreviewText,
+      (outputPath, text) => {
+        setPreviewTextByPath((current) =>
+          current[outputPath] === undefined ? { ...current, [outputPath]: text } : current,
+        );
+      },
+    );
   }
 
   useEffect(() => {
     if (!searchFilter.trim() || !onLoadPreviewText) return;
 
     let cancelled = false;
-    for (const entry of entries) {
-      if (previewTextByPath[entry.outputPath] !== undefined) continue;
-      void onLoadPreviewText(entry)
-        .then((text) => {
-          if (cancelled) return;
-          setPreviewTextByPath((current) =>
-            current[entry.outputPath] === undefined
-              ? { ...current, [entry.outputPath]: text }
-              : current,
-          );
-        })
-        .catch(() => undefined);
-    }
+    void (async () => {
+      for (const entry of entries) {
+        if (cancelled) break;
+        if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
+        await previewLoaderRef.current.load(
+          entry,
+          previewTextByPathRef.current,
+          onLoadPreviewText,
+          (outputPath, text) => {
+            if (cancelled) return;
+            setPreviewTextByPath((current) =>
+              current[outputPath] === undefined ? { ...current, [outputPath]: text } : current,
+            );
+          },
+        );
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [entries, onLoadPreviewText, previewTextByPath, searchFilter]);
+  }, [entries, onLoadPreviewText, searchFilter]);
 
   const visibleGroups = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
