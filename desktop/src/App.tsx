@@ -19,6 +19,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { useLocalComputeTargets } from "@/hooks/use-local-compute-targets";
 import { useLiveControl } from "@/hooks/use-live-control";
+import { useRecordingSelection } from "@/hooks/use-recording-selection";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useServerConnection } from "@/hooks/use-server-connection";
@@ -48,7 +49,6 @@ import {
   type WorkspaceView,
   workspaceCopy,
 } from "@/lib/app-types";
-import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import {
   allowRecordingPlaybackPath,
 } from "@/lib/playback-registry";
@@ -90,13 +90,6 @@ type SetupStatus = {
 const setupSkipKey = "yap-local-fallback-setup-skipped";
 const batchServerQueuedMessage = "Queued until a transcription server is connected.";
 
-type ReviewMorphOrigin = {
-  height: number;
-  left: number;
-  top: number;
-  width: number;
-};
-
 export default function App() {
   const initialQueue = useMemo(() => readRecordingQueue(), []);
   const [queue, setQueue] = useState<RecordingJobView[]>(initialQueue);
@@ -129,7 +122,6 @@ export default function App() {
     updateLiveOverlay,
     updateLivePasteHotkey,
   } = useLiveControl();
-  const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
   const [railCollapsed, setRailCollapsed] = useState(false);
@@ -157,8 +149,19 @@ export default function App() {
     rememberHiddenHistoryEntry,
   } = useTranscriptHistory();
   const historyPlaybackPaths = useRegisteredPlayback(queue, setQueue, history);
-  const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
-  const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
+  const {
+    clearHistorySelectionIf,
+    closeHistoryReview,
+    historyJob,
+    reviewMorphOrigin,
+    selectHistoryEntry,
+    selectQueueItem,
+    selectQueueItemOnly,
+    selectedHistoryItem,
+    selectedHistoryOutput,
+    selectedId,
+    selectedItem,
+  } = useRecordingSelection({ history, historyPlaybackPaths, queue });
   const setupPrompted = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
@@ -173,18 +176,6 @@ export default function App() {
   const queueProgress = queue.length ? Math.round((completed / queue.length) * 100) : 0;
   const runningItem = queue.find((item) => isRecordingActive(item.status));
   const elapsedSeconds = useElapsedSeconds(runningSince);
-  const historyJob = useCallback(
-    (entry: TranscriptHistoryEntry) => historyEntryToRecordingJob(entry, historyPlaybackPaths[entry.outputPath]),
-    [historyPlaybackPaths],
-  );
-  const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
-  const selectedHistoryItem = selectedHistoryEntry ? historyJob(selectedHistoryEntry) : undefined;
-  const selectedItem =
-    queue.find((item) => item.id === selectedId) ??
-    selectedHistoryItem ??
-    [...queue].reverse().find((item) => isRecordingFinished(item.status)) ??
-    (history[0] ? historyJob(history[0]) : undefined) ??
-    queue[0];
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
   const showHistory = workspaceView === "home";
@@ -229,7 +220,7 @@ export default function App() {
       const entry = savedSessionToTranscriptHistoryEntry(event.payload);
       const recorded = recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
       if (!recorded) return;
-      setSelectedHistoryOutput(entry.outputPath);
+      selectHistoryEntry(entry);
       setActiveRail("home");
       setWorkspaceView("home");
       setStatus("Ready");
@@ -320,25 +311,6 @@ export default function App() {
       setAuth("Tauri bridge");
     }
   }, []);
-
-  useEffect(() => {
-    if (selectedHistoryOutput) return;
-
-    if (!queue.length) {
-      setSelectedId(undefined);
-      return;
-    }
-
-    if (!selectedId || !queue.some((item) => item.id === selectedId)) {
-      setSelectedId(queue[queue.length - 1].id);
-    }
-  }, [queue, selectedId, selectedHistoryOutput]);
-
-  useEffect(() => {
-    if (selectedHistoryOutput && !history.some((entry) => entry.outputPath === selectedHistoryOutput)) {
-      setSelectedHistoryOutput(undefined);
-    }
-  }, [history, selectedHistoryOutput]);
 
   useEffect(() => {
     if (selectedItem?.output && !Object.prototype.hasOwnProperty.call(transcriptText, selectedItem.output)) {
@@ -633,8 +605,7 @@ export default function App() {
     setQueue((current) => [...current, ...newItems]);
     setActiveRail("transcribe");
     setWorkspaceView("transcribe");
-    setSelectedHistoryOutput(undefined);
-    setSelectedId(newItems[newItems.length - 1].id);
+    selectQueueItem(newItems[newItems.length - 1].id);
   }
 
   function goToTranscribe() {
@@ -695,7 +666,7 @@ export default function App() {
     setStatus(`Transcribing 0/${pending.length}`);
 
     for (const [index, item] of pending.entries()) {
-      if (index === 0) setSelectedId(item.id);
+      if (index === 0) selectQueueItemOnly(item.id);
       setQueue((items) =>
         items.map((entry) =>
           entry.id === item.id
@@ -759,7 +730,7 @@ export default function App() {
     const item = queue.find((entry) => entry.id === id);
     if (!item || !isRecordingRetryable(item.status) || running) return;
 
-    setSelectedId(id);
+    selectQueueItemOnly(id);
     await transcribeItems([{ ...item, status: "queued_local_fallback", error: undefined }]);
   }
 
@@ -788,11 +759,6 @@ export default function App() {
     });
   }
 
-  function selectQueueItem(id: number) {
-    setSelectedHistoryOutput(undefined);
-    setSelectedId(id);
-  }
-
   function clearQueue() {
     if (!running) {
       setQueue([]);
@@ -814,7 +780,7 @@ export default function App() {
   function hideHistoryEntry(outputPath: string) {
     if (!rememberHiddenHistoryEntry(outputPath)) return;
     if (!forgetHistoryEntry(outputPath)) return;
-    if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
+    clearHistorySelectionIf(outputPath);
     toast.success("Hidden from history");
   }
 
@@ -825,7 +791,7 @@ export default function App() {
       });
       if (!rememberHiddenHistoryEntry(entry.outputPath)) return;
       if (!forgetHistoryEntry(entry.outputPath)) return;
-      if (selectedHistoryOutput === entry.outputPath) setSelectedHistoryOutput(undefined);
+      clearHistorySelectionIf(entry.outputPath);
       forgetTranscriptText(entry.outputPath);
       toast.success("Deleted from device");
     } catch (error) {
@@ -833,19 +799,8 @@ export default function App() {
     }
   }
 
-  function selectHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
-    setSelectedId(undefined);
-    setSelectedHistoryOutput(entry.outputPath);
-    setReviewMorphOrigin(
-      origin
-        ? {
-            height: origin.height,
-            left: origin.left,
-            top: origin.top,
-            width: origin.width,
-          }
-        : undefined,
-    );
+  function openHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
+    selectHistoryEntry(entry, origin);
     setActiveRail("home");
     setWorkspaceView("home");
   }
@@ -882,7 +837,7 @@ export default function App() {
           onOpenHelp={() => handleRailAction("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
           onReveal={(entry) => void revealPath(entry.outputPath)}
-          onSelect={selectHistoryEntry}
+          onSelect={openHistoryEntry}
           selectedOutputPath={selectedHistoryOutput}
         />
       ) : null}
@@ -1024,10 +979,7 @@ export default function App() {
         onCopy={copyTranscript}
         onOpen={(path) => void openAppPath(path)}
         onOpenChange={(open) => {
-          if (!open) {
-            setSelectedHistoryOutput(undefined);
-            setReviewMorphOrigin(undefined);
-          }
+          if (!open) closeHistoryReview();
         }}
         onOpenHelp={() => handleRailAction("help")}
         onRetry={(id) => void retryItem(id)}
