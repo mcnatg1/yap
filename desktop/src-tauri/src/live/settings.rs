@@ -36,13 +36,19 @@ pub fn load() -> LiveSettings {
 
 pub fn save(settings: &LiveSettings) -> Result<(), String> {
     let path = settings_path();
+    save_to_path(settings, &path)
+}
+
+fn save_to_path(settings: &LiveSettings, path: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create settings directory: {err}"))?;
     }
     let text = serde_json::to_string_pretty(settings)
         .map_err(|err| format!("Failed to serialize live settings: {err}"))?;
-    std::fs::write(path, text).map_err(|err| format!("Failed to save live settings: {err}"))
+    std::fs::remove_file(path.with_extension("json.part")).ok();
+    crate::stt::model::write_text_atomically(path, &text)
+        .map_err(|err| format!("Failed to save live settings: {err}"))
 }
 
 pub fn settings_dir_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
@@ -74,5 +80,24 @@ mod tests {
             settings_dir_from(|key| (key == "LOCALAPPDATA").then(|| local.display().to_string()));
 
         assert_eq!(dir, local.join("Yap"));
+    }
+
+    #[test]
+    fn save_live_settings_replaces_stale_partial_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "yap-live-settings-{}-{}",
+            std::process::id(),
+            crate::live::recordings::unix_millis_now().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live-settings.json");
+        let partial = dir.join("live-settings.json.part");
+        std::fs::write(&partial, "stale").unwrap();
+
+        save_to_path(&LiveSettings::default(), &path).unwrap();
+
+        assert!(path.exists());
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 }
