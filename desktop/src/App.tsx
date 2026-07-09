@@ -21,6 +21,7 @@ import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { useLocalComputeTargets } from "@/hooks/use-local-compute-targets";
 import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
+import { useServerConnection } from "@/hooks/use-server-connection";
 import {
   hideTranscriptHistory,
   readHiddenTranscriptHistory,
@@ -44,11 +45,9 @@ import {
   isRecordingRunnable,
   isWorkspaceView,
   recordingStatusForStartFailure,
-  serverConnectionLabel,
   type FallbackModelView,
   type RailAction,
   type RecordingJobView,
-  type ServerConnectionState,
   type WorkspaceView,
   workspaceCopy,
 } from "@/lib/app-types";
@@ -81,7 +80,6 @@ import {
   verifyFallbackModel,
 } from "@/settings";
 import { SttInvokeError, startTranscribe } from "@/stt";
-import { serverConnectionStatus } from "@/server";
 
 type SetupStatus = {
   model: string;
@@ -116,8 +114,8 @@ export default function App() {
   const [fallbackEnabled, setFallbackEnabled] = useState(true);
   const [fallbackModel, setFallbackModel] = useState<FallbackModelView | null>(null);
   const [modelInstalled, setModelInstalled] = useState(false);
-  const [serverState, setServerState] = useState<ServerConnectionState>("not_set");
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
+  const { refreshServerState, serverLabel } = useServerConnection();
   const {
     clearLivePasteShortcut,
     clearLiveShortcut,
@@ -165,7 +163,6 @@ export default function App() {
   const queueProgress = queue.length ? Math.round((completed / queue.length) * 100) : 0;
   const runningItem = queue.find((item) => isRecordingActive(item.status));
   const elapsedSeconds = useElapsedSeconds(runningSince);
-  const serverLabel = serverConnectionLabel(serverState);
   const historyJob = useCallback(
     (entry: TranscriptHistoryEntry) => historyEntryToRecordingJob(entry, historyPlaybackPaths[entry.outputPath]),
     [historyPlaybackPaths],
@@ -358,12 +355,11 @@ export default function App() {
     if (!isTauri()) return;
 
     try {
-      const [setup, view, server] = await Promise.all([
+      const [setup, view] = await Promise.all([
         invoke<SetupStatus>("setup_status"),
         fallbackModelStatus(),
-        serverConnectionStatus(),
+        refreshServerState(),
       ]);
-      setServerState(server);
       applySetupStatus(setup);
       applyFallbackModelView(view, {
         authText: setup.engineReady ? "Ready" : "Setup",
