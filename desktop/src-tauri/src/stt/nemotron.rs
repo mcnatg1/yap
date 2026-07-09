@@ -444,9 +444,7 @@ fn status_view(
 
 fn remove_if_exists(path: PathBuf) -> Result<(), SttError> {
     match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => {
-            std::fs::remove_dir_all(path).map_err(|_| SttError::ModelMissing)?;
-        }
+        Ok(metadata) if metadata.is_dir() => return Err(SttError::ModelCorrupt),
         Ok(_) => {
             std::fs::remove_file(path).map_err(|_| SttError::ModelMissing)?;
         }
@@ -728,17 +726,18 @@ mod tests {
     }
 
     #[test]
-    fn remove_download_artifacts_cleans_stale_artifact_directories() {
+    fn remove_download_artifacts_rejects_artifact_directories() {
         let dir = TestDir::new();
         let path = dir.path().join(ARTIFACTS[0].file);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::create_dir_all(path.with_extension("verified")).unwrap();
         std::fs::create_dir_all(path.with_extension("part")).unwrap();
 
-        remove_download_artifacts(&path).unwrap();
+        let error = remove_download_artifacts(&path).unwrap_err();
 
-        assert!(!path.exists());
-        assert!(!path.with_extension("verified").exists());
-        assert!(!path.with_extension("part").exists());
+        assert_eq!(error, SttError::ModelCorrupt);
+        assert!(path.is_dir());
+        assert!(path.with_extension("verified").is_dir());
+        assert!(path.with_extension("part").is_dir());
     }
 }
