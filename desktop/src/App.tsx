@@ -22,6 +22,7 @@ import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useServerConnection } from "@/hooks/use-server-connection";
+import { useTranscriptFileActions } from "@/hooks/use-transcript-file-actions";
 import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import {
@@ -142,6 +143,12 @@ export default function App() {
     rememberPolishedText,
     transcriptText,
   } = useTranscriptText();
+  const {
+    copyTranscript,
+    openAppPath,
+    revealPath,
+    savePolishedTranscript,
+  } = useTranscriptFileActions(loadTranscriptText);
   const {
     forgetHistoryEntry,
     history,
@@ -799,48 +806,6 @@ export default function App() {
     (entry: TranscriptHistoryEntry) => loadTranscriptPreviewText(entry.outputPath),
     [loadTranscriptPreviewText],
   );
-
-  async function copyTranscript(item: RecordingJobView) {
-    if (!item.output) return;
-
-    try {
-      const text = await loadTranscriptText(item.output);
-      await navigator.clipboard.writeText(text);
-      toast.success(text.trim() ? "Transcript copied" : "Empty transcript copied");
-    } catch {
-      toast.error("Copy failed");
-    }
-  }
-
-  async function openAppPath(path: string) {
-    try {
-      await invoke("open_app_path", { path });
-      toast.success("Opened file");
-    } catch {
-      toast.error("Open failed");
-    }
-  }
-
-  async function revealPath(path: string) {
-    try {
-      await invoke("reveal_app_path", { path });
-    } catch {
-      toast.error("Reveal failed");
-    }
-  }
-
-  async function savePolishedTranscript(item: RecordingJobView, text: string) {
-    if (!item.output || !text.trim()) return "";
-
-    try {
-      const path = await invoke<string>("write_polished_text", { path: item.output, text });
-      toast.success("Polished draft saved");
-      return path;
-    } catch (error) {
-      toast.error("Save failed");
-      throw error;
-    }
-  }
 
   function hideHistoryEntry(outputPath: string) {
     if (!rememberHiddenHistoryEntry(outputPath)) return;
