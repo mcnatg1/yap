@@ -76,6 +76,7 @@ describe("client recording workflow projection", () => {
     expect(isRecordingFinished("complete")).toBe(true);
     expect(isRecordingFinished("partial")).toBe(true);
     expect(isRecordingRunnable("blocked_server_unavailable")).toBe(false);
+    expect(isRecordingRunnable("queued_server")).toBe(false);
     expect(isRecordingRunnable("queued_local_fallback")).toBe(true);
     expect(isRecordingRunnable("failed")).toBe(true);
     expect(isRecordingRunnable("complete")).toBe(false);

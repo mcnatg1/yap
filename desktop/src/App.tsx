@@ -101,7 +101,7 @@ type SetupStatus = {
 
 const setupSkipKey = "yap-local-fallback-setup-skipped";
 const defaultLiveHotkey = "Ctrl+Shift+Space";
-const batchServerUnavailableMessage = "Server batch transcription is not wired yet.";
+const batchServerQueuedMessage = "Queued until a transcription server is connected.";
 
 const initialLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
@@ -692,14 +692,14 @@ export default function App() {
       }
 
       const newItems: RecordingJobView[] = accepted.map(({ id, path }) => ({
-        error: batchServerUnavailableMessage,
+        error: batchServerQueuedMessage,
         id,
         intent: "recording",
         name: basename(path),
         path,
         pipeline: createInitialPipelineState(),
         route: "serverBatch",
-        status: "blocked_server_unavailable",
+        status: "queued_server",
       }));
       if (newItems.length) {
         setActiveRail("transcribe");
@@ -760,7 +760,7 @@ export default function App() {
   async function transcribeItems(pending: RecordingJobView[]) {
     if (!pending.length || running || !isTauri()) return;
     if (pending.some((item) => item.intent === "recording")) {
-      toast.error(batchServerUnavailableMessage);
+      toast.error(batchServerQueuedMessage);
       return;
     }
 
