@@ -116,6 +116,8 @@ impl LiveRuntime {
         self.active_session.store(session, Ordering::SeqCst);
 
         let capture = open_capture(
+            self.clone(),
+            app.clone(),
             selected_device_id.as_deref(),
             session,
             Arc::clone(&self.active_session),
@@ -183,6 +185,8 @@ impl LiveRuntime {
         if self.active_session.load(Ordering::SeqCst) != session {
             return;
         }
+        let state = app.state::<LiveSessionState>();
+        let before_crash = state.snapshot();
         self.active_session.store(0, Ordering::SeqCst);
         {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
@@ -191,7 +195,13 @@ impl LiveRuntime {
         }
         app.state::<crate::runtime::RuntimeOrchestratorState>()
             .with(|orchestrator| orchestrator.finish_active_work());
-        let state = app.state::<LiveSessionState>();
+        match super::recordings::save_session_files(self, &before_crash) {
+            Ok(Some(saved)) => {
+                let _ = app.emit("live-session-saved", &saved);
+            }
+            Ok(None) => {}
+            Err(error) => crate::stt::log_yap(&format!("live crash save failed: {error}")),
+        }
         let view = state.block_with_error(message);
         let _ = app.emit("live-session", &view);
     }
@@ -409,6 +419,8 @@ impl StreamFinisher {
 }
 
 fn open_capture(
+    runtime: LiveRuntime,
+    app: tauri::AppHandle,
     selected_device_id: Option<&str>,
     session: u64,
     active_session: Arc<AtomicU64>,
@@ -457,7 +469,6 @@ fn open_capture(
             audio_raw_ready.store(true, Ordering::Release);
         }
     });
-    let err_fn = |err| crate::stt::log_yap(&format!("live input stream error: {err}"));
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => build_capture_stream::<f32>(
             &device,
@@ -466,7 +477,7 @@ fn open_capture(
             Arc::clone(&active_session),
             Arc::clone(&raw_ready),
             raw_tx,
-            err_fn,
+            capture_error_handler(runtime.clone(), app.clone(), session),
         ),
         cpal::SampleFormat::I16 => build_capture_stream::<i16>(
             &device,
@@ -475,7 +486,7 @@ fn open_capture(
             Arc::clone(&active_session),
             Arc::clone(&raw_ready),
             raw_tx,
-            err_fn,
+            capture_error_handler(runtime.clone(), app.clone(), session),
         ),
         cpal::SampleFormat::U16 => build_capture_stream::<u16>(
             &device,
@@ -484,7 +495,7 @@ fn open_capture(
             Arc::clone(&active_session),
             Arc::clone(&raw_ready),
             raw_tx,
-            err_fn,
+            capture_error_handler(runtime, app, session),
         ),
         sample_format => Err(format!("Unsupported microphone format: {sample_format}")),
     }?;
@@ -492,6 +503,20 @@ fn open_capture(
         .play()
         .map_err(|err| format!("Microphone access failed: {err}"))?;
     Ok((stream, level_rx, audio))
+}
+
+fn capture_error_handler(
+    runtime: LiveRuntime,
+    app: tauri::AppHandle,
+    session: u64,
+) -> impl FnMut(cpal::StreamError) + Send + 'static {
+    move |err| {
+        let message = format!("Microphone input stopped: {err}");
+        crate::stt::log_yap(&format!("live input stream error: {err}"));
+        let runtime = runtime.clone();
+        let app = app.clone();
+        std::thread::spawn(move || runtime.handle_stream_crash(app, session, &message));
+    }
 }
 
 fn build_capture_stream<T>(
