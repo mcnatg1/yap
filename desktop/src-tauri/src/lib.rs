@@ -147,7 +147,9 @@ fn live_status(state: tauri::State<'_, live::LiveSessionState>) -> live::state::
 async fn show_live_overlay(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
 ) -> Result<live::state::LiveSessionView, String> {
+    warm_live_on_intent(&app, &live_runtime);
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
     persist_live_view(&view)?;
     if view.status == live::state::LiveSessionStatus::Idle {
@@ -199,10 +201,11 @@ fn set_live_overlay_surface(
 async fn set_live_overlay_enabled(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     enabled: bool,
 ) -> Result<live::state::LiveSessionView, String> {
     if enabled {
-        show_live_overlay(app, state).await
+        show_live_overlay(app, state, live_runtime).await
     } else {
         hide_live_overlay(app, state)
     }
@@ -389,6 +392,7 @@ fn start_live_session(
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     active_capture_mode: Option<live::state::LiveCaptureMode>,
 ) -> live::state::LiveSessionView {
+    warm_live_on_intent(&app, &live_runtime);
     let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
     start_live_runtime(
         app,
@@ -893,6 +897,16 @@ fn block_live_for_setup(
     live.start(setup, false)
 }
 
+fn warm_live_on_intent(app: &tauri::AppHandle, live_runtime: &live::runtime::LiveRuntime) {
+    let app = app.clone();
+    let live_runtime = live_runtime.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = live_runtime.warm(app) {
+            log_line(&format!("live warmup skipped: {error}"));
+        }
+    });
+}
+
 fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     ensure_live_overlay_size(
         app,
@@ -1077,7 +1091,6 @@ pub fn run() {
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
     let fallback_model_install_state = stt::fallback_model::FallbackModelInstallState::new();
-    let live_runtime_for_warmup = live_runtime.clone();
     let live_runtime_for_monitor = live_runtime.clone();
     let live_runtime_for_exit = live_runtime.clone();
     let live_shortcut_interaction =
@@ -1169,15 +1182,6 @@ pub fn run() {
                 }
             }
             install_tray(app.handle())?;
-            {
-                let app = app.handle().clone();
-                let live_runtime = live_runtime_for_warmup.clone();
-                std::thread::spawn(move || {
-                    if let Err(error) = live_runtime.warm(app) {
-                        log_line(&format!("live warmup skipped: {error}"));
-                    }
-                });
-            }
             {
                 let app = app.handle().clone();
                 std::thread::spawn(move || loop {
