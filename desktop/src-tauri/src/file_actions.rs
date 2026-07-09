@@ -19,17 +19,29 @@ pub fn read_text_preview(
 }
 
 fn read_text_file_at(path: String) -> Result<String, String> {
+    read_text_file_at_from_dir(path, &crate::live::recordings::recordings_dir())
+}
+
+fn read_text_file_at_from_dir(path: String, owned_dir: &std::path::Path) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
-    let path = canonical_transcript_path(&path, "read")?;
+    let path = owned_live_transcript_path_from_dir(&path, "read", owned_dir)?;
     reject_oversized_transcript(&path)?;
     std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
 }
 
 fn read_text_preview_at(path: String, max_chars: usize) -> Result<String, String> {
+    read_text_preview_at_from_dir(path, max_chars, &crate::live::recordings::recordings_dir())
+}
+
+fn read_text_preview_at_from_dir(
+    path: String,
+    max_chars: usize,
+    owned_dir: &std::path::Path,
+) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
 
     let max_chars = max_chars.clamp(1, 4_000);
-    let path = canonical_transcript_path(&path, "read")?;
+    let path = owned_live_transcript_path_from_dir(&path, "read", owned_dir)?;
     let file =
         std::fs::File::open(&path).map_err(|err| format!("Failed to read transcript: {err}"))?;
     let mut text = String::new();
@@ -50,8 +62,16 @@ pub fn write_polished_text(
 }
 
 fn write_polished_text_at(path: String, text: String) -> Result<String, String> {
+    write_polished_text_at_from_dir(path, text, &crate::live::recordings::recordings_dir())
+}
+
+fn write_polished_text_at_from_dir(
+    path: String,
+    text: String,
+    owned_dir: &std::path::Path,
+) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
-    let path = canonical_transcript_path(&path, "polished")?;
+    let path = owned_live_transcript_path_from_dir(&path, "polished", owned_dir)?;
     let output = polished_path(&path)?;
     write_text_atomically(&output, &text)
         .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
@@ -214,6 +234,22 @@ fn canonical_transcript_path(
     Ok(path)
 }
 
+fn owned_live_transcript_path_from_dir(
+    path: &std::path::Path,
+    action: &str,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let path = canonical_transcript_path(path, action)?;
+    let owned_dir = owned_dir
+        .canonicalize()
+        .map_err(|_| format!("Only Yap-owned live transcripts can be {action}."))?;
+
+    if !path.starts_with(&owned_dir) || !is_live_transcript_file(&path) {
+        return Err(format!("Only Yap-owned live transcripts can be {action}."));
+    }
+    Ok(path)
+}
+
 fn reject_oversized_transcript(path: &std::path::Path) -> Result<(), String> {
     let length = std::fs::metadata(path)
         .map_err(|err| format!("Failed to inspect transcript: {err}"))?
@@ -285,10 +321,11 @@ mod tests {
     #[test]
     fn read_text_preview_caps_transcript_text() {
         let dir = temp_test_dir("preview-cap");
-        let transcript = dir.join("take.txt");
+        let transcript = dir.join("live-100.txt");
         std::fs::write(&transcript, "abcdef").unwrap();
 
-        let preview = read_text_preview_at(transcript.display().to_string(), 3).unwrap();
+        let preview =
+            read_text_preview_at_from_dir(transcript.display().to_string(), 3, &dir).unwrap();
 
         assert_eq!(preview, "abc");
         std::fs::remove_dir_all(dir).ok();
@@ -297,10 +334,11 @@ mod tests {
     #[test]
     fn transcript_read_rejects_directory_after_canonicalization() {
         let dir = temp_test_dir("txt-dir");
-        let transcript_dir = dir.join("take.txt");
+        let transcript_dir = dir.join("live-101.txt");
         std::fs::create_dir_all(&transcript_dir).unwrap();
 
-        let error = read_text_file_at(transcript_dir.display().to_string()).unwrap_err();
+        let error =
+            read_text_file_at_from_dir(transcript_dir.display().to_string(), &dir).unwrap_err();
 
         assert_eq!(error, "Only transcript text files can be read.");
         std::fs::remove_dir_all(dir).ok();
@@ -309,14 +347,14 @@ mod tests {
     #[test]
     fn read_text_file_rejects_oversized_transcripts() {
         let dir = temp_test_dir("oversized-read");
-        let transcript = dir.join("take.txt");
+        let transcript = dir.join("live-102.txt");
         std::fs::write(
             &transcript,
             vec![b'a'; (MAX_TRANSCRIPT_READ_BYTES as usize) + 1],
         )
         .unwrap();
 
-        let error = read_text_file_at(transcript.display().to_string()).unwrap_err();
+        let error = read_text_file_at_from_dir(transcript.display().to_string(), &dir).unwrap_err();
 
         assert_eq!(
             error,
@@ -326,10 +364,39 @@ mod tests {
     }
 
     #[test]
+    fn transcript_reads_reject_external_text_files() {
+        let owned_dir = temp_test_dir("owned-live-read");
+        let external_dir = temp_test_dir("external-transcript-read");
+        let transcript = external_dir.join("live-103.txt");
+        std::fs::write(&transcript, "secret").unwrap();
+
+        assert_eq!(
+            read_text_file_at_from_dir(transcript.display().to_string(), &owned_dir).unwrap_err(),
+            "Only Yap-owned live transcripts can be read."
+        );
+        assert_eq!(
+            read_text_preview_at_from_dir(transcript.display().to_string(), 10, &owned_dir)
+                .unwrap_err(),
+            "Only Yap-owned live transcripts can be read."
+        );
+        assert_eq!(
+            write_polished_text_at_from_dir(
+                transcript.display().to_string(),
+                "safe".into(),
+                &owned_dir,
+            )
+            .unwrap_err(),
+            "Only Yap-owned live transcripts can be polished."
+        );
+        std::fs::remove_dir_all(owned_dir).ok();
+        std::fs::remove_dir_all(external_dir).ok();
+    }
+
+    #[test]
     fn transcript_actions_reject_resolved_non_transcript_files() {
         let dir = temp_test_dir("txt-symlink");
         let target = dir.join("secret.json");
-        let link = dir.join("take.txt");
+        let link = dir.join("live-104.txt");
         std::fs::write(&target, "{}").unwrap();
         if create_file_symlink(&target, &link).is_err() {
             std::fs::remove_dir_all(dir).ok();
@@ -337,15 +404,16 @@ mod tests {
         }
 
         assert_eq!(
-            read_text_file_at(link.display().to_string()).unwrap_err(),
+            read_text_file_at_from_dir(link.display().to_string(), &dir).unwrap_err(),
             "Only transcript text files can be read."
         );
         assert_eq!(
-            read_text_preview_at(link.display().to_string(), 10).unwrap_err(),
+            read_text_preview_at_from_dir(link.display().to_string(), 10, &dir).unwrap_err(),
             "Only transcript text files can be read."
         );
         assert_eq!(
-            write_polished_text_at(link.display().to_string(), "safe".into()).unwrap_err(),
+            write_polished_text_at_from_dir(link.display().to_string(), "safe".into(), &dir)
+                .unwrap_err(),
             "Only transcript text files can be polished."
         );
         std::fs::remove_dir_all(dir).ok();
