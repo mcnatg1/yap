@@ -18,6 +18,7 @@ import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog"
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
+import { useLocalComputeTargets } from "@/hooks/use-local-compute-targets";
 import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import {
@@ -45,7 +46,6 @@ import {
   recordingStatusForStartFailure,
   serverConnectionLabel,
   type FallbackModelView,
-  type LocalComputeTargetView,
   type RailAction,
   type RecordingJobView,
   type ServerConnectionState,
@@ -73,13 +73,11 @@ import {
   cancelFallbackModelInstall,
   fallbackModelStatus,
   installFallbackModel,
-  listLocalComputeTargets,
   listenFallbackModelProgress,
   listenFallbackModelStatus,
   openFallbackModelFolder,
   removeFallbackModel,
   setFallbackModelEnabled,
-  setLocalComputeTarget,
   verifyFallbackModel,
 } from "@/settings";
 import { SttInvokeError, startTranscribe } from "@/stt";
@@ -120,7 +118,6 @@ export default function App() {
   const [modelInstalled, setModelInstalled] = useState(false);
   const [serverState, setServerState] = useState<ServerConnectionState>("not_set");
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
-  const [computeTargetPending, setComputeTargetPending] = useState(false);
   const {
     clearLivePasteShortcut,
     clearLiveShortcut,
@@ -139,10 +136,6 @@ export default function App() {
     updateLiveOverlay,
     updateLivePasteHotkey,
   } = useLiveControl();
-  const [localComputeTargets, setLocalComputeTargets] = useState<LocalComputeTargetView[]>([
-    { id: "auto", label: "Auto", selected: true },
-    { id: "cpu", label: "CPU", selected: false },
-  ]);
   const [selectedId, setSelectedId] = useState<number>();
   const [activeRail, setActiveRail] = useState<RailAction>("home");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("home");
@@ -191,6 +184,12 @@ export default function App() {
   const showTranscript = workspaceView === "transcribe" || workspaceView === "polish";
   const showPolish = workspaceView === "polish";
   const fallbackModelBusy = isFallbackModelBusy(fallbackModel, fallbackCommandPending);
+  const {
+    computeTargetPending,
+    loadComputeTargets,
+    localComputeTargets,
+    updateLocalComputeTarget,
+  } = useLocalComputeTargets(fallbackModelBusy);
   const setupBusy = fallbackModelBusy || computeTargetPending;
 
   useEffect(() => {
@@ -377,10 +376,6 @@ export default function App() {
       setStatus("Setup check failed");
       setAuth(String(error));
     }
-  }
-
-  async function loadComputeTargets() {
-    setLocalComputeTargets(await listLocalComputeTargets());
   }
 
   function unblockFallbackReadyQueue() {
@@ -589,21 +584,6 @@ export default function App() {
       await openFallbackModelFolder();
     } catch (error) {
       toast.error(`Open failed: ${String(error)}`);
-    }
-  }
-
-  async function updateLocalComputeTarget(targetId: string) {
-    if (!isTauri() || setupBusy) return;
-
-    setComputeTargetPending(true);
-    try {
-      setLocalComputeTargets(await setLocalComputeTarget(targetId));
-      toast.success("Local compute updated");
-    } catch (error) {
-      toast.error(String(error));
-      await loadComputeTargets();
-    } finally {
-      setComputeTargetPending(false);
     }
   }
 
