@@ -172,6 +172,7 @@ export default function App() {
   const setupPrompted = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
+  const historyRef = useRef(history);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => isRecordingRunnable(item.status)),
@@ -207,6 +208,10 @@ export default function App() {
   }, [modelInstalled]);
 
   useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
+  useEffect(() => {
     if (!isTauri()) return;
 
     let cancelled = false;
@@ -225,7 +230,8 @@ export default function App() {
 
     void listen<SavedLiveSession>("live-session-saved", (event) => {
       const entry = savedLiveSessionToHistoryEntry(event.payload);
-      recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
+      const recorded = recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
+      if (!recorded) return;
       setSelectedHistoryOutput(entry.outputPath);
       setActiveRail("home");
       setWorkspaceView("home");
@@ -940,21 +946,27 @@ export default function App() {
     }
   }
 
+  function replaceHistory(next: TranscriptHistoryEntry[]) {
+    historyRef.current = next;
+    setHistory(next);
+  }
+
   function recordVisibleHistoryEntries(entries: TranscriptHistoryEntry[], warning: string) {
-    if (!entries.length) return;
+    if (!entries.length) return false;
     const hiddenHistoryOutputs = new Set(readHiddenTranscriptHistory());
     const visibleEntries = entries.filter((entry) => !hiddenHistoryOutputs.has(entry.outputPath));
-    if (!visibleEntries.length) return;
+    if (!visibleEntries.length) return false;
 
-    setHistory((current) => {
-      const next = visibleEntries.reduce(recordTranscriptHistory, current);
-      try {
-        writeTranscriptHistory(next);
-      } catch (error) {
-        console.warn(warning, error);
-      }
-      return next;
-    });
+    const next = visibleEntries.reduce(recordTranscriptHistory, historyRef.current);
+    try {
+      writeTranscriptHistory(next);
+    } catch (error) {
+      console.warn(warning, error);
+      toast.warning(warning);
+      return false;
+    }
+    replaceHistory(next);
+    return true;
   }
 
   function rememberHiddenHistoryEntry(outputPath: string) {
@@ -963,25 +975,30 @@ export default function App() {
       writeHiddenTranscriptHistory(next);
     } catch (error) {
       console.warn("Hidden transcript history could not be saved.", error);
+      toast.warning("Hidden transcript history could not be saved.");
+      return false;
     }
+    return true;
   }
 
   function forgetHistoryEntry(outputPath: string) {
-    setHistory((current) => {
-      const next = removeTranscriptHistory(current, outputPath);
-      try {
-        writeTranscriptHistory(next);
-      } catch (error) {
-        console.warn("Transcript history removal could not be saved.", error);
-      }
-      return next;
-    });
+    const next = removeTranscriptHistory(historyRef.current, outputPath);
+    try {
+      writeTranscriptHistory(next);
+    } catch (error) {
+      console.warn("Transcript history removal could not be saved.", error);
+      toast.warning("Transcript history removal could not be saved.");
+      return false;
+    }
+    replaceHistory(next);
     if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
+    return true;
   }
 
   function hideHistoryEntry(outputPath: string) {
-    rememberHiddenHistoryEntry(outputPath);
-    forgetHistoryEntry(outputPath);
+    if (!rememberHiddenHistoryEntry(outputPath)) return;
+    replaceHistory(removeTranscriptHistory(historyRef.current, outputPath));
+    if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
     toast.success("Hidden from history");
   }
 
