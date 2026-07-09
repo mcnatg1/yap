@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
-import { nextRecordingQueueId, normalizeRecordingQueue, readRecordingQueue, writeRecordingQueue } from "@/recording-queue";
+import {
+  availableQueuedServerSlots,
+  createQueuedServerRecordingJobs,
+  maxStoredQueueJobs,
+  nextRecordingQueueId,
+  normalizeRecordingQueue,
+  readRecordingQueue,
+  writeRecordingQueue,
+} from "@/recording-queue";
 
 function storageWith(value: string) {
   const storage = { value };
@@ -76,5 +84,42 @@ describe("recording queue storage", () => {
     expect(jobs).toHaveLength(200);
     expect(jobs[0].id).toBe(6);
     expect(jobs.at(-1)?.id).toBe(205);
+  });
+
+  it("projects approved selected recordings into queued server jobs", () => {
+    const jobs = createQueuedServerRecordingJobs(
+      [{ id: 9, path: "C:/meeting.wav", playbackPath: "\\\\?\\C:\\meeting.wav" }],
+      "Queued",
+    );
+
+    expect(jobs).toMatchObject([
+      {
+        error: "Queued",
+        id: 9,
+        intent: "recording",
+        name: "meeting.wav",
+        path: "C:/meeting.wav",
+        playbackPath: "\\\\?\\C:\\meeting.wav",
+        route: "serverBatch",
+        status: "queued_server",
+      },
+    ]);
+    expect(jobs[0].pipeline).toEqual(createInitialPipelineState());
+  });
+
+  it("counts only queued server recordings against persisted queue slots", () => {
+    const queued = createQueuedServerRecordingJobs(
+      Array.from({ length: 2 }, (_, index) => ({
+        id: index + 1,
+        path: `C:/meeting-${index}.wav`,
+        playbackPath: `C:/meeting-${index}.wav`,
+      })),
+      "Queued",
+    );
+
+    expect(availableQueuedServerSlots([
+      ...queued,
+      { ...queued[0], id: 10, status: "complete" },
+    ])).toBe(maxStoredQueueJobs - 2);
   });
 });

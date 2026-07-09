@@ -33,8 +33,6 @@ import {
   acceptedFormats,
   acceptedRecordingDrops,
   audioExtensions,
-  basename,
-  createInitialPipelineState,
   deriveSetupStateFromFallbackModel,
   isFallbackModelBusy,
   isRecordingActive,
@@ -58,7 +56,13 @@ import {
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
-import { maxStoredQueueJobs, nextRecordingQueueId, readRecordingQueue, writeRecordingQueue } from "@/recording-queue";
+import {
+  availableQueuedServerSlots,
+  createQueuedServerRecordingJobs,
+  nextRecordingQueueId,
+  readRecordingQueue,
+  writeRecordingQueue,
+} from "@/recording-queue";
 import {
   clearLiveHotkey,
   clearLivePasteHotkey,
@@ -719,14 +723,8 @@ export default function App() {
     nextRecordingId.current += paths.length;
     const incoming = paths.map((path, index) => ({ id: firstId + index, path }));
 
-    const queuedServerCount = queueRef.current.filter((item) =>
-      item.intent === "recording" &&
-      item.route === "serverBatch" &&
-      item.status === "queued_server"
-    ).length;
     const acceptedCandidates = acceptedRecordingDrops(queueRef.current.map((item) => item.path), incoming);
-    const availableServerQueueSlots = Math.max(0, maxStoredQueueJobs - queuedServerCount);
-    const accepted = acceptedCandidates.slice(0, availableServerQueueSlots);
+    const accepted = acceptedCandidates.slice(0, availableQueuedServerSlots(queueRef.current));
     if (paths.length && !acceptedCandidates.length) {
       toast.warning(`Drop ${acceptedFormats} files.`);
       return;
@@ -760,28 +758,12 @@ export default function App() {
     const acceptedApprovedIds = new Set(
       acceptedRecordingDrops(current.map((item) => item.path), approved).map((item) => item.id),
     );
-    const currentQueuedServerCount = current.filter((item) =>
-      item.intent === "recording" &&
-      item.route === "serverBatch" &&
-      item.status === "queued_server"
-    ).length;
-    const currentAvailableServerQueueSlots = Math.max(0, maxStoredQueueJobs - currentQueuedServerCount);
     const addable = approved
       .filter((item) => acceptedApprovedIds.has(item.id))
-      .slice(0, currentAvailableServerQueueSlots);
+      .slice(0, availableQueuedServerSlots(current));
     if (!addable.length) return;
 
-    const newItems: RecordingJobView[] = addable.map(({ id, path, playbackPath }) => ({
-      error: batchServerQueuedMessage,
-      id,
-      intent: "recording",
-      name: basename(path),
-      path,
-      playbackPath,
-      pipeline: createInitialPipelineState(),
-      route: "serverBatch",
-      status: "queued_server",
-    }));
+    const newItems = createQueuedServerRecordingJobs(addable, batchServerQueuedMessage);
     setQueue((current) => [...current, ...newItems]);
     setActiveRail("transcribe");
     setWorkspaceView("transcribe");
