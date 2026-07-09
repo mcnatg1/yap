@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
@@ -888,10 +888,15 @@ export default function App() {
     return text;
   }
 
-  async function loadTranscriptPreviewText(path: string) {
+  const loadTranscriptPreviewText = useCallback(async (path: string) => {
     if (!isTauri()) return "";
     return invoke<string>("read_text_preview", { maxChars: 600, path });
-  }
+  }, []);
+
+  const loadHistoryPreviewText = useCallback(
+    (entry: TranscriptHistoryEntry) => loadTranscriptPreviewText(entry.outputPath),
+    [loadTranscriptPreviewText],
+  );
 
   async function copyTranscript(item: RecordingJobView) {
     if (!item.output) return;
@@ -1053,7 +1058,7 @@ export default function App() {
           onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
           onDelete={(entry) => void deleteHistoryEntry(entry)}
           onHide={hideHistoryEntry}
-          onLoadPreviewText={(entry) => loadTranscriptPreviewText(entry.outputPath)}
+          onLoadPreviewText={loadHistoryPreviewText}
           onOpen={(entry) => void openAppPath(entry.outputPath)}
           onOpenHelp={() => handleRailAction("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
