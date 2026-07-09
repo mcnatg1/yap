@@ -1,4 +1,5 @@
 use crate::audio::frame::{AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, VadSegment};
+use crate::audio::vad::{VadDecision, VadKind};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -9,6 +10,14 @@ pub struct AudioSessionEnvelope {
     pub sample_rate_hz: u32,
     pub chunks: Vec<AudioChunkEnvelope>,
     pub degraded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkWindowConfig {
+    pub target_window_ms: u32,
+    pub max_window_ms: u32,
+    pub tail_padding_ms: u32,
+    pub preserve_silence_markers: bool,
 }
 
 pub struct AudioChunkEnvelopeBuilder {
@@ -110,15 +119,370 @@ pub enum AudioSource {
     Recording,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FrameVadAssignment {
+    kind: VadKind,
+    rms: f32,
+}
+
+pub fn build_manifest_windows(
+    session_id: u64,
+    frames: &[AudioFrame],
+    vad: &[VadDecision],
+    purpose: AudioPurpose,
+    codec: AudioCodec,
+    config: ChunkWindowConfig,
+) -> Vec<AudioChunkEnvelope> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sorted_frames = frames.to_vec();
+    sorted_frames.sort_by_key(|frame| (frame.start_ms, frame.sequence, frame.duration_ms));
+
+    let target_window_ms = u64::from(config.target_window_ms.max(1));
+    let max_window_ms = u64::from(config.max_window_ms.max(config.target_window_ms.max(1)));
+    let chunk_window_ms = target_window_ms.min(max_window_ms);
+
+    if has_mixed_session_or_sample_rate(session_id, &sorted_frames) {
+        return build_error_windows(session_id, &sorted_frames, purpose, codec, chunk_window_ms);
+    }
+
+    let assignments = sorted_frames
+        .iter()
+        .map(|frame| assign_vad(frame, vad))
+        .collect::<Vec<_>>();
+
+    let mut chunks = Vec::new();
+    let mut index = 0;
+    while index < sorted_frames.len() {
+        match assignments[index].kind {
+            VadKind::Speech => {
+                let speech_end = advance_while_kind(&assignments, index, VadKind::Speech);
+                let speech_windows = split_windows(
+                    &sorted_frames[index..speech_end],
+                    chunk_window_ms,
+                    max_window_ms,
+                );
+                let last_window = speech_windows.len().saturating_sub(1);
+                let mut consumed = speech_end;
+
+                for (window_index, (relative_start, relative_end)) in
+                    speech_windows.iter().enumerate()
+                {
+                    let start = index + relative_start;
+                    let speech_chunk_end = index + relative_end;
+                    let mut chunk_end = speech_chunk_end;
+                    let speech_end_ms = sorted_frames[speech_chunk_end - 1].end_ms();
+
+                    if window_index == last_window {
+                        chunk_end = extend_speech_tail(
+                            &sorted_frames,
+                            &assignments,
+                            start,
+                            speech_chunk_end,
+                            speech_end_ms,
+                            config.tail_padding_ms,
+                            max_window_ms,
+                        );
+                        consumed = chunk_end;
+                    }
+
+                    let mut vad_segments = vec![VadSegment {
+                        start_ms: sorted_frames[start].start_ms,
+                        end_ms: speech_end_ms,
+                        kind: VadKind::Speech,
+                        rms: max_rms(&assignments[start..speech_chunk_end], VadKind::Speech),
+                    }];
+
+                    if config.preserve_silence_markers && chunk_end > speech_chunk_end {
+                        vad_segments.push(VadSegment {
+                            start_ms: speech_end_ms,
+                            end_ms: sorted_frames[chunk_end - 1].end_ms(),
+                            kind: VadKind::Silence,
+                            rms: max_rms(
+                                &assignments[speech_chunk_end..chunk_end],
+                                VadKind::Silence,
+                            ),
+                        });
+                    }
+
+                    if let Some(chunk) = build_chunk(
+                        session_id,
+                        &sorted_frames[start..chunk_end],
+                        codec,
+                        vad_segments,
+                        purpose,
+                    ) {
+                        chunks.push(chunk);
+                    }
+                }
+
+                index = consumed;
+            }
+            VadKind::Silence => {
+                let silence_end = advance_while_kind(&assignments, index, VadKind::Silence);
+                if config.preserve_silence_markers {
+                    for (relative_start, relative_end) in split_windows(
+                        &sorted_frames[index..silence_end],
+                        chunk_window_ms,
+                        max_window_ms,
+                    ) {
+                        let start = index + relative_start;
+                        let end = index + relative_end;
+                        let chunk_end_ms = sorted_frames[end - 1].end_ms();
+                        let vad_segments = vec![VadSegment {
+                            start_ms: sorted_frames[start].start_ms,
+                            end_ms: chunk_end_ms,
+                            kind: VadKind::Silence,
+                            rms: max_rms(&assignments[start..end], VadKind::Silence),
+                        }];
+
+                        if let Some(chunk) = build_chunk(
+                            session_id,
+                            &sorted_frames[start..end],
+                            codec,
+                            vad_segments,
+                            purpose,
+                        ) {
+                            chunks.push(chunk);
+                        }
+                    }
+                }
+                index = silence_end;
+            }
+            VadKind::Error => {
+                let error_end = advance_while_kind(&assignments, index, VadKind::Error);
+                for (relative_start, relative_end) in split_windows(
+                    &sorted_frames[index..error_end],
+                    chunk_window_ms,
+                    max_window_ms,
+                ) {
+                    let start = index + relative_start;
+                    let end = index + relative_end;
+                    let chunk_end_ms = sorted_frames[end - 1].end_ms();
+                    let vad_segments = vec![VadSegment {
+                        start_ms: sorted_frames[start].start_ms,
+                        end_ms: chunk_end_ms,
+                        kind: VadKind::Error,
+                        rms: max_rms(&assignments[start..end], VadKind::Error),
+                    }];
+
+                    if let Some(chunk) = build_chunk(
+                        session_id,
+                        &sorted_frames[start..end],
+                        codec,
+                        vad_segments,
+                        purpose,
+                    ) {
+                        chunks.push(chunk);
+                    }
+                }
+                index = error_end;
+            }
+        }
+    }
+
+    chunks
+}
+
+fn build_chunk(
+    session_id: u64,
+    frames: &[AudioFrame],
+    codec: AudioCodec,
+    vad_segments: Vec<VadSegment>,
+    purpose: AudioPurpose,
+) -> Option<AudioChunkEnvelope> {
+    let sequence_start = frames.iter().map(|frame| frame.sequence).min()?;
+    AudioChunkEnvelope::from_frames(
+        session_id,
+        sequence_start,
+        frames,
+        codec,
+        vad_segments,
+        purpose,
+    )
+}
+
+fn build_error_windows(
+    session_id: u64,
+    frames: &[AudioFrame],
+    purpose: AudioPurpose,
+    codec: AudioCodec,
+    window_ms: u64,
+) -> Vec<AudioChunkEnvelope> {
+    partition_identity_runs(frames)
+        .into_iter()
+        .flat_map(|run| {
+            split_windows(run, window_ms, window_ms)
+                .into_iter()
+                .filter_map(|(start, end)| {
+                    let chunk_frames = &run[start..end];
+                    let chunk_end_ms = chunk_frames.last()?.end_ms();
+                    build_chunk(
+                        session_id,
+                        chunk_frames,
+                        codec,
+                        vec![VadSegment {
+                            start_ms: chunk_frames.first()?.start_ms,
+                            end_ms: chunk_end_ms,
+                            kind: VadKind::Error,
+                            rms: 0.0,
+                        }],
+                        purpose,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn partition_identity_runs(frames: &[AudioFrame]) -> Vec<&[AudioFrame]> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+
+    while start < frames.len() {
+        let session_id = frames[start].session_id;
+        let sample_rate_hz = frames[start].sample_rate_hz;
+        let mut end = start + 1;
+        while end < frames.len()
+            && frames[end].session_id == session_id
+            && frames[end].sample_rate_hz == sample_rate_hz
+        {
+            end += 1;
+        }
+        runs.push(&frames[start..end]);
+        start = end;
+    }
+
+    runs
+}
+
+fn has_mixed_session_or_sample_rate(session_id: u64, frames: &[AudioFrame]) -> bool {
+    let expected_sample_rate_hz = frames[0].sample_rate_hz;
+    frames.iter().any(|frame| {
+        frame.session_id != session_id || frame.sample_rate_hz != expected_sample_rate_hz
+    })
+}
+
+fn assign_vad(frame: &AudioFrame, vad: &[VadDecision]) -> FrameVadAssignment {
+    vad.iter()
+        .filter_map(|decision| {
+            let overlap_start = frame.start_ms.max(decision.start_ms);
+            let overlap_end = frame.end_ms().min(decision.end_ms);
+            (overlap_end > overlap_start).then(|| {
+                (
+                    overlap_end - overlap_start,
+                    vad_priority(decision.kind),
+                    *decision,
+                )
+            })
+        })
+        .max_by_key(|(overlap_ms, priority, _)| (*overlap_ms, *priority))
+        .map(|(_, _, decision)| FrameVadAssignment {
+            kind: decision.kind,
+            rms: decision.rms,
+        })
+        .unwrap_or(FrameVadAssignment {
+            kind: VadKind::Error,
+            rms: 0.0,
+        })
+}
+
+fn vad_priority(kind: VadKind) -> u8 {
+    match kind {
+        VadKind::Error => 0,
+        VadKind::Silence => 1,
+        VadKind::Speech => 2,
+    }
+}
+
+fn advance_while_kind(assignments: &[FrameVadAssignment], start: usize, kind: VadKind) -> usize {
+    let mut end = start + 1;
+    while end < assignments.len() && assignments[end].kind == kind {
+        end += 1;
+    }
+    end
+}
+
+fn split_windows(
+    frames: &[AudioFrame],
+    target_window_ms: u64,
+    max_window_ms: u64,
+) -> Vec<(usize, usize)> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let mut windows = Vec::new();
+    let mut start = 0;
+    let hard_limit_ms = target_window_ms.min(max_window_ms).max(1);
+
+    while start < frames.len() {
+        let chunk_start_ms = frames[start].start_ms;
+        let mut end = start + 1;
+        while end < frames.len() {
+            let candidate_end_ms = frames[end].end_ms();
+            let candidate_duration_ms = candidate_end_ms.saturating_sub(chunk_start_ms);
+            if candidate_duration_ms > hard_limit_ms {
+                break;
+            }
+            end += 1;
+        }
+
+        windows.push((start, end));
+        start = end;
+    }
+
+    windows
+}
+
+fn extend_speech_tail(
+    frames: &[AudioFrame],
+    assignments: &[FrameVadAssignment],
+    chunk_start: usize,
+    speech_chunk_end: usize,
+    speech_end_ms: u64,
+    tail_padding_ms: u32,
+    max_window_ms: u64,
+) -> usize {
+    if tail_padding_ms == 0 {
+        return speech_chunk_end;
+    }
+
+    let allowed_tail_end_ms = speech_end_ms.saturating_add(u64::from(tail_padding_ms));
+    let allowed_chunk_end_ms = frames[chunk_start].start_ms.saturating_add(max_window_ms);
+    let final_allowed_end_ms = allowed_tail_end_ms.min(allowed_chunk_end_ms);
+
+    let mut end = speech_chunk_end;
+    while end < frames.len()
+        && assignments[end].kind == VadKind::Silence
+        && frames[end].end_ms() <= final_allowed_end_ms
+    {
+        end += 1;
+    }
+
+    end
+}
+
+fn max_rms(assignments: &[FrameVadAssignment], kind: VadKind) -> f32 {
+    assignments
+        .iter()
+        .filter(|assignment| assignment.kind == kind)
+        .map(|assignment| assignment.rms)
+        .fold(0.0_f32, f32::max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioChunkEnvelopeBuilder, AudioSessionEnvelope, AudioSessionEnvelopeBuilder, AudioSource,
+        build_manifest_windows, AudioChunkEnvelopeBuilder, AudioSessionEnvelope,
+        AudioSessionEnvelopeBuilder, AudioSource, ChunkWindowConfig,
     };
     use crate::audio::frame::{
         AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, RetryMetadata, VadSegment,
     };
-    use crate::audio::vad::VadKind;
+    use crate::audio::vad::{VadDecision, VadKind};
 
     fn frame(
         session_id: u64,
@@ -286,5 +650,249 @@ mod tests {
         assert_eq!(session.chunks.len(), 2);
         assert_eq!(session.chunks[0].chunk_id, "55-2-40");
         assert_eq!(session.chunks[1].chunk_id, "55-4-40");
+    }
+
+    fn window_config(preserve_silence_markers: bool) -> ChunkWindowConfig {
+        ChunkWindowConfig {
+            target_window_ms: 40,
+            max_window_ms: 80,
+            tail_padding_ms: 20,
+            preserve_silence_markers,
+        }
+    }
+
+    #[test]
+    fn build_manifest_windows_returns_empty_for_empty_frames() {
+        assert!(build_manifest_windows(
+            7,
+            &[],
+            &[],
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn build_manifest_windows_uses_target_windows_for_vad_error_fallback() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+            frame(7, 4, 60, 20, 16_000),
+        ];
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &[],
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].start_ms, 0);
+        assert_eq!(chunks[0].duration_ms, 40);
+        assert_eq!(chunks[0].vad_segments[0].kind, VadKind::Error);
+        assert_eq!(chunks[0].vad_segments[0].rms, 0.0);
+        assert_eq!(chunks[1].start_ms, 40);
+        assert_eq!(chunks[1].duration_ms, 40);
+        assert_eq!(chunks[1].vad_segments[0].kind, VadKind::Error);
+    }
+
+    #[test]
+    fn build_manifest_windows_preserves_specific_error_vad_metadata() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+        ];
+        let vad = vec![VadDecision {
+            kind: VadKind::Error,
+            rms: 0.12,
+            threshold: 0.2,
+            start_ms: 0,
+            end_ms: 60,
+        }];
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].vad_segments[0].kind, VadKind::Error);
+        assert_eq!(chunks[0].vad_segments[0].rms, 0.12);
+        assert_eq!(chunks[1].vad_segments[0].kind, VadKind::Error);
+        assert_eq!(chunks[1].vad_segments[0].rms, 0.12);
+    }
+
+    #[test]
+    fn build_manifest_windows_closes_on_vad_boundaries_before_max_window() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+            frame(7, 4, 60, 20, 16_000),
+        ];
+        let vad = vec![
+            VadDecision {
+                kind: VadKind::Speech,
+                rms: 0.4,
+                threshold: 0.2,
+                start_ms: 0,
+                end_ms: 40,
+            },
+            VadDecision {
+                kind: VadKind::Silence,
+                rms: 0.0,
+                threshold: 0.2,
+                start_ms: 40,
+                end_ms: 80,
+            },
+        ];
+        let mut config = window_config(false);
+        config.target_window_ms = 80;
+        config.max_window_ms = 120;
+        config.tail_padding_ms = 0;
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::CaptureEnvelope,
+            AudioCodec::PcmS16Le,
+            config,
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].start_ms, 0);
+        assert_eq!(chunks[0].duration_ms, 40);
+        assert_eq!(chunks[0].vad_segments.len(), 1);
+        assert_eq!(chunks[0].vad_segments[0].kind, VadKind::Speech);
+        assert_eq!(chunks[0].vad_segments[0].end_ms, 40);
+    }
+
+    #[test]
+    fn build_manifest_windows_adds_final_word_tail_padding_from_available_frames() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+            frame(7, 4, 60, 20, 16_000),
+        ];
+        let vad = vec![
+            VadDecision {
+                kind: VadKind::Speech,
+                rms: 0.6,
+                threshold: 0.2,
+                start_ms: 0,
+                end_ms: 40,
+            },
+            VadDecision {
+                kind: VadKind::Silence,
+                rms: 0.0,
+                threshold: 0.2,
+                start_ms: 40,
+                end_ms: 80,
+            },
+        ];
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].duration_ms, 60);
+        assert_eq!(
+            chunks[0].vad_segments,
+            vec![VadSegment {
+                start_ms: 0,
+                end_ms: 40,
+                kind: VadKind::Speech,
+                rms: 0.6,
+            }]
+        );
+    }
+
+    #[test]
+    fn build_manifest_windows_preserves_silence_markers_only_when_requested() {
+        let frames = vec![
+            frame(7, 1, 0, 20, 16_000),
+            frame(7, 2, 20, 20, 16_000),
+            frame(7, 3, 40, 20, 16_000),
+        ];
+        let vad = vec![VadDecision {
+            kind: VadKind::Silence,
+            rms: 0.0,
+            threshold: 0.2,
+            start_ms: 0,
+            end_ms: 60,
+        }];
+
+        let dropped = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        );
+        let preserved = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(true),
+        );
+
+        assert!(dropped.is_empty());
+        assert_eq!(preserved.len(), 2);
+        assert_eq!(preserved[0].vad_segments[0].kind, VadKind::Silence);
+        assert_eq!(preserved[0].duration_ms, 40);
+        assert_eq!(preserved[1].vad_segments[0].kind, VadKind::Silence);
+        assert_eq!(preserved[1].duration_ms, 20);
+    }
+
+    #[test]
+    fn build_manifest_windows_marks_mixed_sample_rates_as_error_chunks() {
+        let frames = vec![frame(7, 1, 0, 20, 16_000), frame(7, 2, 20, 20, 8_000)];
+        let vad = vec![VadDecision {
+            kind: VadKind::Speech,
+            rms: 0.6,
+            threshold: 0.2,
+            start_ms: 0,
+            end_ms: 40,
+        }];
+
+        let chunks = build_manifest_windows(
+            7,
+            &frames,
+            &vad,
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+            window_config(false),
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.vad_segments
+            == vec![VadSegment {
+                start_ms: chunk.start_ms,
+                end_ms: chunk.start_ms + u64::from(chunk.duration_ms),
+                kind: VadKind::Error,
+                rms: 0.0,
+            }]));
     }
 }
