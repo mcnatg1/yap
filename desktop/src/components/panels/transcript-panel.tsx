@@ -474,6 +474,12 @@ export function TranscriptPanel({
         {item ? <RecordingPlayer item={item} onOpen={onOpen} onReveal={onReveal} variant={variant} /> : null}
         <ScrollArea className="min-h-[280px] flex-1 bg-[var(--surface-transcript)]">
           <div className={cn("min-h-[280px]", variant === "modal" ? "p-8 pt-7" : "p-5")}>
+            {item?.status === "partial" && item.error ? (
+              <Alert className="mb-5">
+                <HelpCircle />
+                <AlertDescription>{item.error}</AlertDescription>
+              </Alert>
+            ) : null}
             {isDone ? (
               transcriptText.state === "ready" ? (
                 <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{transcriptText.text}</pre>

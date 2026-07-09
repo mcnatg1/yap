@@ -12,9 +12,10 @@ export function historyEntryToRecordingJob(entry: TranscriptHistoryEntry): Recor
       ...createInitialPipelineState(),
       intake: "done",
       transcription: "done",
-      postprocessing: "done",
+      postprocessing: entry.warning ? "error" : "done",
     },
     route: "localFallback",
-    status: "complete",
+    error: entry.warning,
+    status: entry.warning ? "partial" : "complete",
   };
 }

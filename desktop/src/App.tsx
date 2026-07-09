@@ -122,6 +122,7 @@ function savedLiveSessionToHistoryEntry(session: SavedLiveSession): TranscriptHi
     sourcePath: session.sourcePath,
     outputPath: session.outputPath,
     createdAt,
+    warning: session.warning ?? undefined,
   };
 }
 
@@ -230,7 +231,11 @@ export default function App() {
       setWorkspaceView("home");
       setStatus("Ready");
       void loadTranscriptText(entry.outputPath).catch(() => undefined);
-      toast.success("Live transcript saved");
+      if (entry.warning) {
+        toast.warning(entry.warning);
+      } else {
+        toast.success("Live transcript saved");
+      }
     }).then((stop) => {
       if (cancelled) {
         stop();

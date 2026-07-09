@@ -8,6 +8,7 @@ export type SavedLiveSession = {
   name: string;
   sourcePath: string;
   outputPath: string;
+  warning?: string | null;
 };
 
 export function liveStatus(): Promise<LiveSessionView> {

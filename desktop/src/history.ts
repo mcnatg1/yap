@@ -3,6 +3,7 @@ export type TranscriptHistoryEntry = {
   sourcePath: string;
   outputPath: string;
   createdAt: string;
+  warning?: string;
 };
 
 const transcriptHistoryKey = "yap.transcriptHistory.v1";
@@ -17,7 +18,8 @@ function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
     typeof entry.name === "string" &&
     typeof entry.sourcePath === "string" &&
     typeof entry.outputPath === "string" &&
-    typeof entry.createdAt === "string"
+    typeof entry.createdAt === "string" &&
+    (entry.warning === undefined || typeof entry.warning === "string")
   );
 }
 

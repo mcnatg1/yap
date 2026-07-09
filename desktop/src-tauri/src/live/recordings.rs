@@ -11,6 +11,7 @@ pub struct SavedLiveSession {
     pub source_path: String,
     pub output_path: String,
     pub created_at_ms: u64,
+    pub warning: Option<String>,
 }
 
 pub fn save_session_files(
@@ -65,6 +66,9 @@ fn save_session_parts_to_dir(
                         source_path: transcript_path.display().to_string(),
                         output_path: transcript_path.display().to_string(),
                         created_at_ms,
+                        warning: Some(
+                            "Live audio could not be saved. Transcript was saved.".into(),
+                        ),
                     }));
                 }
 
@@ -77,6 +81,7 @@ fn save_session_parts_to_dir(
                     },
                     output_path: transcript_path.display().to_string(),
                     created_at_ms,
+                    warning: None,
                 }));
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -165,6 +170,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             source_path: source_path.display().to_string(),
             output_path: path.display().to_string(),
             created_at_ms,
+            warning: None,
         });
     }
 
@@ -500,6 +506,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(saved.source_path, saved.output_path);
+        assert_eq!(
+            saved.warning.as_deref(),
+            Some("Live audio could not be saved. Transcript was saved.")
+        );
         assert!(std::path::Path::new(&saved.output_path).exists());
         assert!(!dir.join("live-42.wav").exists());
         std::fs::remove_dir_all(dir).ok();
