@@ -261,7 +261,7 @@ git commit -m "Harden recording file trust boundary"
 
 **Files:**
 - Modify: `desktop/src-tauri/src/live/actions.rs`
-- Modify: `desktop/src-tauri/src/live/paste.rs`
+- Delete if still present: `desktop/src-tauri/src/live/paste.rs`
 - Modify: `desktop/src-tauri/src/lib.rs`
 - Modify: `desktop/src-tauri/src/live/settings.rs`
 - Modify: `desktop/src/components/panels/app-sheets.tsx`
@@ -307,7 +307,7 @@ Expected: build and Rust tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add desktop/src-tauri/src/live/actions.rs desktop/src-tauri/src/live/paste.rs desktop/src-tauri/src/lib.rs desktop/src-tauri/src/live/settings.rs desktop/src/components/panels/app-sheets.tsx desktop/src/hooks/use-live-control.ts
+git add desktop/src-tauri/src/live/actions.rs desktop/src-tauri/src/live/mod.rs desktop/src-tauri/src/live/paste.rs desktop/src-tauri/src/lib.rs desktop/src-tauri/src/live/settings.rs desktop/src/components/panels/app-sheets.tsx desktop/src/hooks/use-live-control.ts desktop/src/live.ts
 git commit -m "Gate cross app paste behavior"
 ```
 
