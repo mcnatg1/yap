@@ -1,8 +1,19 @@
+import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
+
 export type PreviewTextEntry = {
   outputPath: string;
 };
 
 export type PreviewTextCache = Record<string, string>;
+export const minTranscriptBodySearchLength = 2;
+
+export function shouldSearchTranscriptBodies(query: string) {
+  return query.trim().length >= minTranscriptBodySearchLength;
+}
+
+export function previewSearchEntries(entries: TranscriptHistoryEntry[]) {
+  return entries.slice(0, maxTranscriptHistoryEntries);
+}
 
 export function createPreviewTextLoader() {
   const inFlight = new Map<string, Promise<string>>();

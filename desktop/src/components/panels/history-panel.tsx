@@ -48,7 +48,7 @@ import {
 import { canDeleteTranscriptHistoryEntry, maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
-import { createPreviewTextLoader } from "@/lib/history-preview-loader";
+import { createPreviewTextLoader, previewSearchEntries, shouldSearchTranscriptBodies } from "@/lib/history-preview-loader";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 
@@ -203,12 +203,14 @@ export function HistoryPanel({
     );
   }, [onLoadPreviewText]);
 
+  const searchableEntries = useMemo(() => previewSearchEntries(entries), [entries]);
+
   useEffect(() => {
-    if (!searchFilter.trim() || !onLoadPreviewText) return;
+    if (!shouldSearchTranscriptBodies(searchFilter) || !onLoadPreviewText) return;
 
     let cancelled = false;
     void (async () => {
-      for (const entry of entries) {
+      for (const entry of searchableEntries) {
         if (cancelled) break;
         if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
         try {
@@ -234,7 +236,7 @@ export function HistoryPanel({
     return () => {
       cancelled = true;
     };
-  }, [entries, onLoadPreviewText, searchFilter]);
+  }, [onLoadPreviewText, searchFilter, searchableEntries]);
 
   useEffect(() => {
     setRenderLimit(historyRenderWindowSize);
@@ -242,14 +244,15 @@ export function HistoryPanel({
 
   const filteredEntries = useMemo(() => {
     const query = searchFilter.trim().toLowerCase();
+    const includePreviewText = shouldSearchTranscriptBodies(query);
     return query
-      ? entries.filter((entry) =>
-          `${entry.name} ${entry.sourcePath} ${previewTextByPath[entry.outputPath] ?? ""}`
+      ? searchableEntries.filter((entry) =>
+          `${entry.name} ${entry.sourcePath} ${includePreviewText ? previewTextByPath[entry.outputPath] ?? "" : ""}`
             .toLowerCase()
             .includes(query),
         )
-      : entries;
-  }, [entries, previewTextByPath, searchFilter]);
+      : searchableEntries;
+  }, [previewTextByPath, searchFilter, searchableEntries]);
 
   const historyWindow = useMemo(
     () => renderHistoryWindow(filteredEntries, renderLimit),

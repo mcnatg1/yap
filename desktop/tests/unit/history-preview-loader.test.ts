@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { createPreviewTextLoader } from "@/lib/history-preview-loader";
+import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
+import { createPreviewTextLoader, previewSearchEntries, shouldSearchTranscriptBodies } from "@/lib/history-preview-loader";
 
 describe("history preview loader", () => {
   it("dedupes concurrent reads by output path", async () => {
@@ -71,5 +72,26 @@ describe("history preview loader", () => {
     await expect(loader.load(entry, {}, async () => {
       throw new Error("missing");
     }, () => undefined)).rejects.toThrow("missing");
+  });
+
+  it("does not search transcript bodies for one-character queries", () => {
+    expect(shouldSearchTranscriptBodies("a")).toBe(false);
+    expect(shouldSearchTranscriptBodies("  a ")).toBe(false);
+    expect(shouldSearchTranscriptBodies("ab")).toBe(true);
+  });
+
+  it("does not index more than the bounded history cap", () => {
+    const entries = Array.from({ length: maxTranscriptHistoryEntries + 5 }, (_, index): TranscriptHistoryEntry => ({
+      createdAt: new Date(index).toISOString(),
+      name: `live-${index}`,
+      outputPath: `C:\\recordings\\live-${index}.txt`,
+      sourcePath: `C:\\recordings\\live-${index}.wav`,
+    }));
+
+    const searchable = previewSearchEntries(entries);
+
+    expect(searchable).toHaveLength(maxTranscriptHistoryEntries);
+    expect(searchable[0]).toBe(entries[0]);
+    expect(searchable.at(-1)).toBe(entries[maxTranscriptHistoryEntries - 1]);
   });
 });
