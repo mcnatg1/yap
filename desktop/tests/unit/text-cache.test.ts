@@ -21,9 +21,12 @@ describe("text cache", () => {
     expect(cache).toEqual({ "b.txt": "b", "a.txt": "new" });
   });
 
-  it("returns text to the caller without retaining oversized entries", () => {
+  it("retains an oversized sentinel so large transcripts are not reread", () => {
     const cache = rememberText({ "a.txt": "a" }, "big.txt", "12345", 8, 4);
 
-    expect(cache).toEqual({ "a.txt": "a" });
+    expect(cache).toEqual({
+      "a.txt": "a",
+      "big.txt": "Transcript is too large to preview in the app. Open it from disk instead.",
+    });
   });
 });
