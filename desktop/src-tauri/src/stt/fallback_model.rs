@@ -239,27 +239,11 @@ pub async fn install(
                     |view| progress.publish(view),
                     is_cancelled,
                 )?;
-                let verifying_view = fallback_model_phase_view(
-                    true,
-                    nemotron::FallbackModelStatus::Verifying,
-                    Some("Verifying files".into()),
-                );
-                emit_fallback_status_with_phase(
-                    &app,
-                    &install_state,
-                    FallbackModelInstallPhase::Verifying,
-                    verifying_view,
-                );
-                let view = nemotron::verify_model_with_progress(
-                    true,
-                    |view| progress.publish(view),
-                    is_cancelled,
-                );
                 if is_cancelled() {
                     let _ = nemotron::remove_model();
                     return Err(SttError::ModelInstallCancelled);
                 }
-                Ok(view)
+                Ok(nemotron::model_status(true))
             })();
 
             match result {
