@@ -378,13 +378,21 @@ function WaveformView({
   prefersReducedMotion: boolean;
   showsActivityPulse?: boolean;
 }) {
-  const pulseTime = useAnimationTime(Boolean(showsActivityPulse) && !prefersReducedMotion);
+  const activityFloor = showsActivityPulse && !prefersReducedMotion ? 0.08 : 0;
   return (
-    <div aria-hidden="true" className="flex h-6 w-12 items-center justify-center gap-[2.5px]" data-testid="live-waveform">
+    <div
+      aria-hidden="true"
+      className={cn(
+        "flex h-6 w-12 items-center justify-center gap-[2.5px]",
+        showsActivityPulse && !prefersReducedMotion && "live-waveform-pulse",
+      )}
+      data-testid="live-waveform"
+    >
       {waveformMultipliers.map((multiplier, index) => (
         <WaveformBar
-          amplitude={barAmplitude(audioLevel, multiplier, index, pulseTime)}
+          amplitude={barAmplitude(audioLevel, multiplier, index, activityFloor)}
           delay={Math.abs(index - waveformCenterIndex) * 0.01}
+          index={index}
           key={index}
           prefersReducedMotion={prefersReducedMotion}
           response={0.18 + (Math.abs(index - waveformCenterIndex) / waveformCenterIndex) * 0.06}
@@ -400,37 +408,35 @@ const waveformCenterIndex = (waveformMultipliers.length - 1) / 2;
 function WaveformBar({
   amplitude,
   delay,
+  index,
   prefersReducedMotion,
   response,
 }: {
   amplitude: number;
   delay: number;
+  index: number;
   prefersReducedMotion: boolean;
   response: number;
 }) {
   return (
     <span
-      className="w-[3px] rounded-full bg-white"
+      className="live-waveform-bar w-[3px] rounded-full bg-white"
       style={{
+        "--live-wave-delay": `${index * 72}ms`,
         height: 2 + (22 - 2) * amplitude,
         transition: prefersReducedMotion
           ? "none"
           : `height ${Math.min(response, 0.12)}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
-      }}
+      } as CSSProperties}
     />
   );
 }
 
-function barAmplitude(level: number, multiplier: number, index: number, pulseTime?: number) {
+function barAmplitude(level: number, multiplier: number, index: number, activityFloor = 0) {
   const baseAmplitude = Math.min(Math.max(level, 0) * multiplier, 1);
-  if (pulseTime === undefined) return baseAmplitude;
-
-  const travelingWave = 0.5 + 0.5 * Math.sin(pulseTime * 6.2 - index * 0.78);
-  const shimmer = 0.5 + 0.5 * Math.sin(pulseTime * 3.1 + index * 0.5);
-  const pulse = travelingWave * 0.22 + shimmer * 0.06;
-  const saturationRelief = baseAmplitude * (0.74 + pulse);
-  const quietPulse = (1 - baseAmplitude) * (0.04 + pulse * 0.28);
-  return Math.min(saturationRelief + quietPulse, 1);
+  if (!activityFloor) return baseAmplitude;
+  const centerBoost = 1 - Math.abs(index - waveformCenterIndex) / waveformCenterIndex;
+  return Math.max(baseAmplitude, activityFloor * (0.62 + centerBoost * 0.38));
 }
 
 function ProcessingIndicatorView() {
@@ -438,44 +444,36 @@ function ProcessingIndicatorView() {
 }
 
 function ProcessingWaveformView() {
-  const time = useAnimationTime(true) ?? 0;
   return (
-    <div className="flex h-5 items-center justify-center gap-1">
+    <div className="live-processing-waveform flex h-5 items-center justify-center gap-1">
       {Array.from({ length: 5 }, (_, index) => (
         <ProcessingPill
-          amplitude={processingAmplitude(index, time)}
+          amplitude={processingAmplitude(index)}
+          index={index}
           key={index}
-          opacity={0.42 + processingPulse(index, time) * 0.52}
+          opacity={0.72}
         />
       ))}
     </div>
   );
 }
 
-function ProcessingPill({ amplitude, opacity }: { amplitude: number; opacity: number }) {
+function ProcessingPill({ amplitude, index, opacity }: { amplitude: number; index: number; opacity: number }) {
   return (
     <span
-      className="w-1 rounded-full bg-white"
+      className="live-processing-pill w-1 rounded-full bg-white"
       style={{
+        "--live-wave-delay": `${index * 110}ms`,
         height: 4 + (18 - 4) * amplitude,
         opacity,
-      }}
+      } as CSSProperties}
     />
   );
 }
 
-function processingAmplitude(index: number, time: number) {
+function processingAmplitude(index: number) {
   const centerDistance = Math.abs(index - 2) / 2;
-  const baseline = 0.18 + (1 - centerDistance) * 0.1;
-  return Math.min(baseline + processingPulse(index, time) * 0.68, 1);
-}
-
-function processingPulse(index: number, time: number) {
-  const cycle = 1.05;
-  const stagger = 0.11;
-  const phase = ((time - index * stagger) % cycle) / cycle;
-  const wave = 0.5 + 0.5 * Math.sin(phase * 2 * Math.PI - Math.PI / 2);
-  return Math.pow(wave, 1.9);
+  return 0.24 + (1 - centerDistance) * 0.18;
 }
 
 function InitializingDotsView() {
@@ -558,32 +556,6 @@ function FreeFlowNeutralButton({
       {children}
     </Button>
   );
-}
-
-function useAnimationTime(enabled: boolean) {
-  const prefersReducedMotion = usePrefersReducedMotion();
-  const [time, setTime] = useState<number | undefined>(undefined);
-
-  useEffect(() => {
-    if (!enabled || prefersReducedMotion) {
-      setTime(undefined);
-      return;
-    }
-
-    let frame = 0;
-    let previous = 0;
-    const tick = (now: number) => {
-      if (now - previous >= 1000 / 60) {
-        previous = now;
-        setTime(now / 1000);
-      }
-      frame = window.requestAnimationFrame(tick);
-    };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-  }, [enabled, prefersReducedMotion]);
-
-  return time;
 }
 
 function usePrefersReducedMotion() {
