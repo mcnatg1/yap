@@ -105,6 +105,11 @@ const setupSkipKey = "yap-local-fallback-setup-skipped";
 const defaultLiveHotkey = "Ctrl+Shift+Space";
 const batchServerQueuedMessage = "Queued until a transcription server is connected.";
 
+async function allowRecordingPlaybackPath(path: string) {
+  if (!isTauri()) return path;
+  return invoke<string>("allow_recording_playback_path", { path });
+}
+
 const initialLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
   hotkey: defaultLiveHotkey,
@@ -177,6 +182,7 @@ export default function App() {
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
   const historyRef = useRef(history);
+  const queueRef = useRef(queue);
   const previewRequest = useRef(0);
 
   const hasRunnable = useMemo(
@@ -217,6 +223,7 @@ export default function App() {
   }, [history]);
 
   useEffect(() => {
+    queueRef.current = queue;
     try {
       writeRecordingQueue(queue);
     } catch (error) {
@@ -342,7 +349,7 @@ export default function App() {
     const unlistenDrag = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "enter") setDragging(true);
       if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
-      if (event.payload.type === "drop") addPaths(event.payload.paths);
+      if (event.payload.type === "drop") void addPaths(event.payload.paths);
     });
 
     return () => {
@@ -704,51 +711,79 @@ export default function App() {
     void updateLive(stopLiveSession);
   }
 
-  function addPaths(paths: string[]) {
+  async function addPaths(paths: string[]) {
     const firstId = nextRecordingId.current;
     nextRecordingId.current += paths.length;
     const incoming = paths.map((path, index) => ({ id: firstId + index, path }));
 
-    setQueue((current) => {
-      const acceptedCandidates = acceptedRecordingDrops(current.map((item) => item.path), incoming);
-      const queuedServerCount = current.filter((item) =>
-        item.intent === "recording" &&
-        item.route === "serverBatch" &&
-        item.status === "queued_server"
-      ).length;
-      const availableServerQueueSlots = Math.max(0, maxStoredQueueJobs - queuedServerCount);
-      const accepted = acceptedCandidates.slice(0, availableServerQueueSlots);
-      if (paths.length && !acceptedCandidates.length) {
-        toast.warning(`Drop ${acceptedFormats} files.`);
-        return current;
-      }
-      if (acceptedCandidates.length > accepted.length) {
-        toast.warning(
-          accepted.length
-            ? `Queued ${accepted.length} of ${acceptedCandidates.length} recordings. Connect a server before adding more.`
-            : "Server queue is full. Connect a server before adding more recordings.",
-        );
-      }
+    const queuedServerCount = queueRef.current.filter((item) =>
+      item.intent === "recording" &&
+      item.route === "serverBatch" &&
+      item.status === "queued_server"
+    ).length;
+    const acceptedCandidates = acceptedRecordingDrops(queueRef.current.map((item) => item.path), incoming);
+    const availableServerQueueSlots = Math.max(0, maxStoredQueueJobs - queuedServerCount);
+    const accepted = acceptedCandidates.slice(0, availableServerQueueSlots);
+    if (paths.length && !acceptedCandidates.length) {
+      toast.warning(`Drop ${acceptedFormats} files.`);
+      return;
+    }
+    if (acceptedCandidates.length > accepted.length) {
+      toast.warning(
+        accepted.length
+          ? `Queued ${accepted.length} of ${acceptedCandidates.length} recordings. Connect a server before adding more.`
+          : "Server queue is full. Connect a server before adding more recordings.",
+      );
+    }
 
-      const newItems: RecordingJobView[] = accepted.map(({ id, path }) => ({
-        error: batchServerQueuedMessage,
-        id,
-        intent: "recording",
-        name: basename(path),
-        path,
-        playbackPath: path,
-        pipeline: createInitialPipelineState(),
-        route: "serverBatch",
-        status: "queued_server",
-      }));
-      if (newItems.length) {
-        setActiveRail("transcribe");
-        setWorkspaceView("transcribe");
-        setSelectedHistoryOutput(undefined);
-        setSelectedId(newItems[newItems.length - 1].id);
-      }
-      return [...current, ...newItems];
-    });
+    const approved = (
+      await Promise.all(
+        accepted.map(async (item) => {
+          try {
+            return { ...item, playbackPath: await allowRecordingPlaybackPath(item.path) };
+          } catch {
+            return undefined;
+          }
+        }),
+      )
+    ).filter((item): item is { id: number; path: string; playbackPath: string } => Boolean(item));
+
+    if (accepted.length && approved.length < accepted.length) {
+      toast.warning("Some recordings could not be prepared for playback.");
+    }
+    if (!approved.length) return;
+
+    const current = queueRef.current;
+    const acceptedApprovedIds = new Set(
+      acceptedRecordingDrops(current.map((item) => item.path), approved).map((item) => item.id),
+    );
+    const currentQueuedServerCount = current.filter((item) =>
+      item.intent === "recording" &&
+      item.route === "serverBatch" &&
+      item.status === "queued_server"
+    ).length;
+    const currentAvailableServerQueueSlots = Math.max(0, maxStoredQueueJobs - currentQueuedServerCount);
+    const addable = approved
+      .filter((item) => acceptedApprovedIds.has(item.id))
+      .slice(0, currentAvailableServerQueueSlots);
+    if (!addable.length) return;
+
+    const newItems: RecordingJobView[] = addable.map(({ id, path, playbackPath }) => ({
+      error: batchServerQueuedMessage,
+      id,
+      intent: "recording",
+      name: basename(path),
+      path,
+      playbackPath,
+      pipeline: createInitialPipelineState(),
+      route: "serverBatch",
+      status: "queued_server",
+    }));
+    setQueue((current) => [...current, ...newItems]);
+    setActiveRail("transcribe");
+    setWorkspaceView("transcribe");
+    setSelectedHistoryOutput(undefined);
+    setSelectedId(newItems[newItems.length - 1].id);
   }
 
   function goToTranscribe() {
@@ -770,8 +805,8 @@ export default function App() {
         title: "Choose recordings",
         filters: [{ name: "Audio and video", extensions: audioExtensions }],
       });
-      if (Array.isArray(selected)) addPaths(selected);
-      else if (selected) addPaths([selected]);
+      if (Array.isArray(selected)) await addPaths(selected);
+      else if (selected) await addPaths([selected]);
     } catch (error) {
       toast.error(`Picker failed: ${String(error)}`);
     }

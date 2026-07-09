@@ -1,6 +1,22 @@
 use std::io::{Read, Write};
 
+use tauri::Manager;
+
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
+
+#[tauri::command]
+pub fn allow_recording_playback_path(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    let path = playable_recording_path(path)?;
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|err| format!("Failed to allow recording playback: {err}"))?;
+    Ok(path.display().to_string())
+}
 
 #[tauri::command]
 pub fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
@@ -183,6 +199,18 @@ fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
+fn playable_recording_path(path: String) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(path);
+    if !is_recording_media_path(&path) {
+        return Err("Choose a supported audio or video file.".into());
+    }
+    let path = canonical_existing_path(&path)?;
+    if !path.is_file() || !is_recording_media_path(&path) {
+        return Err("Choose a supported audio or video file.".into());
+    }
+    Ok(path)
+}
+
 fn deletable_yap_owned_live_transcript_path_from_dir(
     path: String,
     owned_dir: &std::path::Path,
@@ -274,6 +302,10 @@ fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
         path,
         &["txt", "mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"],
     )
+}
+
+fn is_recording_media_path(path: &std::path::Path) -> bool {
+    has_extension(path, crate::RECORDING_EXTENSIONS)
 }
 
 fn is_live_transcript_file(path: &std::path::Path) -> bool {
@@ -455,6 +487,54 @@ mod tests {
             err,
             "Only Yap recording and transcript files can be opened."
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_path_accepts_canonical_media_files() {
+        let dir = temp_test_dir("playback-media");
+        let media = dir.join("Clip.WAV");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let path = playable_recording_path(media.display().to_string()).unwrap();
+
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), "Clip.WAV");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_path_rejects_transcripts() {
+        let dir = temp_test_dir("playback-transcript");
+        let transcript = dir.join("clip.txt");
+        std::fs::write(&transcript, "hello").unwrap();
+
+        let error = playable_recording_path(transcript.display().to_string()).unwrap_err();
+
+        assert_eq!(error, "Choose a supported audio or video file.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_path_rejects_media_named_directories() {
+        let dir = temp_test_dir("playback-media-dir");
+        let media_dir = dir.join("clip.wav");
+        std::fs::create_dir_all(&media_dir).unwrap();
+
+        let error = playable_recording_path(media_dir.display().to_string()).unwrap_err();
+
+        assert_eq!(error, "Choose a supported audio or video file.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_path_rejects_missing_files() {
+        let dir = temp_test_dir("playback-missing");
+        let missing = dir.join("missing.wav");
+
+        let error = playable_recording_path(missing.display().to_string()).unwrap_err();
+
+        assert_eq!(error, "File no longer exists.");
         std::fs::remove_dir_all(dir).ok();
     }
 

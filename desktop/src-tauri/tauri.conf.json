@@ -28,12 +28,7 @@
         "enable": true,
         "scope": {
           "allow": [
-            "$AUDIO/**",
-            "$VIDEO/**",
-            "$LOCALDATA/Yap/live-recordings/**",
-            "$DESKTOP/**",
-            "$DOWNLOAD/**",
-            "$DOCUMENT/**"
+            "$LOCALDATA/Yap/live-recordings/**"
           ]
         }
       }

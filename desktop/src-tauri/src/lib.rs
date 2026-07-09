@@ -32,7 +32,8 @@ const TRAY_QUIT: &str = "quit";
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 const LIVE_OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const MAX_TRANSCRIBE_BATCH_PATHS: usize = 200;
-const RECORDING_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
+pub(crate) const RECORDING_EXTENSIONS: &[&str] =
+    &["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 
 pub mod audio;
 mod file_actions;
@@ -1404,6 +1405,7 @@ pub fn run() {
             show_main_workspace,
             polish_num_gpu,
             start_transcribe,
+            file_actions::allow_recording_playback_path,
             file_actions::read_text_file,
             file_actions::read_text_preview,
             file_actions::write_polished_text,
