@@ -8,6 +8,7 @@ export type TranscriptHistoryEntry = {
 
 const transcriptHistoryKey = "yap.transcriptHistory.v1";
 const hiddenTranscriptHistoryKey = "yap.hiddenTranscriptHistory.v1";
+export const maxTranscriptHistoryEntries = 500;
 
 type HistoryStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -34,7 +35,8 @@ function normalizeTranscriptHistory(value: unknown) {
       seen.add(entry.outputPath);
       return true;
     })
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, maxTranscriptHistoryEntries);
 }
 
 export function normalizeHiddenTranscriptHistory(value: unknown) {

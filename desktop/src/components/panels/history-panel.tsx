@@ -48,7 +48,10 @@ import {
 import { canDeleteTranscriptHistoryEntry, type TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { createPreviewTextLoader } from "@/lib/history-preview-loader";
+import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
+
+const maxHistoryPreviewCacheEntries = 120;
 
 function HistoryActionMenu({
   entry,
@@ -188,9 +191,11 @@ export function HistoryPanel({
       entry,
       previewTextByPathRef.current,
       onLoadPreviewText,
-      (outputPath, text) => {
-        setPreviewTextByPath((current) =>
-          current[outputPath] === undefined ? { ...current, [outputPath]: text } : current,
+        (outputPath, text) => {
+          setPreviewTextByPath((current) =>
+            current[outputPath] === undefined
+              ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
+              : current,
         );
       },
     );
@@ -212,7 +217,9 @@ export function HistoryPanel({
             (outputPath, text) => {
               if (cancelled) return;
               setPreviewTextByPath((current) =>
-                current[outputPath] === undefined ? { ...current, [outputPath]: text } : current,
+                current[outputPath] === undefined
+                  ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
+                  : current,
               );
             },
           );

@@ -4,6 +4,7 @@ import {
   canDeleteTranscriptHistoryEntry,
   filterHiddenTranscriptHistory,
   hideTranscriptHistory,
+  maxTranscriptHistoryEntries,
   normalizeHiddenTranscriptHistory,
   readTranscriptHistory,
   readVisibleTranscriptHistory,
@@ -31,6 +32,25 @@ describe("transcript history storage", () => {
     };
 
     expect(readTranscriptHistory(storage)[0].warning).toBe("Live audio could not be saved. Transcript was saved.");
+  });
+
+  it("bounds persisted transcript history to recent entries", () => {
+    const entries = Array.from({ length: maxTranscriptHistoryEntries + 5 }, (_, index) => ({
+      createdAt: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+      name: `live-${index}`,
+      outputPath: `C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-${index}.txt`,
+      sourcePath: `C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-${index}.wav`,
+    }));
+    const storage = {
+      getItem: () => JSON.stringify(entries),
+      setItem: () => undefined,
+    };
+
+    const history = readTranscriptHistory(storage);
+
+    expect(history).toHaveLength(maxTranscriptHistoryEntries);
+    expect(history[0].name).toBe(`live-${maxTranscriptHistoryEntries + 4}`);
+    expect(history.at(-1)?.name).toBe("live-5");
   });
 
   it("keeps hidden transcripts out of history after reload", () => {
