@@ -22,15 +22,9 @@ import { useLiveControl } from "@/hooks/use-live-control";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useServerConnection } from "@/hooks/use-server-connection";
+import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import {
-  hideTranscriptHistory,
-  readHiddenTranscriptHistory,
-  readVisibleTranscriptHistory,
-  recordVisibleTranscriptHistoryEntries,
-  removeTranscriptHistory,
   savedSessionToTranscriptHistoryEntry,
-  writeHiddenTranscriptHistory,
-  writeTranscriptHistory,
   type TranscriptHistoryEntry,
 } from "@/history";
 import {
@@ -141,7 +135,12 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
-  const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readVisibleTranscriptHistory());
+  const {
+    forgetHistoryEntry,
+    history,
+    recordVisibleHistoryEntries,
+    rememberHiddenHistoryEntry,
+  } = useTranscriptHistory();
   const historyPlaybackPaths = useRegisteredPlayback(queue, setQueue, history);
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
@@ -150,7 +149,6 @@ export default function App() {
   const setupPrompted = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
-  const historyRef = useRef(history);
   const queueRef = useRef(queue);
   const previewRequest = useRef(0);
   const recordingDrop = useRecordingDrop(addPaths);
@@ -196,10 +194,6 @@ export default function App() {
   useEffect(() => {
     modelInstalledRef.current = modelInstalled;
   }, [modelInstalled]);
-
-  useEffect(() => {
-    historyRef.current = history;
-  }, [history]);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -855,56 +849,10 @@ export default function App() {
     }
   }
 
-  function replaceHistory(next: TranscriptHistoryEntry[]) {
-    historyRef.current = next;
-    setHistory(next);
-  }
-
-  function recordVisibleHistoryEntries(entries: TranscriptHistoryEntry[], warning: string) {
-    if (!entries.length) return false;
-    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
-    const next = recordVisibleTranscriptHistoryEntries(historyRef.current, entries, hiddenHistoryOutputs);
-    if (next === historyRef.current) return false;
-    try {
-      writeTranscriptHistory(next);
-    } catch (error) {
-      console.warn(warning, error);
-      toast.warning(warning);
-      return false;
-    }
-    replaceHistory(next);
-    return true;
-  }
-
-  function rememberHiddenHistoryEntry(outputPath: string) {
-    const next = hideTranscriptHistory(readHiddenTranscriptHistory(), outputPath);
-    try {
-      writeHiddenTranscriptHistory(next);
-    } catch (error) {
-      console.warn("Hidden transcript history could not be saved.", error);
-      toast.warning("Hidden transcript history could not be saved.");
-      return false;
-    }
-    return true;
-  }
-
-  function forgetHistoryEntry(outputPath: string) {
-    const next = removeTranscriptHistory(historyRef.current, outputPath);
-    try {
-      writeTranscriptHistory(next);
-    } catch (error) {
-      console.warn("Transcript history removal could not be saved.", error);
-      toast.warning("Transcript history removal could not be saved.");
-      return false;
-    }
-    replaceHistory(next);
-    if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
-    return true;
-  }
-
   function hideHistoryEntry(outputPath: string) {
     if (!rememberHiddenHistoryEntry(outputPath)) return;
     if (!forgetHistoryEntry(outputPath)) return;
+    if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
     toast.success("Hidden from history");
   }
 
@@ -915,6 +863,7 @@ export default function App() {
       });
       if (!rememberHiddenHistoryEntry(entry.outputPath)) return;
       if (!forgetHistoryEntry(entry.outputPath)) return;
+      if (selectedHistoryOutput === entry.outputPath) setSelectedHistoryOutput(undefined);
       setTranscriptText((current) => {
         const { [entry.outputPath]: _deleted, ...next } = current;
         return next;
