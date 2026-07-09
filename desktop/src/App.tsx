@@ -50,6 +50,11 @@ import {
 import {
   allowRecordingPlaybackPath,
 } from "@/lib/playback-registry";
+import {
+  fallbackStatusText,
+  shouldOpenSetupPrompt,
+  unblockFallbackReadyQueue,
+} from "@/lib/setup-model-state";
 import { cn } from "@/lib/utils";
 import {
   availableQueuedServerSlots,
@@ -324,49 +329,13 @@ export default function App() {
     }
   }
 
-  function unblockFallbackReadyQueue() {
-    setQueue((items) =>
-      items.map((item) =>
-        item.status === "blocked_setup_required"
-          ? {
-              ...item,
-              error: undefined,
-              pipeline: {
-                ...item.pipeline,
-                transcription: "notStarted",
-              },
-              status: "queued_local_fallback",
-            }
-          : item,
-      ),
-    );
-  }
-
-  function fallbackStatusText(view: FallbackModelView, enabled: boolean) {
-    switch (view.status) {
-      case "downloading":
-        return view.message ?? "Installing local fallback";
-      case "verifying":
-        return view.message ?? "Verifying local fallback";
-      case "ready":
-        return "Transcription engine ready";
-      case "disabled":
-        return "Local fallback disabled";
-      case "error":
-        return view.message ?? "Local fallback needs attention";
-      case "missing":
-      case "corrupted":
-        return enabled ? "Local fallback model missing" : "Local fallback disabled";
-    }
-  }
-
   function maybeOpenSetupPrompt(nextSetupState: ReturnType<typeof deriveSetupStateFromFallbackModel>, nextFallbackEnabled: boolean) {
-    if (
-      !nextFallbackEnabled ||
-      nextSetupState === "fallback_ready" ||
-      setupPrompted.current ||
-      localStorage.getItem(setupSkipKey) === "true"
-    ) {
+    if (!shouldOpenSetupPrompt({
+      alreadyPrompted: setupPrompted.current,
+      fallbackEnabled: nextFallbackEnabled,
+      setupState: nextSetupState,
+      skipped: localStorage.getItem(setupSkipKey) === "true",
+    })) {
       return;
     }
 
@@ -408,7 +377,7 @@ export default function App() {
     maybeOpenSetupPrompt(nextSetupState, nextFallbackEnabled);
 
     if (nextSetupState === "fallback_ready") {
-      unblockFallbackReadyQueue();
+      setQueue(unblockFallbackReadyQueue);
     }
   }
 
