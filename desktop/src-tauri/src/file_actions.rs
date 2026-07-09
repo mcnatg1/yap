@@ -182,7 +182,7 @@ fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
         return Err("Only Yap recording and transcript files can be opened.".into());
     }
     let path = canonical_existing_path(&path)?;
-    if !is_yap_media_or_transcript_path(&path) {
+    if !path.is_file() || !is_yap_media_or_transcript_path(&path) {
         return Err("Only Yap recording and transcript files can be opened.".into());
     }
     Ok(path)
@@ -433,6 +433,21 @@ mod tests {
         assert!(!is_yap_media_or_transcript_path(std::path::Path::new(
             "script.ps1"
         )));
+    }
+
+    #[test]
+    fn app_open_path_rejects_media_named_directories() {
+        let dir = temp_test_dir("open-media-dir");
+        let media_dir = dir.join("clip.wav");
+        std::fs::create_dir_all(&media_dir).unwrap();
+
+        let err = openable_app_path(media_dir.display().to_string()).unwrap_err();
+
+        assert_eq!(
+            err,
+            "Only Yap recording and transcript files can be opened."
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
