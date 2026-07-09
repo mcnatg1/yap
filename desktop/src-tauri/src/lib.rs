@@ -31,8 +31,8 @@ const TRAY_START_DICTATING: &str = "start_dictating";
 const TRAY_STOP_RECORDING: &str = "stop_recording";
 const TRAY_QUIT: &str = "quit";
 
+pub mod audio;
 mod file_actions;
-mod audio;
 pub mod live;
 pub mod runtime;
 pub mod stt;

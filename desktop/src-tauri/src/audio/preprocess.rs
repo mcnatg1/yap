@@ -178,8 +178,7 @@ mod tests {
 
     #[test]
     fn preprocess_pipeline_flows_through_shared_module_path() {
-        let downmixed =
-            crate::audio::preprocess::downmix_to_mono(&[1.0, 0.0, 0.0, 1.0], 2);
+        let downmixed = crate::audio::preprocess::downmix_to_mono(&[1.0, 0.0, 0.0, 1.0], 2);
         let mut resampler = crate::audio::preprocess::LinearResampler::new(2, 1);
         let resampled = resampler.push(&downmixed);
         let pcm = crate::audio::preprocess::f32_to_i16_le_bytes(&resampled);
