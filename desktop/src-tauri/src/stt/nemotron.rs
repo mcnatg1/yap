@@ -348,11 +348,10 @@ fn verify_or_trust(path: &Path, expected_hash: &str) -> Result<(), SttError> {
 fn verify_sha_and_mark(path: &Path, expected_hash: &str) -> Result<(), SttError> {
     crate::stt::model::verify_sha256(path, expected_hash)?;
     let metadata = std::fs::metadata(path).map_err(|_| SttError::ModelMissing)?;
-    std::fs::write(
-        path.with_extension("verified"),
-        format!("{expected_hash}\n{}\n", metadata.len()),
+    crate::stt::model::write_text_atomically(
+        &path.with_extension("verified"),
+        &format!("{expected_hash}\n{}\n", metadata.len()),
     )
-    .map_err(|_| SttError::ModelMissing)
 }
 
 fn verify_model_at_with_progress<P, C>(

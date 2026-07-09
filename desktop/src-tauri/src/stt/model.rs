@@ -145,9 +145,8 @@ where
     P: FnMut(DownloadProgress),
     C: Fn() -> bool,
 {
-    let tmp = dest.with_extension("part");
+    let (tmp, mut file) = reserve_sibling_temp_file(dest)?;
     let result = (|| {
-        let mut file = std::fs::File::create(&tmp).map_err(io_error_to_stt)?;
         let mut buffer = [0u8; DOWNLOAD_BUFFER_BYTES];
         let mut downloaded_bytes = 0u64;
         let started_at = Instant::now();
@@ -195,6 +194,52 @@ where
     }
 
     result
+}
+
+pub(crate) fn write_text_atomically(path: &Path, text: &str) -> Result<(), SttError> {
+    let (tmp, mut file) = reserve_sibling_temp_file(path)?;
+    let result = (|| {
+        file.write_all(text.as_bytes()).map_err(io_error_to_stt)?;
+        file.sync_all().map_err(io_error_to_stt)?;
+        drop(file);
+        if path.exists() {
+            std::fs::remove_file(path).map_err(io_error_to_stt)?;
+        }
+        std::fs::rename(&tmp, path).map_err(io_error_to_stt)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    result
+}
+
+fn reserve_sibling_temp_file(path: &Path) -> Result<(PathBuf, std::fs::File), SttError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(SttError::ModelMissing)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+
+    for attempt in 0..32 {
+        let tmp = path.with_file_name(format!("{file_name}.{pid}.{nonce}.{attempt}.part"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io_error_to_stt(error)),
+        }
+    }
+
+    Err(SttError::ModelMissing)
 }
 
 #[cfg(test)]
@@ -425,6 +470,32 @@ mod tests {
         assert_eq!(error, SttError::ModelInstallCancelled);
         assert!(!dest.exists());
         assert!(!dest.with_extension("part").exists());
+    }
+
+    #[test]
+    fn stream_to_destination_does_not_truncate_legacy_partial_file() {
+        let dir = TestDir::new("yap-download-existing-partial");
+        let dest = dir.path().join("model.bin");
+        let legacy_partial = dest.with_extension("part");
+        std::fs::write(&legacy_partial, b"keep me").unwrap();
+        let mut reader = ChunkedReader::from_bytes(&[b"abc"]);
+
+        stream_to_destination(&mut reader, Some(3), &dest, |_| {}, || false).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+        assert_eq!(std::fs::read(&legacy_partial).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn atomic_text_write_rejects_directory_destinations() {
+        let dir = TestDir::new("yap-atomic-text-directory");
+        let marker = dir.path().join("model.verified");
+        std::fs::create_dir_all(&marker).unwrap();
+
+        let error = write_text_atomically(&marker, "verified").unwrap_err();
+
+        assert_eq!(error, SttError::ModelMissing);
+        assert!(marker.is_dir());
     }
 
     #[test]
