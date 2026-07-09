@@ -37,7 +37,6 @@ struct LiveRuntimeInner {
     stream: Option<SessionStream>,
     audio: Option<JoinHandle<()>>,
     level: Option<JoinHandle<()>>,
-    vad_segments: Vec<VadSegment>,
     last_used: Instant,
     #[cfg(test)]
     has_capture_for_test: bool,
@@ -175,12 +174,6 @@ impl RecordedPcmBuffer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VadSegment {
-    pub start_ms: u64,
-    pub end_ms: u64,
-}
-
 impl LiveRuntime {
     pub fn new() -> Self {
         Self {
@@ -212,7 +205,6 @@ impl LiveRuntime {
             self.discard_recorded_pcm();
             inner.session = inner.session.saturating_add(1);
             inner.last_used = Instant::now();
-            inner.vad_segments.clear();
             let session = inner.session;
             inner.ensure_stream(self.clone(), app.clone(), session)?;
             let stream_tx = inner
@@ -383,7 +375,6 @@ impl LiveRuntimeInner {
             stream: None,
             audio: None,
             level: None,
-            vad_segments: Vec::new(),
             last_used: Instant::now(),
             #[cfg(test)]
             has_capture_for_test: false,

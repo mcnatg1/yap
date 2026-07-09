@@ -88,7 +88,7 @@ fn fallback_model_cancel_install(
 }
 
 #[tauri::command]
-fn fallback_model_verify(
+async fn fallback_model_verify(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
@@ -96,7 +96,7 @@ fn fallback_model_verify(
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
-    stt::fallback_model::verify(app, install_state.inner().clone())
+    stt::fallback_model::verify(app, install_state.inner().clone()).await
 }
 
 #[tauri::command]

@@ -277,7 +277,7 @@ pub fn cancel_install(
     Ok(status(install_state))
 }
 
-pub fn verify(
+pub async fn verify(
     app: AppHandle,
     install_state: FallbackModelInstallState,
 ) -> Result<nemotron::FallbackModelView, SttCommandError> {
@@ -295,24 +295,22 @@ pub fn verify(
         Err(active) => return Ok(*active),
     }
 
-    tauri::async_runtime::block_on(async move {
-        tauri::async_runtime::spawn_blocking(move || {
-            let final_view = {
-                let mut progress = FallbackProgressEmitter::new(app.clone(), install_state.clone());
-                sanitize_fallback_model_view(nemotron::verify_model_with_progress(
-                    settings::local_fallback_enabled(),
-                    |view| progress.publish(view),
-                    || false,
-                ))
-            };
+    tauri::async_runtime::spawn_blocking(move || {
+        let final_view = {
+            let mut progress = FallbackProgressEmitter::new(app.clone(), install_state.clone());
+            sanitize_fallback_model_view(nemotron::verify_model_with_progress(
+                settings::local_fallback_enabled(),
+                |view| progress.publish(view),
+                || false,
+            ))
+        };
 
-            emit_fallback_status(&app, &install_state, final_view.clone());
-            install_state.clear();
-            Ok(final_view)
-        })
-        .await
-        .map_err(|_| SttCommandError::from(SttError::SidecarCrash))?
+        emit_fallback_status(&app, &install_state, final_view.clone());
+        install_state.clear();
+        Ok(final_view)
     })
+    .await
+    .map_err(|_| SttCommandError::from(SttError::SidecarCrash))?
 }
 
 pub fn remove(
