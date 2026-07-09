@@ -18,6 +18,7 @@ import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog"
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
+import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import {
   hideTranscriptHistory,
   readHiddenTranscriptHistory,
@@ -56,11 +57,6 @@ import {
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import {
   allowRecordingPlaybackPath,
-  applyRestoredQueuePlaybackPaths,
-  mergeHistoryPlaybackPaths,
-  restoreHistoryPlaybackPaths,
-  restoreQueuePlaybackPaths,
-  trimHistoryPlaybackPaths,
 } from "@/lib/playback-registry";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
@@ -168,7 +164,7 @@ export default function App() {
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readVisibleTranscriptHistory());
-  const [historyPlaybackPaths, setHistoryPlaybackPaths] = useState<Record<string, string>>({});
+  const historyPlaybackPaths = useRegisteredPlayback(queue, setQueue, history);
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
@@ -230,38 +226,6 @@ export default function App() {
       toast.warning("Queued recordings could not be saved.");
     }
   }, [queue]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void restoreQueuePlaybackPaths(queue).then((restored) => {
-      if (cancelled) return;
-      if (restored.length) {
-        setQueue((current) => applyRestoredQueuePlaybackPaths(current, restored));
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [queue]);
-
-  useEffect(() => {
-    setHistoryPlaybackPaths((current) => trimHistoryPlaybackPaths(current, history));
-  }, [history]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void restoreHistoryPlaybackPaths(history, historyPlaybackPaths).then((restored) => {
-      if (cancelled) return;
-      if (restored.length) {
-        setHistoryPlaybackPaths((current) => mergeHistoryPlaybackPaths(current, restored));
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [history, historyPlaybackPaths]);
 
   useEffect(() => {
     if (!isTauri()) return;
