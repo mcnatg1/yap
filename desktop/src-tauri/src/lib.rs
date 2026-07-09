@@ -430,46 +430,6 @@ fn show_main_workspace(app: tauri::AppHandle, workspace: String) -> Result<(), S
     }
 }
 
-#[tauri::command]
-async fn install_local_fallback(
-    live_state: tauri::State<'_, live::LiveSessionState>,
-) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
-    ensure_fallback_setup_idle(&live_state)?;
-    tauri::async_runtime::spawn_blocking(|| {
-        let previous_enabled = stt::settings::local_fallback_enabled();
-        stt::settings::set_local_fallback_enabled(true)?;
-        match stt::nemotron::local_fallback_start_paths() {
-            Ok(_) => Ok(current_setup_status()),
-            Err(error) => {
-                let _ = stt::settings::set_local_fallback_enabled(previous_enabled);
-                Err(stt::dispatch::SttCommandError::from(error))
-            }
-        }
-    })
-    .await
-    .map_err(|_| stt::dispatch::SttCommandError::from(stt::error::SttError::SidecarCrash))?
-}
-
-#[tauri::command]
-fn remove_local_fallback(
-    live_state: tauri::State<'_, live::LiveSessionState>,
-) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
-    ensure_fallback_setup_idle(&live_state)?;
-    remove_local_fallback_files()?;
-    stt::settings::set_local_fallback_enabled(false)?;
-    Ok(current_setup_status())
-}
-
-#[tauri::command]
-fn set_local_fallback_enabled(
-    live_state: tauri::State<'_, live::LiveSessionState>,
-    enabled: bool,
-) -> Result<SetupStatus, stt::dispatch::SttCommandError> {
-    ensure_fallback_setup_idle(&live_state)?;
-    stt::settings::set_local_fallback_enabled(enabled)?;
-    Ok(current_setup_status())
-}
-
 fn current_setup_status() -> SetupStatus {
     let fallback_enabled = stt::settings::local_fallback_enabled();
     let model_installed = matches!(
@@ -555,10 +515,6 @@ fn compose_engine_status(
             "Local fallback needs attention.".into(),
         ),
     }
-}
-
-fn remove_local_fallback_files() -> Result<(), stt::dispatch::SttCommandError> {
-    stt::nemotron::remove_model().map_err(stt::dispatch::SttCommandError::from)
 }
 
 #[tauri::command]
@@ -1253,9 +1209,6 @@ pub fn run() {
             fallback_model_open_folder,
             list_local_compute_targets,
             set_local_compute_target,
-            install_local_fallback,
-            remove_local_fallback,
-            set_local_fallback_enabled,
             live_status,
             show_live_overlay,
             hide_live_overlay,
