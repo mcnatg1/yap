@@ -1352,13 +1352,7 @@ mod tests {
 
     #[test]
     fn live_overlay_frame_matches_frontend_surface_contract() {
-        for surface in [
-            "peek",
-            "recording",
-            "processing",
-            "initializing",
-            "success",
-        ] {
+        for surface in ["peek", "recording", "processing", "initializing", "success"] {
             assert_eq!(
                 live_overlay_frame(surface, None),
                 (LIVE_OVERLAY_HOVER_SENSOR_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)

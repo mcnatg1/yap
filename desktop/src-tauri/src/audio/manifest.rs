@@ -179,12 +179,14 @@ pub fn build_manifest_windows(
                         chunk_end = extend_speech_tail(
                             &sorted_frames,
                             &assignments,
-                            start,
-                            speech_chunk_end,
-                            speech_end_ms,
-                            assigned_speech_end_ms,
-                            config.tail_padding_ms,
-                            max_window_ms,
+                            TailExtension {
+                                chunk_start: start,
+                                speech_chunk_end,
+                                speech_end_ms,
+                                assigned_speech_end_ms,
+                                tail_padding_ms: config.tail_padding_ms,
+                                max_window_ms,
+                            },
                         );
                         consumed = chunk_end;
                     }
@@ -447,31 +449,41 @@ fn split_windows(frames: &[AudioFrame], window_ms: u64) -> Vec<(usize, usize)> {
     windows
 }
 
-fn extend_speech_tail(
-    frames: &[AudioFrame],
-    assignments: &[FrameVadAssignment],
+struct TailExtension {
     chunk_start: usize,
     speech_chunk_end: usize,
     speech_end_ms: u64,
     assigned_speech_end_ms: u64,
     tail_padding_ms: u32,
     max_window_ms: u64,
+}
+
+fn extend_speech_tail(
+    frames: &[AudioFrame],
+    assignments: &[FrameVadAssignment],
+    tail: TailExtension,
 ) -> usize {
-    if tail_padding_ms == 0 {
-        return speech_chunk_end;
+    if tail.tail_padding_ms == 0 {
+        return tail.speech_chunk_end;
     }
 
-    let already_covered_tail_ms = assigned_speech_end_ms.saturating_sub(speech_end_ms);
-    let remaining_tail_ms = u64::from(tail_padding_ms).saturating_sub(already_covered_tail_ms);
+    let already_covered_tail_ms = tail
+        .assigned_speech_end_ms
+        .saturating_sub(tail.speech_end_ms);
+    let remaining_tail_ms = u64::from(tail.tail_padding_ms).saturating_sub(already_covered_tail_ms);
     if remaining_tail_ms == 0 {
-        return speech_chunk_end;
+        return tail.speech_chunk_end;
     }
 
-    let allowed_tail_end_ms = assigned_speech_end_ms.saturating_add(remaining_tail_ms);
-    let allowed_chunk_end_ms = frames[chunk_start].start_ms.saturating_add(max_window_ms);
+    let allowed_tail_end_ms = tail
+        .assigned_speech_end_ms
+        .saturating_add(remaining_tail_ms);
+    let allowed_chunk_end_ms = frames[tail.chunk_start]
+        .start_ms
+        .saturating_add(tail.max_window_ms);
     let final_allowed_end_ms = allowed_tail_end_ms.min(allowed_chunk_end_ms);
 
-    let mut end = speech_chunk_end;
+    let mut end = tail.speech_chunk_end;
     while end < frames.len()
         && assignments[end].kind == VadKind::Silence
         && frames[end].end_ms() <= final_allowed_end_ms

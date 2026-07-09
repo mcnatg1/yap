@@ -53,15 +53,17 @@ impl FallbackModelInstallState {
         phase: FallbackModelInstallPhase,
         view: nemotron::FallbackModelView,
         cancellable: bool,
-    ) -> Result<Option<Arc<AtomicBool>>, nemotron::FallbackModelView> {
+    ) -> Result<Option<Arc<AtomicBool>>, Box<nemotron::FallbackModelView>> {
         {
             let mut inner = self.inner.lock().expect("fallback model state poisoned");
             if inner.phase.is_some() {
-                return Err(inner
-                    .progress
-                    .clone()
-                    .or_else(|| inner.view.clone())
-                    .unwrap_or(view));
+                return Err(Box::new(
+                    inner
+                        .progress
+                        .clone()
+                        .or_else(|| inner.view.clone())
+                        .unwrap_or(view),
+                ));
             }
             inner.phase = Some(phase);
             inner.view = Some(view);
@@ -217,7 +219,7 @@ pub async fn install(
         true,
     ) {
         Ok(cancellation) => cancellation,
-        Err(active) => return Ok(active),
+        Err(active) => return Ok(*active),
     };
     emit_fallback_progress(&app, &install_state, initial_view);
 
@@ -306,7 +308,7 @@ pub fn verify(
         false,
     ) {
         Ok(_) => emit_fallback_status(&app, &install_state, initial_view),
-        Err(active) => return Ok(active),
+        Err(active) => return Ok(*active),
     }
 
     tauri::async_runtime::block_on(async move {

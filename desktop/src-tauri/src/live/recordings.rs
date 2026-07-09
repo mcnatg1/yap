@@ -33,7 +33,7 @@ fn save_session_parts_to_dir(
         return Ok(None);
     }
 
-    std::fs::create_dir_all(&dir)
+    std::fs::create_dir_all(dir)
         .map_err(|err| format!("Failed to create live recordings folder: {err}"))?;
     let (name, transcript_path, audio_path) = reserve_session_paths(dir, created_at_ms)?;
     let transcript_body =
@@ -41,15 +41,13 @@ fn save_session_parts_to_dir(
 
     write_new_text_file(&transcript_path, &format!("{transcript_body}\n"))
         .map_err(|err| format!("Failed to save live transcript: {err}"))?;
-    if !pcm.is_empty() {
-        if write_pcm16_wav(&audio_path, pcm).is_err() {
-            return Ok(Some(SavedLiveSession {
-                name,
-                source_path: transcript_path.display().to_string(),
-                output_path: transcript_path.display().to_string(),
-                created_at_ms,
-            }));
-        }
+    if !pcm.is_empty() && write_pcm16_wav(&audio_path, pcm).is_err() {
+        return Ok(Some(SavedLiveSession {
+            name,
+            source_path: transcript_path.display().to_string(),
+            output_path: transcript_path.display().to_string(),
+            created_at_ms,
+        }));
     }
 
     Ok(Some(SavedLiveSession {
