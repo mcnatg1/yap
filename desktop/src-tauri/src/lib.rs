@@ -10,26 +10,11 @@ use tauri::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
-};
-
-const LIVE_OVERLAY_COMPACT_HEIGHT: f64 = 40.0;
-const LIVE_OVERLAY_DEFAULT_WIDTH: f64 = 104.0;
-const LIVE_OVERLAY_HOVER_SENSOR_WIDTH: f64 = 260.0;
-const LIVE_OVERLAY_HOVER_SENSOR_HEIGHT: f64 = 8.0;
-const LIVE_OVERLAY_MIN_ERROR_WIDTH: f64 = 180.0;
-const LIVE_OVERLAY_MAX_ERROR_WIDTH: f64 = 420.0;
-const LIVE_OVERLAY_TOP_BEZEL_OFFSET: f64 = 0.0;
 const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_START_DICTATING: &str = "start_dictating";
 const TRAY_STOP_RECORDING: &str = "stop_recording";
 const TRAY_QUIT: &str = "quit";
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
-const LIVE_OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 
 pub mod audio;
 mod batch_recordings;
@@ -198,9 +183,9 @@ async fn show_live_overlay(
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
     persist_live_view(&view)?;
     if view.status == live::state::LiveSessionStatus::Idle {
-        ensure_idle_live_overlay(&app)?;
+        live::overlay_window::ensure_idle(&app)?;
     } else {
-        ensure_live_overlay(&app)?;
+        live::overlay_window::ensure_active(&app)?;
     }
     emit_live(&app, &view);
     Ok(view)
@@ -218,7 +203,7 @@ fn hide_live_overlay(
     }
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Hidden);
     persist_live_view(&view)?;
-    if let Some(window) = app.get_webview_window("live-overlay") {
+    if let Some(window) = app.get_webview_window(live::overlay_window::WINDOW_LABEL) {
         window
             .hide()
             .map_err(|err| format!("Failed to hide live overlay: {err}"))?;
@@ -242,8 +227,8 @@ fn set_live_overlay_surface(
     {
         return Ok(());
     }
-    let (width, height) = live_overlay_frame(&surface, error_message.as_deref());
-    ensure_live_overlay_size(&app, width, height)
+    let (width, height) = live::overlay_window::frame(&surface, error_message.as_deref());
+    live::overlay_window::ensure_size(&app, width, height)
 }
 
 #[tauri::command]
@@ -694,7 +679,7 @@ fn is_main_command_window(label: &str) -> bool {
 }
 
 fn is_main_or_overlay_command_window(label: &str) -> bool {
-    is_main_command_window(label) || label == LIVE_OVERLAY_WINDOW_LABEL
+    is_main_command_window(label) || label == live::overlay_window::WINDOW_LABEL
 }
 
 fn forbidden_command_window_message() -> String {
@@ -909,7 +894,7 @@ fn start_live_runtime(
     if stt.is_transcribing() {
         let view = live.block_with_error(stt::error::SttError::Busy.user_message());
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = ensure_live_overlay(&app) {
+            if let Err(error) = live::overlay_window::ensure_active(&app) {
                 log_line(&format!("live overlay busy show failed: {error}"));
             }
         }
@@ -922,7 +907,7 @@ fn start_live_runtime(
     if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
         let view = block_live_for_setup(live, setup);
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = ensure_live_overlay(&app) {
+            if let Err(error) = live::overlay_window::ensure_active(&app) {
                 log_line(&format!("live overlay blocked show failed: {error}"));
             }
         }
@@ -933,7 +918,7 @@ fn start_live_runtime(
     if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
         let view = live.block_with_error(&runtime_error_to_stt(error).message);
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = ensure_live_overlay(&app) {
+            if let Err(error) = live::overlay_window::ensure_active(&app) {
                 log_line(&format!("live overlay route error show failed: {error}"));
             }
         }
@@ -955,7 +940,7 @@ fn start_live_runtime(
         view.status = live::state::LiveSessionStatus::Armed;
         view.active_capture_mode = Some(active_capture_mode);
     });
-    if let Err(error) = ensure_live_overlay(&app) {
+    if let Err(error) = live::overlay_window::ensure_active(&app) {
         log_line(&format!("live overlay start show failed: {error}"));
     }
     emit_live(&app, &view);
@@ -1009,10 +994,10 @@ fn stop_live_runtime(
         paste_live_text(&text);
     }
     if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-        if let Err(error) = ensure_idle_live_overlay(&app) {
+        if let Err(error) = live::overlay_window::ensure_idle(&app) {
             log_line(&format!("live overlay idle show failed: {error}"));
         }
-    } else if let Some(window) = app.get_webview_window("live-overlay") {
+    } else if let Some(window) = app.get_webview_window(live::overlay_window::WINDOW_LABEL) {
         let _ = window.hide();
     }
     emit_live(&app, &view);
@@ -1034,175 +1019,6 @@ fn warm_live_on_intent(app: &tauri::AppHandle, live_runtime: &live::runtime::Liv
             log_line(&format!("live warmup skipped: {error}"));
         }
     });
-}
-
-fn ensure_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
-    ensure_live_overlay_size(
-        app,
-        LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
-        LIVE_OVERLAY_COMPACT_HEIGHT,
-    )
-}
-
-fn ensure_idle_live_overlay(app: &tauri::AppHandle) -> Result<(), String> {
-    ensure_live_overlay_size(
-        app,
-        LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
-        LIVE_OVERLAY_HOVER_SENSOR_HEIGHT,
-    )
-}
-
-fn recover_live_overlay(app: &tauri::AppHandle) {
-    let view = app.state::<live::LiveSessionState>().snapshot();
-    if view.visibility != live::state::LiveOverlayVisibility::Enabled {
-        return;
-    }
-    if app
-        .get_webview_window("live-overlay")
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false)
-    {
-        return;
-    }
-    let result = if live::state::is_live_session_started(view.status)
-        || view.status == live::state::LiveSessionStatus::Blocked
-    {
-        ensure_live_overlay(app)
-    } else {
-        ensure_idle_live_overlay(app)
-    };
-    if let Err(error) = result {
-        log_line(&format!("live overlay recovery failed: {error}"));
-    }
-}
-
-fn live_overlay_frame(surface: &str, error_message: Option<&str>) -> (f64, f64) {
-    let width = match surface {
-        "sensor" | "peek" | "recording" | "processing" | "initializing" | "success" => {
-            LIVE_OVERLAY_HOVER_SENSOR_WIDTH
-        }
-        "feedback" => error_message.map_or(LIVE_OVERLAY_DEFAULT_WIDTH, |message| {
-            (message.len() as f64 * 6.8 + 74.0)
-                .clamp(LIVE_OVERLAY_MIN_ERROR_WIDTH, LIVE_OVERLAY_MAX_ERROR_WIDTH)
-        }),
-        _ => LIVE_OVERLAY_DEFAULT_WIDTH,
-    };
-    let height = if surface == "sensor" {
-        LIVE_OVERLAY_HOVER_SENSOR_HEIGHT
-    } else {
-        LIVE_OVERLAY_COMPACT_HEIGHT
-    };
-    (width, height)
-}
-
-fn ensure_live_overlay_size(app: &tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("live-overlay") {
-        window
-            .set_size(tauri::LogicalSize::new(width, height))
-            .map_err(|err| format!("Failed to size live overlay: {err}"))?;
-        window
-            .set_shadow(false)
-            .map_err(|err| format!("Failed to hide live overlay shadow: {err}"))?;
-        window
-            .set_skip_taskbar(true)
-            .map_err(|err| format!("Failed to hide live overlay from taskbar: {err}"))?;
-        window
-            .set_closable(false)
-            .map_err(|err| format!("Failed to lock live overlay close control: {err}"))?;
-        window
-            .set_focusable(false)
-            .map_err(|err| format!("Failed to keep live overlay unfocusable: {err}"))?;
-        make_live_overlay_system_window(&window)?;
-        position_live_overlay(app, &window, width)?;
-        window
-            .show()
-            .map_err(|err| format!("Failed to show live overlay: {err}"))?;
-        return Ok(());
-    }
-
-    let (x, y) = live_overlay_position(app, width);
-    let window = tauri::WebviewWindowBuilder::new(
-        app,
-        "live-overlay",
-        tauri::WebviewUrl::App("index.html?window=live-overlay".into()),
-    )
-    .title("Yap Live")
-    .inner_size(width, height)
-    .position(x, y)
-    .decorations(false)
-    .resizable(false)
-    .closable(false)
-    .transparent(true)
-    .shadow(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .focusable(false)
-    .build()
-    .map_err(|err| format!("Failed to create live overlay: {err}"))?;
-    window
-        .set_focusable(false)
-        .map_err(|err| format!("Failed to keep live overlay unfocusable: {err}"))?;
-    make_live_overlay_system_window(&window)?;
-    position_live_overlay(app, &window, width)?;
-    Ok(())
-}
-
-fn position_live_overlay(
-    app: &tauri::AppHandle,
-    window: &tauri::WebviewWindow,
-    width: f64,
-) -> Result<(), String> {
-    let (x, y) = live_overlay_position(app, width);
-    window
-        .set_position(tauri::LogicalPosition::new(x, y))
-        .map_err(|err| format!("Failed to position live overlay: {err}"))
-}
-
-fn live_overlay_position(app: &tauri::AppHandle, width: f64) -> (f64, f64) {
-    let monitor = app
-        .cursor_position()
-        .ok()
-        .and_then(|cursor| app.monitor_from_point(cursor.x, cursor.y).ok().flatten())
-        .or_else(|| app.primary_monitor().ok().flatten());
-    if let Some(monitor) = monitor {
-        let scale = monitor.scale_factor();
-        let position = monitor.position().to_logical::<f64>(scale);
-        let size = monitor.size().to_logical::<f64>(scale);
-        return (
-            position.x + ((size.width - width) / 2.0).max(0.0),
-            position.y + LIVE_OVERLAY_TOP_BEZEL_OFFSET,
-        );
-    }
-    (8.0, LIVE_OVERLAY_TOP_BEZEL_OFFSET)
-}
-
-#[cfg(target_os = "windows")]
-fn make_live_overlay_system_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let hwnd = window
-        .hwnd()
-        .map_err(|err| format!("Failed to read live overlay window handle: {err}"))?;
-    unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let next_style = (style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) & !WS_EX_APPWINDOW.0;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_style as isize);
-        SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-        .map_err(|err| format!("Failed to refresh live overlay window style: {err}"))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn make_live_overlay_system_window(_window: &tauri::WebviewWindow) -> Result<(), String> {
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1315,15 +1131,15 @@ pub fn run() {
                 let app = app.handle().clone();
                 std::thread::spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_secs(2));
-                    recover_live_overlay(&app);
+                    live::overlay_window::recover(&app);
                 });
             }
             let startup_live = app.state::<live::LiveSessionState>().snapshot();
             if startup_live.visibility == live::state::LiveOverlayVisibility::Enabled {
                 let result = if startup_live.status == live::state::LiveSessionStatus::Idle {
-                    ensure_idle_live_overlay(app.handle())
+                    live::overlay_window::ensure_idle(app.handle())
                 } else {
-                    ensure_live_overlay(app.handle())
+                    live::overlay_window::ensure_active(app.handle())
                 };
                 if let Err(error) = result {
                     log_line(&format!("live overlay startup failed: {error}"));
@@ -1388,7 +1204,7 @@ pub fn run() {
                 label,
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
-            } if label == "live-overlay" => {
+            } if label == live::overlay_window::WINDOW_LABEL => {
                 api.prevent_close();
             }
             tauri::RunEvent::Exit => {
@@ -1494,11 +1310,13 @@ mod tests {
     #[test]
     fn command_window_guards_keep_privileged_commands_main_only() {
         assert!(is_main_command_window("main"));
-        assert!(!is_main_command_window("live-overlay"));
+        assert!(!is_main_command_window(live::overlay_window::WINDOW_LABEL));
         assert!(!is_main_command_window("settings"));
 
         assert!(is_main_or_overlay_command_window("main"));
-        assert!(is_main_or_overlay_command_window("live-overlay"));
+        assert!(is_main_or_overlay_command_window(
+            live::overlay_window::WINDOW_LABEL
+        ));
         assert!(!is_main_or_overlay_command_window("settings"));
     }
 
@@ -1508,39 +1326,6 @@ mod tests {
 
         assert_eq!(error.code, "UNAUTHORIZED_WINDOW");
         assert_eq!(error.message, "Command is not available from this window.");
-    }
-
-    #[test]
-    fn live_overlay_frame_matches_frontend_surface_contract() {
-        for surface in ["peek", "recording", "processing", "initializing", "success"] {
-            assert_eq!(
-                live_overlay_frame(surface, None),
-                (LIVE_OVERLAY_HOVER_SENSOR_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
-            );
-        }
-        assert_eq!(
-            live_overlay_frame("sensor", None),
-            (
-                LIVE_OVERLAY_HOVER_SENSOR_WIDTH,
-                LIVE_OVERLAY_HOVER_SENSOR_HEIGHT
-            )
-        );
-    }
-
-    #[test]
-    fn live_overlay_feedback_frame_clamps_error_width() {
-        assert_eq!(
-            live_overlay_frame("feedback", None),
-            (LIVE_OVERLAY_DEFAULT_WIDTH, LIVE_OVERLAY_COMPACT_HEIGHT)
-        );
-        assert_eq!(
-            live_overlay_frame("feedback", Some("short")).0,
-            LIVE_OVERLAY_MIN_ERROR_WIDTH
-        );
-        assert_eq!(
-            live_overlay_frame("feedback", Some(&"x".repeat(200))).0,
-            LIVE_OVERLAY_MAX_ERROR_WIDTH
-        );
     }
 
     #[test]
