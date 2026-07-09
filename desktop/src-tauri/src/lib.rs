@@ -3,17 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tauri::{
-    menu::MenuBuilder,
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-};
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-const TRAY_SHOW_APP: &str = "show_app";
-const TRAY_START_DICTATING: &str = "start_dictating";
-const TRAY_STOP_RECORDING: &str = "stop_recording";
-const TRAY_QUIT: &str = "quit";
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
 pub mod audio;
@@ -23,6 +15,7 @@ pub mod live;
 mod paths;
 pub mod runtime;
 pub mod stt;
+mod tray;
 
 #[tauri::command]
 fn polish_num_gpu(window: tauri::WebviewWindow) -> Result<u32, String> {
@@ -731,14 +724,14 @@ fn emit_live_saved(app: &tauri::AppHandle, saved: &live::recordings::SavedLiveSe
     let _ = app.emit("live-session-saved", saved);
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
     }
 }
 
-fn start_live_from_app(app: &tauri::AppHandle) {
+pub(crate) fn start_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
     let stt = app.state::<stt::dispatch::SttState>();
@@ -754,7 +747,7 @@ fn start_live_from_app(app: &tauri::AppHandle) {
     );
 }
 
-fn stop_live_from_app(app: &tauri::AppHandle) {
+pub(crate) fn stop_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
     let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
@@ -833,50 +826,6 @@ fn handle_live_shortcut_action(
             });
         }
     }
-}
-
-fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let menu = MenuBuilder::new(app)
-        .text(TRAY_SHOW_APP, "Show Yap")
-        .text(TRAY_START_DICTATING, "Start Dictating")
-        .text(TRAY_STOP_RECORDING, "Stop Recording")
-        .separator()
-        .text(TRAY_QUIT, "Quit")
-        .build()?;
-
-    let mut tray = TrayIconBuilder::with_id("yap")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .tooltip("Yap")
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            TRAY_SHOW_APP => show_main_window(app),
-            TRAY_START_DICTATING => start_live_from_app(app),
-            TRAY_STOP_RECORDING => stop_live_from_app(app),
-            TRAY_QUIT => app.exit(0),
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                }
-            ) {
-                show_main_window(tray.app_handle());
-            }
-        });
-
-    if let Some(icon) = app.default_window_icon().cloned() {
-        tray = tray.icon(icon);
-    }
-
-    tray.build(app)?;
-    Ok(())
 }
 
 fn start_live_runtime(
@@ -1126,7 +1075,7 @@ pub fn run() {
                     }
                 }
             }
-            install_tray(app.handle())?;
+            tray::install(app.handle())?;
             {
                 let app = app.handle().clone();
                 std::thread::spawn(move || loop {
