@@ -38,6 +38,7 @@ test("live overlay respects reduced motion", async ({ page }) => {
   const before = await waveformBarHeights(waveform);
   await page.waitForTimeout(180);
   await expect(waveform).toBeVisible();
+  await expect(waveform.locator("span").first()).toHaveCSS("transition-duration", "0s");
   expect(await waveformBarHeights(waveform)).toEqual(before);
 });
 

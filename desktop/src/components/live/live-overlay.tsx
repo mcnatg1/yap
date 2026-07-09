@@ -227,6 +227,7 @@ export function LiveOverlay({
             model={model}
             onRetryButtonPressed={onRetry}
             onStopButtonPressed={onStop}
+            prefersReducedMotion={prefersReducedMotion}
           />
         )}
       </div>
@@ -270,10 +271,12 @@ function RecordingOverlayView({
   model,
   onRetryButtonPressed,
   onStopButtonPressed,
+  prefersReducedMotion,
 }: {
   model: OverlayModel;
   onRetryButtonPressed?: () => void;
   onStopButtonPressed?: () => void;
+  prefersReducedMotion: boolean;
 }) {
   const showsLiveRecordingContent = model.phase === "recording";
   const showsStopButton = showsLiveRecordingContent && model.recordingTriggerMode === "toggle";
@@ -289,7 +292,7 @@ function RecordingOverlayView({
         {model.phase === "initializing" ? (
           <InitializingDotsView />
         ) : showsLiveRecordingContent ? (
-          <WaveformView audioLevel={model.audioLevel} showsActivityPulse />
+          <WaveformView audioLevel={model.audioLevel} prefersReducedMotion={prefersReducedMotion} showsActivityPulse />
         ) : (
           <ProcessingIndicatorView />
         )}
@@ -366,8 +369,16 @@ function FreeFlowIconButton({
   );
 }
 
-function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; showsActivityPulse?: boolean }) {
-  const pulseTime = useAnimationTime(Boolean(showsActivityPulse));
+function WaveformView({
+  audioLevel,
+  prefersReducedMotion,
+  showsActivityPulse,
+}: {
+  audioLevel: number;
+  prefersReducedMotion: boolean;
+  showsActivityPulse?: boolean;
+}) {
+  const pulseTime = useAnimationTime(Boolean(showsActivityPulse) && !prefersReducedMotion);
   return (
     <div aria-hidden="true" className="flex h-6 w-12 items-center justify-center gap-[2.5px]" data-testid="live-waveform">
       {waveformMultipliers.map((multiplier, index) => (
@@ -375,6 +386,7 @@ function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; 
           amplitude={barAmplitude(audioLevel, multiplier, index, pulseTime)}
           delay={Math.abs(index - waveformCenterIndex) * 0.01}
           key={index}
+          prefersReducedMotion={prefersReducedMotion}
           response={0.18 + (Math.abs(index - waveformCenterIndex) / waveformCenterIndex) * 0.06}
         />
       ))}
@@ -385,13 +397,25 @@ function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; 
 const waveformMultipliers = [0.35, 0.55, 0.75, 0.9, 1.0, 0.9, 0.75, 0.55, 0.35] as const;
 const waveformCenterIndex = (waveformMultipliers.length - 1) / 2;
 
-function WaveformBar({ amplitude, delay, response }: { amplitude: number; delay: number; response: number }) {
+function WaveformBar({
+  amplitude,
+  delay,
+  prefersReducedMotion,
+  response,
+}: {
+  amplitude: number;
+  delay: number;
+  prefersReducedMotion: boolean;
+  response: number;
+}) {
   return (
     <span
       className="w-[3px] rounded-full bg-white"
       style={{
         height: 2 + (22 - 2) * amplitude,
-        transition: `height ${Math.min(response, 0.12)}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
+        transition: prefersReducedMotion
+          ? "none"
+          : `height ${Math.min(response, 0.12)}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
       }}
     />
   );
