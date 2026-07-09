@@ -593,6 +593,9 @@ fn open_capture(
     let (level_tx, level_rx) = mpsc::channel::<f32>();
     let audio_active_session = Arc::clone(&active_session);
     let audio_raw_ready = Arc::clone(&raw_ready);
+    let audio_app = app.clone();
+    let decoder_backpressure_reported = Arc::new(AtomicBool::new(false));
+    let audio_decoder_backpressure_reported = Arc::clone(&decoder_backpressure_reported);
     let audio = std::thread::spawn(move || {
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE);
         let mut level_normalizer = LiveAudioLevelNormalizer::new();
@@ -612,10 +615,18 @@ fn open_capture(
                     .expect("live pcm poisoned")
                     .append(&bytes);
                 // If the decoder falls behind, keep the saved WAV path bounded and drop the live chunk.
-                let _ = samples_tx.try_send(StreamMessage::Samples {
-                    session: raw.session,
-                    samples: resampled,
-                });
+                if samples_tx
+                    .try_send(StreamMessage::Samples {
+                        session: raw.session,
+                        samples: resampled,
+                    })
+                    .is_err()
+                    && !audio_decoder_backpressure_reported.swap(true, Ordering::AcqRel)
+                {
+                    let state = audio_app.state::<LiveSessionState>();
+                    let view = state.mark_transcription_backpressure();
+                    let _ = audio_app.emit("live-session", &view);
+                }
             }
             let _ = level_tx.send(level);
             audio_raw_ready.store(true, Ordering::Release);

@@ -247,6 +247,16 @@ impl LiveSessionState {
         })
     }
 
+    pub fn mark_transcription_backpressure(&self) -> LiveSessionView {
+        self.update(|view| {
+            if !is_live_session_started(view.status) {
+                return;
+            }
+            view.error =
+                Some("Live transcription is catching up. Audio will still be saved.".into());
+        })
+    }
+
     pub fn return_to_listening(&self) -> LiveSessionView {
         self.update(|view| {
             if matches!(
@@ -499,6 +509,29 @@ mod tests {
 
         assert_eq!(view.status, LiveSessionStatus::Speaking);
         assert_eq!(view.level, Some(0.35));
+    }
+
+    #[test]
+    fn backpressure_warning_does_not_reopen_idle_sessions() {
+        let state = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+
+        assert_eq!(state.mark_transcription_backpressure().error, None);
+        state.update(|view| view.status = LiveSessionStatus::Speaking);
+
+        let warning = state.mark_transcription_backpressure();
+        assert_eq!(
+            warning.error.as_deref(),
+            Some("Live transcription is catching up. Audio will still be saved.")
+        );
+
+        let partial = state.update_partial("caught up");
+        assert_eq!(partial.error, None);
     }
 
     #[test]
