@@ -32,6 +32,7 @@ const TRAY_QUIT: &str = "quit";
 pub mod audio;
 mod file_actions;
 pub mod live;
+mod paths;
 pub mod runtime;
 pub mod stt;
 

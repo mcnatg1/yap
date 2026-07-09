@@ -31,13 +31,10 @@ pub fn models_dir_from<F>(env: F) -> PathBuf
 where
     F: Fn(&str) -> Option<String>,
 {
-    if let Some(dir) = env("YAP_MODELS_DIR") {
-        return PathBuf::from(dir);
+    if let Some(dir) = crate::paths::absolute_env_path(&env, "YAP_MODELS_DIR") {
+        return dir;
     }
-    if let Some(local) = env("LOCALAPPDATA") {
-        return PathBuf::from(local).join("Yap").join("models");
-    }
-    PathBuf::from(".").join("models")
+    crate::paths::app_data_dir_from(env).join("models")
 }
 
 pub fn models_dir() -> PathBuf {
@@ -304,25 +301,22 @@ mod tests {
 
     #[test]
     fn models_dir_prefers_override() {
+        let custom = std::env::temp_dir().join("custom-yap-models");
         let dir = models_dir_from(|key| match key {
-            "YAP_MODELS_DIR" => Some("D:/custom".into()),
+            "YAP_MODELS_DIR" => Some(custom.display().to_string()),
             _ => None,
         });
-        assert_eq!(dir, std::path::PathBuf::from("D:/custom"));
+        assert_eq!(dir, custom);
     }
 
     #[test]
     fn models_dir_falls_back_to_localappdata() {
+        let local = std::env::temp_dir().join("local-data");
         let dir = models_dir_from(|key| match key {
-            "LOCALAPPDATA" => Some("C:/Users/me/AppData/Local".into()),
+            "LOCALAPPDATA" => Some(local.display().to_string()),
             _ => None,
         });
-        assert_eq!(
-            dir,
-            std::path::PathBuf::from("C:/Users/me/AppData/Local")
-                .join("Yap")
-                .join("models")
-        );
+        assert_eq!(dir, local.join("Yap").join("models"));
     }
 
     #[test]

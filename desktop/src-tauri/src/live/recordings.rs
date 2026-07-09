@@ -89,15 +89,10 @@ fn recordings_dir_from<F>(env: F) -> std::path::PathBuf
 where
     F: Fn(&str) -> Option<String>,
 {
-    if let Some(dir) = env("YAP_LIVE_RECORDINGS_DIR") {
-        return std::path::PathBuf::from(dir);
+    if let Some(dir) = crate::paths::absolute_env_path(&env, "YAP_LIVE_RECORDINGS_DIR") {
+        return dir;
     }
-    if let Some(local) = env("LOCALAPPDATA") {
-        return std::path::PathBuf::from(local)
-            .join("Yap")
-            .join("live-recordings");
-    }
-    std::path::PathBuf::from(".").join("live-recordings")
+    crate::paths::app_data_dir_from(env).join("live-recordings")
 }
 
 pub(crate) fn recordings_dir() -> std::path::PathBuf {

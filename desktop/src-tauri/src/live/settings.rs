@@ -46,13 +46,7 @@ pub fn save(settings: &LiveSettings) -> Result<(), String> {
 }
 
 pub fn settings_dir_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    if let Some(local_app_data) = env("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data).join("Yap");
-    }
-    env("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".yap")
+    crate::paths::app_data_dir_from(env)
 }
 
 fn settings_path() -> PathBuf {
@@ -75,13 +69,10 @@ mod tests {
 
     #[test]
     fn settings_dir_uses_local_app_data() {
-        let dir = settings_dir_from(|key| {
-            (key == "LOCALAPPDATA").then(|| "C:/Users/Test/AppData/Local".into())
-        });
+        let local = std::env::temp_dir().join("local-data");
+        let dir =
+            settings_dir_from(|key| (key == "LOCALAPPDATA").then(|| local.display().to_string()));
 
-        assert_eq!(
-            dir,
-            PathBuf::from("C:/Users/Test/AppData/Local").join("Yap")
-        );
+        assert_eq!(dir, local.join("Yap"));
     }
 }
