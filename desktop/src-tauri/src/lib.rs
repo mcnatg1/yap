@@ -28,6 +28,8 @@ const TRAY_SHOW_APP: &str = "show_app";
 const TRAY_START_DICTATING: &str = "start_dictating";
 const TRAY_STOP_RECORDING: &str = "stop_recording";
 const TRAY_QUIT: &str = "quit";
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
+const LIVE_OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 
 pub mod audio;
 mod file_actions;
@@ -37,84 +39,108 @@ pub mod runtime;
 pub mod stt;
 
 #[tauri::command]
-fn polish_num_gpu() -> u32 {
-    stt::settings::polish_num_gpu_layers()
+fn polish_num_gpu(window: tauri::WebviewWindow) -> Result<u32, String> {
+    ensure_main_command(&window)?;
+    Ok(stt::settings::polish_num_gpu_layers())
 }
 
 #[tauri::command]
-fn setup_status(_state: tauri::State<'_, stt::dispatch::SttState>) -> SetupStatus {
-    current_setup_status()
+fn setup_status(
+    window: tauri::WebviewWindow,
+    _state: tauri::State<'_, stt::dispatch::SttState>,
+) -> Result<SetupStatus, String> {
+    ensure_main_command(&window)?;
+    Ok(current_setup_status())
 }
 
 #[tauri::command]
 fn fallback_model_status(
+    window: tauri::WebviewWindow,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     Ok(stt::fallback_model::status(install_state.inner()))
 }
 
 #[tauri::command]
 async fn fallback_model_install(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
     force: Option<bool>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
     stt::fallback_model::install(app, install_state.inner().clone(), force.unwrap_or(false)).await
 }
 
 #[tauri::command]
 fn fallback_model_cancel_install(
+    window: tauri::WebviewWindow,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     stt::fallback_model::cancel_install(install_state.inner())
 }
 
 #[tauri::command]
 fn fallback_model_verify(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
     stt::fallback_model::verify(app, install_state.inner().clone())
 }
 
 #[tauri::command]
 fn fallback_model_remove(
+    window: tauri::WebviewWindow,
     live_state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
     stt::fallback_model::remove()
 }
 
 #[tauri::command]
 fn fallback_model_set_enabled(
+    window: tauri::WebviewWindow,
     live_state: tauri::State<'_, live::LiveSessionState>,
     enabled: bool,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     ensure_fallback_setup_idle(&live_state)?;
     stt::fallback_model::set_enabled(enabled)
 }
 
 #[tauri::command]
 fn fallback_model_open_folder(
+    window: tauri::WebviewWindow,
     _app: tauri::AppHandle,
 ) -> Result<(), stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     stt::fallback_model::open_folder()
 }
 
 #[tauri::command]
-fn list_local_compute_targets() -> Vec<LocalComputeTargetView> {
-    local_compute_targets()
+fn list_local_compute_targets(
+    window: tauri::WebviewWindow,
+) -> Result<Vec<LocalComputeTargetView>, String> {
+    ensure_main_command(&window)?;
+    Ok(local_compute_targets())
 }
 
 #[tauri::command]
 fn set_local_compute_target(
+    window: tauri::WebviewWindow,
     live_state: tauri::State<'_, live::LiveSessionState>,
     target_id: String,
 ) -> Result<Vec<LocalComputeTargetView>, String> {
+    ensure_main_command(&window)?;
     if live::state::is_live_session_started(live_state.snapshot().status) {
         return Err("Stop live before changing local compute.".into());
     }
@@ -130,8 +156,12 @@ fn set_local_compute_target(
 }
 
 #[tauri::command]
-fn live_status(state: tauri::State<'_, live::LiveSessionState>) -> live::state::LiveSessionView {
-    state.update(|view| {
+fn live_status(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_or_overlay_command(&window)?;
+    Ok(state.update(|view| {
         let requested_id = view.input_device_id.clone();
         let resolved = live::devices::resolve_input_device(requested_id.as_deref());
         if requested_id.is_some() {
@@ -141,15 +171,17 @@ fn live_status(state: tauri::State<'_, live::LiveSessionState>) -> live::state::
         if resolved.recovered {
             view.error = Some("Selected microphone unavailable. Using default.".into());
         }
-    })
+    }))
 }
 
 #[tauri::command]
 async fn show_live_overlay(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     warm_live_on_intent(&app, &live_runtime);
     let view = state.update(|view| view.visibility = live::state::LiveOverlayVisibility::Enabled);
     persist_live_view(&view)?;
@@ -164,9 +196,11 @@ async fn show_live_overlay(
 
 #[tauri::command]
 fn hide_live_overlay(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     if live::state::is_live_session_started(state.snapshot().status) {
         return Err("Stop live before hiding the pill.".into());
     }
@@ -183,11 +217,13 @@ fn hide_live_overlay(
 
 #[tauri::command]
 fn set_live_overlay_surface(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     surface: String,
     error_message: Option<String>,
 ) -> Result<(), String> {
+    ensure_main_or_overlay_command(&window)?;
     let snapshot = state.snapshot();
     if snapshot.visibility == live::state::LiveOverlayVisibility::Hidden
         && !live::state::is_live_session_started(snapshot.status)
@@ -200,24 +236,28 @@ fn set_live_overlay_surface(
 
 #[tauri::command]
 async fn set_live_overlay_enabled(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     enabled: bool,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     if enabled {
-        show_live_overlay(app, state, live_runtime).await
+        show_live_overlay(window, app, state, live_runtime).await
     } else {
-        hide_live_overlay(app, state)
+        hide_live_overlay(window, app, state)
     }
 }
 
 #[tauri::command]
 fn set_live_hotkey(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     hotkey: String,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     let next = live::hotkeys::parse_hotkey(&hotkey)?;
     let snapshot = state.snapshot();
     if configured_hotkey_matches_shortcut(&snapshot.paste_hotkey, &next) {
@@ -245,9 +285,11 @@ fn set_live_hotkey(
 
 #[tauri::command]
 fn clear_live_hotkey(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     let previous = state.snapshot().hotkey;
     if !previous.is_empty() {
         if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
@@ -262,10 +304,12 @@ fn clear_live_hotkey(
 
 #[tauri::command]
 fn set_live_paste_hotkey(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     hotkey: String,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     let next = live::hotkeys::parse_hotkey(&hotkey)?;
     let snapshot = state.snapshot();
     if configured_hotkey_matches_shortcut(&snapshot.hotkey, &next) {
@@ -293,9 +337,11 @@ fn set_live_paste_hotkey(
 
 #[tauri::command]
 fn clear_live_paste_hotkey(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     let previous = state.snapshot().paste_hotkey;
     if !previous.is_empty() {
         if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
@@ -310,10 +356,12 @@ fn clear_live_paste_hotkey(
 
 #[tauri::command]
 fn set_live_capture_mode(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     capture_mode: live::state::LiveCaptureMode,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     if live::state::is_live_session_started(state.snapshot().status) {
         return Err("Stop live before changing live mode.".into());
     }
@@ -325,18 +373,24 @@ fn set_live_capture_mode(
 
 #[tauri::command]
 fn list_input_devices(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, live::LiveSessionState>,
-) -> Vec<live::state::LiveInputDeviceView> {
+) -> Result<Vec<live::state::LiveInputDeviceView>, String> {
+    ensure_main_command(&window)?;
     let view = state.snapshot();
-    live::devices::list_input_devices(view.input_device_id.as_deref())
+    Ok(live::devices::list_input_devices(
+        view.input_device_id.as_deref(),
+    ))
 }
 
 #[tauri::command]
 fn set_input_device(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     device_id: Option<String>,
 ) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     if live::state::is_live_session_started(state.snapshot().status) {
         return Err("Stop live before changing microphones.".into());
     }
@@ -354,12 +408,14 @@ fn set_input_device(
 
 #[tauri::command]
 fn preflight_input_device(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
-) -> live::state::LiveSessionView {
+) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_command(&window)?;
     let snapshot = state.snapshot();
     if live::state::is_live_session_started(snapshot.status) {
-        return snapshot;
+        return Ok(snapshot);
     }
     let selected = snapshot.input_device_id;
     let view = match live::devices::preflight_input_device(selected.as_deref()) {
@@ -381,38 +437,47 @@ fn preflight_input_device(
         }),
     };
     emit_live(&app, &view);
-    view
+    Ok(view)
 }
 
 #[tauri::command]
 fn start_live_session(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     stt_state: tauri::State<'_, stt::dispatch::SttState>,
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     active_capture_mode: Option<live::state::LiveCaptureMode>,
-) -> live::state::LiveSessionView {
+) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_or_overlay_command(&window)?;
     warm_live_on_intent(&app, &live_runtime);
     let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
-    start_live_runtime(
+    Ok(start_live_runtime(
         app,
         &state,
         &live_runtime,
         &stt_state,
         &runtime_state,
         capture_mode,
-    )
+    ))
 }
 
 #[tauri::command]
 fn stop_live_session(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
-) -> live::state::LiveSessionView {
-    stop_live_runtime(app, &state, &live_runtime, &runtime_state)
+) -> Result<live::state::LiveSessionView, String> {
+    ensure_main_or_overlay_command(&window)?;
+    Ok(stop_live_runtime(
+        app,
+        &state,
+        &live_runtime,
+        &runtime_state,
+    ))
 }
 
 #[tauri::command]
@@ -424,7 +489,12 @@ fn list_saved_live_sessions(
 }
 
 #[tauri::command]
-fn show_main_workspace(app: tauri::AppHandle, workspace: String) -> Result<(), String> {
+fn show_main_workspace(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    workspace: String,
+) -> Result<(), String> {
+    ensure_main_or_overlay_command(&window)?;
     match workspace.as_str() {
         "home" | "transcribe" | "polish" => {
             show_main_window(&app);
@@ -524,10 +594,12 @@ fn compose_engine_status(
 
 #[tauri::command]
 fn start_transcribe(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, stt::dispatch::SttState>,
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     paths: Vec<String>,
 ) -> Result<(), stt::dispatch::SttCommandError> {
+    ensure_main_stt_command(&window)?;
     if paths.is_empty() {
         return Ok(());
     }
@@ -602,6 +674,45 @@ fn live_setup_busy_error() -> stt::dispatch::SttCommandError {
 
 fn log_line(message: &str) {
     stt::log_yap(message);
+}
+
+fn is_main_command_window(label: &str) -> bool {
+    label == MAIN_WINDOW_LABEL
+}
+
+fn is_main_or_overlay_command_window(label: &str) -> bool {
+    is_main_command_window(label) || label == LIVE_OVERLAY_WINDOW_LABEL
+}
+
+fn forbidden_command_window_message() -> String {
+    "Command is not available from this window.".into()
+}
+
+fn ensure_main_command(window: &tauri::WebviewWindow) -> Result<(), String> {
+    is_main_command_window(window.label())
+        .then_some(())
+        .ok_or_else(forbidden_command_window_message)
+}
+
+fn ensure_main_or_overlay_command(window: &tauri::WebviewWindow) -> Result<(), String> {
+    is_main_or_overlay_command_window(window.label())
+        .then_some(())
+        .ok_or_else(forbidden_command_window_message)
+}
+
+fn forbidden_stt_command_window() -> stt::dispatch::SttCommandError {
+    stt::dispatch::SttCommandError {
+        code: "UNAUTHORIZED_WINDOW".into(),
+        message: forbidden_command_window_message(),
+    }
+}
+
+fn ensure_main_stt_command(
+    window: &tauri::WebviewWindow,
+) -> Result<(), stt::dispatch::SttCommandError> {
+    is_main_command_window(window.label())
+        .then_some(())
+        .ok_or_else(forbidden_stt_command_window)
 }
 
 fn persist_live_view(view: &live::state::LiveSessionView) -> Result<(), String> {
@@ -1350,6 +1461,25 @@ mod tests {
             runtime_error_to_stt(runtime::RuntimeError::SetupRequired).code,
             stt::error::SttError::ModelMissing.code()
         );
+    }
+
+    #[test]
+    fn command_window_guards_keep_privileged_commands_main_only() {
+        assert!(is_main_command_window("main"));
+        assert!(!is_main_command_window("live-overlay"));
+        assert!(!is_main_command_window("settings"));
+
+        assert!(is_main_or_overlay_command_window("main"));
+        assert!(is_main_or_overlay_command_window("live-overlay"));
+        assert!(!is_main_or_overlay_command_window("settings"));
+    }
+
+    #[test]
+    fn unauthorized_stt_window_error_has_stable_code() {
+        let error = forbidden_stt_command_window();
+
+        assert_eq!(error.code, "UNAUTHORIZED_WINDOW");
+        assert_eq!(error.message, "Command is not available from this window.");
     }
 
     #[test]

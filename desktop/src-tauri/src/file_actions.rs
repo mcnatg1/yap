@@ -212,7 +212,7 @@ fn canonical_existing_path(path: &std::path::Path) -> Result<std::path::PathBuf,
 }
 
 pub(crate) fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == "main" {
+    if window.label() == crate::MAIN_WINDOW_LABEL {
         Ok(())
     } else {
         Err("This file action is only available from the main window.".into())
