@@ -213,6 +213,18 @@ fn delete_history_entry_files_at_from_dir(
 }
 
 fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
+    openable_app_path_from(
+        path,
+        &recording_playback_registry_path(),
+        &crate::live::recordings::recordings_dir(),
+    )
+}
+
+fn openable_app_path_from(
+    path: String,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let path = std::path::PathBuf::from(path);
     if !is_yap_media_or_transcript_path(&path) {
         return Err("Only Yap recording and transcript files can be opened.".into());
@@ -221,7 +233,10 @@ fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
     if !path.is_file() || !is_yap_media_or_transcript_path(&path) {
         return Err("Only Yap recording and transcript files can be opened.".into());
     }
-    Ok(path)
+    if is_yap_owned_live_media_or_transcript_path_from_dir(&path, owned_dir) {
+        return Ok(path);
+    }
+    registered_recording_path_at(&path, registry_path)
 }
 
 fn playable_recording_path(path: String) -> Result<std::path::PathBuf, String> {
@@ -255,7 +270,30 @@ fn registered_playback_path_at(
     path: String,
     registry_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    let path = playable_recording_path(path)?;
+    registered_recording_path_at(&std::path::PathBuf::from(path), registry_path)
+}
+
+pub(crate) fn ensure_registered_recording_paths(
+    paths: &[std::path::PathBuf],
+) -> Result<(), String> {
+    ensure_registered_recording_paths_at(paths, &recording_playback_registry_path())
+}
+
+fn ensure_registered_recording_paths_at(
+    paths: &[std::path::PathBuf],
+    registry_path: &std::path::Path,
+) -> Result<(), String> {
+    for path in paths {
+        registered_recording_path_at(path, registry_path)?;
+    }
+    Ok(())
+}
+
+fn registered_recording_path_at(
+    path: &std::path::Path,
+    registry_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let path = playable_recording_path(path.display().to_string())?;
     if read_registered_playback_paths(registry_path)
         .iter()
         .any(|registered| same_registry_path(registered, &path))
@@ -420,6 +458,24 @@ fn is_live_transcript_file(path: &std::path::Path) -> bool {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .is_some_and(|stem| stem.starts_with("live-"))
+}
+
+fn is_live_recording_file(path: &std::path::Path) -> bool {
+    has_extension(path, &["wav"])
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.starts_with("live-"))
+}
+
+fn is_yap_owned_live_media_or_transcript_path_from_dir(
+    path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> bool {
+    let Ok(owned_dir) = owned_dir.canonicalize() else {
+        return false;
+    };
+    path.starts_with(&owned_dir) && (is_live_transcript_file(path) || is_live_recording_file(path))
 }
 
 fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
@@ -593,6 +649,71 @@ mod tests {
             err,
             "Only Yap recording and transcript files can be opened."
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn openable_app_path_rejects_unregistered_external_media() {
+        let dir = temp_test_dir("open-unregistered-media");
+        let registry = dir.join("registry.json");
+        let owned_dir = dir.join("owned");
+        let media = dir.join("meeting.wav");
+        std::fs::create_dir_all(&owned_dir).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let error =
+            openable_app_path_from(media.display().to_string(), &registry, &owned_dir).unwrap_err();
+
+        assert_eq!(error, "Recording file is not registered for playback.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn openable_app_path_accepts_registered_external_media() {
+        let dir = temp_test_dir("open-registered-media");
+        let registry = dir.join("registry.json");
+        let owned_dir = dir.join("owned");
+        let media = dir.join("meeting.wav");
+        std::fs::create_dir_all(&owned_dir).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+        register_playback_path_at(media.display().to_string(), &registry).unwrap();
+
+        let opened =
+            openable_app_path_from(media.display().to_string(), &registry, &owned_dir).unwrap();
+
+        assert_eq!(opened.file_name().unwrap(), "meeting.wav");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn openable_app_path_accepts_yap_owned_live_transcripts() {
+        let dir = temp_test_dir("open-owned-live-transcript");
+        let registry = dir.join("registry.json");
+        let owned_dir = dir.join("owned");
+        let transcript = owned_dir.join("live-400.txt");
+        std::fs::create_dir_all(&owned_dir).unwrap();
+        std::fs::write(&transcript, "hello").unwrap();
+
+        let opened =
+            openable_app_path_from(transcript.display().to_string(), &registry, &owned_dir)
+                .unwrap();
+
+        assert_eq!(opened.file_name().unwrap(), "live-400.txt");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn registered_recording_paths_reject_unregistered_transcribe_input() {
+        let dir = temp_test_dir("transcribe-unregistered-media");
+        let registry = dir.join("registry.json");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let error =
+            ensure_registered_recording_paths_at(&[media.canonicalize().unwrap()], &registry)
+                .unwrap_err();
+
+        assert_eq!(error, "Recording file is not registered for playback.");
         std::fs::remove_dir_all(dir).ok();
     }
 

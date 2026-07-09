@@ -594,6 +594,12 @@ fn start_transcribe(
         return Ok(());
     }
     let paths = batch_recordings::validate_recording_paths(&paths)?;
+    file_actions::ensure_registered_recording_paths(&paths).map_err(|message| {
+        stt::dispatch::SttCommandError {
+            code: stt::error::SttError::AudioDecode.code().to_string(),
+            message,
+        }
+    })?;
     if state.is_transcribing() {
         return Err(stt::dispatch::SttCommandError {
             code: stt::error::SttError::Busy.code().to_string(),
