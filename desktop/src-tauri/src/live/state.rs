@@ -67,6 +67,22 @@ pub struct LiveSessionView {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveLevelView {
+    pub level: Option<f32>,
+    pub status: LiveSessionStatus,
+}
+
+impl From<&LiveSessionView> for LiveLevelView {
+    fn from(view: &LiveSessionView) -> Self {
+        Self {
+            level: view.level,
+            status: view.status,
+        }
+    }
+}
+
 impl LiveSessionView {
     pub fn from_settings(settings: &LiveSettings) -> Self {
         Self {
@@ -522,6 +538,34 @@ mod tests {
 
         assert_eq!(view.status, LiveSessionStatus::Speaking);
         assert_eq!(view.level, Some(0.35));
+    }
+
+    #[test]
+    fn level_view_does_not_serialize_transcript_text() {
+        let mut view = LiveSessionView::from_settings(&LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
+            capture_mode: LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+        view.partial_text = Some("large partial".into());
+        view.final_text = Some("large final".into());
+        view.level = Some(0.5);
+        view.status = LiveSessionStatus::Speaking;
+
+        let payload = serde_json::to_value(LiveLevelView::from(&view)).unwrap();
+
+        assert_eq!(
+            payload.get("level").and_then(serde_json::Value::as_f64),
+            Some(0.5)
+        );
+        assert_eq!(
+            payload.get("status").and_then(serde_json::Value::as_str),
+            Some("speaking")
+        );
+        assert!(payload.get("partialText").is_none());
+        assert!(payload.get("finalText").is_none());
     }
 
     #[test]

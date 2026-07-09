@@ -2,6 +2,7 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import { LiveOverlay } from "@/components/live/live-overlay";
 import {
+  listenLiveLevel,
   listenLiveSession,
   liveStatus,
   showMainWorkspace,
@@ -41,6 +42,7 @@ export function LiveOverlayHost() {
     }
 
     let cancelled = false;
+    let unlistenLevel: (() => void) | undefined;
     let unlisten: (() => void) | undefined;
     void liveStatus().then(setView).catch(() => undefined);
     void listenLiveSession(setView).then((stop) => {
@@ -50,9 +52,19 @@ export function LiveOverlayHost() {
       }
       unlisten = stop;
     });
+    void listenLiveLevel((level) => {
+      setView((current) => ({ ...current, level: level.level, status: level.status }));
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlistenLevel = stop;
+    });
 
     return () => {
       cancelled = true;
+      unlistenLevel?.();
       unlisten?.();
     };
   }, [previewMode]);

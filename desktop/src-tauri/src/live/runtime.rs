@@ -13,7 +13,7 @@ use crate::audio::preprocess::{
     AudioLevelNormalizer as LiveAudioLevelNormalizer, LinearResampler,
 };
 
-use super::state::LiveSessionState;
+use super::state::{LiveLevelView, LiveSessionState};
 use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
@@ -458,7 +458,8 @@ impl LiveRuntimeInner {
                     break;
                 }
                 let view = state.update_level(value);
-                let _ = app.emit("live-session", &view);
+                let level = LiveLevelView::from(&view);
+                let _ = app.emit("live-level", &level);
                 std::thread::sleep(LEVEL_TICK);
             }
         });
