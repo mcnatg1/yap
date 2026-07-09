@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 
+const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
+
 #[tauri::command]
 pub fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
     ensure_main_window(&window)?;
@@ -19,6 +21,7 @@ pub fn read_text_preview(
 fn read_text_file_at(path: String) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
     let path = canonical_transcript_path(&path, "read")?;
+    reject_oversized_transcript(&path)?;
     std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
 }
 
@@ -211,6 +214,18 @@ fn canonical_transcript_path(
     Ok(path)
 }
 
+fn reject_oversized_transcript(path: &std::path::Path) -> Result<(), String> {
+    let length = std::fs::metadata(path)
+        .map_err(|err| format!("Failed to inspect transcript: {err}"))?
+        .len();
+    if length > MAX_TRANSCRIPT_READ_BYTES {
+        return Err(
+            "Transcript is too large to load in the app. Open it from disk instead.".into(),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.label() == crate::MAIN_WINDOW_LABEL {
         Ok(())
@@ -288,6 +303,25 @@ mod tests {
         let error = read_text_file_at(transcript_dir.display().to_string()).unwrap_err();
 
         assert_eq!(error, "Only transcript text files can be read.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn read_text_file_rejects_oversized_transcripts() {
+        let dir = temp_test_dir("oversized-read");
+        let transcript = dir.join("take.txt");
+        std::fs::write(
+            &transcript,
+            vec![b'a'; (MAX_TRANSCRIPT_READ_BYTES as usize) + 1],
+        )
+        .unwrap();
+
+        let error = read_text_file_at(transcript.display().to_string()).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Transcript is too large to load in the app. Open it from disk instead."
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
