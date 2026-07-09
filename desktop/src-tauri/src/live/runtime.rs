@@ -69,6 +69,13 @@ struct RawAudio {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+enum StreamSendStatus {
+    Sent,
+    BackedUp,
+    Disconnected,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum RecordedPcmAppendStatus {
     Stored,
     Capped,
@@ -593,9 +600,12 @@ fn open_capture(
     let (level_tx, level_rx) = mpsc::channel::<f32>();
     let audio_active_session = Arc::clone(&active_session);
     let audio_raw_ready = Arc::clone(&raw_ready);
+    let audio_runtime = runtime.clone();
     let audio_app = app.clone();
     let decoder_backpressure_reported = Arc::new(AtomicBool::new(false));
     let audio_decoder_backpressure_reported = Arc::clone(&decoder_backpressure_reported);
+    let decoder_disconnected_reported = Arc::new(AtomicBool::new(false));
+    let audio_decoder_disconnected_reported = Arc::clone(&decoder_disconnected_reported);
     let audio = std::thread::spawn(move || {
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE);
         let mut level_normalizer = LiveAudioLevelNormalizer::new();
@@ -615,17 +625,24 @@ fn open_capture(
                     .expect("live pcm poisoned")
                     .append(&bytes);
                 // If the decoder falls behind, keep the saved WAV path bounded and drop the live chunk.
-                if samples_tx
-                    .try_send(StreamMessage::Samples {
-                        session: raw.session,
-                        samples: resampled,
-                    })
-                    .is_err()
-                    && !audio_decoder_backpressure_reported.swap(true, Ordering::AcqRel)
-                {
-                    let state = audio_app.state::<LiveSessionState>();
-                    let view = state.mark_transcription_backpressure();
-                    let _ = audio_app.emit("live-session", &view);
+                match try_send_stream_samples(&samples_tx, raw.session, resampled) {
+                    StreamSendStatus::Sent => {}
+                    StreamSendStatus::BackedUp => {
+                        if !audio_decoder_backpressure_reported.swap(true, Ordering::AcqRel) {
+                            let state = audio_app.state::<LiveSessionState>();
+                            let view = state.mark_transcription_backpressure();
+                            let _ = audio_app.emit("live-session", &view);
+                        }
+                    }
+                    StreamSendStatus::Disconnected => {
+                        if !audio_decoder_disconnected_reported.swap(true, Ordering::AcqRel) {
+                            audio_runtime.handle_stream_crash(
+                                audio_app.clone(),
+                                raw.session,
+                                "Live transcription stopped unexpectedly.",
+                            );
+                        }
+                    }
                 }
             }
             let _ = level_tx.send(level);
@@ -666,6 +683,18 @@ fn open_capture(
         .play()
         .map_err(|err| format!("Microphone access failed: {err}"))?;
     Ok((stream, level_rx, audio))
+}
+
+fn try_send_stream_samples(
+    samples_tx: &mpsc::SyncSender<StreamMessage>,
+    session: u64,
+    samples: Vec<f32>,
+) -> StreamSendStatus {
+    match samples_tx.try_send(StreamMessage::Samples { session, samples }) {
+        Ok(()) => StreamSendStatus::Sent,
+        Err(mpsc::TrySendError::Full(_)) => StreamSendStatus::BackedUp,
+        Err(mpsc::TrySendError::Disconnected(_)) => StreamSendStatus::Disconnected,
+    }
 }
 
 fn capture_error_handler(
@@ -1076,6 +1105,22 @@ mod tests {
 
         assert!(pcm.was_capped());
         assert_eq!(pcm.take(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn stream_sample_send_distinguishes_backpressure_from_disconnect() {
+        let (full_tx, _full_rx) = mpsc::sync_channel(0);
+        assert_eq!(
+            try_send_stream_samples(&full_tx, 1, vec![1.0]),
+            StreamSendStatus::BackedUp
+        );
+
+        let (disconnected_tx, disconnected_rx) = mpsc::sync_channel(1);
+        drop(disconnected_rx);
+        assert_eq!(
+            try_send_stream_samples(&disconnected_tx, 1, vec![1.0]),
+            StreamSendStatus::Disconnected
+        );
     }
 
     #[test]

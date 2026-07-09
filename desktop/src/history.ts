@@ -62,6 +62,20 @@ export function readHiddenTranscriptHistory(storage: HistoryStorage | undefined 
   }
 }
 
+export function filterHiddenTranscriptHistory(entries: TranscriptHistoryEntry[], outputPaths: string[]) {
+  const hidden = new Set(normalizeHiddenTranscriptHistory(outputPaths));
+  if (!hidden.size) return entries;
+  return entries.filter((entry) => !hidden.has(entry.outputPath));
+}
+
+export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
+  if (!storage) return [];
+  return filterHiddenTranscriptHistory(
+    readTranscriptHistory(storage),
+    readHiddenTranscriptHistory(storage),
+  );
+}
+
 export function writeTranscriptHistory(entries: TranscriptHistoryEntry[], storage: HistoryStorage = globalThis.localStorage) {
   storage.setItem(transcriptHistoryKey, JSON.stringify(normalizeTranscriptHistory(entries)));
 }

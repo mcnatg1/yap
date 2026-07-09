@@ -20,8 +20,9 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import {
   hideTranscriptHistory,
+  filterHiddenTranscriptHistory,
   readHiddenTranscriptHistory,
-  readTranscriptHistory,
+  readVisibleTranscriptHistory,
   recordTranscriptHistory,
   removeTranscriptHistory,
   writeHiddenTranscriptHistory,
@@ -57,7 +58,7 @@ import {
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
-import { nextRecordingQueueId, readRecordingQueue, writeRecordingQueue } from "@/recording-queue";
+import { maxStoredQueueJobs, nextRecordingQueueId, readRecordingQueue, writeRecordingQueue } from "@/recording-queue";
 import {
   clearLiveHotkey,
   clearLivePasteHotkey,
@@ -166,7 +167,7 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [transcriptText, setTranscriptText] = useState<Record<string, string>>({});
   const [polishedText, setPolishedText] = useState<Record<string, string>>({});
-  const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readTranscriptHistory());
+  const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readVisibleTranscriptHistory());
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
   const [previewEntry, setPreviewEntry] = useState<TranscriptHistoryEntry>();
@@ -175,6 +176,7 @@ export default function App() {
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
   const historyRef = useRef(history);
+  const previewRequest = useRef(0);
 
   const hasRunnable = useMemo(
     () => queue.some((item) => isRecordingRunnable(item.status)),
@@ -707,10 +709,24 @@ export default function App() {
     const incoming = paths.map((path, index) => ({ id: firstId + index, path }));
 
     setQueue((current) => {
-      const accepted = acceptedRecordingDrops(current.map((item) => item.path), incoming);
-      if (paths.length && !accepted.length) {
+      const acceptedCandidates = acceptedRecordingDrops(current.map((item) => item.path), incoming);
+      const queuedServerCount = current.filter((item) =>
+        item.intent === "recording" &&
+        item.route === "serverBatch" &&
+        item.status === "queued_server"
+      ).length;
+      const availableServerQueueSlots = Math.max(0, maxStoredQueueJobs - queuedServerCount);
+      const accepted = acceptedCandidates.slice(0, availableServerQueueSlots);
+      if (paths.length && !acceptedCandidates.length) {
         toast.warning(`Drop ${acceptedFormats} files.`);
         return current;
+      }
+      if (acceptedCandidates.length > accepted.length) {
+        toast.warning(
+          accepted.length
+            ? `Queued ${accepted.length} of ${acceptedCandidates.length} recordings. Connect a server before adding more.`
+            : "Server queue is full. Connect a server before adding more recordings.",
+        );
       }
 
       const newItems: RecordingJobView[] = accepted.map(({ id, path }) => ({
@@ -964,11 +980,13 @@ export default function App() {
 
   function recordVisibleHistoryEntries(entries: TranscriptHistoryEntry[], warning: string) {
     if (!entries.length) return false;
-    const hiddenHistoryOutputs = new Set(readHiddenTranscriptHistory());
-    const visibleEntries = entries.filter((entry) => !hiddenHistoryOutputs.has(entry.outputPath));
+    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
+    const hiddenHistorySet = new Set(hiddenHistoryOutputs);
+    const visibleEntries = entries.filter((entry) => !hiddenHistorySet.has(entry.outputPath));
     if (!visibleEntries.length) return false;
 
-    const next = visibleEntries.reduce(recordTranscriptHistory, historyRef.current);
+    const visibleHistory = filterHiddenTranscriptHistory(historyRef.current, hiddenHistoryOutputs);
+    const next = visibleEntries.reduce(recordTranscriptHistory, visibleHistory);
     try {
       writeTranscriptHistory(next);
     } catch (error) {
@@ -1008,8 +1026,7 @@ export default function App() {
 
   function hideHistoryEntry(outputPath: string) {
     if (!rememberHiddenHistoryEntry(outputPath)) return;
-    replaceHistory(removeTranscriptHistory(historyRef.current, outputPath));
-    if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
+    if (!forgetHistoryEntry(outputPath)) return;
     toast.success("Hidden from history");
   }
 
@@ -1049,13 +1066,18 @@ export default function App() {
   }
 
   async function previewHistoryEntry(entry: TranscriptHistoryEntry) {
+    const request = previewRequest.current + 1;
+    previewRequest.current = request;
     setPreviewEntry(entry);
     setPreviewText(undefined);
 
     try {
-      setPreviewText(await loadTranscriptPreviewText(entry.outputPath));
+      const text = await loadTranscriptPreviewText(entry.outputPath);
+      if (previewRequest.current === request) setPreviewText(text);
     } catch {
-      setPreviewText("Preview unavailable. Open the transcript file from the actions menu.");
+      if (previewRequest.current === request) {
+        setPreviewText("Preview unavailable. Open the transcript file from the actions menu.");
+      }
     }
   }
 
@@ -1257,7 +1279,11 @@ export default function App() {
         onCopy={(entry) => void copyTranscript(historyEntryToRecordingJob(entry))}
         onOpen={(entry) => void openAppPath(entry.outputPath)}
         onOpenChange={(open) => {
-          if (!open) setPreviewEntry(undefined);
+          if (!open) {
+            previewRequest.current += 1;
+            setPreviewEntry(undefined);
+            setPreviewText(undefined);
+          }
         }}
         onReveal={(entry) => void revealPath(entry.outputPath)}
         text={previewText}

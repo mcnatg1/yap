@@ -44,10 +44,11 @@ fn read_text_preview_at_from_dir(
     let path = owned_live_transcript_path_from_dir(&path, "read", owned_dir)?;
     let file =
         std::fs::File::open(&path).map_err(|err| format!("Failed to read transcript: {err}"))?;
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::io::Read::take(file, (max_chars.saturating_mul(4).saturating_add(4)) as u64)
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|err| format!("Failed to read transcript: {err}"))?;
+    let text = String::from_utf8_lossy(&bytes);
     Ok(text.chars().take(max_chars).collect())
 }
 
@@ -328,6 +329,19 @@ mod tests {
             read_text_preview_at_from_dir(transcript.display().to_string(), 3, &dir).unwrap();
 
         assert_eq!(preview, "abc");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn read_text_preview_handles_multibyte_boundary() {
+        let dir = temp_test_dir("preview-multibyte");
+        let transcript = dir.join("live-105.txt");
+        std::fs::write(&transcript, "abcdefg€").unwrap();
+
+        let preview =
+            read_text_preview_at_from_dir(transcript.display().to_string(), 1, &dir).unwrap();
+
+        assert_eq!(preview, "a");
         std::fs::remove_dir_all(dir).ok();
     }
 

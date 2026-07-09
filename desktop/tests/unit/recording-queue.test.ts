@@ -23,10 +23,21 @@ describe("recording queue storage", () => {
     ]);
 
     expect(jobs).toMatchObject([
-      { id: 3, path: "C:/meeting.wav", route: "serverBatch", status: "queued_server" },
+      { id: 5, path: "C:/meeting.wav", route: "serverBatch", status: "queued_server" },
       { id: 6, name: "demo.mp3", path: "C:/demo.mp3", route: "serverBatch", status: "queued_server" },
     ]);
     expect(nextRecordingQueueId(jobs)).toBe(7);
+  });
+
+  it("drops duplicate ids from corrupt queue storage", () => {
+    const jobs = normalizeRecordingQueue([
+      { id: 7, path: "C:/first.wav" },
+      { id: 7, path: "C:/second.wav" },
+      { id: 8, path: "C:/third.wav" },
+    ]);
+
+    expect(jobs.map((job) => job.id)).toEqual([7, 8]);
+    expect(new Set(jobs.map((job) => job.id)).size).toBe(jobs.length);
   });
 
   it("stores only queued server jobs", () => {
@@ -61,7 +72,7 @@ describe("recording queue storage", () => {
     );
 
     expect(jobs).toHaveLength(200);
-    expect(jobs[0].id).toBe(1);
-    expect(jobs.at(-1)?.id).toBe(200);
+    expect(jobs[0].id).toBe(6);
+    expect(jobs.at(-1)?.id).toBe(205);
   });
 });

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { canDeleteTranscriptHistoryEntry, hideTranscriptHistory, normalizeHiddenTranscriptHistory, readTranscriptHistory } from "@/history";
+import {
+  canDeleteTranscriptHistoryEntry,
+  filterHiddenTranscriptHistory,
+  hideTranscriptHistory,
+  normalizeHiddenTranscriptHistory,
+  readTranscriptHistory,
+  readVisibleTranscriptHistory,
+} from "@/history";
 
 describe("transcript history storage", () => {
   it("dedupes hidden transcript paths", () => {
@@ -24,6 +31,37 @@ describe("transcript history storage", () => {
     };
 
     expect(readTranscriptHistory(storage)[0].warning).toBe("Live audio could not be saved. Transcript was saved.");
+  });
+
+  it("keeps hidden transcripts out of history after reload", () => {
+    const hidden = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-hidden.txt";
+    const visible = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-visible.txt";
+    const storage = {
+      getItem: (key: string) => {
+        if (key === "yap.hiddenTranscriptHistory.v1") return JSON.stringify([hidden]);
+        if (key === "yap.transcriptHistory.v1") {
+          return JSON.stringify([
+            {
+              createdAt: "2026-01-02T00:00:00.000Z",
+              name: "live-visible",
+              outputPath: visible,
+              sourcePath: visible,
+            },
+            {
+              createdAt: "2026-01-01T00:00:00.000Z",
+              name: "live-hidden",
+              outputPath: hidden,
+              sourcePath: hidden,
+            },
+          ]);
+        }
+        return null;
+      },
+      setItem: () => undefined,
+    };
+
+    expect(readVisibleTranscriptHistory(storage).map((entry) => entry.outputPath)).toEqual([visible]);
+    expect(filterHiddenTranscriptHistory(readTranscriptHistory(storage), [hidden])).toHaveLength(1);
   });
 
   it("only exposes delete for Yap-owned live history entries", () => {
