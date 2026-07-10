@@ -2,6 +2,7 @@
 //! Heavy inference, diarization, enrichment, and team storage stay server-owned.
 
 pub mod capture;
+pub mod coordinator;
 pub mod evidence;
 pub mod frame;
 pub mod manifest;

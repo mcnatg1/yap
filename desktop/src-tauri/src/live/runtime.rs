@@ -9,13 +9,16 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 use crate::audio::capture::{CaptureAdapter, CapturePacket, CapturePorts};
-use crate::audio::preprocess::{
-    downmix_to_mono, f32_to_i16_le_bytes, rms_level,
-    AudioLevelNormalizer as LiveAudioLevelNormalizer, LinearResampler,
+use crate::audio::coordinator::{
+    bounded_sink, BoundedReceiver, BoundedSink, Coordinator, CoordinatorPorts, SinkKind,
+    LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
 };
+use crate::audio::frame::PreparedFrame;
+use crate::audio::preprocess::f32_to_i16_le_bytes;
+use crate::audio::session::{SessionId, TrackId};
 
 use super::state::{LiveLevelView, LiveSessionState};
-use super::stream::{self, LiveStreamEngine};
+use super::stream::{self, LiveStreamEngine, StreamMessage};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
@@ -42,6 +45,7 @@ struct LiveRuntimeInner {
     session: u64,
     capture: Option<CaptureAdapter>,
     stream: Option<SessionStream>,
+    recording: Option<JoinHandle<()>>,
     level: Option<JoinHandle<()>>,
     last_used: Instant,
     #[cfg(test)]
@@ -52,27 +56,10 @@ struct LiveRuntimeInner {
 
 struct SessionStream {
     session: Arc<AtomicU64>,
+    frames_tx: BoundedSink<PreparedFrame>,
     samples_tx: mpsc::SyncSender<StreamMessage>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
-}
-
-enum StreamMessage {
-    Samples {
-        session: u64,
-        samples: Vec<f32>,
-    },
-    Finish {
-        session: u64,
-        done: mpsc::Sender<()>,
-    },
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum StreamSendStatus {
-    Sent,
-    BackedUp,
-    Disconnected,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -216,7 +203,7 @@ impl LiveRuntime {
         app: tauri::AppHandle,
         selected_device_id: Option<String>,
     ) -> Result<(), LiveStartFailure> {
-        let (session, stream_tx) = {
+        let (session, local_asr) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
                 return Ok(());
@@ -229,13 +216,13 @@ impl LiveRuntime {
             if let Err(message) = inner.ensure_stream(self.clone(), app.clone(), session) {
                 return Err(LiveStartFailure::new(session, message));
             }
-            let Some(stream_tx) = inner.stream_tx() else {
+            let Some(local_asr) = inner.stream_sink() else {
                 return Err(LiveStartFailure::new(
                     session,
                     "Live stream is unavailable.".into(),
                 ));
             };
-            (session, stream_tx)
+            (session, local_asr)
         };
 
         let state = app.state::<LiveSessionState>();
@@ -259,7 +246,20 @@ impl LiveRuntime {
         let capture_app = app.clone();
         let capture_active_session = Arc::clone(&self.active_session);
         let capture_recorded_pcm = Arc::clone(&self.recorded_pcm);
-        let capture = CaptureAdapter::open(
+        let (recording, recording_rx) = bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
+        let recording_runtime = self.clone();
+        let recording_app = app.clone();
+        let recording_worker = std::thread::spawn(move || {
+            run_recording_sink_worker(
+                recording_rx,
+                recording_runtime,
+                recording_app,
+                session,
+                capture_recorded_pcm,
+            )
+        });
+        let recording_for_capture = recording.clone();
+        let capture = match CaptureAdapter::open(
             resolved.device,
             stream_config,
             sample_format,
@@ -272,14 +272,20 @@ impl LiveRuntime {
                         app: capture_app,
                         session,
                         active_session: capture_active_session,
-                        samples_tx: stream_tx,
-                        recorded_pcm: capture_recorded_pcm,
+                        recording: recording_for_capture,
+                        local_asr,
                         level_tx,
                     },
                 );
             },
-        )
-        .map_err(|error| LiveStartFailure::new(session, error))?;
+        ) {
+            Ok(capture) => capture,
+            Err(error) => {
+                recording.close();
+                let _ = join_worker(recording_worker);
+                return Err(LiveStartFailure::new(session, error));
+            }
+        };
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         if !should_install_capture(
             session,
@@ -292,10 +298,12 @@ impl LiveRuntime {
             if let Err(error) = capture.shutdown() {
                 crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
             }
+            let _ = join_worker(recording_worker);
             drop(level);
             return Ok(());
         }
         inner.capture = Some(capture);
+        inner.recording = Some(recording_worker);
         inner.start_level_worker(app, level, session, Arc::clone(&self.active_session));
         Ok(())
     }
@@ -439,6 +447,7 @@ impl LiveRuntimeInner {
             session: 0,
             capture: None,
             stream: None,
+            recording: None,
             level: None,
             last_used: Instant::now(),
             #[cfg(test)]
@@ -463,7 +472,8 @@ impl LiveRuntimeInner {
         self.retire_stream();
 
         let engine = LiveStreamEngine::new().map_err(|err| err.user_message().to_string())?;
-        let (samples_tx, samples_rx) = mpsc::sync_channel::<StreamMessage>(64);
+        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
+        let (samples_tx, samples_rx) = mpsc::sync_channel::<StreamMessage>(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let stream_session = Arc::new(AtomicU64::new(session));
 
@@ -474,6 +484,7 @@ impl LiveRuntimeInner {
             move || {
                 run_stream_worker(
                     engine,
+                    frames_rx,
                     samples_rx,
                     stream_session,
                     active_session,
@@ -485,6 +496,7 @@ impl LiveRuntimeInner {
 
         self.stream = Some(SessionStream {
             session: stream_session,
+            frames_tx,
             samples_tx,
             cancelled,
             worker: Some(worker),
@@ -492,8 +504,8 @@ impl LiveRuntimeInner {
         Ok(())
     }
 
-    fn stream_tx(&self) -> Option<mpsc::SyncSender<StreamMessage>> {
-        self.stream.as_ref().map(|stream| stream.samples_tx.clone())
+    fn stream_sink(&self) -> Option<BoundedSink<PreparedFrame>> {
+        self.stream.as_ref().map(|stream| stream.frames_tx.clone())
     }
 
     fn start_level_worker(
@@ -531,6 +543,11 @@ impl LiveRuntimeInner {
         let mut errors = Vec::new();
         if let Some(capture) = self.capture.take() {
             if let Err(error) = capture.shutdown() {
+                errors.push(error);
+            }
+        }
+        if let Some(worker) = self.recording.take() {
+            if let Err(error) = join_worker(worker) {
                 errors.push(error);
             }
         }
@@ -591,6 +608,7 @@ impl SessionStream {
 
     fn shutdown(mut self, join_reader: bool) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.frames_tx.close();
         drop(self.samples_tx);
         if join_reader {
             if let Some(handle) = self.worker.take() {
@@ -671,8 +689,8 @@ struct CaptureWorkerContext {
     app: tauri::AppHandle,
     session: u64,
     active_session: Arc<AtomicU64>,
-    samples_tx: mpsc::SyncSender<StreamMessage>,
-    recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
+    recording: BoundedSink<PreparedFrame>,
+    local_asr: BoundedSink<PreparedFrame>,
     level_tx: mpsc::Sender<f32>,
 }
 
@@ -686,8 +704,8 @@ fn run_capture_worker(
         app,
         session,
         active_session,
-        samples_tx,
-        recorded_pcm,
+        recording,
+        local_asr,
         level_tx,
     } = context;
     let packet_runtime = runtime.clone();
@@ -696,85 +714,57 @@ fn run_capture_worker(
     let error_app = app.clone();
     let loss_runtime = runtime.clone();
     let loss_app = app.clone();
-    let mut resampler = None;
-    let mut capture_config = None;
-    let mut level_normalizer = LiveAudioLevelNormalizer::new();
-    let mut decoder_backpressure_reported = false;
-    let mut decoder_disconnected_reported = false;
+    let coordinator = Arc::new(Mutex::new(Coordinator::new(
+        SessionId::new(format!("live-{session}")).expect("live session IDs are valid"),
+        TrackId::new("live-microphone").expect("static live track ID is valid"),
+        CoordinatorPorts {
+            recording,
+            local_asr: Some(local_asr),
+            speaker_evidence: None,
+            server_transport: None,
+        },
+    )));
+    let transcription_degraded = Arc::new(AtomicBool::new(false));
+    let packet_coordinator = Arc::clone(&coordinator);
+    let packet_degraded = Arc::clone(&transcription_degraded);
+    let loss_coordinator = Arc::clone(&coordinator);
     run_guarded_capture_packet_worker(
         || {
             run_capture_packet_loop(
                 ports,
                 errors,
-                move |packet| {
+                move |packet, losses| {
                     if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
                         return false;
                     }
-                    let config = (packet.channels, packet.sample_rate_hz);
-                    if packet.channels == 0
-                        || packet.sample_rate_hz == 0
-                        || capture_config.is_some_and(|current| current != config)
-                    {
-                        if !decoder_disconnected_reported {
-                            decoder_disconnected_reported = true;
+                    let mut coordinator = match packet_coordinator.lock() {
+                        Ok(coordinator) => coordinator,
+                        Err(_) => return true,
+                    };
+                    match coordinator.consume(packet, losses) {
+                        Ok(level) => {
+                            if coordinator
+                                .outcome(SinkKind::LocalAsr)
+                                .is_some_and(|outcome| outcome.dropped_frames > 0)
+                                && mark_local_asr_degraded_once(&packet_degraded)
+                            {
+                                let state = packet_app.state::<LiveSessionState>();
+                                let view = state.mark_transcription_backpressure();
+                                let _ = packet_app.emit("live-session", &view);
+                            }
+                            let _ = level_tx.send(level);
+                            false
+                        }
+                        Err(message) => {
                             spawn_stream_crash_handler(
                                 packet_app.clone(),
                                 packet_runtime.clone(),
                                 session,
-                                "Microphone input configuration changed unexpectedly.".to_string(),
+                                message,
                             );
-                        }
-                        return true;
-                    }
-                    capture_config.get_or_insert(config);
-                    let resampler = resampler.get_or_insert_with(|| {
-                        LinearResampler::new(packet.sample_rate_hz, TARGET_SAMPLE_RATE)
-                    });
-                    let mono = downmix_to_mono(&packet.samples, usize::from(packet.channels));
-                    let level = level_normalizer.normalized_level(rms_level(&mono));
-                    let resampled = resampler.push(&mono);
-                    let bytes = f32_to_i16_le_bytes(&resampled);
-                    if !bytes.is_empty() {
-                        match recorded_pcm.lock() {
-                            Ok(mut recorded_pcm) => {
-                                recorded_pcm.append(&bytes);
-                            }
-                            Err(_) => {
-                                spawn_stream_crash_handler(
-                                    packet_app.clone(),
-                                    packet_runtime.clone(),
-                                    session,
-                                    "Live recording buffer became unavailable.".to_string(),
-                                );
-                                return true;
-                            }
-                        }
-                        match try_send_stream_samples(&samples_tx, session, resampled) {
-                            StreamSendStatus::Sent => {}
-                            StreamSendStatus::BackedUp => {
-                                if !decoder_backpressure_reported {
-                                    decoder_backpressure_reported = true;
-                                    let state = packet_app.state::<LiveSessionState>();
-                                    let view = state.mark_transcription_backpressure();
-                                    let _ = packet_app.emit("live-session", &view);
-                                }
-                            }
-                            StreamSendStatus::Disconnected => {
-                                if !decoder_disconnected_reported {
-                                    decoder_disconnected_reported = true;
-                                    spawn_stream_crash_handler(
-                                        packet_app.clone(),
-                                        packet_runtime.clone(),
-                                        session,
-                                        "Live transcription stopped unexpectedly.".to_string(),
-                                    );
-                                }
-                                return true;
-                            }
+                            true
                         }
                     }
-                    let _ = level_tx.send(level);
-                    false
                 },
                 move |error| {
                     let message = format!("Microphone input stopped: {error}");
@@ -788,15 +778,10 @@ fn run_capture_worker(
                     true
                 },
                 move |loss| match loss {
-                    Ok(snapshot) => {
-                        crate::stt::log_yap(&format!(
-                            "live capture degraded: source_position_frames={} dropped_frames={} cause={:?}",
-                            snapshot.first_source_position_frames,
-                            snapshot.dropped_frames,
-                            snapshot.cause
-                        ));
-                        false
-                    }
+                    Ok(snapshot) => match loss_coordinator.lock() {
+                        Ok(mut coordinator) => coordinator.consume_loss(snapshot).is_err(),
+                        Err(_) => true,
+                    },
                     Err(_) => {
                         spawn_stream_crash_handler(
                             loss_app.clone(),
@@ -811,6 +796,19 @@ fn run_capture_worker(
         },
         move |message| spawn_stream_crash_handler(app, runtime, session, message),
     );
+    if let Ok(mut coordinator) = coordinator.lock() {
+        for outcome in coordinator.outcomes() {
+            crate::stt::log_yap(&format!(
+                "audio sink {:?} accepted={} dropped={} closed={} error={:?}",
+                outcome.kind,
+                outcome.accepted_frames,
+                outcome.dropped_frames,
+                outcome.closed,
+                outcome.error
+            ));
+        }
+        coordinator.close();
+    };
 }
 
 fn run_guarded_capture_packet_worker<R, C>(run: R, process_crash: C)
@@ -830,7 +828,7 @@ fn run_capture_packet_loop<P, E, L>(
     process_error: E,
     process_loss: L,
 ) where
-    P: FnMut(&CapturePacket) -> bool,
+    P: FnMut(&CapturePacket, &crate::audio::timeline::LossAccumulator) -> bool,
     E: FnMut(cpal::StreamError) -> bool,
     L: FnMut(
         Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
@@ -854,7 +852,7 @@ fn run_capture_packet_loop_with_timeout<P, E, L>(
     mut process_error: E,
     mut process_loss: L,
 ) where
-    P: FnMut(&CapturePacket) -> bool,
+    P: FnMut(&CapturePacket, &crate::audio::timeline::LossAccumulator) -> bool,
     E: FnMut(cpal::StreamError) -> bool,
     L: FnMut(
         Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
@@ -881,7 +879,7 @@ fn run_capture_packet_loop_with_timeout<P, E, L>(
         }
         match packets.recv_timeout(receive_timeout) {
             Ok(mut packet) => {
-                let should_exit = process_packet(&packet);
+                let should_exit = process_packet(&packet, &losses);
                 packet.samples.clear();
                 let _ = returned_buffers.try_send(packet.samples);
                 if should_exit {
@@ -913,15 +911,46 @@ where
     }
 }
 
-fn try_send_stream_samples(
-    samples_tx: &mpsc::SyncSender<StreamMessage>,
+fn mark_local_asr_degraded_once(reported: &AtomicBool) -> bool {
+    reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+fn run_recording_sink_worker(
+    frames: BoundedReceiver<PreparedFrame>,
+    runtime: LiveRuntime,
+    app: tauri::AppHandle,
     session: u64,
-    samples: Vec<f32>,
-) -> StreamSendStatus {
-    match samples_tx.try_send(StreamMessage::Samples { session, samples }) {
-        Ok(()) => StreamSendStatus::Sent,
-        Err(mpsc::TrySendError::Full(_)) => StreamSendStatus::BackedUp,
-        Err(mpsc::TrySendError::Disconnected(_)) => StreamSendStatus::Disconnected,
+    recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
+) {
+    let run = || loop {
+        match frames.recv_timeout(Duration::from_millis(100)) {
+            Ok(frame) => match recorded_pcm.lock() {
+                Ok(mut recorded_pcm) => {
+                    recorded_pcm.append(&f32_to_i16_le_bytes(&frame.samples));
+                }
+                Err(_) => {
+                    spawn_stream_crash_handler(
+                        app.clone(),
+                        runtime.clone(),
+                        session,
+                        "Live recording buffer became unavailable.".to_string(),
+                    );
+                    break;
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    };
+    if catch_unwind(AssertUnwindSafe(run)).is_err() {
+        spawn_stream_crash_handler(
+            app,
+            runtime,
+            session,
+            "Live recording worker stopped unexpectedly.".to_string(),
+        );
     }
 }
 
@@ -961,6 +990,7 @@ fn release_warmup(warming: &AtomicBool) {
 
 fn run_stream_worker(
     mut engine: LiveStreamEngine,
+    frames_rx: BoundedReceiver<PreparedFrame>,
     samples_rx: mpsc::Receiver<StreamMessage>,
     stream_session: Arc<AtomicU64>,
     active_session: Arc<AtomicU64>,
@@ -971,43 +1001,98 @@ fn run_stream_worker(
     let mut buffer = Vec::<f32>::with_capacity(stream::chunk_samples() * 2);
     let mut profile = StreamProfile::default();
 
+    let mut frames_closed = false;
     while !cancelled.load(Ordering::Relaxed) {
-        match samples_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(StreamMessage::Samples { session, samples }) => {
-                if !should_accept_stream_samples(
-                    session,
-                    active_session.load(Ordering::SeqCst),
-                    stream_session.load(Ordering::SeqCst),
-                ) {
-                    continue;
-                }
-                if active_stream_session != session {
-                    engine.reset();
-                    buffer.clear();
-                    profile = StreamProfile::new(session);
-                    active_stream_session = session;
-                }
-                buffer.extend(samples);
-                drain_stream_buffer(&mut engine, &mut buffer, &mut profile, &app, false);
+        while let Ok(message) = samples_rx.try_recv() {
+            process_stream_message(
+                &mut engine,
+                &mut buffer,
+                &mut profile,
+                &app,
+                &active_session,
+                &stream_session,
+                &mut active_stream_session,
+                message,
+            );
+        }
+        if frames_closed {
+            match samples_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(message) => process_stream_message(
+                    &mut engine,
+                    &mut buffer,
+                    &mut profile,
+                    &app,
+                    &active_session,
+                    &stream_session,
+                    &mut active_stream_session,
+                    message,
+                ),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            Ok(StreamMessage::Finish { session, done }) => {
-                if active_stream_session == session {
-                    drain_stream_buffer(&mut engine, &mut buffer, &mut profile, &app, true);
-                    let started = Instant::now();
-                    let final_text = engine.finish();
-                    profile.decode_elapsed += started.elapsed();
-                    if let Some(text) = final_text {
-                        emit_stream_final(&app, session, &text);
-                    }
-                    crate::stt::log_stt(&profile.summary());
-                    engine.reset();
-                    buffer.clear();
-                    active_stream_session = 0;
-                }
-                let _ = done.send(());
-            }
+            continue;
+        }
+        match frames_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(frame) => process_stream_message(
+                &mut engine,
+                &mut buffer,
+                &mut profile,
+                &app,
+                &active_session,
+                &stream_session,
+                &mut active_stream_session,
+                StreamMessage::from_prepared(stream_session.load(Ordering::SeqCst), frame),
+            ),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => frames_closed = true,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_stream_message(
+    engine: &mut LiveStreamEngine,
+    buffer: &mut Vec<f32>,
+    profile: &mut StreamProfile,
+    app: &tauri::AppHandle,
+    active_session: &Arc<AtomicU64>,
+    stream_session: &Arc<AtomicU64>,
+    active_stream_session: &mut u64,
+    message: StreamMessage,
+) {
+    match message {
+        StreamMessage::Samples { session, samples } => {
+            if !should_accept_stream_samples(
+                session,
+                active_session.load(Ordering::SeqCst),
+                stream_session.load(Ordering::SeqCst),
+            ) {
+                return;
+            }
+            if *active_stream_session != session {
+                engine.reset();
+                buffer.clear();
+                *profile = StreamProfile::new(session);
+                *active_stream_session = session;
+            }
+            buffer.extend(samples);
+            drain_stream_buffer(engine, buffer, profile, app, false);
+        }
+        StreamMessage::Finish { session, done } => {
+            if *active_stream_session == session {
+                drain_stream_buffer(engine, buffer, profile, app, true);
+                let started = Instant::now();
+                let final_text = engine.finish();
+                profile.decode_elapsed += started.elapsed();
+                if let Some(text) = final_text {
+                    emit_stream_final(app, session, &text);
+                }
+                crate::stt::log_stt(&profile.summary());
+                engine.reset();
+                buffer.clear();
+                *active_stream_session = 0;
+            }
+            let _ = done.send(());
         }
     }
 }
@@ -1175,7 +1260,7 @@ mod tests {
         };
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run_capture_packet_loop(ports, error_rx, |_| false, |_| false, |_| false);
+            run_capture_packet_loop(ports, error_rx, |_, _| false, |_| false, |_| false);
             done_tx.send(()).unwrap();
         });
         let mut samples = Vec::with_capacity(4);
@@ -1217,7 +1302,7 @@ mod tests {
                 ports,
                 error_rx,
                 Duration::from_millis(1),
-                |_| false,
+                |_, _| false,
                 |_| false,
                 move |loss| loss_tx.send(loss).is_err(),
             );
@@ -1279,7 +1364,7 @@ mod tests {
                 ports,
                 error_rx,
                 Duration::from_secs(1),
-                |_| false,
+                |_, _| false,
                 |_| false,
                 |_| false,
             );
@@ -1308,7 +1393,7 @@ mod tests {
                 ports,
                 error_rx,
                 Duration::from_millis(1),
-                move |_| {
+                move |_, _| {
                     packet_started_tx.send(()).unwrap();
                     release_packet_rx.recv().unwrap();
                     false
@@ -1495,19 +1580,12 @@ mod tests {
     }
 
     #[test]
-    fn stream_sample_send_distinguishes_backpressure_from_disconnect() {
-        let (full_tx, _full_rx) = mpsc::sync_channel(0);
-        assert_eq!(
-            try_send_stream_samples(&full_tx, 1, vec![1.0]),
-            StreamSendStatus::BackedUp
-        );
+    fn local_asr_degradation_is_marked_once_without_stopping_recording() {
+        let degradation_reported = AtomicBool::new(false);
 
-        let (disconnected_tx, disconnected_rx) = mpsc::sync_channel(1);
-        drop(disconnected_rx);
-        assert_eq!(
-            try_send_stream_samples(&disconnected_tx, 1, vec![1.0]),
-            StreamSendStatus::Disconnected
-        );
+        assert!(mark_local_asr_degraded_once(&degradation_reported));
+        assert!(!mark_local_asr_degraded_once(&degradation_reported));
+        assert!(degradation_reported.load(Ordering::SeqCst));
     }
 
     #[test]

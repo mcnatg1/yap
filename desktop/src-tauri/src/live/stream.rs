@@ -1,12 +1,49 @@
 use std::path::Path;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 
+use crate::audio::frame::PreparedFrame;
 use crate::stt::error::SttError;
 
 const SAMPLE_RATE: i32 = 16_000;
 const TAIL_SILENCE: Duration = Duration::from_millis(1500);
+
+pub(crate) enum StreamMessage {
+    Samples {
+        session: u64,
+        samples: Vec<f32>,
+    },
+    Finish {
+        session: u64,
+        done: mpsc::Sender<()>,
+    },
+}
+
+impl StreamMessage {
+    pub(crate) fn from_prepared(session: u64, frame: PreparedFrame) -> Self {
+        Self::Samples {
+            session,
+            samples: frame.samples.to_vec(),
+        }
+    }
+
+    #[cfg(test)]
+    fn session(&self) -> u64 {
+        match self {
+            Self::Samples { session, .. } | Self::Finish { session, .. } => *session,
+        }
+    }
+
+    #[cfg(test)]
+    fn samples(&self) -> &[f32] {
+        match self {
+            Self::Samples { samples, .. } => samples,
+            Self::Finish { .. } => &[],
+        }
+    }
+}
 
 pub struct LiveStreamEngine {
     recognizer: OnlineRecognizer,
@@ -105,6 +142,9 @@ fn path_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::frame::{AudioFrame, PreparedFrame};
+    use crate::audio::session::{SessionId, TrackId};
+    use std::sync::Arc;
 
     #[test]
     fn stream_chunk_matches_pinned_nemotron_export() {
@@ -135,5 +175,27 @@ mod tests {
             crate::stt::nemotron::NUM_THREADS
         );
         assert_eq!(config.decoding_method.as_deref(), Some("greedy_search"));
+    }
+
+    #[test]
+    fn prepared_frames_become_stream_messages_without_changing_samples() {
+        let frame = PreparedFrame {
+            metadata: AudioFrame {
+                session_id: SessionId::new("stream-test").unwrap(),
+                track_id: TrackId::new("microphone").unwrap(),
+                sequence: 4,
+                sample_rate_hz: 16_000,
+                channels: 1,
+                start_ms: 10,
+                duration_ms: 2,
+                sample_count: 2,
+            },
+            samples: Arc::from([0.25_f32, -0.25]),
+        };
+
+        let message = StreamMessage::from_prepared(7, frame);
+
+        assert_eq!(message.session(), 7);
+        assert_eq!(message.samples(), &[0.25, -0.25]);
     }
 }
