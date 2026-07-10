@@ -7,4 +7,5 @@ pub mod manifest;
 pub mod preprocess;
 pub mod results;
 pub mod session;
+pub mod timeline;
 pub mod vad;
