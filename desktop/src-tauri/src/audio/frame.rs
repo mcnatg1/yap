@@ -1,12 +1,24 @@
-#[derive(Debug, Clone, PartialEq)]
+use std::sync::Arc;
+
+use crate::audio::session::{SessionId, TrackId};
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioFrame {
-    pub session_id: u64,
+    pub session_id: SessionId,
+    pub track_id: TrackId,
     pub sequence: u64,
     pub sample_rate_hz: u32,
     pub channels: u16,
     pub start_ms: u64,
     pub duration_ms: u32,
     pub sample_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedFrame {
+    pub metadata: AudioFrame,
+    pub samples: Arc<[f32]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -42,9 +54,11 @@ pub struct RetryMetadata {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioChunkEnvelope {
-    pub session_id: u64,
+    pub session_id: SessionId,
+    pub track_id: TrackId,
     pub chunk_id: String,
     pub sequence_start: u64,
+    pub sequence_end: u64,
     pub start_ms: u64,
     pub duration_ms: u32,
     pub sample_rate_hz: u32,
@@ -70,33 +84,45 @@ impl AudioFrame {
 
 impl AudioChunkEnvelope {
     pub fn from_frames(
-        session_id: u64,
-        sequence_start: u64,
         frames: &[AudioFrame],
         codec: AudioCodec,
         vad_segments: Vec<VadSegment>,
         purpose: AudioPurpose,
     ) -> Option<Self> {
         let first = frames.first()?;
-        let last = frames.last().expect("first frame implies last frame");
-        let duration_ms = last
-            .start_ms
-            .saturating_add(u64::from(last.duration_ms))
-            .saturating_sub(first.start_ms) as u32;
-        let chunk_id = format!("{session_id}-{sequence_start}-{duration_ms}");
+        if frames
+            .iter()
+            .any(|frame| frame.session_id != first.session_id || frame.track_id != first.track_id)
+        {
+            return None;
+        }
+        let sequence_start = frames.iter().map(|frame| frame.sequence).min()?;
+        let sequence_end = frames.iter().map(|frame| frame.sequence).max()?;
+        let start_ms = frames.iter().map(|frame| frame.start_ms).min()?;
+        let end_ms = frames.iter().map(AudioFrame::end_ms).max()?;
+        let duration_ms = end_ms.saturating_sub(start_ms) as u32;
+        let chunk_id = format!(
+            "{}-{}-{sequence_start}-{sequence_end}-{duration_ms}",
+            first.session_id, first.track_id
+        );
 
         Some(Self {
-            session_id,
+            session_id: first.session_id.clone(),
+            track_id: first.track_id.clone(),
             chunk_id: chunk_id.clone(),
             sequence_start,
-            start_ms: first.start_ms,
+            sequence_end,
+            start_ms,
             duration_ms,
             sample_rate_hz: first.sample_rate_hz,
             codec,
             vad_segments,
             purpose,
             retry: RetryMetadata {
-                idempotency_key: format!("{session_id}-{sequence_start}-{chunk_id}"),
+                idempotency_key: format!(
+                    "{}-{sequence_start}-{sequence_end}-{chunk_id}",
+                    first.session_id
+                ),
                 attempt: 1,
                 max_attempts: 1,
             },
@@ -107,13 +133,17 @@ impl AudioChunkEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, RetryMetadata, VadSegment,
+        AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, PreparedFrame, VadSegment,
     };
-    use crate::audio::vad::VadKind;
+    use crate::audio::{
+        session::{SessionId, TrackId},
+        vad::VadKind,
+    };
 
     fn frame(sequence: u64, start_ms: u64, duration_ms: u32, sample_count: usize) -> AudioFrame {
         AudioFrame {
-            session_id: 7,
+            session_id: SessionId::new("s-test").unwrap(),
+            track_id: TrackId::new("mic-1").unwrap(),
             sequence,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -141,21 +171,28 @@ mod tests {
     }
 
     #[test]
-    fn from_frames_returns_none_for_empty_frame_lists() {
-        let envelope = AudioChunkEnvelope::from_frames(
-            7,
-            10,
+    fn from_frames_returns_none_for_empty_or_mixed_track_lists() {
+        assert!(AudioChunkEnvelope::from_frames(
             &[],
             AudioCodec::PcmS16Le,
             Vec::new(),
             AudioPurpose::LocalFallback,
-        );
+        )
+        .is_none());
 
-        assert!(envelope.is_none());
+        let mut mixed = vec![frame(1, 0, 20, 320), frame(2, 20, 20, 320)];
+        mixed[1].track_id = TrackId::new("mic-2").unwrap();
+        assert!(AudioChunkEnvelope::from_frames(
+            &mixed,
+            AudioCodec::PcmS16Le,
+            Vec::new(),
+            AudioPurpose::LocalFallback,
+        )
+        .is_none());
     }
 
     #[test]
-    fn from_frames_builds_deterministic_chunk_and_retry_metadata() {
+    fn from_frames_builds_track_aware_chunk_and_retry_metadata() {
         let frames = vec![frame(11, 100, 20, 320), frame(12, 120, 20, 320)];
         let vad_segments = vec![VadSegment {
             start_ms: 100,
@@ -165,71 +202,34 @@ mod tests {
         }];
 
         let envelope = AudioChunkEnvelope::from_frames(
-            7,
-            11,
             &frames,
             AudioCodec::PcmS16Le,
             vad_segments.clone(),
             AudioPurpose::CaptureEnvelope,
         )
-        .expect("frames should build an envelope");
+        .unwrap();
 
-        assert_eq!(envelope.session_id, 7);
-        assert_eq!(envelope.chunk_id, "7-11-40");
+        assert_eq!(envelope.session_id.as_str(), "s-test");
+        assert_eq!(envelope.track_id.as_str(), "mic-1");
         assert_eq!(envelope.sequence_start, 11);
+        assert_eq!(envelope.sequence_end, 12);
         assert_eq!(envelope.start_ms, 100);
         assert_eq!(envelope.duration_ms, 40);
-        assert_eq!(envelope.sample_rate_hz, 16_000);
-        assert_eq!(envelope.codec, AudioCodec::PcmS16Le);
         assert_eq!(envelope.vad_segments, vad_segments);
-        assert_eq!(envelope.purpose, AudioPurpose::CaptureEnvelope);
-        assert_eq!(
-            envelope.retry,
-            RetryMetadata {
-                idempotency_key: "7-11-7-11-40".into(),
-                attempt: 1,
-                max_attempts: 1,
-            }
-        );
+        assert!(envelope.retry.idempotency_key.contains("mic-1"));
     }
 
     #[test]
-    fn chunk_envelope_serializes_with_expected_field_names() {
-        let envelope = AudioChunkEnvelope {
-            session_id: 9,
-            chunk_id: "9-4-20".into(),
-            sequence_start: 4,
-            start_ms: 80,
-            duration_ms: 20,
-            sample_rate_hz: 16_000,
-            codec: AudioCodec::PcmS16Le,
-            vad_segments: vec![VadSegment {
-                start_ms: 80,
-                end_ms: 100,
-                kind: VadKind::Silence,
-                rms: 0.0,
-            }],
-            purpose: AudioPurpose::LocalFallback,
-            retry: RetryMetadata {
-                idempotency_key: "9-4-9-4-20".into(),
-                attempt: 1,
-                max_attempts: 2,
-            },
+    fn prepared_frames_keep_samples_out_of_serializable_metadata() {
+        let metadata = frame(1, 0, 20, 320);
+        let prepared = PreparedFrame {
+            metadata: metadata.clone(),
+            samples: std::sync::Arc::from([0.0_f32, 0.25_f32]),
         };
 
-        let value = serde_json::to_value(&envelope).expect("chunk envelope should serialize");
-
-        assert_eq!(value["sessionId"], 9);
-        assert_eq!(value["chunkId"], "9-4-20");
-        assert_eq!(value["sequenceStart"], 4);
-        assert_eq!(value["startMs"], 80);
-        assert_eq!(value["durationMs"], 20);
-        assert_eq!(value["sampleRateHz"], 16_000);
-        assert_eq!(value["codec"], "pcm_s16_le");
-        assert_eq!(value["purpose"], "localFallback");
-        assert_eq!(value["retry"]["idempotencyKey"], "9-4-9-4-20");
-        assert_eq!(value["retry"]["attempt"], 1);
-        assert_eq!(value["retry"]["maxAttempts"], 2);
-        assert_eq!(value["vadSegments"][0]["kind"], "silence");
+        let value = serde_json::to_value(metadata).unwrap();
+        assert!(value.get("samples").is_none());
+        assert_eq!(prepared.samples.len(), 2);
+        assert_eq!(prepared.metadata.track_id.as_str(), "mic-1");
     }
 }

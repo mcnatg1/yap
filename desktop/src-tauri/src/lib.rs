@@ -15,6 +15,7 @@ pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 pub mod audio;
 mod batch_recordings;
 mod file_actions;
+mod install_identity;
 pub mod live;
 mod paths;
 pub mod runtime;

@@ -1,11 +1,17 @@
 use crate::audio::frame::{AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, VadSegment};
+use crate::audio::session::{
+    CaptureSource, CaptureTrackDescriptor, ImportedTrackProvenance, SessionId, SessionMode,
+    SessionOrigin, TrackId, TrackSource,
+};
 use crate::audio::vad::{VadDecision, VadKind};
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSessionEnvelope {
-    pub session_id: u64,
-    pub source: AudioSource,
+    pub session_id: SessionId,
+    pub session_mode: SessionMode,
+    pub session_origin: SessionOrigin,
+    pub tracks: Vec<CaptureTrackDescriptor>,
     pub started_at_ms: u64,
     pub sample_rate_hz: u32,
     pub chunks: Vec<AudioChunkEnvelope>,
@@ -21,7 +27,8 @@ pub struct ChunkWindowConfig {
 }
 
 pub struct AudioChunkEnvelopeBuilder {
-    session_id: u64,
+    session_id: SessionId,
+    track_id: TrackId,
     sequence_start: Option<u64>,
     purpose: AudioPurpose,
     codec: AudioCodec,
@@ -29,9 +36,15 @@ pub struct AudioChunkEnvelopeBuilder {
 }
 
 impl AudioChunkEnvelopeBuilder {
-    pub fn new(session_id: u64, purpose: AudioPurpose, codec: AudioCodec) -> Self {
+    pub fn new(
+        session_id: SessionId,
+        track_id: TrackId,
+        purpose: AudioPurpose,
+        codec: AudioCodec,
+    ) -> Self {
         Self {
             session_id,
+            track_id,
             sequence_start: None,
             purpose,
             codec,
@@ -48,24 +61,31 @@ impl AudioChunkEnvelopeBuilder {
     }
 
     pub fn finish(mut self, vad_segments: Vec<VadSegment>) -> Option<AudioChunkEnvelope> {
-        let sequence_start = self.sequence_start?;
-        self.frames
-            .sort_by_key(|frame| (frame.sequence, frame.start_ms, frame.duration_ms));
+        self.sequence_start?;
+        self.frames.sort_by_key(|frame| {
+            (
+                frame.track_id.as_str().to_owned(),
+                frame.sequence,
+                frame.start_ms,
+            )
+        });
 
-        AudioChunkEnvelope::from_frames(
-            self.session_id,
-            sequence_start,
-            &self.frames,
-            self.codec,
-            vad_segments,
-            self.purpose,
-        )
+        if self
+            .frames
+            .iter()
+            .any(|frame| frame.session_id != self.session_id || frame.track_id != self.track_id)
+        {
+            return None;
+        }
+        AudioChunkEnvelope::from_frames(&self.frames, self.codec, vad_segments, self.purpose)
     }
 }
 
 pub struct AudioSessionEnvelopeBuilder {
-    session_id: u64,
-    source: AudioSource,
+    session_id: SessionId,
+    session_mode: SessionMode,
+    session_origin: SessionOrigin,
+    tracks: Vec<CaptureTrackDescriptor>,
     started_at_ms: u64,
     sample_rate_hz: u32,
     chunks: Vec<AudioChunkEnvelope>,
@@ -74,14 +94,18 @@ pub struct AudioSessionEnvelopeBuilder {
 
 impl AudioSessionEnvelopeBuilder {
     pub fn new(
-        session_id: u64,
-        source: AudioSource,
+        session_id: SessionId,
+        session_mode: SessionMode,
+        session_origin: SessionOrigin,
+        tracks: Vec<CaptureTrackDescriptor>,
         started_at_ms: u64,
         sample_rate_hz: u32,
     ) -> Self {
         Self {
             session_id,
-            source,
+            session_mode,
+            session_origin,
+            tracks,
             started_at_ms,
             sample_rate_hz,
             chunks: Vec::new(),
@@ -98,12 +122,20 @@ impl AudioSessionEnvelopeBuilder {
     }
 
     pub fn finish(mut self) -> AudioSessionEnvelope {
-        self.chunks
-            .sort_by_key(|chunk| (chunk.sequence_start, chunk.start_ms, chunk.chunk_id.clone()));
+        self.chunks.sort_by_key(|chunk| {
+            (
+                chunk.track_id.as_str().to_owned(),
+                chunk.sequence_start,
+                chunk.start_ms,
+                chunk.chunk_id.clone(),
+            )
+        });
 
         AudioSessionEnvelope {
             session_id: self.session_id,
-            source: self.source,
+            session_mode: self.session_mode,
+            session_origin: self.session_origin,
+            tracks: self.tracks,
             started_at_ms: self.started_at_ms,
             sample_rate_hz: self.sample_rate_hz,
             chunks: self.chunks,
@@ -112,11 +144,93 @@ impl AudioSessionEnvelopeBuilder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioSessionEnvelopeWire {
+    session_id: LegacySessionId,
+    #[serde(default)]
+    session_mode: Option<SessionMode>,
+    #[serde(default)]
+    session_origin: Option<SessionOrigin>,
+    #[serde(default)]
+    tracks: Option<Vec<CaptureTrackDescriptor>>,
+    #[serde(default)]
+    source: Option<LegacyAudioSource>,
+    #[serde(default)]
+    started_at_ms: u64,
+    #[serde(default)]
+    sample_rate_hz: u32,
+    #[serde(default)]
+    chunks: Vec<AudioChunkEnvelope>,
+    #[serde(default)]
+    degraded: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum LegacySessionId {
+    Current(SessionId),
+    Numeric(u64),
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AudioSource {
+enum LegacyAudioSource {
     Live,
     Recording,
+}
+
+impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AudioSessionEnvelopeWire::deserialize(deserializer)?;
+        let session_id = match wire.session_id {
+            LegacySessionId::Current(session_id) => session_id,
+            LegacySessionId::Numeric(value) => {
+                SessionId::new(format!("legacy-{value}")).map_err(serde::de::Error::custom)?
+            }
+        };
+        let legacy_origin = wire.source.map(|source| match source {
+            LegacyAudioSource::Live => SessionOrigin::LiveCapture,
+            LegacyAudioSource::Recording => SessionOrigin::ImportedFile,
+        });
+        let session_origin = wire
+            .session_origin
+            .or(legacy_origin)
+            .ok_or_else(|| serde::de::Error::missing_field("sessionOrigin"))?;
+        let tracks = wire
+            .tracks
+            .unwrap_or_else(|| vec![legacy_track_descriptor(session_origin)]);
+
+        Ok(Self {
+            session_id,
+            session_mode: wire.session_mode.unwrap_or(SessionMode::Dictation),
+            session_origin,
+            tracks,
+            started_at_ms: wire.started_at_ms,
+            sample_rate_hz: wire.sample_rate_hz,
+            chunks: wire.chunks,
+            degraded: wire.degraded,
+        })
+    }
+}
+
+fn legacy_track_descriptor(origin: SessionOrigin) -> CaptureTrackDescriptor {
+    let source = match origin {
+        SessionOrigin::LiveCapture => TrackSource::Captured {
+            source: CaptureSource::Microphone,
+        },
+        SessionOrigin::ImportedFile => TrackSource::Imported {
+            provenance: ImportedTrackProvenance::Unknown,
+        },
+    };
+    CaptureTrackDescriptor {
+        track_id: TrackId::new("legacy-0").expect("static legacy track ID is valid"),
+        source,
+        device_id: "dev-legacy".into(),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -211,7 +325,6 @@ pub fn build_manifest_windows(
                     }
 
                     if let Some(chunk) = build_chunk(
-                        session_id,
                         &sorted_frames[start..chunk_end],
                         codec,
                         vad_segments,
@@ -239,13 +352,9 @@ pub fn build_manifest_windows(
                             rms: max_rms(&assignments[start..end], VadKind::Silence),
                         }];
 
-                        if let Some(chunk) = build_chunk(
-                            session_id,
-                            &sorted_frames[start..end],
-                            codec,
-                            vad_segments,
-                            purpose,
-                        ) {
+                        if let Some(chunk) =
+                            build_chunk(&sorted_frames[start..end], codec, vad_segments, purpose)
+                        {
                             chunks.push(chunk);
                         }
                     }
@@ -267,13 +376,9 @@ pub fn build_manifest_windows(
                         rms: max_rms(&assignments[start..end], VadKind::Error),
                     }];
 
-                    if let Some(chunk) = build_chunk(
-                        session_id,
-                        &sorted_frames[start..end],
-                        codec,
-                        vad_segments,
-                        purpose,
-                    ) {
+                    if let Some(chunk) =
+                        build_chunk(&sorted_frames[start..end], codec, vad_segments, purpose)
+                    {
                         chunks.push(chunk);
                     }
                 }
@@ -286,25 +391,16 @@ pub fn build_manifest_windows(
 }
 
 fn build_chunk(
-    session_id: u64,
     frames: &[AudioFrame],
     codec: AudioCodec,
     vad_segments: Vec<VadSegment>,
     purpose: AudioPurpose,
 ) -> Option<AudioChunkEnvelope> {
-    let sequence_start = frames.iter().map(|frame| frame.sequence).min()?;
-    AudioChunkEnvelope::from_frames(
-        session_id,
-        sequence_start,
-        frames,
-        codec,
-        vad_segments,
-        purpose,
-    )
+    AudioChunkEnvelope::from_frames(frames, codec, vad_segments, purpose)
 }
 
 fn build_error_windows(
-    session_id: u64,
+    _session_id: u64,
     frames: &[AudioFrame],
     purpose: AudioPurpose,
     codec: AudioCodec,
@@ -319,7 +415,6 @@ fn build_error_windows(
                     let chunk_frames = &run[start..end];
                     let chunk_end_ms = chunk_frames.last()?.end_ms();
                     build_chunk(
-                        session_id,
                         chunk_frames,
                         codec,
                         vec![VadSegment {
@@ -358,7 +453,7 @@ fn partition_identity_runs(frames: &[AudioFrame]) -> Vec<&[AudioFrame]> {
     let mut start = 0;
 
     while start < frames.len() {
-        let session_id = frames[start].session_id;
+        let session_id = frames[start].session_id.clone();
         let sample_rate_hz = frames[start].sample_rate_hz;
         let mut end = start + 1;
         while end < frames.len()
@@ -376,8 +471,10 @@ fn partition_identity_runs(frames: &[AudioFrame]) -> Vec<&[AudioFrame]> {
 
 fn has_mixed_session_or_sample_rate(session_id: u64, frames: &[AudioFrame]) -> bool {
     let expected_sample_rate_hz = frames[0].sample_rate_hz;
+    let expected_session_id =
+        SessionId::new(format!("s-{session_id}")).expect("legacy numeric session ID is valid");
     frames.iter().any(|frame| {
-        frame.session_id != session_id || frame.sample_rate_hz != expected_sample_rate_hz
+        frame.session_id != expected_session_id || frame.sample_rate_hz != expected_sample_rate_hz
     })
 }
 
@@ -506,22 +603,27 @@ fn max_rms(assignments: &[FrameVadAssignment], kind: VadKind) -> f32 {
 mod tests {
     use super::{
         build_manifest_windows, AudioChunkEnvelopeBuilder, AudioSessionEnvelope,
-        AudioSessionEnvelopeBuilder, AudioSource, ChunkWindowConfig,
+        AudioSessionEnvelopeBuilder, ChunkWindowConfig,
     };
     use crate::audio::frame::{
         AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, RetryMetadata, VadSegment,
     };
+    use crate::audio::session::{
+        CaptureSource, CaptureTrackDescriptor, SessionId, SessionMode, SessionOrigin, TrackId,
+        TrackSource,
+    };
     use crate::audio::vad::{VadDecision, VadKind};
 
     fn frame(
-        session_id: u64,
+        session_number: u64,
         sequence: u64,
         start_ms: u64,
         duration_ms: u32,
         sample_rate_hz: u32,
     ) -> AudioFrame {
         AudioFrame {
-            session_id,
+            session_id: session_id(session_number),
+            track_id: track_id(),
             sequence,
             sample_rate_hz,
             channels: 1,
@@ -531,17 +633,40 @@ mod tests {
         }
     }
 
+    fn session_id(value: u64) -> SessionId {
+        SessionId::new(format!("s-{value}")).unwrap()
+    }
+
+    fn track_id() -> TrackId {
+        TrackId::new("mic-1").unwrap()
+    }
+
+    fn track_descriptor() -> CaptureTrackDescriptor {
+        CaptureTrackDescriptor::from_selector(
+            track_id(),
+            TrackSource::Captured {
+                source: CaptureSource::Microphone,
+            },
+            "install-id",
+            "0:Built-in Microphone",
+        )
+    }
+
     #[test]
     fn session_envelope_serializes_with_expected_field_names() {
         let session = AudioSessionEnvelope {
-            session_id: 55,
-            source: AudioSource::Live,
+            session_id: session_id(55),
+            session_mode: SessionMode::Dictation,
+            session_origin: SessionOrigin::LiveCapture,
+            tracks: vec![track_descriptor()],
             started_at_ms: 1_000,
             sample_rate_hz: 16_000,
             chunks: vec![AudioChunkEnvelope {
-                session_id: 55,
-                chunk_id: "55-2-40".into(),
+                session_id: session_id(55),
+                track_id: track_id(),
+                chunk_id: "s-55-mic-1-2-3-40".into(),
                 sequence_start: 2,
+                sequence_end: 3,
                 start_ms: 40,
                 duration_ms: 40,
                 sample_rate_hz: 16_000,
@@ -554,7 +679,7 @@ mod tests {
                 }],
                 purpose: AudioPurpose::CaptureEnvelope,
                 retry: RetryMetadata {
-                    idempotency_key: "55-2-55-2-40".into(),
+                    idempotency_key: "s-55-2-3-s-55-mic-1-2-3-40".into(),
                     attempt: 1,
                     max_attempts: 1,
                 },
@@ -564,18 +689,24 @@ mod tests {
 
         let value = serde_json::to_value(&session).expect("session envelope should serialize");
 
-        assert_eq!(value["sessionId"], 55);
-        assert_eq!(value["source"], "live");
+        assert_eq!(value["sessionId"], "s-55");
+        assert_eq!(value["sessionMode"], "dictation");
+        assert_eq!(value["sessionOrigin"], "live_capture");
+        assert!(value.get("source").is_none());
         assert_eq!(value["startedAtMs"], 1_000);
         assert_eq!(value["sampleRateHz"], 16_000);
         assert_eq!(value["degraded"], true);
-        assert_eq!(value["chunks"][0]["chunkId"], "55-2-40");
+        assert_eq!(value["chunks"][0]["chunkId"], "s-55-mic-1-2-3-40");
     }
 
     #[test]
     fn chunk_builder_orders_contiguous_frames_by_sequence() {
-        let mut builder =
-            AudioChunkEnvelopeBuilder::new(7, AudioPurpose::CaptureEnvelope, AudioCodec::PcmS16Le);
+        let mut builder = AudioChunkEnvelopeBuilder::new(
+            session_id(7),
+            track_id(),
+            AudioPurpose::CaptureEnvelope,
+            AudioCodec::PcmS16Le,
+        );
         builder.push(frame(7, 12, 120, 20, 16_000));
         builder.push(frame(7, 11, 100, 20, 16_000));
 
@@ -590,8 +721,8 @@ mod tests {
             .finish(vad_segments.clone())
             .expect("frames should build an envelope");
 
-        assert_eq!(envelope.session_id, 7);
-        assert_eq!(envelope.chunk_id, "7-11-40");
+        assert_eq!(envelope.session_id, session_id(7));
+        assert_eq!(envelope.track_id, track_id());
         assert_eq!(envelope.sequence_start, 11);
         assert_eq!(envelope.start_ms, 100);
         assert_eq!(envelope.duration_ms, 40);
@@ -603,16 +734,24 @@ mod tests {
 
     #[test]
     fn chunk_builder_returns_none_for_empty_builders() {
-        let builder =
-            AudioChunkEnvelopeBuilder::new(7, AudioPurpose::LocalFallback, AudioCodec::PcmS16Le);
+        let builder = AudioChunkEnvelopeBuilder::new(
+            session_id(7),
+            track_id(),
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+        );
 
         assert!(builder.finish(Vec::new()).is_none());
     }
 
     #[test]
     fn chunk_builder_sets_retry_and_idempotency_fields() {
-        let mut builder =
-            AudioChunkEnvelopeBuilder::new(7, AudioPurpose::LocalFallback, AudioCodec::PcmS16Le);
+        let mut builder = AudioChunkEnvelopeBuilder::new(
+            session_id(7),
+            track_id(),
+            AudioPurpose::LocalFallback,
+            AudioCodec::PcmS16Le,
+        );
         builder.push(frame(7, 11, 100, 20, 16_000));
         builder.push(frame(7, 12, 120, 20, 16_000));
 
@@ -628,7 +767,7 @@ mod tests {
         assert_eq!(
             envelope.retry,
             RetryMetadata {
-                idempotency_key: "7-11-7-11-40".into(),
+                idempotency_key: "s-7-11-12-s-7-mic-1-11-12-40".into(),
                 attempt: 1,
                 max_attempts: 1,
             }
@@ -637,8 +776,12 @@ mod tests {
 
     #[test]
     fn session_builder_collects_chunks_and_marks_degraded() {
-        let mut first_chunk_builder =
-            AudioChunkEnvelopeBuilder::new(55, AudioPurpose::CaptureEnvelope, AudioCodec::PcmS16Le);
+        let mut first_chunk_builder = AudioChunkEnvelopeBuilder::new(
+            session_id(55),
+            track_id(),
+            AudioPurpose::CaptureEnvelope,
+            AudioCodec::PcmS16Le,
+        );
         first_chunk_builder.push(frame(55, 4, 80, 20, 16_000));
         first_chunk_builder.push(frame(55, 5, 100, 20, 16_000));
         let first_chunk = first_chunk_builder
@@ -650,8 +793,12 @@ mod tests {
             }])
             .expect("first chunk should build");
 
-        let mut second_chunk_builder =
-            AudioChunkEnvelopeBuilder::new(55, AudioPurpose::CaptureEnvelope, AudioCodec::PcmS16Le);
+        let mut second_chunk_builder = AudioChunkEnvelopeBuilder::new(
+            session_id(55),
+            track_id(),
+            AudioPurpose::CaptureEnvelope,
+            AudioCodec::PcmS16Le,
+        );
         second_chunk_builder.push(frame(55, 2, 40, 20, 16_000));
         second_chunk_builder.push(frame(55, 3, 60, 20, 16_000));
         let second_chunk = second_chunk_builder
@@ -663,22 +810,28 @@ mod tests {
             }])
             .expect("second chunk should build");
 
-        let mut session_builder =
-            AudioSessionEnvelopeBuilder::new(55, AudioSource::Live, 1_000, 16_000);
+        let mut session_builder = AudioSessionEnvelopeBuilder::new(
+            session_id(55),
+            SessionMode::Dictation,
+            SessionOrigin::LiveCapture,
+            vec![track_descriptor()],
+            1_000,
+            16_000,
+        );
         session_builder.push_chunk(first_chunk);
         session_builder.push_chunk(second_chunk);
         session_builder.mark_degraded();
 
         let session = session_builder.finish();
 
-        assert_eq!(session.session_id, 55);
-        assert_eq!(session.source, AudioSource::Live);
+        assert_eq!(session.session_id, session_id(55));
+        assert_eq!(session.session_origin, SessionOrigin::LiveCapture);
         assert_eq!(session.started_at_ms, 1_000);
         assert_eq!(session.sample_rate_hz, 16_000);
         assert!(session.degraded);
         assert_eq!(session.chunks.len(), 2);
-        assert_eq!(session.chunks[0].chunk_id, "55-2-40");
-        assert_eq!(session.chunks[1].chunk_id, "55-4-40");
+        assert_eq!(session.chunks[0].sequence_start, 2);
+        assert_eq!(session.chunks[1].sequence_start, 4);
     }
 
     fn window_config(preserve_silence_markers: bool) -> ChunkWindowConfig {
@@ -1015,5 +1168,43 @@ mod tests {
                 kind: VadKind::Error,
                 rms: 0.0,
             }]));
+    }
+
+    #[test]
+    fn legacy_live_audio_source_deserializes_as_live_capture() {
+        let manifest: AudioSessionEnvelope = serde_json::from_value(serde_json::json!({
+            "sessionId": 7,
+            "source": "live",
+            "startedAtMs": 0,
+            "sampleRateHz": 16_000,
+            "chunks": [],
+            "degraded": false
+        }))
+        .unwrap();
+
+        assert_eq!(
+            manifest.session_origin,
+            crate::audio::session::SessionOrigin::LiveCapture
+        );
+        assert_eq!(manifest.tracks.len(), 1);
+        assert!(matches!(
+            manifest.tracks[0].source,
+            crate::audio::session::TrackSource::Captured { .. }
+        ));
+    }
+
+    #[test]
+    fn manifest_device_reference_is_opaque_and_does_not_contain_the_os_label() {
+        let descriptor = crate::audio::session::CaptureTrackDescriptor::from_selector(
+            crate::audio::session::TrackId::new("mic-1").unwrap(),
+            crate::audio::session::TrackSource::Captured {
+                source: crate::audio::session::CaptureSource::Microphone,
+            },
+            "install-id",
+            "0:Built-in Microphone",
+        );
+
+        assert!(descriptor.device_id.starts_with("dev-"));
+        assert!(!descriptor.device_id.contains("Built-in Microphone"));
     }
 }

@@ -6063,6 +6063,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-wdio",
  "tauri-plugin-wdio-webdriver",
+ "time",
  "windows 0.61.3",
 ]
 
