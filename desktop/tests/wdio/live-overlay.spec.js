@@ -1,4 +1,7 @@
 describe("Yap live overlay window", () => {
+  // Tauri does not expose a cross-platform skip-taskbar/Alt-Tab readback command here.
+  // These probes cover the enforceable surface: compact size, unfocused/non-closable state,
+  // close-request survival, and command denial from the overlay webview.
   it("opens as a compact system overlay and refuses direct close", async () => {
     await browser.tauri.execute(({ core }) => core.invoke("start_live_session", { activeCaptureMode: "toggle" }));
     await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
@@ -32,6 +35,44 @@ describe("Yap live overlay window", () => {
     expect(logicalOuter.width).toBeLessThanOrEqual(300);
     expect(logicalOuter.height).toBeLessThanOrEqual(80);
 
+    await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
+  });
+
+  it("rejects main-window file actions from the overlay and survives close attempts", async () => {
+    await browser.tauri.execute(({ core }) => core.invoke("start_live_session", { activeCaptureMode: "toggle" }));
+    await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+
+    await browser.tauri.switchWindow("live-overlay");
+    const denied = await browser.tauri.execute(async ({ core }) => {
+      try {
+        await core.invoke("open_app_path", { path: "C:\\not-a-yap-file.txt" });
+        return { ok: true, message: "" };
+      } catch (error) {
+        return { ok: false, message: String(error) };
+      }
+    });
+    expect(denied.ok).toBe(false);
+    expect(denied.message).toContain("This file action is only available from the main window.");
+
+    const closeAttempt = await browser.tauri.execute(async ({ core }) => {
+      try {
+        await core.invoke("plugin:window|close", { label: "live-overlay" });
+        return { ok: true, message: "" };
+      } catch (error) {
+        return { ok: false, message: String(error) };
+      }
+    });
+    expect(closeAttempt.ok).toBe(true);
+    await browser.pause(250);
+
+    const windows = await browser.tauri.listWindows();
+    expect(windows).toContain("main");
+    expect(windows).toContain("live-overlay");
+
+    const overlay = await browser.tauri.execute(({ core }) => core.invoke("plugin:window|is_visible", { label: "live-overlay" }));
+    expect(overlay).toBe(true);
+
+    await browser.tauri.switchWindow("main");
     await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
   });
 });

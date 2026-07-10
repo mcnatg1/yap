@@ -45,6 +45,15 @@ export function modelFromLiveView(view: LiveSessionView): OverlayModel {
     partialText: view.partialText ?? undefined,
   };
   if (view.status === "idle") {
+    if (view.error) {
+      return {
+        ...base,
+        audioLevel: 0,
+        errorMessage: view.error,
+        phase: "feedback",
+        recordingTriggerMode: triggerMode,
+      };
+    }
     return { ...base, audioLevel: 0, phase: "idle", recordingTriggerMode: triggerMode };
   }
 

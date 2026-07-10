@@ -95,4 +95,16 @@ describe("live overlay state projection", () => {
     expect(overlaySurface(blocked, false, false, false)).toBe("feedback");
     expect(overlayFrame("feedback", blocked).width).toBeGreaterThanOrEqual(180);
   });
+
+  it("surfaces idle injection fallback instead of reporting success", () => {
+    const fallback = modelFromLiveView({
+      ...baseView,
+      error: "Couldn't insert text here. Transcript copied; press Ctrl+V.",
+      finalText: "done",
+    });
+
+    expect(fallback.phase).toBe("feedback");
+    expect(fallback.errorMessage).toContain("Transcript copied");
+    expect(overlaySurface(fallback, false, false, true)).toBe("feedback");
+  });
 });

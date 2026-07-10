@@ -151,10 +151,13 @@ export function LiveOverlay({
   }
 
   function openIdlePreview() {
+    const interruptedRetraction = retracting;
     cancelRetract();
     setRetracting(false);
     setPeeked(true);
-    setEntered(true);
+    if (interruptedRetraction) {
+      setEntered(true);
+    }
   }
 
   function closeIdlePreview() {

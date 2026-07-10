@@ -26,7 +26,7 @@ test("live overlay respects reduced motion", async ({ page }) => {
   await page.goto(previewUrl);
 
   const root = page.getByTestId("live-overlay-root");
-  await page.mouse.move(130, 3);
+  await hoverIdleSensor(page);
   await expect(root).toHaveAttribute("data-overlay-surface", "peek");
 
   const island = page.getByTestId("live-overlay-island");
@@ -51,7 +51,7 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await expect(root).toHaveAttribute("data-overlay-surface", "sensor");
   await expectFrame(root, { height: 8, width: 260 });
 
-  await page.mouse.move(130, 3);
+  await hoverIdleSensor(page);
   await expect(root).toHaveAttribute("data-overlay-surface", "peek");
   await expect(page.getByRole("button", { name: "Start dictating" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open scratch" })).toBeVisible();
@@ -82,7 +82,7 @@ test("live overlay state machine keeps the island compact and collision-free", a
   await waitForRetract();
   await expect(root).toHaveAttribute("data-overlay-surface", "sensor");
   await expectFrame(root, { height: 8, width: 260 });
-  await page.mouse.move(130, 3);
+  await hoverIdleSensor(page);
   await expect(root).toHaveAttribute("data-overlay-surface", "peek");
   await waitForIslandMotion();
 
@@ -165,8 +165,9 @@ test("live overlay tolerates rapid state churn without active-frame jitter", asy
   await page.goto(previewUrl);
 
   const root = page.getByTestId("live-overlay-root");
-  await page.mouse.move(130, 3);
+  await hoverIdleSensor(page);
   await expect(root).toHaveAttribute("data-overlay-surface", "peek");
+  await waitForIslandMotion();
 
   const activeStates = [
     { activeCaptureMode: "pushToTalk", captureMode: "toggle", level: 0.12, route: "localFallback", status: "armed" },
@@ -196,6 +197,11 @@ async function setLiveView(page: Page, detail: Record<string, unknown>) {
   await page.evaluate((nextView) => {
     window.dispatchEvent(new CustomEvent("yap-live-overlay-preview", { detail: nextView }));
   }, detail);
+}
+
+async function hoverIdleSensor(page: Page) {
+  await page.mouse.move(130, 80);
+  await page.getByTestId("live-overlay-root").hover({ position: { x: 130, y: 3 } });
 }
 
 async function waitForIslandMotion() {
@@ -242,15 +248,19 @@ async function expectNoClippedChildren(rootLocator: Locator) {
       .map((element) => {
         const box = element.getBoundingClientRect();
         return {
-          bottom: box.bottom > rootBox.bottom + 1,
-          left: box.left < rootBox.left - 1,
-          right: box.right > rootBox.right + 1,
-          top: box.top < rootBox.top - 1,
+          bounds: { bottom: box.bottom, left: box.left, right: box.right, top: box.top },
+          name: element.getAttribute("aria-label") ?? element.getAttribute("data-testid") ?? element.tagName,
+          root: { bottom: rootBox.bottom, left: rootBox.left, right: rootBox.right, top: rootBox.top },
         };
       })
-      .some((entry) => entry.bottom || entry.left || entry.right || entry.top);
+      .filter(({ bounds, root }) =>
+        bounds.bottom > root.bottom + 1 ||
+        bounds.left < root.left - 1 ||
+        bounds.right > root.right + 1 ||
+        bounds.top < root.top - 1,
+      );
   });
-  expect(clipped).toBe(false);
+  expect(clipped).toEqual([]);
   expect(root.width).toBeGreaterThan(0);
   expect(root.height).toBeGreaterThan(0);
 }
