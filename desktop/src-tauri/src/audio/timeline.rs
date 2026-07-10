@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use crate::audio::frame::{AudioFrame, AudioGap, GapCause, TrackConfigurationRevision};
 use crate::audio::session::{SessionId, TrackId};
 
-const EMPTY_SOURCE_POSITION: u64 = u64::MAX;
 const NO_CAUSE: u8 = 0;
+const LOSS_RUN_CAPACITY: usize = 64;
+const REGISTRATION_TICKET_CAPACITY: usize = LOSS_RUN_CAPACITY * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -386,12 +387,63 @@ pub struct LossSnapshot {
 }
 
 #[derive(Debug)]
-struct LossSlot {
-    writers: AtomicUsize,
-    first_source_position_frames: AtomicU64,
-    last_source_position_frames: AtomicU64,
+struct LossRunCell {
+    source_position_frames: AtomicU64,
     dropped_frames: AtomicU64,
     cause: AtomicU8,
+    published: AtomicBool,
+}
+
+impl LossRunCell {
+    const fn new() -> Self {
+        Self {
+            source_position_frames: AtomicU64::new(0),
+            dropped_frames: AtomicU64::new(0),
+            cause: AtomicU8::new(NO_CAUSE),
+            published: AtomicBool::new(false),
+        }
+    }
+
+    fn publish(&self, source_position_frames: u64, dropped_frames: u64, cause: GapCause) {
+        self.source_position_frames
+            .store(source_position_frames, Ordering::Relaxed);
+        self.dropped_frames.store(dropped_frames, Ordering::Relaxed);
+        self.cause.store(encode_cause(cause), Ordering::Relaxed);
+        self.published.store(true, Ordering::Release);
+    }
+
+    fn take(&self) -> Option<RawLossRun> {
+        if !self.published.load(Ordering::Acquire) {
+            return None;
+        }
+        let run = RawLossRun {
+            source_position_frames: self.source_position_frames.load(Ordering::Relaxed),
+            dropped_frames: self.dropped_frames.load(Ordering::Relaxed),
+            cause: self.cause.load(Ordering::Relaxed),
+        };
+        self.published.store(false, Ordering::Relaxed);
+        Some(run)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RawLossRun {
+    source_position_frames: u64,
+    dropped_frames: u64,
+    cause: u8,
+}
+
+const EMPTY_LOSS_RUN: RawLossRun = RawLossRun {
+    source_position_frames: 0,
+    dropped_frames: 0,
+    cause: NO_CAUSE,
+};
+
+#[derive(Debug)]
+struct LossSlot {
+    writers: AtomicUsize,
+    claimed_runs: AtomicUsize,
+    runs: [LossRunCell; LOSS_RUN_CAPACITY],
     invalid: AtomicBool,
 }
 
@@ -399,67 +451,70 @@ impl LossSlot {
     const fn new() -> Self {
         Self {
             writers: AtomicUsize::new(0),
-            first_source_position_frames: AtomicU64::new(EMPTY_SOURCE_POSITION),
-            last_source_position_frames: AtomicU64::new(0),
-            dropped_frames: AtomicU64::new(0),
-            cause: AtomicU8::new(NO_CAUSE),
+            claimed_runs: AtomicUsize::new(0),
+            runs: [const { LossRunCell::new() }; LOSS_RUN_CAPACITY],
             invalid: AtomicBool::new(false),
         }
     }
 
     fn record(&self, source_position_frames: u64, dropped_frames: u64, cause: GapCause) {
-        self.first_source_position_frames
-            .fetch_min(source_position_frames, Ordering::Relaxed);
-        match source_position_frames.checked_add(dropped_frames) {
-            Some(end) => {
-                self.last_source_position_frames
-                    .fetch_max(end, Ordering::Relaxed);
-            }
-            None => self.invalid.store(true, Ordering::Relaxed),
+        let run_index = self.claimed_runs.fetch_add(1, Ordering::Relaxed);
+        if run_index >= LOSS_RUN_CAPACITY {
+            self.invalid.store(true, Ordering::Relaxed);
+            return;
         }
-
-        let previous_total = self
-            .dropped_frames
-            .fetch_add(dropped_frames, Ordering::Relaxed);
-        if previous_total.checked_add(dropped_frames).is_none() {
+        if source_position_frames.checked_add(dropped_frames).is_none() {
             self.invalid.store(true, Ordering::Relaxed);
         }
-
-        let encoded_cause = encode_cause(cause);
-        if let Err(existing) = self.cause.compare_exchange(
-            NO_CAUSE,
-            encoded_cause,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            if existing != encoded_cause {
-                self.invalid.store(true, Ordering::Relaxed);
-            }
-        }
+        self.runs[run_index].publish(source_position_frames, dropped_frames, cause);
     }
 
     fn take(&self, generation: u64) -> Result<Option<LossSnapshot>, TimelineError> {
-        let dropped_frames = self.dropped_frames.swap(0, Ordering::Relaxed);
-        let first_source_position_frames = self
-            .first_source_position_frames
-            .swap(EMPTY_SOURCE_POSITION, Ordering::Relaxed);
-        let last_source_position_frames =
-            self.last_source_position_frames.swap(0, Ordering::Relaxed);
-        let cause = self.cause.swap(NO_CAUSE, Ordering::Relaxed);
-        let invalid = self.invalid.swap(false, Ordering::Relaxed);
+        let claimed_runs = self.claimed_runs.swap(0, Ordering::Relaxed);
+        let mut invalid =
+            self.invalid.swap(false, Ordering::Relaxed) || claimed_runs > LOSS_RUN_CAPACITY;
+        let mut runs = [EMPTY_LOSS_RUN; LOSS_RUN_CAPACITY];
+        for (index, cell) in self.runs.iter().enumerate() {
+            let published = cell.take();
+            if index < claimed_runs.min(LOSS_RUN_CAPACITY) {
+                match published {
+                    Some(run) => runs[index] = run,
+                    None => invalid = true,
+                }
+            } else if published.is_some() {
+                invalid = true;
+            }
+        }
         if invalid {
             return Err(TimelineError::InvalidTiming);
         }
-        if dropped_frames == 0 {
+        if claimed_runs == 0 {
             return Ok(None);
         }
-        let exact_span = last_source_position_frames
-            .checked_sub(first_source_position_frames)
-            .is_some_and(|span| span == dropped_frames);
-        let cause = decode_cause(cause).ok_or(TimelineError::InvalidTiming)?;
-        if !exact_span {
-            return Err(TimelineError::InvalidTiming);
+
+        let runs = &mut runs[..claimed_runs];
+        runs.sort_unstable_by_key(|run| run.source_position_frames);
+        let first_source_position_frames = runs[0].source_position_frames;
+        let encoded_cause = runs[0].cause;
+        let cause = decode_cause(encoded_cause).ok_or(TimelineError::InvalidTiming)?;
+        let mut expected_position = first_source_position_frames;
+        let mut dropped_frames = 0_u64;
+        for run in runs {
+            if run.dropped_frames == 0
+                || run.cause != encoded_cause
+                || run.source_position_frames != expected_position
+            {
+                return Err(TimelineError::InvalidTiming);
+            }
+            expected_position = run
+                .source_position_frames
+                .checked_add(run.dropped_frames)
+                .ok_or(TimelineError::InvalidTiming)?;
+            dropped_frames = dropped_frames
+                .checked_add(run.dropped_frames)
+                .ok_or(TimelineError::InvalidTiming)?;
         }
+
         Ok(Some(LossSnapshot {
             first_source_position_frames,
             dropped_frames,
@@ -483,7 +538,10 @@ impl Drop for DrainGuard<'_> {
 pub struct LossAccumulator {
     // The full handoff generation, rather than only its low slot bit, prevents ABA.
     active_generation: AtomicU64,
-    entrants: AtomicUsize,
+    registration_started: AtomicU64,
+    registration_completed: AtomicU64,
+    registration_drained: AtomicU64,
+    registration_completion_tickets: [AtomicU64; REGISTRATION_TICKET_CAPACITY],
     drain_in_progress: AtomicBool,
     slots: [LossSlot; 2],
 }
@@ -492,51 +550,77 @@ impl LossAccumulator {
     pub const fn new() -> Self {
         Self {
             active_generation: AtomicU64::new(0),
-            entrants: AtomicUsize::new(0),
+            registration_started: AtomicU64::new(0),
+            registration_completed: AtomicU64::new(0),
+            registration_drained: AtomicU64::new(0),
+            registration_completion_tickets: [const { AtomicU64::new(0) };
+                REGISTRATION_TICKET_CAPACITY],
             drain_in_progress: AtomicBool::new(false),
             slots: [LossSlot::new(), LossSlot::new()],
         }
     }
 
     pub fn record(&self, source_position_frames: u64, dropped_frames: u64, cause: GapCause) {
-        self.record_inner(source_position_frames, dropped_frames, cause, || {});
+        self.record_inner(source_position_frames, dropped_frames, cause, || {}, || {});
     }
 
-    fn record_inner<F>(
+    fn record_inner<F, G>(
         &self,
         source_position_frames: u64,
         dropped_frames: u64,
         cause: GapCause,
         after_entrant_registered: F,
+        after_generation_read: G,
     ) where
         F: FnOnce(),
+        G: FnOnce(),
     {
         if dropped_frames == 0 {
             return;
         }
-        self.entrants.fetch_add(1, Ordering::SeqCst);
+        let started = self.registration_started.fetch_add(1, Ordering::SeqCst);
+        assert_ne!(started, u64::MAX, "loss registration counter exhausted");
+        let registration_floor = self.registration_drained.load(Ordering::SeqCst);
+        let outstanding_registrations = started
+            .checked_sub(registration_floor)
+            .expect("loss registration tickets regressed");
+        assert!(
+            outstanding_registrations < REGISTRATION_TICKET_CAPACITY as u64,
+            "loss registration ticket capacity exhausted"
+        );
         after_entrant_registered();
         let generation = self.active_generation.load(Ordering::SeqCst);
+        after_generation_read();
         let slot = &self.slots[(generation & 1) as usize];
         slot.writers.fetch_add(1, Ordering::Relaxed);
-        self.entrants.fetch_sub(1, Ordering::SeqCst);
+        let completed_ticket = started + 1;
+        self.registration_completion_tickets[started as usize % REGISTRATION_TICKET_CAPACITY]
+            .store(completed_ticket, Ordering::SeqCst);
+        let completed = self.registration_completed.fetch_add(1, Ordering::SeqCst);
+        assert_ne!(
+            completed,
+            u64::MAX,
+            "loss registration completion counter exhausted"
+        );
 
         slot.record(source_position_frames, dropped_frames, cause);
         slot.writers.fetch_sub(1, Ordering::Release);
     }
 
     pub fn drain(&self) -> Result<Option<LossSnapshot>, TimelineError> {
-        self.drain_inner(|| {}, || {})
+        self.drain_inner(|| {}, || {}, || {})
     }
 
-    fn drain_inner<F, G>(
+    fn drain_inner<F, G, H>(
         &self,
         after_flip: F,
-        on_contention: G,
+        after_registration_wait: G,
+        on_contention: H,
     ) -> Result<Option<LossSnapshot>, TimelineError>
     where
         F: FnOnce(),
         G: FnOnce(),
+        H: FnOnce(),
     {
         let _guard = self.acquire_drain(on_contention);
         let generation = self
@@ -545,10 +629,26 @@ impl LossAccumulator {
                 current.checked_add(1)
             })
             .map_err(|_| TimelineError::InvalidTiming)?;
-        after_flip();
-        while self.entrants.load(Ordering::SeqCst) != 0 {
-            spin_loop();
+        let registration_floor = self.registration_drained.load(Ordering::SeqCst);
+        let registration_target = self.registration_started.load(Ordering::SeqCst);
+        let pending_registrations = registration_target
+            .checked_sub(registration_floor)
+            .ok_or(TimelineError::InvalidTiming)?;
+        if pending_registrations > REGISTRATION_TICKET_CAPACITY as u64 {
+            return Err(TimelineError::InvalidTiming);
         }
+        after_flip();
+        for ticket in registration_floor..registration_target {
+            let expected = ticket.checked_add(1).ok_or(TimelineError::InvalidTiming)?;
+            let completion = &self.registration_completion_tickets
+                [ticket as usize % REGISTRATION_TICKET_CAPACITY];
+            while completion.load(Ordering::SeqCst) != expected {
+                spin_loop();
+            }
+        }
+        self.registration_drained
+            .store(registration_target, Ordering::SeqCst);
+        after_registration_wait();
         let slot = &self.slots[(generation & 1) as usize];
         while slot.writers.load(Ordering::Acquire) != 0 {
             spin_loop();
@@ -594,7 +694,36 @@ impl LossAccumulator {
             dropped_frames,
             cause,
             after_writer_registered,
+            || {},
         );
+    }
+
+    #[cfg(test)]
+    fn record_with_registration_hooks<F, G>(
+        &self,
+        source_position_frames: u64,
+        dropped_frames: u64,
+        cause: GapCause,
+        after_started: F,
+        after_generation_read: G,
+    ) where
+        F: FnOnce(),
+        G: FnOnce(),
+    {
+        self.record_inner(
+            source_position_frames,
+            dropped_frames,
+            cause,
+            after_started,
+            after_generation_read,
+        );
+    }
+
+    #[cfg(test)]
+    fn registration_ticket_completed(&self, ticket: u64) -> bool {
+        self.registration_completion_tickets[ticket as usize % REGISTRATION_TICKET_CAPACITY]
+            .load(Ordering::SeqCst)
+            == ticket + 1
     }
 
     #[cfg(test)]
@@ -602,7 +731,7 @@ impl LossAccumulator {
     where
         F: FnOnce(),
     {
-        self.drain_inner(after_flip, || {}).unwrap()
+        self.drain_inner(after_flip, || {}, || {}).unwrap()
     }
 
     #[cfg(test)]
@@ -615,7 +744,22 @@ impl LossAccumulator {
         F: FnOnce(),
         G: FnOnce(),
     {
-        self.drain_inner(after_flip, on_contention)
+        self.drain_inner(after_flip, || {}, on_contention)
+    }
+
+    #[cfg(test)]
+    fn drain_with_registration_hooks<F, G, H>(
+        &self,
+        after_flip: F,
+        after_registration_wait: G,
+        on_contention: H,
+    ) -> Result<Option<LossSnapshot>, TimelineError>
+    where
+        F: FnOnce(),
+        G: FnOnce(),
+        H: FnOnce(),
+    {
+        self.drain_inner(after_flip, after_registration_wait, on_contention)
     }
 }
 
@@ -677,13 +821,12 @@ mod tests {
         timeline
     }
 
-    fn concurrently_record_two(
-        first: (u64, u64, GapCause),
-        second: (u64, u64, GapCause),
+    fn concurrently_record<const N: usize>(
+        records: [(u64, u64, GapCause); N],
     ) -> Result<Option<LossSnapshot>, TimelineError> {
         let losses = Arc::new(LossAccumulator::new());
-        let start = Arc::new(Barrier::new(3));
-        let writers = [first, second].map(|(position, dropped, cause)| {
+        let start = Arc::new(Barrier::new(N + 1));
+        let writers = records.map(|(position, dropped, cause)| {
             let losses = Arc::clone(&losses);
             let start = Arc::clone(&start);
             thread::spawn(move || {
@@ -1057,10 +1200,10 @@ mod tests {
     #[test]
     fn reversed_position_contiguous_writers_report_the_exact_union() {
         assert_eq!(
-            concurrently_record_two(
+            concurrently_record([
                 (480, 320, GapCause::CallbackPoolExhausted),
                 (320, 160, GapCause::CallbackPoolExhausted),
-            ),
+            ]),
             Ok(Some(LossSnapshot {
                 first_source_position_frames: 320,
                 dropped_frames: 480,
@@ -1073,10 +1216,10 @@ mod tests {
     #[test]
     fn non_contiguous_writers_never_fabricate_the_missing_interval() {
         assert_eq!(
-            concurrently_record_two(
+            concurrently_record([
                 (320, 160, GapCause::CallbackPoolExhausted),
                 (640, 160, GapCause::CallbackPoolExhausted),
-            ),
+            ]),
             Err(TimelineError::InvalidTiming)
         );
     }
@@ -1084,10 +1227,10 @@ mod tests {
     #[test]
     fn overlapping_writers_invalidate_the_snapshot() {
         assert_eq!(
-            concurrently_record_two(
+            concurrently_record([
                 (320, 320, GapCause::CallbackPoolExhausted),
                 (480, 320, GapCause::CallbackPoolExhausted),
-            ),
+            ]),
             Err(TimelineError::InvalidTiming)
         );
     }
@@ -1095,12 +1238,52 @@ mod tests {
     #[test]
     fn different_writer_causes_invalidate_the_snapshot() {
         assert_eq!(
-            concurrently_record_two(
+            concurrently_record([
                 (320, 160, GapCause::CallbackPoolExhausted),
                 (480, 160, GapCause::SinkUnavailable),
-            ),
+            ]),
             Err(TimelineError::InvalidTiming)
         );
+    }
+
+    #[test]
+    fn overlap_and_hole_cannot_cancel_into_an_exact_span() {
+        assert_eq!(
+            concurrently_record([
+                (0, 10, GapCause::CallbackPoolExhausted),
+                (5, 10, GapCause::CallbackPoolExhausted),
+                (20, 5, GapCause::CallbackPoolExhausted),
+            ]),
+            Err(TimelineError::InvalidTiming)
+        );
+    }
+
+    #[test]
+    fn reversed_order_contiguous_multi_writer_run_is_exact() {
+        assert_eq!(
+            concurrently_record([
+                (20, 5, GapCause::DeviceDiscontinuity),
+                (10, 10, GapCause::DeviceDiscontinuity),
+                (0, 10, GapCause::DeviceDiscontinuity),
+            ]),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 25,
+                cause: GapCause::DeviceDiscontinuity,
+                generation: 0,
+            }))
+        );
+    }
+
+    #[test]
+    fn loss_run_capacity_exhaustion_is_invalid_timing() {
+        let losses = LossAccumulator::new();
+        let capacity = u64::try_from(super::LOSS_RUN_CAPACITY).unwrap();
+        for position in 0..=capacity {
+            losses.record(position, 1, GapCause::CallbackPoolExhausted);
+        }
+
+        assert_eq!(losses.drain(), Err(TimelineError::InvalidTiming));
     }
 
     #[test]
@@ -1218,6 +1401,133 @@ mod tests {
             }))
         );
         assert_eq!(second.join().unwrap(), Ok(None));
+    }
+
+    #[test]
+    fn post_snapshot_callback_does_not_delay_the_old_slot_drain() {
+        let losses = Arc::new(LossAccumulator::new());
+        losses.record(0, 10, GapCause::CallbackPoolExhausted);
+        let registration_target_snapshotted = Arc::new(Barrier::new(2));
+        let release_coordinator = Arc::new(Barrier::new(2));
+        let post_snapshot_started = Arc::new(Barrier::new(2));
+        let release_post_snapshot = Arc::new(Barrier::new(2));
+        let registration_target_completed = Arc::new(Barrier::new(2));
+
+        let coordinator = {
+            let losses = Arc::clone(&losses);
+            let registration_target_snapshotted = Arc::clone(&registration_target_snapshotted);
+            let release_coordinator = Arc::clone(&release_coordinator);
+            let registration_target_completed = Arc::clone(&registration_target_completed);
+            thread::spawn(move || {
+                losses.drain_with_registration_hooks(
+                    || {
+                        registration_target_snapshotted.wait();
+                        release_coordinator.wait();
+                    },
+                    || {
+                        registration_target_completed.wait();
+                    },
+                    || {},
+                )
+            })
+        };
+        registration_target_snapshotted.wait();
+
+        let callback = {
+            let losses = Arc::clone(&losses);
+            let post_snapshot_started = Arc::clone(&post_snapshot_started);
+            let release_post_snapshot = Arc::clone(&release_post_snapshot);
+            thread::spawn(move || {
+                losses.record_with_hook(10, 10, GapCause::CallbackPoolExhausted, || {
+                    post_snapshot_started.wait();
+                    release_post_snapshot.wait();
+                });
+            })
+        };
+        post_snapshot_started.wait();
+        release_coordinator.wait();
+        registration_target_completed.wait();
+
+        assert_eq!(
+            coordinator.join().unwrap(),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 10,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 0,
+            }))
+        );
+        release_post_snapshot.wait();
+        callback.join().unwrap();
+        assert_eq!(
+            losses.drain(),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: 10,
+                dropped_frames: 10,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 1,
+            }))
+        );
+    }
+
+    #[test]
+    fn later_registration_completion_cannot_mask_an_earlier_ticket() {
+        let losses = Arc::new(LossAccumulator::new());
+        let old_generation_read = Arc::new(Barrier::new(2));
+        let release_old_registration = Arc::new(Barrier::new(2));
+
+        let old_callback = {
+            let losses = Arc::clone(&losses);
+            let old_generation_read = Arc::clone(&old_generation_read);
+            let release_old_registration = Arc::clone(&release_old_registration);
+            thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    0,
+                    10,
+                    GapCause::CallbackPoolExhausted,
+                    || {},
+                    || {
+                        old_generation_read.wait();
+                        release_old_registration.wait();
+                    },
+                );
+            })
+        };
+        old_generation_read.wait();
+        let registration_target = losses.registration_started.load(Ordering::SeqCst);
+        losses.active_generation.store(1, Ordering::SeqCst);
+
+        losses.record(10, 10, GapCause::CallbackPoolExhausted);
+
+        assert_eq!(registration_target, 1);
+        assert_eq!(losses.registration_completed.load(Ordering::SeqCst), 1);
+        assert!(!losses.registration_ticket_completed(0));
+
+        release_old_registration.wait();
+        old_callback.join().unwrap();
+        assert!(losses.registration_ticket_completed(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "loss registration counter exhausted")]
+    fn registration_started_overflow_fails_fast() {
+        let losses = LossAccumulator::new();
+        losses
+            .registration_started
+            .store(u64::MAX, Ordering::Relaxed);
+
+        losses.record(0, 1, GapCause::CallbackPoolExhausted);
+    }
+
+    #[test]
+    #[should_panic(expected = "loss registration completion counter exhausted")]
+    fn registration_completed_overflow_fails_fast() {
+        let losses = LossAccumulator::new();
+        losses
+            .registration_completed
+            .store(u64::MAX, Ordering::Relaxed);
+
+        losses.record(0, 1, GapCause::CallbackPoolExhausted);
     }
 
     #[test]
