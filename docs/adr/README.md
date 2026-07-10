@@ -46,15 +46,15 @@ ADRs 0001–0013 cover the **solo / local-first profile**. ADRs 0014–0018 intr
 | [0007](0007-forced-alignment-engine.md) | Forced-alignment engine for word→speaker | Accepted (roadmap — 7a) |
 | [0008](0008-speechbrain-lid-gate.md) | SpeechBrain LID language gate | Accepted (roadmap — 4) |
 | [0009](0009-knowledge-worker-protocol.md) | Knowledge worker IPC protocol | Accepted (roadmap — 7a) |
-| [0010](0010-okf-conversation-schema.md) | OKF conversation schema | Accepted (roadmap — 7c) |
-| [0011](0011-vector-rag-retrieval.md) | Vector index + RAG retrieval (L6–L7) | Accepted (roadmap — 7e) |
-| [0012](0012-mcp-server-surface.md) | MCP server surface | Accepted (roadmap — 7e) |
-| [0013](0013-global-hotkey-injection.md) | Global hotkey + cross-app injection (L1) | Accepted (roadmap — 7+) |
-| [0014](0014-server-tier-compute-topology.md) | Server-tier compute topology — thin client + GB-class workload router | Accepted (roadmap — Phase 8) |
-| [0015](0015-two-pass-diarization-speaker-identity.md) | Two-pass diarization and speaker identity (ECAPA-TDNN + VBx) | Accepted (roadmap — Phase 10) |
-| [0016](0016-auth-identity-bridge.md) | Authentication and voice identity bridge (Entra ID + MSAL) | Accepted (roadmap — Phase 9) |
-| [0017](0017-knowledge-base-compiler.md) | Team knowledge base — source-of-truth, compiled disposable indexes, permission model | Accepted (roadmap — Phase 11) |
-| [0018](0018-three-repo-topology.md) | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | Accepted (roadmap — Phase 12) |
+| [0010](0010-okf-conversation-schema.md) | OKF conversation schema | Accepted (canonical Phase 9) |
+| [0011](0011-vector-rag-retrieval.md) | Vector index + RAG retrieval (L6–L7) | Accepted (canonical Phase 9) |
+| [0012](0012-mcp-server-surface.md) | MCP server surface | Accepted (canonical Phase 9) |
+| [0013](0013-global-hotkey-injection.md) | Global hotkey + cross-app injection (L1) | Accepted (Windows active; cross-platform follow-on) |
+| [0014](0014-server-tier-compute-topology.md) | Server-tier compute topology — thin client + GB-class workload router | Accepted (canonical Phases 3–5) |
+| [0015](0015-two-pass-diarization-speaker-identity.md) | Two-pass diarization and speaker identity (ECAPA-TDNN + VBx) | Accepted (canonical Phase 8) |
+| [0016](0016-auth-identity-bridge.md) | Authentication and voice identity bridge (Entra ID + MSAL) | Accepted (canonical Phase 7) |
+| [0017](0017-knowledge-base-compiler.md) | Team knowledge base — source-of-truth, compiled disposable indexes, permission model | Accepted (canonical Phase 9) |
+| [0018](0018-three-repo-topology.md) | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | Accepted (roadmap — canonical Phase 10) |
 | [0019](0019-local-streaming-model-selection.md) | Local streaming model selection — Nemotron INT8 client fallback | Accepted |
 
 **Build specs** (how, not why): [docs/specs/](../specs/) — STT sidecar, LLM sidecar, live UX, testing.

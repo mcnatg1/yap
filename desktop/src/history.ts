@@ -18,7 +18,15 @@ const transcriptHistoryKey = "yap.transcriptHistory.v1";
 const hiddenTranscriptHistoryKey = "yap.hiddenTranscriptHistory.v1";
 export const maxTranscriptHistoryEntries = 500;
 
-type HistoryStorage = Pick<Storage, "getItem" | "setItem">;
+export type HistoryStorage = Pick<Storage, "getItem" | "setItem">;
+
+export type OwnedLiveTranscriptPathResolution = {
+  requestedPath: string;
+  canonicalPath?: string | null;
+  missing: boolean;
+};
+
+const hiddenPruneBatchSize = 200;
 
 function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
   if (!value || typeof value !== "object") return false;
@@ -32,6 +40,30 @@ function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
   );
 }
 
+export function transcriptPathIdentity(path: string) {
+  const isWindowsPath = /^[a-z]:[\\/]/i.test(path) || /^(?:\\\\|\/\/)/.test(path);
+  if (!isWindowsPath) return path;
+
+  let normalized = path
+    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+    .replace(/^\\\\\?\\/i, "")
+    .replace(/\//g, "\\");
+  const unc = normalized.startsWith("\\\\");
+  const segments = normalized.split("\\").filter(Boolean);
+  const resolved: string[] = [];
+  const rootDepth = unc ? 2 : 1;
+  for (const segment of segments) {
+    if (segment === ".") continue;
+    if (segment === "..") {
+      if (resolved.length > rootDepth) resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  normalized = `${unc ? "\\\\" : ""}${resolved.join("\\")}`;
+  return normalized.toLowerCase();
+}
+
 function normalizeTranscriptHistory(value: unknown) {
   if (!Array.isArray(value)) return [];
 
@@ -39,8 +71,9 @@ function normalizeTranscriptHistory(value: unknown) {
   return value
     .filter(isHistoryEntry)
     .filter((entry) => {
-      if (seen.has(entry.outputPath)) return false;
-      seen.add(entry.outputPath);
+      const identity = transcriptPathIdentity(entry.outputPath);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
       return true;
     })
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
@@ -49,7 +82,14 @@ function normalizeTranscriptHistory(value: unknown) {
 
 export function normalizeHiddenTranscriptHistory(value: unknown) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter((item): item is string => typeof item === "string"))];
+  const seen = new Set<string>();
+  return value.filter((item): item is string => {
+    if (typeof item !== "string") return false;
+    const identity = transcriptPathIdentity(item);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
 }
 
 export function readTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
@@ -73,9 +113,11 @@ export function readHiddenTranscriptHistory(storage: HistoryStorage | undefined 
 }
 
 export function filterHiddenTranscriptHistory(entries: TranscriptHistoryEntry[], outputPaths: string[]) {
-  const hidden = new Set(normalizeHiddenTranscriptHistory(outputPaths));
+  const hidden = new Set(
+    normalizeHiddenTranscriptHistory(outputPaths).map(transcriptPathIdentity),
+  );
   if (!hidden.size) return entries;
-  return entries.filter((entry) => !hidden.has(entry.outputPath));
+  return entries.filter((entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)));
 }
 
 export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
@@ -94,8 +136,83 @@ export function writeHiddenTranscriptHistory(outputPaths: string[], storage: His
   storage.setItem(hiddenTranscriptHistoryKey, JSON.stringify(normalizeHiddenTranscriptHistory(outputPaths)));
 }
 
+export async function pruneMissingHiddenTranscriptHistory(
+  authorize: (outputPaths: string[]) => Promise<OwnedLiveTranscriptPathResolution[]>,
+  storage: HistoryStorage | undefined = globalThis.localStorage,
+) {
+  if (!storage) return [];
+  const initial = readHiddenTranscriptHistory(storage);
+  if (!initial.length) return initial;
+
+  const confirmedMissing = new Set<string>();
+  const canonicalRewrites = new Map<string, string>();
+  const staleAliasHistory = new Set<string>();
+  for (let offset = 0; offset < initial.length; offset += hiddenPruneBatchSize) {
+    const batch = initial.slice(offset, offset + hiddenPruneBatchSize);
+    const requested = new Set(batch.map(transcriptPathIdentity));
+    const resolutions = await authorize(batch);
+    for (const resolution of resolutions) {
+      const requestedIdentity = transcriptPathIdentity(resolution.requestedPath);
+      if (!requested.has(requestedIdentity)) continue;
+      if (resolution.missing) {
+        confirmedMissing.add(requestedIdentity);
+        if (resolution.canonicalPath) {
+          confirmedMissing.add(transcriptPathIdentity(resolution.canonicalPath));
+        }
+        continue;
+      }
+      if (!resolution.canonicalPath) continue;
+      const canonicalIdentity = transcriptPathIdentity(resolution.canonicalPath);
+      if (resolution.canonicalPath !== resolution.requestedPath) {
+        canonicalRewrites.set(requestedIdentity, resolution.canonicalPath);
+        if (canonicalIdentity !== requestedIdentity) {
+          staleAliasHistory.add(requestedIdentity);
+        }
+      }
+    }
+  }
+  if (!confirmedMissing.size && !canonicalRewrites.size) {
+    return readHiddenTranscriptHistory(storage);
+  }
+
+  const currentBeforeCleanup = readHiddenTranscriptHistory(storage);
+  const protectedCanonicalPaths = normalizeHiddenTranscriptHistory([
+    ...currentBeforeCleanup,
+    ...canonicalRewrites.values(),
+  ]);
+  if (JSON.stringify(protectedCanonicalPaths) !== JSON.stringify(currentBeforeCleanup)) {
+    writeHiddenTranscriptHistory(protectedCanonicalPaths, storage);
+  }
+
+  const history = readTranscriptHistory(storage);
+  const nextHistory = history.filter(
+    (entry) => {
+      const identity = transcriptPathIdentity(entry.outputPath);
+      return !confirmedMissing.has(identity) && !staleAliasHistory.has(identity);
+    },
+  );
+  if (nextHistory.length !== history.length) {
+    writeTranscriptHistory(nextHistory, storage);
+  }
+
+  const current = readHiddenTranscriptHistory(storage);
+  const next = normalizeHiddenTranscriptHistory(current.flatMap((outputPath) => {
+    const identity = transcriptPathIdentity(outputPath);
+    if (confirmedMissing.has(identity)) return [];
+    return [canonicalRewrites.get(identity) ?? outputPath];
+  }));
+  if (JSON.stringify(next) !== JSON.stringify(current)) {
+    writeHiddenTranscriptHistory(next, storage);
+  }
+  return next;
+}
+
 export function recordTranscriptHistory(entries: TranscriptHistoryEntry[], entry: TranscriptHistoryEntry) {
-  return normalizeTranscriptHistory([entry, ...entries.filter((item) => item.outputPath !== entry.outputPath)]);
+  const identity = transcriptPathIdentity(entry.outputPath);
+  return normalizeTranscriptHistory([
+    entry,
+    ...entries.filter((item) => transcriptPathIdentity(item.outputPath) !== identity),
+  ]);
 }
 
 export function recordVisibleTranscriptHistoryEntries(
@@ -103,8 +220,12 @@ export function recordVisibleTranscriptHistoryEntries(
   entries: TranscriptHistoryEntry[],
   hiddenOutputPaths: string[],
 ) {
-  const hidden = new Set(normalizeHiddenTranscriptHistory(hiddenOutputPaths));
-  const visibleEntries = entries.filter((entry) => !hidden.has(entry.outputPath));
+  const hidden = new Set(
+    normalizeHiddenTranscriptHistory(hiddenOutputPaths).map(transcriptPathIdentity),
+  );
+  const visibleEntries = entries.filter(
+    (entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)),
+  );
   if (!visibleEntries.length) return current;
 
   const visibleHistory = filterHiddenTranscriptHistory(current, hiddenOutputPaths);
@@ -112,7 +233,8 @@ export function recordVisibleTranscriptHistoryEntries(
 }
 
 export function removeTranscriptHistory(entries: TranscriptHistoryEntry[], outputPath: string) {
-  return entries.filter((entry) => entry.outputPath !== outputPath);
+  const identity = transcriptPathIdentity(outputPath);
+  return entries.filter((entry) => transcriptPathIdentity(entry.outputPath) !== identity);
 }
 
 export function hideTranscriptHistory(outputPaths: string[], outputPath: string) {

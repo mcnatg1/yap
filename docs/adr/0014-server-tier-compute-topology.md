@@ -1,7 +1,7 @@
 # ADR 0014: Server-tier compute topology — thin client + GB-class workload router
 
 **Date:** 2026-07-01
-**Status:** Accepted (roadmap — Phase 8)
+**Status:** Accepted (roadmap — canonical Phases 3–5)
 **Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (local fallback runtime history), [ADR 0005](0005-llama-server-agents.md) (LLM sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (runtime state machine)
 **Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the team profile still defaults to server-hosted live ASR when connected, but the desktop-local offline/degraded fallback is Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`.
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
@@ -30,11 +30,11 @@ Yap supports two deployment profiles. Neither profile is deleted. The team profi
 |-----------|---------------------------|----------------------|
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
 | STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server-hosted streaming ASR pool |
-| STT (batch) | Queue/block larger recordings when offline; no local Cohere default in PR3 | Server Cohere batch pool (concurrent GPU workers) |
+| STT (batch) | Queue/block every imported recording when offline; no local file-ASR path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
-| Diarization | Server-less (L3 worker, Phase 7b) | Two-pass server pipeline (ADR 0015, Phase 10) |
-| Knowledge base | Local OKF markdown (Phase 7c) | `yap-knowledge` Git repo + KB compiler (ADR 0017, Phase 11) |
-| Auth | None / local | Entra ID / MSAL (ADR 0016, Phase 9) |
+| Diarization | Server-less L3 worker (legacy phase map) | Two-pass server pipeline (ADR 0015, canonical Phase 8) |
+| Knowledge base | Local OKF markdown (legacy phase map) | `yap-knowledge` Git repo + KB compiler (ADR 0017, canonical Phase 9) |
+| Auth | None / local | Entra ID / MSAL (ADR 0016, canonical Phase 7) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
 ### Client-side responsibilities (both profiles)
@@ -265,7 +265,7 @@ The GB-class server node:
 ### Neutral
 
 - The client binary (`yap-desktop`) ships to all users; profile is determined at runtime by server connectivity and auth status.
-- Phases 1–7e (local-first track) continue in parallel for the solo profile; they are not blocked by the server-tier work.
+- Client-local live fallback remains available through all canonical phases; server work in Phases 3–9 does not turn imported recordings into local jobs.
 
 ## Implementation notes
 
@@ -306,9 +306,9 @@ stateDiagram-v2
 
 On `Connected` loss → switch to solo/local fallback; toast "Using local transcription (server unreachable)."
 
-### Phase 8 deliverables
+### Canonical Phases 3–5 deliverables
 
-- [ ] `server/` staging area and Phase 8 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in Phase 12)
+- [ ] `server/` staging area and Phase 3 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
 - [ ] Workload router: per-user queues, priority, pool dispatch
 - [ ] Streaming ASR pool: GPU ASR, WSS endpoint
 - [ ] Cohere batch pool: concurrent GPU workers, job queue

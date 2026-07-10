@@ -30,8 +30,8 @@ fn save_session_files_to_dir(
     dir: &std::path::Path,
 ) -> Result<Option<SavedLiveSession>, String> {
     let transcript = transcript_text(view);
-    let pcm = live_runtime.take_recorded_pcm();
     let created_at_ms = unix_millis_now()?;
+    let pcm = live_runtime.take_recorded_pcm();
     let warning = session_warning(view, pcm.capped);
     match save_session_parts_to_dir(dir, created_at_ms, transcript, &pcm.bytes, warning) {
         Ok(saved) => Ok(saved),
@@ -66,23 +66,25 @@ fn save_session_parts_to_dir(
         match write_new_text_file(&transcript_path, &format!("{transcript_body}\n")) {
             Ok(()) => {
                 if !pcm.is_empty() && write_pcm16_wav(&audio_path, pcm).is_err() {
+                    let transcript_path = stable_existing_path_string(&transcript_path);
                     return Ok(Some(SavedLiveSession {
                         name,
-                        source_path: transcript_path.display().to_string(),
-                        output_path: transcript_path.display().to_string(),
+                        source_path: transcript_path.clone(),
+                        output_path: transcript_path,
                         created_at_ms,
                         warning: combine_warning(warning, AUDIO_SAVE_FAILED_WARNING),
                     }));
                 }
 
+                let output_path = stable_existing_path_string(&transcript_path);
                 return Ok(Some(SavedLiveSession {
                     name,
                     source_path: if pcm.is_empty() {
-                        transcript_path.display().to_string()
+                        output_path.clone()
                     } else {
-                        audio_path.display().to_string()
+                        stable_existing_path_string(&audio_path)
                     },
-                    output_path: transcript_path.display().to_string(),
+                    output_path,
                     created_at_ms,
                     warning,
                 }));
@@ -161,15 +163,14 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
     {
         let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
         let path = entry.path();
-        if !path.is_file() || !file_actions::is_transcript_path(&path) {
+        if !path.is_file() || !is_primary_live_transcript_path(&path) {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        if !stem.starts_with("live-") {
-            continue;
-        }
+        let created_at_ms = created_at_ms_from_live_stem(stem)
+            .expect("primary live transcript predicate validates the stem");
 
         let audio_path = path.with_extension("wav");
         let source_path = if audio_path.is_file() {
@@ -177,23 +178,10 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
         } else {
             path.clone()
         };
-        let created_at_ms = entry
-            .path()
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(created_at_ms_from_live_stem)
-            .or_else(|| {
-                entry
-                    .metadata()
-                    .ok()
-                    .and_then(|metadata| metadata.modified().ok())
-                    .and_then(system_time_to_unix_millis)
-            })
-            .unwrap_or(0);
         sessions.push(SavedLiveSession {
             name: stem.to_string(),
-            source_path: source_path.display().to_string(),
-            output_path: path.display().to_string(),
+            source_path: stable_existing_path_string(&source_path),
+            output_path: stable_existing_path_string(&path),
             created_at_ms,
             warning: None,
         });
@@ -207,8 +195,47 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
     Ok(sessions)
 }
 
+pub(crate) fn stable_existing_path_string(path: &std::path::Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    stable_path_string(&canonical)
+}
+
+#[cfg(target_os = "windows")]
+fn stable_path_string(path: &std::path::Path) -> String {
+    let display = path.display().to_string();
+    if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    display
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&display)
+        .to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn stable_path_string(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
+pub(crate) fn is_primary_live_transcript_path(path: &std::path::Path) -> bool {
+    file_actions::is_transcript_path(path)
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(created_at_ms_from_live_stem)
+            .is_some()
+}
+
 fn created_at_ms_from_live_stem(stem: &str) -> Option<u64> {
-    stem.strip_prefix("live-")?.split('-').next()?.parse().ok()
+    let mut parts = stem.strip_prefix("live-")?.split('-');
+    let created_at_ms = parts.next()?.parse().ok()?;
+    match parts.next() {
+        None => Some(created_at_ms),
+        Some(suffix) if suffix.parse::<u16>().is_ok() && parts.next().is_none() => {
+            Some(created_at_ms)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn unix_millis_now() -> Result<u64, String> {
@@ -225,6 +252,13 @@ pub(crate) fn transcript_text(view: &live::state::LiveSessionView) -> Option<Str
     view.final_text
         .as_deref()
         .or(view.partial_text.as_deref())
+        .map(clean_transcript_text)
+        .filter(|text| !text.is_empty())
+}
+
+pub(crate) fn completed_transcript_text(view: &live::state::LiveSessionView) -> Option<String> {
+    view.final_text
+        .as_deref()
         .map(clean_transcript_text)
         .filter(|text| !text.is_empty())
 }
@@ -404,6 +438,28 @@ mod tests {
     }
 
     #[test]
+    fn completed_transcript_text_never_promotes_a_partial() {
+        let mut view = live_view(None, Some("partial"));
+        assert_eq!(completed_transcript_text(&view), None);
+
+        view.final_text = Some("final".into());
+        assert_eq!(completed_transcript_text(&view).as_deref(), Some("final"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn stable_path_strings_remove_windows_verbatim_prefixes() {
+        assert_eq!(
+            stable_path_string(std::path::Path::new(r"\\?\C:\Users\Me\live-1.txt")),
+            r"C:\Users\Me\live-1.txt"
+        );
+        assert_eq!(
+            stable_path_string(std::path::Path::new(r"\\?\UNC\server\share\live-1.txt")),
+            r"\\server\share\live-1.txt"
+        );
+    }
+
+    #[test]
     fn transcript_text_cleans_streaming_artifacts() {
         let mut view = live_view(Some("  THank   you.. "), None);
 
@@ -479,6 +535,33 @@ mod tests {
         assert_eq!(sessions[0].name, "live-200");
         assert_eq!(sessions[0].output_path, transcript.display().to_string());
         assert_eq!(sessions[0].source_path, audio.display().to_string());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saved_live_session_scan_ignores_polished_and_malformed_names() {
+        let dir =
+            std::env::temp_dir().join(format!("yap-live-primary-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "live-205.txt",
+            "live-205-1.txt",
+            "live-205.polished.txt",
+            "live-not-a-time.txt",
+            "live-205-extra-part.txt",
+        ] {
+            std::fs::write(dir.join(name), "hello\n").unwrap();
+        }
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live-205-1", "live-205"]
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

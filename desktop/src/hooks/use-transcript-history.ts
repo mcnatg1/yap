@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import {
   hideTranscriptHistory,
+  pruneMissingHiddenTranscriptHistory,
   readHiddenTranscriptHistory,
   readVisibleTranscriptHistory,
   recordVisibleTranscriptHistoryEntries,
@@ -11,6 +12,7 @@ import {
   writeTranscriptHistory,
   type TranscriptHistoryEntry,
 } from "@/history";
+import { resolveOwnedLiveTranscriptPaths } from "@/live";
 
 export function useTranscriptHistory() {
   const [history, setHistory] = useState<TranscriptHistoryEntry[]>(() => readVisibleTranscriptHistory());
@@ -24,6 +26,11 @@ export function useTranscriptHistory() {
   useEffect(() => {
     historyRef.current = history;
   }, [history]);
+
+  const reconcileHiddenHistory = useCallback(async () => {
+    await pruneMissingHiddenTranscriptHistory(resolveOwnedLiveTranscriptPaths);
+    replaceHistory(readVisibleTranscriptHistory());
+  }, [replaceHistory]);
 
   const recordVisibleHistoryEntries = useCallback((entries: TranscriptHistoryEntry[], warning: string) => {
     if (!entries.length) return false;
@@ -70,6 +77,7 @@ export function useTranscriptHistory() {
   return {
     forgetHistoryEntry,
     history,
+    reconcileHiddenHistory,
     recordVisibleHistoryEntries,
     rememberHiddenHistoryEntry,
   };

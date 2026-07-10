@@ -108,6 +108,7 @@ export default function App() {
   const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
   const { refreshServerState, serverLabel } = useServerConnection();
   const {
+    clearLivePasteShortcut,
     clearLiveShortcut,
     liveBusy,
     liveInputDevices,
@@ -122,6 +123,7 @@ export default function App() {
     updateLiveCaptureMode,
     updateLiveHotkey,
     updateLiveOverlay,
+    updateLivePasteHotkey,
   } = useLiveControl();
   const {
     clearTranscriptText,
@@ -141,6 +143,7 @@ export default function App() {
   const {
     forgetHistoryEntry,
     history,
+    reconcileHiddenHistory,
     recordVisibleHistoryEntries,
     rememberHiddenHistoryEntry,
   } = useTranscriptHistory();
@@ -271,7 +274,8 @@ export default function App() {
       unlistenFallbackStatus = stop;
     });
 
-    void listSavedLiveSessions()
+    void reconcileHiddenHistory()
+      .then(() => listSavedLiveSessions())
       .then((sessions) => {
         if (cancelled) return;
         recordVisibleHistoryEntries(
@@ -865,6 +869,7 @@ export default function App() {
         localComputeTargets={localComputeTargets}
         onCancelFallbackInstall={() => void cancelFallbackInstall()}
         onClearLiveHotkey={clearLiveShortcut}
+        onClearLivePasteHotkey={clearLivePasteShortcut}
         onInstallFallback={(options) => void installFallback(options)}
         onOpenFallbackFolder={() => void openFallbackFolder()}
         onPreflightLiveInput={preflightLiveInput}
@@ -877,6 +882,7 @@ export default function App() {
         onSetLiveCaptureMode={updateLiveCaptureMode}
         onSetLiveHotkey={updateLiveHotkey}
         onSetLiveOverlayEnabled={updateLiveOverlay}
+        onSetLivePasteHotkey={updateLivePasteHotkey}
         onSetLocalComputeTarget={(targetId) => void updateLocalComputeTarget(targetId)}
         onSkipSetup={skipSetup}
         onStartLive={startLive}

@@ -11,6 +11,12 @@ export type SavedLiveSession = {
   warning?: string | null;
 };
 
+export type OwnedLiveTranscriptPathResolution = {
+  requestedPath: string;
+  canonicalPath?: string | null;
+  missing: boolean;
+};
+
 export type LiveLevelView = {
   level?: number | null;
   status: LiveSessionStatus;
@@ -34,6 +40,14 @@ export function setLiveHotkey(hotkey: string): Promise<LiveSessionView> {
 
 export function clearLiveHotkey(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("clear_live_hotkey");
+}
+
+export function setLivePasteHotkey(hotkey: string): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("set_live_paste_hotkey", { hotkey });
+}
+
+export function clearLivePasteHotkey(): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("clear_live_paste_hotkey");
 }
 
 export function setLiveCaptureMode(captureMode: LiveCaptureMode): Promise<LiveSessionView> {
@@ -62,6 +76,15 @@ export function stopLiveSession(): Promise<LiveSessionView> {
 
 export function listSavedLiveSessions(): Promise<SavedLiveSession[]> {
   return invoke<SavedLiveSession[]>("list_saved_live_sessions");
+}
+
+export function resolveOwnedLiveTranscriptPaths(
+  outputPaths: string[],
+): Promise<OwnedLiveTranscriptPathResolution[]> {
+  if (!isTauri()) return Promise.resolve([]);
+  return invoke<OwnedLiveTranscriptPathResolution[]>("resolve_owned_live_transcript_paths", {
+    outputPaths,
+  });
 }
 
 export function showMainWorkspace(workspace: WorkspaceView): Promise<void> {

@@ -1,15 +1,27 @@
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    sync::{Mutex, OnceLock},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
+const MAX_HIDDEN_PRUNE_CANDIDATES: usize = 200;
 
 #[derive(Deserialize, Serialize)]
 struct RecordingPlaybackRegistry {
     version: u32,
     paths: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedLiveTranscriptPathResolution {
+    requested_path: String,
+    canonical_path: Option<String>,
+    missing: bool,
 }
 
 #[tauri::command]
@@ -34,6 +46,81 @@ pub fn restore_recording_playback_path(
     let path = registered_playback_path_at(path, &recording_playback_registry_path())?;
     allow_asset_playback_path(&app, &path)?;
     Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub fn resolve_owned_live_transcript_paths(
+    window: tauri::WebviewWindow,
+    output_paths: Vec<String>,
+) -> Result<Vec<OwnedLiveTranscriptPathResolution>, String> {
+    ensure_main_window(&window)?;
+    resolve_owned_live_transcript_paths_from_dir(
+        output_paths,
+        &crate::live::recordings::recordings_dir(),
+    )
+}
+
+fn resolve_owned_live_transcript_paths_from_dir(
+    output_paths: Vec<String>,
+    owned_dir: &std::path::Path,
+) -> Result<Vec<OwnedLiveTranscriptPathResolution>, String> {
+    if output_paths.len() > MAX_HIDDEN_PRUNE_CANDIDATES {
+        return Err(format!(
+            "Hidden history reconciliation accepts at most {MAX_HIDDEN_PRUNE_CANDIDATES} paths."
+        ));
+    }
+    let Ok(owned_dir) = owned_dir.canonicalize() else {
+        return Ok(Vec::new());
+    };
+
+    let mut resolutions = Vec::new();
+    for output_path in output_paths {
+        let path = std::path::PathBuf::from(&output_path);
+        if !path.is_absolute() || !crate::live::recordings::is_primary_live_transcript_path(&path) {
+            continue;
+        }
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let Ok(parent) = parent.canonicalize() else {
+            continue;
+        };
+        if parent != owned_dir {
+            continue;
+        }
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        let canonical_candidate = owned_dir.join(file_name);
+        match std::fs::symlink_metadata(&canonical_candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                resolutions.push(OwnedLiveTranscriptPathResolution {
+                    requested_path: output_path,
+                    canonical_path: Some(crate::live::recordings::stable_existing_path_string(
+                        &canonical_candidate,
+                    )),
+                    missing: true,
+                });
+            }
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let Ok(canonical_path) = canonical_candidate.canonicalize() else {
+                    continue;
+                };
+                if canonical_path.parent() != Some(owned_dir.as_path()) {
+                    continue;
+                }
+                resolutions.push(OwnedLiveTranscriptPathResolution {
+                    requested_path: output_path,
+                    canonical_path: Some(crate::live::recordings::stable_existing_path_string(
+                        &canonical_path,
+                    )),
+                    missing: false,
+                });
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    Ok(resolutions)
 }
 
 fn allow_asset_playback_path(app: &tauri::AppHandle, path: &std::path::Path) -> Result<(), String> {
@@ -256,14 +343,25 @@ fn register_playback_path_at(
     registry_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     let path = playable_recording_path(path)?;
-    let mut paths = read_registered_playback_paths(registry_path);
+    let _guard = playback_registry_lock()
+        .lock()
+        .map_err(|_| "Playback registry lock is unavailable.".to_string())?;
+    let mut paths = read_registered_playback_paths(registry_path)?;
+    let already_registered = paths
+        .iter()
+        .any(|registered| same_registry_path(registered, &path));
+    if !already_registered && paths.len() >= MAX_REGISTERED_PLAYBACK_PATHS {
+        return Err("The playback registry is full; remove an old imported recording before adding another.".into());
+    }
     paths.retain(|registered| !same_registry_path(registered, &path));
     paths.insert(0, path.clone());
-    if paths.len() > MAX_REGISTERED_PLAYBACK_PATHS {
-        paths.truncate(MAX_REGISTERED_PLAYBACK_PATHS);
-    }
     write_registered_playback_paths(registry_path, &paths)?;
     Ok(path)
+}
+
+fn playback_registry_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn registered_playback_path_at(
@@ -294,7 +392,7 @@ fn registered_recording_path_at(
     registry_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     let path = playable_recording_path(path.display().to_string())?;
-    if read_registered_playback_paths(registry_path)
+    if read_registered_playback_paths(registry_path)?
         .iter()
         .any(|registered| same_registry_path(registered, &path))
     {
@@ -307,21 +405,31 @@ fn recording_playback_registry_path() -> std::path::PathBuf {
     crate::paths::app_data_dir().join("recording-playback-registry.json")
 }
 
-fn read_registered_playback_paths(registry_path: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let Ok(text) = std::fs::read_to_string(registry_path) else {
-        return Vec::new();
+fn read_registered_playback_paths(
+    registry_path: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let text = match std::fs::read_to_string(registry_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("Failed to read playback registry: {error}")),
     };
     let Ok(registry) = serde_json::from_str::<RecordingPlaybackRegistry>(&text) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+    if registry.version != 1 {
+        return Err(format!(
+            "Unsupported playback registry version {}.",
+            registry.version
+        ));
+    }
 
-    registry
+    Ok(registry
         .paths
         .into_iter()
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute() && is_recording_media_path(path))
         .take(MAX_REGISTERED_PLAYBACK_PATHS)
-        .collect()
+        .collect())
 }
 
 fn write_registered_playback_paths(
@@ -492,9 +600,13 @@ fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    static TEMP_TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
+        let sequence = TEMP_TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "yap-{name}-{}-{}",
+            "yap-{name}-{}-{}-{sequence}",
             std::process::id(),
             crate::live::recordings::unix_millis_now().unwrap_or(0)
         ));
@@ -505,6 +617,134 @@ mod tests {
     #[test]
     fn read_text_file_rejects_non_transcripts() {
         assert!(read_text_file_at("recording.mp3".into()).is_err());
+    }
+
+    #[test]
+    fn hidden_prune_authorizes_only_missing_primary_owned_transcripts() {
+        let dir = temp_test_dir("hidden-prune-owned");
+        let existing = dir.join("live-100.txt");
+        let missing = dir.join("live-101-1.txt");
+        std::fs::write(&existing, "still here").unwrap();
+
+        let resolutions = resolve_owned_live_transcript_paths_from_dir(
+            vec![
+                existing.display().to_string(),
+                missing.display().to_string(),
+            ],
+            &dir,
+        )
+        .unwrap();
+
+        assert_eq!(resolutions.len(), 2);
+        assert_eq!(
+            resolutions[0].requested_path,
+            existing.display().to_string()
+        );
+        assert_eq!(
+            resolutions[0].canonical_path.as_deref(),
+            Some(crate::live::recordings::stable_existing_path_string(&existing).as_str())
+        );
+        assert!(!resolutions[0].missing);
+        assert_eq!(
+            resolutions[1],
+            OwnedLiveTranscriptPathResolution {
+                requested_path: missing.display().to_string(),
+                canonical_path: Some(crate::live::recordings::stable_existing_path_string(
+                    &missing
+                )),
+                missing: true,
+            }
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn hidden_prune_resolves_legacy_case_alias_to_canonical_output() {
+        let dir = temp_test_dir("hidden-prune-case-alias");
+        let transcript = dir.join("live-108.txt");
+        std::fs::write(&transcript, "still here").unwrap();
+        let requested = dir
+            .display()
+            .to_string()
+            .to_uppercase()
+            .replace("LIVE-RECORDINGS", "live-recordings");
+        let requested = std::path::PathBuf::from(requested).join("live-108.txt");
+
+        let resolutions = resolve_owned_live_transcript_paths_from_dir(
+            vec![requested.display().to_string()],
+            &dir,
+        )
+        .unwrap();
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].canonical_path.as_deref(),
+            Some(crate::live::recordings::stable_existing_path_string(&transcript).as_str())
+        );
+        assert!(!resolutions[0].missing);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn hidden_prune_rejects_untrusted_or_non_primary_paths() {
+        let dir = temp_test_dir("hidden-prune-untrusted");
+        let external = temp_test_dir("hidden-prune-external");
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let confirmed = resolve_owned_live_transcript_paths_from_dir(
+            vec![
+                external.join("live-102.txt").display().to_string(),
+                nested.join("live-103.txt").display().to_string(),
+                "live-104.txt".into(),
+                dir.join("live-105.polished.txt").display().to_string(),
+                dir.join("live-nope.txt").display().to_string(),
+                dir.join("notes.txt").display().to_string(),
+            ],
+            &dir,
+        )
+        .unwrap();
+
+        assert!(confirmed.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(external).ok();
+    }
+
+    #[test]
+    fn hidden_prune_preserves_existing_non_file_and_missing_root() {
+        let dir = temp_test_dir("hidden-prune-directory");
+        let directory = dir.join("live-106.txt");
+        std::fs::create_dir_all(&directory).unwrap();
+        let missing_root = dir.join("missing-root");
+
+        assert!(resolve_owned_live_transcript_paths_from_dir(
+            vec![directory.display().to_string()],
+            &dir,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(resolve_owned_live_transcript_paths_from_dir(
+            vec![missing_root.join("live-107.txt").display().to_string()],
+            &missing_root,
+        )
+        .unwrap()
+        .is_empty());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn hidden_prune_rejects_oversized_batches() {
+        let dir = temp_test_dir("hidden-prune-bound");
+        let candidates = (0..=MAX_HIDDEN_PRUNE_CANDIDATES)
+            .map(|index| dir.join(format!("live-{index}.txt")).display().to_string())
+            .collect();
+
+        let error = resolve_owned_live_transcript_paths_from_dir(candidates, &dir).unwrap_err();
+
+        assert!(error.contains("at most 200"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -805,6 +1045,71 @@ mod tests {
         let restored = registered_playback_path_at(media.display().to_string(), &registry).unwrap();
 
         assert_eq!(restored.file_name().unwrap(), "meeting.wav");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_registry_rejects_unsupported_versions() {
+        let dir = temp_test_dir("playback-registry-version");
+        let registry = dir.join("registry.json");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&registry, r#"{"version":2,"paths":[]}"#).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let error = register_playback_path_at(media.display().to_string(), &registry).unwrap_err();
+
+        assert!(error.contains("Unsupported playback registry version"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_registry_does_not_evict_trusted_paths_at_capacity() {
+        let dir = temp_test_dir("playback-registry-capacity");
+        let registry = dir.join("registry.json");
+        let media = dir.join("new.wav");
+        let paths = (0..MAX_REGISTERED_PLAYBACK_PATHS)
+            .map(|index| dir.join(format!("registered-{index}.wav")))
+            .collect::<Vec<_>>();
+        write_registered_playback_paths(&registry, &paths).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let error = register_playback_path_at(media.display().to_string(), &registry).unwrap_err();
+
+        assert!(error.contains("playback registry is full"));
+        assert_eq!(
+            read_registered_playback_paths(&registry).unwrap().len(),
+            paths.len()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_registry_serializes_concurrent_registrations() {
+        let dir = temp_test_dir("playback-registry-concurrent");
+        let registry = dir.join("registry.json");
+        let paths = (0..20)
+            .map(|index| {
+                let path = dir.join(format!("meeting-{index}.wav"));
+                std::fs::write(&path, b"RIFF").unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+
+        let threads = paths
+            .iter()
+            .cloned()
+            .map(|path| {
+                let registry = registry.clone();
+                std::thread::spawn(move || {
+                    register_playback_path_at(path.display().to_string(), &registry)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        assert_eq!(read_registered_playback_paths(&registry).unwrap().len(), 20);
         std::fs::remove_dir_all(dir).ok();
     }
 

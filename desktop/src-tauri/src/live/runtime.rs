@@ -13,7 +13,7 @@ use crate::audio::preprocess::{
     AudioLevelNormalizer as LiveAudioLevelNormalizer, LinearResampler,
 };
 
-use super::state::{LiveLevelView, LiveSessionState, LiveSessionStatus};
+use super::state::{LiveLevelView, LiveSessionState};
 use super::stream::{self, LiveStreamEngine};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
@@ -22,12 +22,18 @@ const MAX_RECORDED_PCM_SECONDS: usize = 10 * 60;
 const MAX_RECORDED_PCM_BYTES: usize = TARGET_SAMPLE_RATE as usize * 2 * MAX_RECORDED_PCM_SECONDS;
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
+const CRASH_CLAIM_BIT: u64 = 1 << 63;
+
+fn active_session_matches(active_session: u64, session: u64) -> bool {
+    session != 0 && (active_session == session || active_session == session | CRASH_CLAIM_BIT)
+}
 
 #[derive(Clone)]
 pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
     recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
+    transition: Arc<Mutex<()>>,
     warming: Arc<AtomicBool>,
 }
 
@@ -89,6 +95,17 @@ struct RecordedPcmBuffer {
 pub(crate) struct RecordedPcm {
     pub(crate) bytes: Vec<u8>,
     pub(crate) capped: bool,
+}
+
+pub(crate) struct LiveStartFailure {
+    session: u64,
+    message: String,
+}
+
+impl LiveStartFailure {
+    fn new(session: u64, message: String) -> Self {
+        Self { session, message }
+    }
 }
 
 impl RecordedPcmBuffer {
@@ -180,8 +197,15 @@ impl LiveRuntime {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
             recorded_pcm: Arc::new(Mutex::new(RecordedPcmBuffer::new())),
+            transition: Arc::new(Mutex::new(())),
             warming: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn transition_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.transition
+            .lock()
+            .expect("live transition gate poisoned")
     }
 
     pub fn is_active(&self) -> bool {
@@ -192,35 +216,44 @@ impl LiveRuntime {
             .is_some()
     }
 
-    pub fn start_local(
+    pub(crate) fn start_local(
         &self,
         app: tauri::AppHandle,
         selected_device_id: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), LiveStartFailure> {
         let (session, stream_tx) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
-                return Err("Live capture is already running.".into());
+                return Ok(());
             }
             self.discard_recorded_pcm();
             inner.session = inner.session.saturating_add(1);
             inner.last_used = Instant::now();
             let session = inner.session;
-            inner.ensure_stream(self.clone(), app.clone(), session)?;
-            let stream_tx = inner
-                .stream_tx()
-                .ok_or_else(|| "Live stream is unavailable.".to_string())?;
+            self.active_session.store(session, Ordering::SeqCst);
+            if let Err(message) = inner.ensure_stream(self.clone(), app.clone(), session) {
+                return Err(LiveStartFailure::new(session, message));
+            }
+            let Some(stream_tx) = inner.stream_tx() else {
+                return Err(LiveStartFailure::new(
+                    session,
+                    "Live stream is unavailable.".into(),
+                ));
+            };
             (session, stream_tx)
         };
 
         let state = app.state::<LiveSessionState>();
-        if !should_continue_capture_start(state.snapshot().status) {
+        let Some(view) = state.try_begin_listening_from_armed() else {
+            let _ = self.active_session.compare_exchange(
+                session,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
             return Ok(());
-        }
-        let view = state.clear_for_new_session();
+        };
         let _ = app.emit("live-session", &view);
-
-        self.active_session.store(session, Ordering::SeqCst);
 
         let capture = open_capture(
             self.clone(),
@@ -234,8 +267,7 @@ impl LiveRuntime {
         let (capture, level, audio) = match capture {
             Ok(capture) => capture,
             Err(error) => {
-                self.active_session.store(0, Ordering::SeqCst);
-                return Err(error);
+                return Err(LiveStartFailure::new(session, error));
             }
         };
         let mut inner = self.inner.lock().expect("live runtime poisoned");
@@ -298,6 +330,7 @@ impl LiveRuntime {
     }
 
     pub fn shutdown(&self) {
+        let _transition = self.transition_guard();
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         inner.stop_capture();
         inner.retire_stream();
@@ -336,28 +369,48 @@ impl LiveRuntime {
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
-        if self.active_session.load(Ordering::SeqCst) != session {
+        if !self.claim_stream_crash(session) {
             return;
         }
         let state = app.state::<LiveSessionState>();
-        let before_crash = state.mark_transcription_degraded();
-        self.active_session.store(0, Ordering::SeqCst);
-        {
-            let mut inner = self.inner.lock().expect("live runtime poisoned");
-            inner.stop_capture();
-            inner.retire_stream_detached_reader();
-        }
-        app.state::<crate::runtime::RuntimeOrchestratorState>()
-            .with(|orchestrator| orchestrator.finish_active_work());
-        match super::recordings::save_session_files(self, &before_crash) {
-            Ok(Some(saved)) => {
-                let _ = app.emit("live-session-saved", &saved);
-            }
-            Ok(None) => {}
-            Err(error) => crate::stt::log_yap(&format!("live crash save failed: {error}")),
-        }
-        let view = state.block_with_error(message);
-        let _ = app.emit("live-session", &view);
+        let orchestrator = app.state::<crate::runtime::RuntimeOrchestratorState>();
+        let _ = super::actions::stop_live_runtime_after_crash(
+            app.clone(),
+            &state,
+            self,
+            &orchestrator,
+            session,
+            message,
+        );
+    }
+
+    fn claim_stream_crash(&self, session: u64) -> bool {
+        session != 0
+            && session & CRASH_CLAIM_BIT == 0
+            && self
+                .active_session
+                .compare_exchange(
+                    session,
+                    session | CRASH_CLAIM_BIT,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+    }
+
+    pub(crate) fn is_session_current(&self, session: u64) -> bool {
+        active_session_matches(self.active_session.load(Ordering::SeqCst), session)
+    }
+
+    fn clear_active_session_if_current(&self, session: u64) -> bool {
+        self.active_session
+            .compare_exchange(session, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub(crate) fn claim_start_failure(&self, failure: LiveStartFailure) -> Option<String> {
+        self.clear_active_session_if_current(failure.session)
+            .then_some(failure.message)
     }
 }
 
@@ -448,7 +501,7 @@ impl LiveRuntimeInner {
                 while let Ok(next) = level.try_recv() {
                     value = next;
                 }
-                if active_session.load(Ordering::SeqCst) != session {
+                if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
                     break;
                 }
                 let view = state.update_level(value);
@@ -622,7 +675,7 @@ fn open_capture(
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE);
         let mut level_normalizer = LiveAudioLevelNormalizer::new();
         while let Ok(raw) = raw_rx.recv() {
-            if raw.session == 0 || audio_active_session.load(Ordering::SeqCst) != raw.session {
+            if !active_session_matches(audio_active_session.load(Ordering::SeqCst), raw.session) {
                 audio_raw_ready.store(true, Ordering::Release);
                 continue;
             }
@@ -754,7 +807,7 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _| {
-                if active_session.load(Ordering::SeqCst) != session {
+                if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
                     return;
                 }
                 if !claim_raw_audio_slot(&raw_ready) {
@@ -868,12 +921,12 @@ fn drain_stream_buffer(
 }
 
 fn emit_stream_partial(app: &tauri::AppHandle, session: u64, text: &str) {
-    if app
-        .state::<LiveRuntime>()
-        .active_session
-        .load(Ordering::SeqCst)
-        != session
-    {
+    if !active_session_matches(
+        app.state::<LiveRuntime>()
+            .active_session
+            .load(Ordering::SeqCst),
+        session,
+    ) {
         return;
     }
     let state = app.state::<LiveSessionState>();
@@ -882,12 +935,12 @@ fn emit_stream_partial(app: &tauri::AppHandle, session: u64, text: &str) {
 }
 
 fn emit_stream_final(app: &tauri::AppHandle, session: u64, text: &str) {
-    if app
-        .state::<LiveRuntime>()
-        .active_session
-        .load(Ordering::SeqCst)
-        != session
-    {
+    if !active_session_matches(
+        app.state::<LiveRuntime>()
+            .active_session
+            .load(Ordering::SeqCst),
+        session,
+    ) {
         return;
     }
     let state = app.state::<LiveSessionState>();
@@ -945,7 +998,7 @@ fn should_accept_stream_samples(
     active_session: u64,
     stream_session: u64,
 ) -> bool {
-    message_session != 0 && message_session == active_session && message_session == stream_session
+    active_session_matches(active_session, message_session) && message_session == stream_session
 }
 
 fn should_install_capture(
@@ -958,10 +1011,6 @@ fn should_install_capture(
         && requested_session == inner_session
         && requested_session == active_session
         && !has_capture
-}
-
-fn should_continue_capture_start(status: LiveSessionStatus) -> bool {
-    status == LiveSessionStatus::Armed
 }
 
 fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
@@ -1089,6 +1138,7 @@ mod tests {
     #[test]
     fn stale_pcm_is_discarded_after_session_changes() {
         assert!(should_accept_stream_samples(2, 2, 2));
+        assert!(should_accept_stream_samples(2, 2 | CRASH_CLAIM_BIT, 2));
         assert!(!should_accept_stream_samples(1, 2, 2));
         assert!(!should_accept_stream_samples(2, 0, 2));
         assert!(!should_accept_stream_samples(2, 2, 0));
@@ -1103,10 +1153,59 @@ mod tests {
     }
 
     #[test]
-    fn capture_start_aborts_if_stop_changed_armed_state() {
-        assert!(should_continue_capture_start(LiveSessionStatus::Armed));
-        assert!(!should_continue_capture_start(LiveSessionStatus::Saving));
-        assert!(!should_continue_capture_start(LiveSessionStatus::Idle));
+    fn stale_stream_crash_cannot_claim_a_newer_session() {
+        let runtime = LiveRuntime::new();
+        runtime.active_session.store(7, Ordering::SeqCst);
+
+        assert!(!runtime.claim_stream_crash(6));
+        assert_eq!(runtime.active_session.load(Ordering::SeqCst), 7);
+        assert!(runtime.claim_stream_crash(7));
+        assert_eq!(
+            runtime.active_session.load(Ordering::SeqCst),
+            7 | CRASH_CLAIM_BIT
+        );
+        assert!(active_session_matches(
+            runtime.active_session.load(Ordering::SeqCst),
+            7
+        ));
+        assert!(runtime.is_session_current(7));
+        assert!(!runtime.is_session_current(8));
+        assert!(!runtime.claim_stream_crash(7));
+        assert!(!runtime.claim_stream_crash(0));
+    }
+
+    #[test]
+    fn stale_start_failure_cannot_clear_a_newer_session() {
+        let runtime = LiveRuntime::new();
+        runtime.active_session.store(8, Ordering::SeqCst);
+
+        assert_eq!(
+            runtime.claim_start_failure(LiveStartFailure::new(7, "old failure".into())),
+            None
+        );
+        assert_eq!(runtime.active_session.load(Ordering::SeqCst), 8);
+        assert_eq!(
+            runtime.claim_start_failure(LiveStartFailure::new(8, "current failure".into())),
+            Some("current failure".into())
+        );
+        assert_eq!(runtime.active_session.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn transition_gate_serializes_start_and_stop_ownership() {
+        let runtime = LiveRuntime::new();
+        let first = runtime.transition_guard();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let contender = runtime.clone();
+        let worker = std::thread::spawn(move || {
+            let _guard = contender.transition_guard();
+            acquired_tx.send(()).unwrap();
+        });
+
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(25)).is_err());
+        drop(first);
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]

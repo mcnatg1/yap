@@ -33,14 +33,14 @@
 | **Scope creep** | Ship desktop history/playback → local live fallback → server STT → preprocessing → diarization → L3 OKF in that order. |
 | **Three processes** | sherpa live recognizer in the Tauri process + llama-server + knowledge worker; worker idles out after 5 min. |
 | **Local ASR dependency** | Pin artifacts; verify hashes; profile chunk/latency; CI smoke tests. |
-| **Wispr comparison on v1** | Don’t promise global hotkey + inject until later desktop OS integration; compete on batch + local first. |
+| **Wispr comparison on v1** | Keep hotkey + focused-field injection client-owned and regression-tested; never make insertion depend on the server. |
 | **OKF/agents before core STT** | Transcripts history first; OKF Phase 9. |
 
 ### Verdict
 
 - **Yap (batch + live EN + polish):** Strong product — ship this.
-- **Background diarization + speaker vault:** Good idea for meetings/interviews — Phase 7, after STT stable.
-- **Full agentic KB + MCP + global injector:** Ambitious second product layer — good *direction*, don’t block v1 on it.
+- **Background diarization + speaker vault:** Good idea for meetings/interviews — canonical Phase 8, after server STT and preprocessing are stable.
+- **Full agentic KB + MCP:** Ambitious second product layer — good *direction*, don’t block the live dictation path on it.
 
 ---
 
@@ -116,24 +116,24 @@ flowchart TB
 
     Orch["RuntimeOrchestrator<br/>Nemotron fallback · server connector · bounded LLM"]
 
-    subgraph Sidecars["Local sidecars — localhost only"]
-        CR["sherpa-onnx<br/>Nemotron INT8 fallback"]
+    subgraph Sidecars["Local runtimes — client-owned"]
+        CR["in-process sherpa-onnx<br/>Nemotron INT8 fallback"]
         LL["llama-server<br/>Scribe + agents · -ngl 0"]
         KW["yap-knowledge-worker<br/>align · diarize · OKF"]
     end
 
-    subgraph L1["L1 — OS + pre-warm · future"]
-        L1n["Hotkey · focus detect · warm sidecars + mic"]
+    subgraph L1["L1 — OS + pre-warm · current client seam"]
+        L1n["Hotkeys · stop-time focus target · warm recognizer + mic"]
     end
 
     subgraph L2["L2 — critical path"]
-        Live["Live mic → Nemotron EN → Scribe → ghost UI"]
+        Live["Live mic → Nemotron EN → overlay + inject"]
         Batch["File drop → server Cohere path / queue → History"]
     end
 
     Handoff["Async handoff<br/>silence chunks · FIFO ≤ 3 · chunk manifest"]
 
-    subgraph L3["L3 — background enrich · Phase 7a–7c"]
+    subgraph L3["L3 — background enrich · Phase 8"]
         L3n["Align raw · WeSpeaker vault · word→speaker · stitch"]
     end
 
@@ -145,11 +145,9 @@ flowchart TB
     User --> UI --> Orch
     Orch --> Sidecars
     L1 --> Live
-    L1 --> Batch
     UI --> Live
     UI --> Batch
     Live --> CR & LL
-    Batch -.->|degraded fallback only| CR
     UI -.->|Polish panel| LL
     Live --> Handoff
     Batch --> Handoff
@@ -159,6 +157,8 @@ flowchart TB
     L7 --> LL
     L5 -.->|refresh Scribe prompt| Live
 ```
+
+Imported and official recording jobs never run through local Nemotron. When the server is unavailable they remain queued or blocked; "offline" describes connectivity, not a local file-transcription mode.
 
 ### Team / server profile — high-level
 
@@ -207,12 +207,12 @@ flowchart TB
 
 ### Low-level detail — 7 layers
 
-Full Voice OS flowchart reconciled for Yap — **live + batch**, orchestrator, sidecars, manifests, and Phase 7 stack.
+Full Voice OS flowchart reconciled for Yap — **live + batch**, orchestrator, local runtimes, manifests, and canonical Phases 8–9 enrichment.
 
 ```mermaid
 flowchart TB
     User["User"]
-    Hotkey["Global hotkey / text-field focus<br/>(future)"]
+    Hotkey["Global hotkey / foreground text field"]
 
     subgraph UI["Yap UI — Tauri + React"]
         Transcribe["Transcribe / queue panel"]
@@ -233,7 +233,7 @@ flowchart TB
         KW["yap-knowledge-worker<br/>BELOW_NORMAL · ORT 2 threads · idle exit 5 min"]
     end
 
-    subgraph L1["L1 — OS listeners + pre-warm · future"]
+    subgraph L1["L1 — OS listeners + pre-warm · client-owned"]
         OSHooks["Global listeners · Tauri/Rust"]
         PreWarm["Pre-warm Nemotron + llama-server · open mic · Silero ready"]
     end
@@ -245,12 +245,12 @@ flowchart TB
         MS["Nemotron INT8 · sherpa-onnx · English"]
         ScribeL["Scribe · llama-server · ≤ 400 ms · dual-track raw+polished"]
         Ghost["Ghost / in-app preview · v1"]
-        Injector["Cross-app text inject · future"]
+        Injector["Windows focused-field inject<br/>clipboard fallback"]
     end
 
     subgraph L2Batch["L2 batch — server path · Yap recording quality"]
         Drop["File drop / queue"]
-        LID["SpeechBrain LID gate · user confirms lang · Phase 4"]
+        LID["SpeechBrain LID gate · user confirms lang · Phase 6"]
         COH["GB-class server Cohere · job API · 14 langs"]
         Save["Write .txt · append Transcripts/ history"]
         ScribeB["Polish panel · optional Scribe on saved text"]
@@ -263,7 +263,7 @@ flowchart TB
         FIFO["FIFO queue · max depth 3"]
     end
 
-    subgraph L3["L3 — yap-knowledge-worker · Phase 7a–7c"]
+    subgraph L3["L3 — yap-knowledge-worker · Phases 8–9"]
         Align["Forced align · canary-ctc-aligner · raw text only"]
         Diar["WeSpeaker ResNet34 · vault match ≥ 0.70 · cluster unmatched · cap 15"]
         Intersect["Word → speaker · > 50% overlap · SPEAKER_XX"]
@@ -352,15 +352,15 @@ Everything from the original 7-layer flowchart and master spec is captured below
 
 | Original flowchart node | Documented? | Where | Yap decision (if changed) |
 |-------------------------|-------------|-------|---------------------------|
-| **L1** Global OS listeners (pynput, UI automation) | ✅ | § Layer model | Future — not v1 |
+| **L1** Global OS listeners | ✅ | ADR 0013 | Tauri hotkeys + Windows target-validated injection are active; other platforms follow |
 | **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005, 0019 | Warm **Nemotron recognizer** + **llama-server** + mic |
 | **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Optional AGC; Silero required |
 | **L2** Silero VAD | ✅ | ADR 0004 §3, §10 | Shared `vad_segments` → L3 |
-| **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2 v1**; batch gate Phase 4 |
+| **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2**; batch gate is canonical Phase 6 |
 | **L2** ASR | ✅ Reconciled | ADR 0001–0002/0014/0019 | **Nemotron local fallback**; **server router** for official recordings/live |
 | **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | **llama-server** ~2B Q4, `-ngl 0` |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
-| **L2** Cross-app injector | ✅ | Future desktop OS integration | Deferred |
+| **L2** Cross-app injector | ✅ | ADR 0013 + `live/injection.rs` | Revalidate stop-time target; Unicode input; visible clipboard fallback |
 | **L2** Silence chunker → FIFO | ✅ | ADR 0004 §3, §10 | Async writer; max queue 3 |
 | **L3** Handoff audio + raw text | ✅ | ADR 0004 chunk manifest | `text_raw` frozen at boundary |
 | **L3** Wav2Vec2 / MMS align | ✅ | ADR 0004 §5 | Align **raw** only; canary-ctc-aligner default |
@@ -379,11 +379,11 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **Bottleneck / thread caps** | ✅ | § Resource profiling | ORT/torch 2 threads in worker |
 | **Silero VAD (L2 + segments → L3)** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | Rust ONNX; no re-VAD in worker |
 | **Agent profiles (8 personas)** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | Mutex groups; v1 = Scribe only |
-| **Runtime state machine** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | One STT backend; bounded LLM queue |
+| **Runtime state machine** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | One client-local Nemotron session; server pools schedule independently; bounded LLM queue |
 | **16 GB RAM budget** | ✅ | ADR 0004 §9 | Pyannote rejected |
-| **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server Cohere batch; local fallback only when explicitly degraded |
+| **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server batch only; queue/block during disconnects; never use local Nemotron |
 
-**Not in code yet** — all of the above is **architecture only** until phases ship.
+Rows marked as future remain architecture-only. The Windows hotkey/injection path and current local live fallback are implemented client behavior.
 
 ---
 
@@ -391,23 +391,33 @@ Everything from the original 7-layer flowchart and master spec is captured below
 
 | Layer | Name | Yap phase | Role |
 |-------|------|-----------|------|
-| **L1** | OS listeners + pre-warm | 7+ | Hotkey, focus detect, warm sidecar/mic |
-| **L2** | Real-time critical path | 3 | Nemotron → optional Scribe → UI/inject |
-| **L3** | Async background | 7a–7c | Align, diarize, stitch, OKF |
-| **L4** | OKF knowledge base | 7c | Markdown + YAML conversations |
-| **L5** | Agentic feedback | 7d | Student, Curator, Auditor |
-| **L6** | Ecosystem gateways | 7e | MCP, vector search, IDE folder |
-| **L7** | Ask-your-KB agent | 7e | Librarian + Analyst |
+| **L1** | OS listeners + pre-warm | Current client | Hotkey, foreground-field injection, warm recognizer/mic |
+| **L2** | Real-time critical path | Current + follow-on | Nemotron → UI/inject now; optional Scribe later |
+| **L3** | Async background | 8–9 | Align, diarize, stitch, OKF |
+| **L4** | OKF knowledge base | 9 | Markdown + YAML conversations |
+| **L5** | Agentic feedback | 9 | Student, Curator, Auditor |
+| **L6** | Ecosystem gateways | 9 | MCP, vector search, IDE folder |
+| **L7** | Ask-your-KB agent | 9 | Librarian + Analyst |
 
 ---
 
-## Real-time path (L2) — reconciled
+## Real-time path (L2) — implemented baseline
+
+```
+Mic → bounded capture/preprocess → Nemotron INT8 (sherpa-onnx)
+  → partial/final state → overlay
+  → stop-time target revalidation → Windows Unicode injection
+  → clipboard fallback when target/input validation fails
+  → local WAV/TXT history
+```
+
+### Follow-on preprocessing/server path
 
 ```
 Mic → optional AGC → Silero VAD
   → Nemotron INT8 (sherpa-onnx, English)       ← live tokens
   → llama-server polish (Scribe) if <400ms budget   ← else raw only
-  → ghost UI / in-app panel (v1)              ← inject later (L1)
+  → ghost UI + focused-field injection (Windows)   ← clipboard fallback if blocked
 
 Parallel (never blocks above):
   VAD silence (1.5–2s) + buffer ≥30s speech
@@ -547,7 +557,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Mode | Languages | Detection |
 |------|-----------|-----------|
 | **Live** | English only (v1) | No LID on hot path |
-| **Batch / larger recordings** | Server Cohere 14 | Manual picker; SpeechBrain **suggests** with user gate (Phase 4) |
+| **Batch / larger recordings** | Server Cohere 14 | Manual picker; SpeechBrain **suggests** with user gate (Phase 6) |
 
 Supported batch codes: `en`, `fr`, `de`, `it`, `es`, `pt`, `el`, `nl`, `pl`, `zh`, `ja`, `ko`, `vi`, `ar`.
 
@@ -689,20 +699,19 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 ## Hardening checklist (implementation)
 
-**STT (Phase 1–2)**
+**Client live fallback (Phases 1–2)**
 
-- [ ] Local Nemotron fallback
+- [x] In-process local Nemotron fallback
 - [ ] Pin Nemotron artifacts; CI smoke test
-- [ ] Sidecar health in Setup UI
+- [x] Model/runtime readiness in Setup UI
 - [ ] Structured error codes → toasts
-- [ ] Optional Q8 batch quality toggle
 
 **Orchestrator (Phase 1+)**
 
 - [ ] Rust `RuntimeOrchestrator` state machine ([ADR 0006](adr/0006-silero-agents-state-machine.md))
 - [ ] Silero ONNX in Rust audio path; `vad_segments` in manifests
 - [ ] Agent profile registry; v1 enable `scribe` only
-- [ ] Mutex: one STT backend, one HOT LLM, one background LLM queue
+- [ ] Enforce one client-local Nemotron session, one HOT LLM, and one background LLM queue; server pools schedule independently
 
 **Local LLM sidecar**
 
@@ -710,7 +719,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [ ] Migrate polish.ts to `/v1/chat/completions`
 - [ ] `YAP_LLM_BACKEND=ollama|llama`
 
-**L3 (Phase 7)**
+**Diarization/enrichment (Phases 8–9)**
 
 - [ ] Subprocess worker, not thread
 - [ ] `vad_segments` in every manifest

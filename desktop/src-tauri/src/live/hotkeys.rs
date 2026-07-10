@@ -39,6 +39,14 @@ pub fn parse_hotkey(input: &str) -> Result<Shortcut, String> {
     Ok(Shortcut::new(Some(modifiers), key))
 }
 
+pub(crate) fn configured_hotkeys_match(left: &str, right: &str) -> bool {
+    !left.trim().is_empty()
+        && !right.trim().is_empty()
+        && parse_hotkey(left)
+            .and_then(|left| parse_hotkey(right).map(|right| left == right))
+            .unwrap_or(false)
+}
+
 fn parse_code(part: &str) -> Result<Code, String> {
     let upper = part.to_ascii_uppercase();
     match upper.as_str() {

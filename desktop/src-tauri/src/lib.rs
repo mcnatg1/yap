@@ -4,7 +4,11 @@ use std::{
 };
 
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+use live::hotkey_commands::{
+    clear_live_hotkey, clear_live_paste_hotkey, set_live_hotkey, set_live_paste_hotkey,
+};
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -241,59 +245,6 @@ async fn set_live_overlay_enabled(
 }
 
 #[tauri::command]
-fn set_live_hotkey(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, live::LiveSessionState>,
-    hotkey: String,
-) -> Result<live::state::LiveSessionView, String> {
-    ensure_main_command(&window)?;
-    ensure_live_hotkey_idle(state.snapshot().status)?;
-    let next = live::hotkeys::parse_hotkey(&hotkey)?;
-    let snapshot = state.snapshot();
-    let previous = snapshot.hotkey;
-    if !previous.is_empty() {
-        if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
-            let _ = app.global_shortcut().unregister(shortcut);
-        }
-    }
-    if let Err(error) = app.global_shortcut().register(next) {
-        if !previous.is_empty() {
-            if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
-                if let Err(restore_error) = app.global_shortcut().register(shortcut) {
-                    return Err(shortcut_restore_error(error, restore_error));
-                }
-            }
-        }
-        return Err(shortcut_unavailable_error(error));
-    }
-    let view = state.update(|view| view.hotkey = hotkey.trim().to_string());
-    persist_live_view(&view)?;
-    emit_live(&app, &view);
-    Ok(view)
-}
-
-#[tauri::command]
-fn clear_live_hotkey(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, live::LiveSessionState>,
-) -> Result<live::state::LiveSessionView, String> {
-    ensure_main_command(&window)?;
-    ensure_live_hotkey_idle(state.snapshot().status)?;
-    let previous = state.snapshot().hotkey;
-    if !previous.is_empty() {
-        if let Ok(shortcut) = live::hotkeys::parse_hotkey(&previous) {
-            let _ = app.global_shortcut().unregister(shortcut);
-        }
-    }
-    let view = state.update(|view| view.hotkey.clear());
-    persist_live_view(&view)?;
-    emit_live(&app, &view);
-    Ok(view)
-}
-
-#[tauri::command]
 fn set_live_capture_mode(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -357,6 +308,7 @@ fn preflight_input_device(
         return Ok(snapshot);
     }
     let selected = snapshot.input_device_id;
+    state.clear_startup_shortcut_failure(false);
     let view = match live::devices::preflight_input_device(selected.as_deref()) {
         Ok(resolved) => state.update(|view| {
             view.input_device_id = selected.clone();
@@ -634,7 +586,7 @@ fn forbidden_command_window_message() -> String {
     "Command is not available from this window.".into()
 }
 
-fn ensure_main_command(window: &tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) fn ensure_main_command(window: &tauri::WebviewWindow) -> Result<(), String> {
     is_main_command_window(window.label())
         .then_some(())
         .ok_or_else(forbidden_command_window_message)
@@ -661,48 +613,97 @@ fn ensure_main_stt_command(
         .ok_or_else(forbidden_stt_command_window)
 }
 
-fn persist_live_view(view: &live::state::LiveSessionView) -> Result<(), String> {
+pub(crate) fn persist_live_view(view: &live::state::LiveSessionView) -> Result<(), String> {
     live::settings::save(&live::settings::LiveSettings {
         overlay_enabled: view.visibility == live::state::LiveOverlayVisibility::Enabled,
         hotkey: (!view.hotkey.is_empty()).then(|| view.hotkey.clone()),
-        paste_hotkey: None,
+        paste_hotkey: (!view.paste_hotkey.is_empty()).then(|| view.paste_hotkey.clone()),
         capture_mode: view.capture_mode,
         input_device_id: view.input_device_id.clone(),
     })
 }
 
-fn ensure_live_hotkey_idle(status: live::state::LiveSessionStatus) -> Result<(), String> {
-    if live::state::is_live_session_started(status) {
-        return Err("Stop live before changing the shortcut.".into());
+#[derive(Debug)]
+struct LiveShortcutRegistration {
+    hotkey: String,
+    is_paste: bool,
+    shortcut: Result<Shortcut, String>,
+}
+
+fn live_shortcut_registration_plan(
+    settings: &live::settings::LiveSettings,
+) -> Vec<LiveShortcutRegistration> {
+    let mut registrations: Vec<LiveShortcutRegistration> = Vec::new();
+    for (configured, is_paste) in [
+        (settings.hotkey.as_deref(), false),
+        (settings.paste_hotkey.as_deref(), true),
+    ] {
+        let Some(hotkey) = configured
+            .map(str::trim)
+            .filter(|hotkey| !hotkey.is_empty())
+        else {
+            continue;
+        };
+        if registrations
+            .iter()
+            .any(|existing| live::hotkeys::configured_hotkeys_match(&existing.hotkey, hotkey))
+        {
+            continue;
+        }
+        registrations.push(LiveShortcutRegistration {
+            hotkey: hotkey.to_string(),
+            is_paste,
+            shortcut: live::hotkeys::parse_hotkey(hotkey),
+        });
     }
-    Ok(())
+    registrations
 }
 
-fn shortcut_unavailable_error(error: impl std::fmt::Display) -> String {
-    format!("Shortcut is unavailable: {error}")
+fn apply_startup_shortcut_failure(
+    view: &mut live::state::LiveSessionView,
+    is_paste_shortcut: bool,
+) {
+    if is_paste_shortcut {
+        view.paste_hotkey.clear();
+        if view.error.as_deref() != Some(live::hotkey_commands::DICTATION_UNAVAILABLE_ERROR) {
+            view.error = Some(live::hotkey_commands::PASTE_UNAVAILABLE_ERROR.into());
+        }
+        return;
+    }
+
+    view.hotkey.clear();
+    view.error = Some(live::hotkey_commands::DICTATION_UNAVAILABLE_ERROR.into());
+    view.route = live::state::LiveRoute::Blocked;
+    view.status = live::state::LiveSessionStatus::Blocked;
 }
 
-fn shortcut_restore_error(
-    new_error: impl std::fmt::Display,
-    restore_error: impl std::fmt::Display,
-) -> String {
-    format!(
-        "{}; failed to restore previous shortcut: {restore_error}",
-        shortcut_unavailable_error(new_error)
-    )
+fn record_startup_shortcut_failure(
+    app: &tauri::AppHandle,
+    registration: &LiveShortcutRegistration,
+    reason: &str,
+) {
+    log_line(&format!(
+        "live {} hotkey unavailable: {reason}",
+        if registration.is_paste {
+            "paste"
+        } else {
+            "dictation"
+        }
+    ));
+    let live = app.state::<live::LiveSessionState>();
+    live.mark_startup_shortcut_failure(registration.is_paste);
+    let view = live.update(|view| {
+        apply_startup_shortcut_failure(view, registration.is_paste);
+    });
+    if let Err(persist_error) = persist_live_view(&view) {
+        log_line(&format!(
+            "failed to persist unavailable live shortcut cleanup: {persist_error}"
+        ));
+    }
+    emit_live(app, &view);
 }
 
-fn live_shortcuts_to_register(settings: &live::settings::LiveSettings) -> Vec<String> {
-    settings
-        .hotkey
-        .iter()
-        .map(|hotkey| hotkey.trim())
-        .filter(|hotkey| !hotkey.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn emit_live(app: &tauri::AppHandle, view: &live::state::LiveSessionView) {
+pub(crate) fn emit_live(app: &tauri::AppHandle, view: &live::state::LiveSessionView) {
     let _ = app.emit("live-session", view);
 }
 
@@ -736,7 +737,7 @@ pub fn run() {
 
     let stt_state = stt::dispatch::SttState::new();
     let live_settings = live::settings::load();
-    let live_shortcuts = live_shortcuts_to_register(&live_settings);
+    let live_shortcuts = live_shortcut_registration_plan(&live_settings);
     let runtime_state = runtime::RuntimeOrchestratorState::new();
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
@@ -773,6 +774,21 @@ pub fn run() {
                             let live = app.state::<live::LiveSessionState>();
                             live.snapshot()
                         };
+                        if live::actions::configured_hotkey_matches_shortcut(
+                            &snapshot.paste_hotkey,
+                            shortcut,
+                        ) {
+                            if event.state() == ShortcutState::Released
+                                && !live::state::is_live_session_started(snapshot.status)
+                            {
+                                let target = live::injection::capture_target();
+                                let app = app.clone();
+                                std::thread::spawn(move || {
+                                    live::actions::inject_last_live_transcript(&app, target);
+                                });
+                            }
+                            return;
+                        }
                         if !live::actions::configured_hotkey_matches_shortcut(
                             &snapshot.hotkey,
                             shortcut,
@@ -802,17 +818,19 @@ pub fn run() {
                     })
                     .build(),
             )?;
-            for hotkey in &live_shortcuts {
-                if let Ok(shortcut) = live::hotkeys::parse_hotkey(hotkey) {
-                    if let Err(error) = app.handle().global_shortcut().register(shortcut) {
-                        log_line(&format!("live hotkey unavailable: {error}"));
-                        let live = app.state::<live::LiveSessionState>();
-                        let view = live.update(|view| {
-                            view.error = Some("Live shortcut is unavailable.".into());
-                            view.route = live::state::LiveRoute::Blocked;
-                            view.status = live::state::LiveSessionStatus::Blocked;
-                        });
-                        emit_live(app.handle(), &view);
+            for registration in &live_shortcuts {
+                match registration.shortcut.as_ref() {
+                    Ok(shortcut) => {
+                        if let Err(error) = app.handle().global_shortcut().register(*shortcut) {
+                            record_startup_shortcut_failure(
+                                app.handle(),
+                                registration,
+                                &error.to_string(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        record_startup_shortcut_failure(app.handle(), registration, error);
                     }
                 }
             }
@@ -856,6 +874,8 @@ pub fn run() {
             set_live_overlay_enabled,
             set_live_hotkey,
             clear_live_hotkey,
+            set_live_paste_hotkey,
+            clear_live_paste_hotkey,
             set_live_capture_mode,
             list_input_devices,
             set_input_device,
@@ -868,6 +888,7 @@ pub fn run() {
             start_transcribe,
             file_actions::allow_recording_playback_path,
             file_actions::restore_recording_playback_path,
+            file_actions::resolve_owned_live_transcript_paths,
             file_actions::read_text_file,
             file_actions::read_text_preview,
             file_actions::write_polished_text,
@@ -1017,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_shortcut_plan_ignores_stale_paste_hotkey() {
+    fn startup_shortcut_plan_keeps_dictation_and_paste_hotkeys() {
         let settings = live::settings::LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
@@ -1027,51 +1048,86 @@ mod tests {
         };
 
         assert_eq!(
-            live_shortcuts_to_register(&settings),
-            vec!["Ctrl+Shift+Space".to_string()]
+            live_shortcut_registration_plan(&settings)
+                .iter()
+                .map(|registration| (registration.hotkey.clone(), registration.is_paste))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Ctrl+Shift+Space".to_string(), false),
+                ("Ctrl+Shift+V".to_string(), true),
+            ]
         );
     }
 
     #[test]
-    fn live_hotkey_mutation_rejects_started_statuses() {
-        for status in [
-            live::state::LiveSessionStatus::Armed,
-            live::state::LiveSessionStatus::Listening,
-            live::state::LiveSessionStatus::Speaking,
-            live::state::LiveSessionStatus::Settling,
-            live::state::LiveSessionStatus::Saving,
-        ] {
-            assert_eq!(
-                ensure_live_hotkey_idle(status),
-                Err("Stop live before changing the shortcut.".into())
-            );
-        }
-    }
+    fn startup_shortcut_plan_deduplicates_conflicting_hotkeys() {
+        let settings = live::settings::LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: Some("Ctrl+Shift+Space".into()),
+            capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        };
 
-    #[test]
-    fn live_hotkey_mutation_allows_idle_statuses() {
-        for status in [
-            live::state::LiveSessionStatus::Idle,
-            live::state::LiveSessionStatus::Blocked,
-        ] {
-            assert_eq!(ensure_live_hotkey_idle(status), Ok(()));
-        }
-    }
-
-    #[test]
-    fn shortcut_registration_errors_surface_to_callers() {
         assert_eq!(
-            shortcut_unavailable_error("already registered"),
-            "Shortcut is unavailable: already registered"
+            live_shortcut_registration_plan(&settings)
+                .iter()
+                .map(|registration| registration.hotkey.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ctrl+Shift+Space"]
         );
     }
 
     #[test]
-    fn failed_hotkey_reregister_surfaces_an_error() {
+    fn startup_shortcut_plan_reports_invalid_dictation_and_paste_settings() {
+        let settings = live::settings::LiveSettings {
+            hotkey: Some("Ctrl".into()),
+            paste_hotkey: Some("Shift".into()),
+            ..Default::default()
+        };
+
+        let plan = live_shortcut_registration_plan(&settings);
+
+        assert_eq!(plan.len(), 2);
+        assert!(!plan[0].is_paste);
+        assert!(plan[0].shortcut.is_err());
+        assert!(plan[1].is_paste);
+        assert!(plan[1].shortcut.is_err());
+    }
+
+    #[test]
+    fn failed_startup_shortcut_is_cleared_for_settings_recovery() {
+        let mut dictation =
+            live::state::LiveSessionView::from_settings(&live::settings::LiveSettings::default());
+        apply_startup_shortcut_failure(&mut dictation, false);
+        assert_eq!(dictation.hotkey, "");
+        assert_eq!(dictation.status, live::state::LiveSessionStatus::Blocked);
+
+        let mut paste =
+            live::state::LiveSessionView::from_settings(&live::settings::LiveSettings {
+                paste_hotkey: Some("Ctrl+Shift+V".into()),
+                ..Default::default()
+            });
+        apply_startup_shortcut_failure(&mut paste, true);
+        assert_eq!(paste.paste_hotkey, "");
+        assert_eq!(paste.status, live::state::LiveSessionStatus::Idle);
+    }
+
+    #[test]
+    fn paste_failure_does_not_overwrite_dictation_block_ownership() {
+        let mut view =
+            live::state::LiveSessionView::from_settings(&live::settings::LiveSettings::default());
+
+        apply_startup_shortcut_failure(&mut view, false);
+        apply_startup_shortcut_failure(&mut view, true);
+
         assert_eq!(
-            shortcut_restore_error("already registered", "previous shortcut unavailable"),
-            "Shortcut is unavailable: already registered; failed to restore previous shortcut: previous shortcut unavailable"
+            view.error.as_deref(),
+            Some(live::hotkey_commands::DICTATION_UNAVAILABLE_ERROR)
         );
+        assert_eq!(view.status, live::state::LiveSessionStatus::Blocked);
+        assert_eq!(view.hotkey, "");
+        assert_eq!(view.paste_hotkey, "");
     }
 
     #[test]

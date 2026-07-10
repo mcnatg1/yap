@@ -1,37 +1,61 @@
 # Spec: Live Dictation Client UX + Audio Thread
 
 **Status:** Draft (2026-06-30)
-**Implements:** [ADR 0001](../adr/0001-dual-stt-backends.md), [ADR 0002](../adr/0002-crispasr-unified-stt-runtime.md) (live endpoint), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (Silero, orchestrator)
-**Depends on:** [STT sidecar spec](local-live-fallback-sidecar.md) (live WS), [LLM sidecar spec](local-llm-sidecar.md) (Scribe)
-**Scope:** Ship **English-only live transcription** — mic capture, Silero VAD, Nemotron INT8 local streaming fallback, optional Scribe polish, in-app preview, and the live overlay/hotkey foundation. No diarization/L3 (Phase 7), no cross-app text injection (Phase 7+).
+**Implements:** [ADR 0006](../adr/0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [ADR 0013](../adr/0013-global-hotkey-injection.md) (hotkeys/injection), [ADR 0019](../adr/0019-local-streaming-model-selection.md) (Nemotron local live fallback)
+**Scope:** Define the **English-only client live path** as an implemented local baseline plus explicitly separate follow-on server/audio features.
 
 > **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).
 
-> **2026-07-08 Phase 3a amendment:** The local live-transcription path uses one local model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. It keeps native punctuation, uses 1120 ms chunks until smaller chunks profile under real-time, and saves local live WAV/TXT output into Home history. Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work.
+> **2026-07-08 implemented local-fallback baseline:** The local live-transcription path uses one local model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. It keeps native punctuation, uses 1120 ms chunks until smaller chunks profile under real-time, and saves local live WAV/TXT output into Home history. Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work.
+
+> **2026-07-09 injection amendment:** Windows live completion captures and revalidates the stop-time external foreground/focused control, then inserts cleaned transcript text with Unicode `SendInput`. The overlay remains non-focusable, paste-last repeats only the dedicated last-completed transcript, and a visible clipboard fallback handles focus changes, held modifiers, or OS blocks. ADR 0013 owns this behavior.
 
 ---
 
 ## 1. Scope
 
-### In scope
+### Implemented baseline
 - Mic permission + device selection.
 - Top-positioned live overlay foundation and typed live session state.
-- Configurable capture hotkey for in-app/overlay live recording.
-- Rust audio thread: capture → ring buffer → Silero VAD → frames to the warm sherpa Nemotron recognizer.
-- Live partial/final tokens rendered in an in-app panel (ghost preview).
-- Optional Scribe polish on finals with 400 ms bypass + raw-mode indicator.
-- “Save session” → WAV on disk (bridges to Phase 5 Cohere re-pass).
+- Configurable dictation and paste-last hotkeys.
+- CPAL capture → bounded channels → mono conversion/linear resampling → warm in-process sherpa Nemotron recognizer.
+- 1120 ms local chunks with partial/final state updates.
+- Windows stop-time target revalidation, Unicode insertion, and visible clipboard fallback.
+- Local WAV/TXT save into Home history.
 - Orchestrator states wired to UI.
 
+### Follow-on client/server work
+- Rust Silero VAD and reusable `vad_segments`.
+- Opus chunk writer and server-ready manifests.
+- Server live WSS connector, reconnect/backpressure policy, and local fallback handoff.
+- Optional Scribe polish with a measured bypass budget.
+- Server diarization and later enrichment phases.
+
 ### Out of scope
-- Cross-app text injection ([ADR 0013](../adr/0013-global-hotkey-injection.md)).
-- L3 enrichment / chunk manifests (Phase 7) — but the **chunker hook** is built (writes `vad_segments`), just not consumed.
+- macOS/Linux injection adapters and deeper accessibility/permission recovery ([ADR 0013](../adr/0013-global-hotkey-injection.md)).
+- L3 enrichment/OKF and server diarization (canonical phases 8-9).
 - Multilingual live (future ADR).
-- LID on live (Phase 4 is batch-only).
+- LID on live (canonical Phase 6 remains batch-only).
 
 ---
 
 ## 2. Audio thread architecture
+
+### Implemented baseline
+
+```
+cpal input callback
+  → bounded raw-frame channel
+  → channel downmix + linear resample to 16 kHz mono
+  → bounded stream-sample channel
+  → 1120 ms chunks into in-process Nemotron LiveStreamEngine
+  → partial/final live state
+  → stop-tail drain
+  → target-validated Windows injection
+  → WAV/TXT persistence
+```
+
+### Follow-on preprocessing/server path
 
 ```
 cpal input stream (16 kHz mono f32)
@@ -41,7 +65,7 @@ cpal input stream (16 kHz mono f32)
        state: silence / speech; debounce
   → on speech: stream PCM frames to the warm sherpa Nemotron recognizer
   → on silence ≥ 1.5–2 s AND speech buffer ≥ 30 s: emit chunk-cut event
-       (async .opus writer thread; manifest carries vad_segments) [hook only in P3]
+       (async .opus writer thread; manifest carries vad_segments)
 ```
 
 ### Decisions
@@ -49,12 +73,12 @@ cpal input stream (16 kHz mono f32)
 | Choice | Decision | Why |
 |--------|----------|-----|
 | Capture crate | **`cpal`** | Cross-platform, low-level control, already common in Tauri audio |
-| VAD runtime | **`ort` (onnxruntime) + bundled `silero_vad.onnx`** | Same ORT as worker; full control of thresholds; ~2 MB model |
+| Follow-on VAD runtime | **`ort` (onnxruntime) + bundled `silero_vad.onnx`** | Full control of thresholds; ~2 MB model |
 | Not `silero-vad` crate | rejected default | Less control over framing/threshold; revisit only if `ort` integration churns |
-| Threading | dedicated **audio callback** + **VAD/dispatch thread** + **writer thread** | Callback stays real-time; no model inference on the callback |
+| Threading | Current bounded capture + recognizer workers; follow-on dedicated **VAD/dispatch** and **writer** workers | Callback stays real-time; no model inference or file I/O on the callback |
 | Resampling | resample to 16 kHz mono before VAD/STT | Nemotron + Silero expect 16 kHz |
 
-Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-agents-state-machine.md)); the worker never re-runs it.
+When Silero lands, it is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-agents-state-machine.md)); the server/knowledge worker never re-runs it.
 
 ---
 
@@ -68,8 +92,8 @@ Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-age
 | `LiveReady` (Nemotron loaded) | Ready | Mic armed, “Listening soon…” |
 | `LiveActive` + silence | Listening | Animated mic / waveform idle |
 | `LiveActive` + speech | Transcribing | Live waveform + streaming partials (ghost text, dimmed) |
-| Scribe within budget | Polished | Final text settles (normal weight) |
-| Scribe over 400 ms / skipped | **Raw mode** | Small “raw” badge on the segment; tooltip “Polished copy unavailable in time” |
+| Scribe within budget (follow-on) | Polished | Final text settles (normal weight) |
+| Scribe over budget / skipped (follow-on) | **Raw mode** | Small “raw” badge on the segment; tooltip “Polished copy unavailable in time” |
 | error | Error | Toast (§6) + return to Ready |
 | saving | Saving | “Saving session…” → WAV path |
 
@@ -89,9 +113,9 @@ Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-age
 ## 5. Ghost preview behavior
 
 - **Partials**: dimmed/italic, replaced in place as Nemotron revises.
-- **Finals**: committed to normal weight; Scribe may replace a final with its polished version (dual-track stored: raw + polished).
-- User can toggle **Raw / Polished** view of the whole session.
-- “Save session” writes WAV (+ raw and polished text). In Phase 5 this WAV feeds a Cohere re-pass; in Phase 7 it feeds L3.
+- **Finals**: committed to normal weight and retained as the completed transcript used by automatic injection and paste-last.
+- Follow-on Scribe may add a dual-track polished form without replacing the raw source.
+- Current “Save session” writes WAV + raw text. Future server phases may reprocess the recording and Phase 8 diarization consumes server-ready manifests.
 
 ---
 
@@ -101,22 +125,31 @@ Silero is owned by **Rust on the audio path** ([ADR 0006](../adr/0006-silero-age
 |------|-------|----|
 | `MIC_DENIED` | permission refused | Explainer + open settings |
 | `MIC_UNAVAILABLE` | device busy/unplugged | “Microphone unavailable.” pick another |
-| `LIVE_WS_DROPPED` | sidecar WS closed | Auto-reconnect once; else stop + raw of buffered |
-| `STT_BACKEND_BUSY` | batch running | “Stop the current transcription to go live.” (orchestrator blocks dual STT) |
-| `SCRIBE_TIMEOUT` | 400 ms exceeded | (silent) raw mode badge |
+| `LOCAL_STREAM_FAILED` | in-process recognizer/capture worker failed | Stop safely, save available audio/text, and expose retry |
+| `LOCAL_RUNTIME_BUSY` | another client-local Nemotron session is active | Keep one local recognizer session; do not conflate with server jobs |
+| `SERVER_WSS_DROPPED` (future) | server live stream disconnected | Retry/reconnect under the connector policy, then fall back locally when ready |
+| `SERVER_BACKPRESSURE` (future) | server live pool is saturated | Keep interactive live prioritized; degrade/fallback without converting imported files to local jobs |
+| `SCRIBE_TIMEOUT` (future) | Scribe budget exceeded | (silent) raw mode badge |
 
 ---
 
 ## 7. Acceptance criteria
 
-- [ ] Speaking English shows partials < ~300 ms after speech onset (warm sidecar).
-- [ ] Silence ≥ ~1.5 s finalizes the phrase.
-- [ ] Scribe polishes finals when within 400 ms; otherwise raw with visible badge — never blocks the stream.
-- [ ] Starting Live while batch/server work is active is blocked or queued with a clear message; no dual STT work runs, and the local fallback loads Nemotron INT8 only.
-- [ ] “Save session” produces a playable WAV + raw/polished text.
+### Implemented baseline
+
+- [ ] First partial occurs within one 1120 ms audio chunk plus measured decode overhead; record p50/p95 on reference Windows hardware.
+- [ ] At most one client-local Nemotron session runs. Server live streams and server batch jobs are independently scheduled by the server router and may coexist; imported files never become local fallback jobs.
+- [ ] “Save session” produces a playable WAV + raw text and Home can recover canonical live sessions after restart.
+- [ ] Stop-time Windows target remains foreground through final decoding before Unicode input; otherwise the full transcript is copied and manual-paste status is visible.
+- [ ] Paste-last repeats only the dedicated last completed transcript and never an active partial.
 - [ ] Mic-denied path is recoverable (no dead end).
-- [ ] Chunk-cut hook writes a manifest with `vad_segments` (even though L3 doesn’t consume it yet).
 - [ ] `prefers-reduced-motion` honored.
+
+### Follow-on preprocessing/server path
+
+- [ ] Silence ≥ ~1.5 s finalizes a Silero speech segment.
+- [ ] Scribe polishes finals when within its measured budget; otherwise raw with visible badge and never blocks the stream.
+- [ ] Chunk-cut writes a server-ready manifest with `vad_segments`.
 
 ---
 
