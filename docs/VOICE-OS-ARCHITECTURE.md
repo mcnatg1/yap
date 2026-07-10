@@ -465,6 +465,28 @@ For an import, `track_source` is `{ "kind": "imported", "provenance": "unknown|m
 
 Raw/polished text, language, and speaker attribution are not capture-manifest fields. Each belongs to a separate immutable result revision that references the capture or chunk hash, so reprocessing cannot mutate capture history.
 
+### Timestamped speaker result (separate revision)
+
+```json
+{
+  "session_id": "...",
+  "revision": 3,
+  "authority": "server_authoritative",
+  "created_at_utc": "2026-07-10T12:00:00Z",
+  "capture_manifest_sha256": "...",
+  "status": "complete|partial",
+  "language": { "tag": "en-US", "confidence": 0.98 },
+  "speaker_turns": [
+    { "turn_id": "t1", "start_ms": 1200, "end_ms": 3400, "speaker": "speaker-1", "confidence": 0.94 }
+  ],
+  "aligned_words": [
+    { "index": 0, "text": "Hello", "start_ms": 1280, "end_ms": 1640, "turn_id": "t1", "speaker": "speaker-1" }
+  ]
+}
+```
+
+All intervals are end-exclusive on the monotonic session timeline. Speaker turns may overlap. Segment timestamps exist independently of word alignment; alignment adds word-level timestamps and speaker intersection later.
+
 ### Processing per chunk
 
 1. **Validate** schema, session, track, timing, content identity, and gaps.

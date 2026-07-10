@@ -150,6 +150,8 @@ The risk is **native runtimes**, not app logic. CI must run the pinned Nemotron/
 - A callback update racing an accumulator drain appears in the next loss generation.
 - `Unknown` may pass through a hidden candidate state and become `Speaker N` in a new revision; neither state may become a local name.
 - Repeated weak evidence may establish an anonymous cluster but cannot update a profile.
+- Speaker-turn and aligned-word intervals are end-exclusive, monotonic, bounded by the capture timeline, and preserve overlap.
+- Alignment failure leaves timestamped speaker turns intact and omits or marks word timing unavailable.
 - The local baseline passes the absolute DER, speaker-count, CPU, RSS, latency, and callback-drop gates before release.
 - Server reconciliation appends a revision and cannot silently overwrite a user correction.
 - Contact import and transcript renaming create no biometric enrollment.

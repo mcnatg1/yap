@@ -105,6 +105,23 @@ Keep Tauri command wiring in `lib.rs` thin. Keep local ASR in `live/stream.rs`. 
 Rust-owned conceptual shape:
 
 ```rust
+pub struct AudioSessionManifest {
+    pub schema_version: u16,
+    pub session_id: u64,
+    pub session_mode: SessionMode,
+    pub session_origin: SessionOrigin,
+    pub started_at_utc: String,
+    pub utc_offset_minutes_at_start: Option<i16>,
+    pub locale_hint_bcp47: Option<String>,
+    pub country_code_hint: Option<String>,
+    pub preferred_languages_bcp47: Vec<String>,
+    pub app_version: String,
+    pub platform: String,
+    pub privacy_policy_version: String,
+    pub retention_expires_at_utc: Option<String>,
+    pub tracks: Vec<CaptureTrackDescriptor>,
+}
+
 pub struct AudioFrame {
     pub session_id: u64,
     pub track_id: String,
@@ -154,6 +171,8 @@ pub enum AudioTimelineEvent {
 ```
 
 `SessionMode` is `Dictation` or `Meeting`. `SessionOrigin` is `LiveCapture` or `ImportedFile`. Imported tracks carry `Unknown`, `Mixed`, or user-declared physical provenance. `track_id` participates in ordering, chunk IDs, and logical idempotency keys. Byte identity remains the separate `content_sha256`. Same logical key/same hash is an idempotent replay; same key/different hash is a conflict; different keys/equal hashes are valid. The local owner namespace prevents collisions on one installation; the server replaces it with the token-derived tenant/owner namespace and does not trust client ownership claims. Session builders reject foreign sessions, foreign tracks, impossible timing, and incompatible sample rates without a recorded conversion. The current `AudioSource::{Live, Recording}` migrates to a session-origin concept and must not be repurposed for microphone versus system loopback.
+
+Session metadata uses UTC for the history/audit anchor and monotonic milliseconds for all media timing. Locale and preferred languages use BCP 47; an optional country hint uses ISO 3166-1 alpha-2 and is accepted only from explicit user/organization configuration when routing needs it. Do not infer country from IP or location. Device references are opaque and app-local; raw OS device labels remain diagnostic-only and are not uploaded by default. Processing state, retries, and transient errors remain mutable runtime/ledger data instead of rewriting this manifest.
 
 The real-time callback reports a full handoff through a preallocated per-track atomic loss accumulator rather than the already-full event queue. The coordinator drains the first dropped source position, dropped-frame count, and loss generation through atomic swap/compare-exchange before the next accepted frame and during finalization. Updates that race the drain remain in the next generation. Drained snapshots become deterministic `Gap` events. Callback code does not allocate, block, or write to disk.
 

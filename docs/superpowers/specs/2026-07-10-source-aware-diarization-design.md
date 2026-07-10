@@ -87,6 +87,21 @@ pub struct CaptureTrackDescriptor {
     pub original_channels: u16,
 }
 
+pub struct SessionMetadata {
+    pub session_id: SessionId,
+    pub mode: SessionMode,
+    pub origin: SessionOrigin,
+    pub started_at_utc: String,
+    pub utc_offset_minutes_at_start: Option<i16>,
+    pub locale_hint_bcp47: Option<String>,
+    pub country_code_hint: Option<String>,
+    pub preferred_languages_bcp47: Vec<String>,
+    pub app_version: String,
+    pub platform: String,
+    pub privacy_policy_version: String,
+    pub retention_expires_at_utc: Option<String>,
+}
+
 pub enum TimelineEvent {
     TrackConfigured(TrackConfigurationRevision),
     ClockMapped(ClockMappingRevision),
@@ -123,6 +138,8 @@ pub struct PreparedFrame {
 
 `TriggerMode` replaces the conceptual meaning of the current `LiveCaptureMode`; serialized settings remain backward compatible. `SessionMode` says whether the workflow is dictation or a meeting. `SessionOrigin` says whether audio was captured live or imported. An imported file does not claim microphone or system provenance unless the user explicitly supplies it, and mixed imports remain `Mixed`. The current `AudioSource::{Live, Recording}` migrates to `SessionOrigin` and is not reused as a physical source.
 
+`started_at_utc` anchors the session for history and audit; all audio, diarization, and word timing uses the monotonic session timeline. Locale, country, and language values are normalized hints, not inferred identity: BCP 47 for locale/language and ISO 3166-1 alpha-2 for country. `country_code_hint` is collected only from an explicit user or organization setting when routing actually needs it; Yap does not derive it from IP address or device location. A track's `device_id` is an opaque app-local configuration reference; raw OS device labels are diagnostic data and are not uploaded by default. Mutable processing/retry state belongs in the runtime or durable job ledger, not the immutable capture manifest.
+
 ## Capture And Fan-Out
 
 One capture coordinator owns the monotonic session clock and accepts events from capture adapters. The existing CPAL microphone implementation becomes the first adapter. A future WASAPI loopback adapter uses the same event contract. A device, format, or source-clock change emits new configuration and clock-mapping revisions before subsequent frames; conversion metadata remains replayable instead of being inferred from callback counts.
@@ -149,7 +166,7 @@ pub struct SpeakerEvidence {
     pub local_slot_id: Option<LocalSlotId>,
     pub embedding_model: ModelRevision,
     pub quality: EvidenceQuality,
-    pub confidence: f32,
+    pub confidence: Option<f32>,
 }
 
 pub enum SpeakerAttribution {
@@ -201,6 +218,46 @@ local provisional r1
 Reprocessing appends a result. It never mutates raw audio or silently replaces a user correction. A later server result may be presented as a proposed revision when manual labels exist.
 
 `Unknown` remains valid in any revision. A result is `partial` when source audio has gaps, is truncated, or was not fully uploaded.
+
+Timestamped diarization is normative at two levels:
+
+```rust
+pub struct SpeakerTurn {
+    pub turn_id: TurnId,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub attribution: SpeakerAttribution,
+    pub confidence: f32,
+    pub supporting_track_ids: Vec<TrackId>,
+    pub overlap_group_id: Option<OverlapGroupId>,
+}
+
+pub struct AlignedWord {
+    pub word_index: u32,
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub turn_id: Option<TurnId>,
+    pub attribution: SpeakerAttribution,
+    pub confidence: Option<f32>,
+}
+
+pub struct SpeakerResultRevision {
+    pub session_id: SessionId,
+    pub revision: u64,
+    pub authority: ResultAuthority,
+    pub created_at_utc: String,
+    pub capture_manifest_sha256: String,
+    pub previous_result_sha256: Option<String>,
+    pub status: ResultStatus,
+    pub language: Option<LanguageDecision>,
+    pub speaker_turns: Vec<SpeakerTurn>,
+    pub aligned_words: Vec<AlignedWord>,
+    pub model_provenance: Vec<ModelRevision>,
+}
+```
+
+Intervals are end-exclusive `[start_ms, end_ms)` on the common monotonic session timeline. Speaker turns may overlap; overlap is not flattened into one guessed speaker. Segment-level turns are available as soon as diarization produces them. Word-level speaker timestamps are added after raw-text forced alignment and majority-overlap intersection. Polished text may reference aligned raw-word indices but never invents its own timings. A result can omit `aligned_words` while alignment is pending or unavailable without losing the timestamped speaker-turn timeline.
 
 ## Persistence And Reconnect
 

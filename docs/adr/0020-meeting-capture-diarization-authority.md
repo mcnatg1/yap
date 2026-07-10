@@ -53,6 +53,8 @@ Capture adapters emit timestamped frames onto a common monotonic session timelin
 
 Every track has its own descriptor, sample-rate history, sequence, and gap events. Device or format changes emit a revisioned track-configuration event. Source-clock position is mapped to the common session clock through revisioned clock-mapping events so drift correction is reproducible. Callback drops and unavailable tracks are explicit. A missing interval must not be hidden by concatenating the remaining samples.
 
+Diarization emits end-exclusive speaker intervals `[start_ms, end_ms)` on that session timeline. Concurrent speakers are represented by overlapping intervals rather than forced into one label. Forced alignment adds word-level `[start_ms, end_ms)` intervals to raw transcript words, then maps each word to the speaker turn with majority overlap. Segment and word timings are result-revision data; later server reconciliation may improve them without changing capture history.
+
 The real-time callback does not allocate, block, or depend on capacity in the ordinary event queue to report loss. Each track owns an atomic dropped-interval accumulator containing the first dropped source position, total dropped frames, and a monotonic loss generation. The coordinator drains it with an atomic swap/compare-exchange before the next accepted frame and again during finalization; callback updates that race a drain remain in the next generation. The drained snapshot becomes deterministic `Gap` events. Consecutive losses may coalesce only when their source positions are contiguous and their cause is identical.
 
 Prepared frames fan out to independent bounded sinks:
