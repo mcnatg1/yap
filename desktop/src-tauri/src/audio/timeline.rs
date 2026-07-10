@@ -546,6 +546,13 @@ struct LossDrainCoordinator {
     pending: Option<PendingDrain>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationReadiness {
+    Ready,
+    Pending,
+    Invalid,
+}
+
 #[derive(Debug)]
 pub struct LossAccumulator {
     // The full handoff generation, rather than only its low slot bit, prevents ABA.
@@ -553,6 +560,7 @@ pub struct LossAccumulator {
     registration_started: AtomicU64,
     registration_drained: AtomicU64,
     registration_completion_tickets: [AtomicU64; REGISTRATION_TICKET_CAPACITY],
+    registration_aborted_tickets: [AtomicU64; REGISTRATION_TICKET_CAPACITY],
     invalid: AtomicBool,
     registration_counter_exhausted: AtomicBool,
     generation_exhausted: AtomicBool,
@@ -568,6 +576,8 @@ impl LossAccumulator {
             registration_started: AtomicU64::new(0),
             registration_drained: AtomicU64::new(0),
             registration_completion_tickets: [const { AtomicU64::new(0) };
+                REGISTRATION_TICKET_CAPACITY],
+            registration_aborted_tickets: [const { AtomicU64::new(0) };
                 REGISTRATION_TICKET_CAPACITY],
             invalid: AtomicBool::new(false),
             registration_counter_exhausted: AtomicBool::new(false),
@@ -603,17 +613,15 @@ impl LossAccumulator {
         let Some(started) = self.reserve_registration_ticket() else {
             return;
         };
+        let mut registration = RegistrationTicket::new(self, started);
         after_entrant_registered();
         let generation = self.active_generation.load(Ordering::SeqCst);
         after_generation_read();
         let slot = &self.slots[(generation & 1) as usize];
-        slot.writers.fetch_add(1, Ordering::Relaxed);
-        let completed_ticket = started + 1;
-        self.registration_completion_tickets[started as usize % REGISTRATION_TICKET_CAPACITY]
-            .store(completed_ticket, Ordering::SeqCst);
-
+        let writer = LossWriter::new(slot);
         slot.record(source_position_frames, dropped_frames, cause);
-        slot.writers.fetch_sub(1, Ordering::Release);
+        drop(writer);
+        registration.commit();
     }
 
     fn reserve_registration_ticket(&self) -> Option<u64> {
@@ -689,7 +697,12 @@ impl LossAccumulator {
             .pending
             .as_ref()
             .expect("pending drain is initialized before polling");
-        if !pending.registration_invalid && !self.registrations_are_ready(pending) {
+        let registration_readiness = if pending.registration_invalid {
+            RegistrationReadiness::Invalid
+        } else {
+            self.registrations_are_ready(pending)
+        };
+        if registration_readiness == RegistrationReadiness::Pending {
             return Ok(TryDrain::Pending);
         }
         let slot = &self.slots[(pending.generation & 1) as usize];
@@ -704,7 +717,11 @@ impl LossAccumulator {
         let snapshot = slot.take(pending.generation);
         let counter_exhausted =
             pending.counter_exhausted || self.registration_counter_exhausted.load(Ordering::SeqCst);
-        if pending.registration_invalid {
+        if pending.registration_invalid || registration_readiness == RegistrationReadiness::Invalid
+        {
+            self.registration_drained
+                .store(pending.registration_target, Ordering::SeqCst);
+            self.invalid.store(false, Ordering::SeqCst);
             if counter_exhausted {
                 self.terminal_invalid_reported.store(true, Ordering::SeqCst);
             }
@@ -737,16 +754,20 @@ impl LossAccumulator {
         }
     }
 
-    fn registrations_are_ready(&self, pending: &PendingDrain) -> bool {
+    fn registrations_are_ready(&self, pending: &PendingDrain) -> RegistrationReadiness {
         for ticket in pending.registration_floor..pending.registration_target {
             let expected = ticket + 1;
-            let completion = &self.registration_completion_tickets
-                [ticket as usize % REGISTRATION_TICKET_CAPACITY];
-            if completion.load(Ordering::SeqCst) != expected {
-                return false;
+            let index = ticket as usize % REGISTRATION_TICKET_CAPACITY;
+            let completion = &self.registration_completion_tickets[index];
+            if completion.load(Ordering::SeqCst) == expected {
+                continue;
             }
+            if self.registration_aborted_tickets[index].load(Ordering::SeqCst) == expected {
+                return RegistrationReadiness::Invalid;
+            }
+            return RegistrationReadiness::Pending;
         }
-        true
+        RegistrationReadiness::Ready
     }
 
     fn advance_generation(&self) -> Result<u64, TimelineError> {
@@ -787,6 +808,59 @@ impl LossAccumulator {
     }
 }
 
+struct RegistrationTicket<'a> {
+    losses: &'a LossAccumulator,
+    ticket: u64,
+    committed: bool,
+}
+
+impl<'a> RegistrationTicket<'a> {
+    fn new(losses: &'a LossAccumulator, ticket: u64) -> Self {
+        Self {
+            losses,
+            ticket,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        let completed_ticket = self.ticket + 1;
+        self.losses.registration_completion_tickets
+            [self.ticket as usize % REGISTRATION_TICKET_CAPACITY]
+            .store(completed_ticket, Ordering::SeqCst);
+        self.committed = true;
+    }
+}
+
+impl Drop for RegistrationTicket<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let aborted_ticket = self.ticket + 1;
+            self.losses.registration_aborted_tickets
+                [self.ticket as usize % REGISTRATION_TICKET_CAPACITY]
+                .store(aborted_ticket, Ordering::SeqCst);
+            self.losses.invalidate();
+        }
+    }
+}
+
+struct LossWriter<'a> {
+    slot: &'a LossSlot,
+}
+
+impl<'a> LossWriter<'a> {
+    fn new(slot: &'a LossSlot) -> Self {
+        slot.writers.fetch_add(1, Ordering::Relaxed);
+        Self { slot }
+    }
+}
+
+impl Drop for LossWriter<'_> {
+    fn drop(&mut self) {
+        self.slot.writers.fetch_sub(1, Ordering::Release);
+    }
+}
+
 impl Default for LossAccumulator {
     fn default() -> Self {
         Self::new()
@@ -814,6 +888,7 @@ fn decode_cause(encoded: u8) -> Option<GapCause> {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -1219,6 +1294,24 @@ mod tests {
                 generation: 0,
             }))
         );
+    }
+
+    #[test]
+    fn unwound_ticket_is_terminal_invalid_instead_of_pending_forever() {
+        let losses = LossAccumulator::new();
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            losses.record_with_registration_hooks(
+                320,
+                160,
+                GapCause::CallbackPoolExhausted,
+                || panic!("synthetic callback unwind"),
+                || {},
+            );
+        }))
+        .is_err());
+
+        assert_eq!(losses.try_drain(), Err(TimelineError::InvalidTiming));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc, Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::audio::capture::CapturePacket;
 use crate::audio::frame::{PreparedFrame, TrackConfigurationRevision};
@@ -43,15 +43,19 @@ pub enum SinkSendError {
 
 struct BoundedSinkState<T> {
     sender: Mutex<Option<mpsc::SyncSender<T>>>,
+    queue_capacity: usize,
     accepted_frames: AtomicU64,
     dropped_frames: AtomicU64,
     queued_frames: AtomicUsize,
+    published_frames: AtomicUsize,
     high_water_mark: AtomicUsize,
     closed: AtomicBool,
     close_count: AtomicUsize,
     error: Mutex<Option<String>>,
     #[cfg(test)]
     after_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_receive_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Clone)]
@@ -76,15 +80,19 @@ pub fn bounded_sink<T>(kind: SinkKind, capacity: usize) -> (BoundedSink<T>, Boun
     let (sender, receiver) = mpsc::sync_channel(capacity);
     let state = Arc::new(BoundedSinkState {
         sender: Mutex::new(Some(sender)),
+        queue_capacity: capacity,
         accepted_frames: AtomicU64::new(0),
         dropped_frames: AtomicU64::new(0),
         queued_frames: AtomicUsize::new(0),
+        published_frames: AtomicUsize::new(0),
         high_water_mark: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
         close_count: AtomicUsize::new(0),
         error: Mutex::new(None),
         #[cfg(test)]
         after_publish_hook: Mutex::new(None),
+        #[cfg(test)]
+        after_receive_hook: Mutex::new(None),
     });
     (
         BoundedSink {
@@ -108,11 +116,17 @@ impl<T> BoundedSink<T> {
             self.record_drop("sink closed");
             return Err(SinkSendError::Closed);
         };
-        // The sender lock serializes producers, so this reservation is visible before a
-        // receiver can observe a successfully published item.
-        let reserved_queued = self.state.queued_frames.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.state.closed.load(Ordering::Acquire) {
+            self.record_drop("sink closed");
+            return Err(SinkSendError::Closed);
+        }
+        let Some(reserved_queued) = self.reserve_queue_slot() else {
+            self.record_drop("sink queue is full");
+            return Err(SinkSendError::Full);
+        };
         match sender.try_send(frame) {
             Ok(()) => {
+                self.state.published_frames.fetch_add(1, Ordering::Release);
                 #[cfg(test)]
                 self.run_after_publish_hook_for_test();
                 self.state.accepted_frames.fetch_add(1, Ordering::Relaxed);
@@ -126,6 +140,7 @@ impl<T> BoundedSink<T> {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 self.state.queued_frames.store(0, Ordering::Release);
+                self.state.published_frames.store(0, Ordering::Release);
                 self.state.closed.store(true, Ordering::Release);
                 self.record_drop("sink receiver disconnected");
                 Err(SinkSendError::Closed)
@@ -170,6 +185,24 @@ impl<T> BoundedSink<T> {
     #[cfg(test)]
     fn queued_frames_for_test(&self) -> usize {
         self.state.queued_frames.load(Ordering::Acquire)
+    }
+
+    fn reserve_queue_slot(&self) -> Option<usize> {
+        let mut queued = self.state.queued_frames.load(Ordering::Acquire);
+        loop {
+            if queued >= self.state.queue_capacity {
+                return None;
+            }
+            match self.state.queued_frames.compare_exchange_weak(
+                queued,
+                queued + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(queued + 1),
+                Err(observed) => queued = observed,
+            }
+        }
     }
 
     fn rollback_reservation(&self) {
@@ -221,18 +254,83 @@ impl<T> BoundedSink<T> {
 
 impl<T> BoundedReceiver<T> {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
-        let item = self.receiver.recv_timeout(timeout)?;
-        let result =
-            self.state
-                .queued_frames
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                    queued.checked_sub(1)
-                });
-        debug_assert!(
-            result.is_ok(),
-            "a published sink item must reserve queue depth"
-        );
-        Ok(item)
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.claim_published_frame() {
+                match self
+                    .receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                {
+                    Ok(item) => {
+                        #[cfg(test)]
+                        self.run_after_receive_hook_for_test();
+                        return Ok(item);
+                    }
+                    Err(error) => {
+                        self.restore_claimed_frame();
+                        return Err(error);
+                    }
+                }
+            }
+            if self.state.closed.load(Ordering::Acquire) {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            if Instant::now() >= deadline {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(test)]
+    fn set_after_receive_hook_for_test(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.state.after_receive_hook.lock().unwrap() = Some(hook);
+    }
+
+    fn claim_published_frame(&self) -> bool {
+        let mut published = self.state.published_frames.load(Ordering::Acquire);
+        loop {
+            if published == 0 {
+                return false;
+            }
+            match self.state.published_frames.compare_exchange_weak(
+                published,
+                published - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let result = self.state.queued_frames.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |queued| queued.checked_sub(1),
+                    );
+                    debug_assert!(result.is_ok(), "a published frame must reserve queue depth");
+                    return true;
+                }
+                Err(observed) => published = observed,
+            }
+        }
+    }
+
+    fn restore_claimed_frame(&self) {
+        self.state.queued_frames.fetch_add(1, Ordering::AcqRel);
+        self.state.published_frames.fetch_add(1, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn run_after_receive_hook_for_test(&self) {
+        if let Some(hook) = self.state.after_receive_hook.lock().unwrap().as_ref() {
+            hook();
+        }
+    }
+}
+
+impl<T> Drop for BoundedReceiver<T> {
+    fn drop(&mut self) {
+        self.state.queued_frames.store(0, Ordering::Release);
+        self.state.published_frames.store(0, Ordering::Release);
+        self.state.closed.store(true, Ordering::Release);
     }
 }
 
@@ -784,6 +882,35 @@ mod tests {
         ));
         assert_eq!(capacity_sink.high_water_mark(), 2);
         assert_eq!(capacity_sink.outcome().accepted_frames, 2);
+    }
+
+    #[test]
+    fn receive_claim_keeps_depth_and_high_water_at_capacity_during_a_send_interleaving() {
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        sink.try_send(1_u8).unwrap();
+
+        let received = Arc::new(Barrier::new(2));
+        let release_receiver = Arc::new(Barrier::new(2));
+        receiver.set_after_receive_hook_for_test({
+            let received = Arc::clone(&received);
+            let release_receiver = Arc::clone(&release_receiver);
+            Arc::new(move || {
+                received.wait();
+                release_receiver.wait();
+            })
+        });
+        let receiver_worker =
+            std::thread::spawn(move || receiver.recv_timeout(Duration::from_secs(1)));
+
+        received.wait();
+        assert_eq!(sink.queued_frames_for_test(), 0);
+        sink.try_send(2_u8).unwrap();
+        assert_eq!(sink.queued_frames_for_test(), 1);
+        assert_eq!(sink.high_water_mark(), 1);
+        release_receiver.wait();
+
+        assert_eq!(receiver_worker.join().unwrap().unwrap(), 1);
+        assert_eq!(sink.high_water_mark(), 1);
     }
 
     #[test]

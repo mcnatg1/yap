@@ -68,12 +68,24 @@ struct SessionAsrAdapter {
     cancelled: Arc<AtomicBool>,
     completed_rx: Option<mpsc::Receiver<()>>,
     worker: Option<JoinHandle<()>>,
+    cleanup_error: Option<String>,
+}
+
+struct AdapterReapPayload {
+    worker: JoinHandle<()>,
+    completed_rx: mpsc::Receiver<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdapterDrainStatus {
     Drained,
     TimedOut,
+    TimedOutRetained,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_REAPER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -244,7 +256,8 @@ impl LiveRuntime {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             );
-            self.inner
+            let _ = self
+                .inner
                 .lock()
                 .expect("live runtime poisoned")
                 .cancel_asr_adapter();
@@ -255,7 +268,8 @@ impl LiveRuntime {
         let resolved = match super::devices::resolve_capture_device(selected_device_id.as_deref()) {
             Ok(resolved) => resolved,
             Err(error) => {
-                self.inner
+                let _ = self
+                    .inner
                     .lock()
                     .expect("live runtime poisoned")
                     .cancel_asr_adapter();
@@ -306,7 +320,8 @@ impl LiveRuntime {
             Err(error) => {
                 recording.close();
                 let _ = join_worker(recording_worker);
-                self.inner
+                let _ = self
+                    .inner
                     .lock()
                     .expect("live runtime poisoned")
                     .cancel_asr_adapter();
@@ -326,7 +341,8 @@ impl LiveRuntime {
                 crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
             }
             let _ = join_worker(recording_worker);
-            self.inner
+            let _ = self
+                .inner
                 .lock()
                 .expect("live runtime poisoned")
                 .cancel_asr_adapter();
@@ -543,7 +559,7 @@ impl LiveRuntimeInner {
     }
 
     fn start_asr_adapter(&mut self, session: u64) -> Result<BoundedSink<PreparedFrame>, String> {
-        self.cancel_asr_adapter();
+        self.cancel_asr_adapter()?;
         let samples_tx = self
             .stream
             .as_ref()
@@ -602,12 +618,21 @@ impl LiveRuntimeInner {
         if let Some(mut adapter) = self.asr_adapter.take() {
             match adapter.drain_after_capture(STREAM_DRAIN_ON_STOP) {
                 Ok(AdapterDrainStatus::Drained) => {}
-                Ok(AdapterDrainStatus::TimedOut) => {
+                Ok(AdapterDrainStatus::TimedOut | AdapterDrainStatus::TimedOutRetained) => {
                     adapter_status = Some(StreamFinishStatus::TimedOut);
+                    if let Some(error) = adapter.take_cleanup_error() {
+                        errors.push(error);
+                    }
+                    if adapter.retains_cleanup_ownership() {
+                        self.asr_adapter = Some(adapter);
+                    }
                 }
                 Err(error) => {
                     errors.push(error);
                     adapter_status = Some(StreamFinishStatus::Disconnected);
+                    if adapter.retains_cleanup_ownership() {
+                        self.asr_adapter = Some(adapter);
+                    }
                 }
             }
         }
@@ -624,7 +649,9 @@ impl LiveRuntimeInner {
     }
 
     fn retire_stream(&mut self) {
-        self.cancel_asr_adapter();
+        if let Err(error) = self.cancel_asr_adapter() {
+            crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
+        }
         if let Some(stream) = self.stream.take() {
             if let Err(error) = stream.shutdown(true) {
                 crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
@@ -637,7 +664,9 @@ impl LiveRuntimeInner {
     }
 
     fn retire_stream_detached_reader(&mut self) {
-        self.cancel_asr_adapter();
+        if let Err(error) = self.cancel_asr_adapter() {
+            crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
+        }
         if let Some(stream) = self.stream.take() {
             if let Err(error) = stream.shutdown(false) {
                 crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
@@ -653,12 +682,14 @@ impl LiveRuntimeInner {
         self.stream.as_ref().map(SessionStream::finisher)
     }
 
-    fn cancel_asr_adapter(&mut self) {
+    fn cancel_asr_adapter(&mut self) -> Result<(), String> {
         if let Some(mut adapter) = self.asr_adapter.take() {
             if let Err(error) = adapter.cancel_and_join() {
-                crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
+                self.asr_adapter = Some(adapter);
+                return Err(error);
             }
         }
+        Ok(())
     }
 }
 
@@ -690,12 +721,24 @@ impl SessionStream {
 
 impl SessionAsrAdapter {
     fn start(samples_tx: mpsc::SyncSender<StreamMessage>, session: u64) -> Self {
+        Self::start_with_completion_hook(samples_tx, session, || {})
+    }
+
+    fn start_with_completion_hook<F>(
+        samples_tx: mpsc::SyncSender<StreamMessage>,
+        session: u64,
+        completion_hook: F,
+    ) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
         let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let (completed_tx, completed_rx) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             run_session_asr_adapter_worker(frames_rx, samples_tx, session, worker_cancelled);
+            completion_hook();
             let _ = completed_tx.send(());
         });
         Self {
@@ -703,7 +746,19 @@ impl SessionAsrAdapter {
             cancelled,
             completed_rx: Some(completed_rx),
             worker: Some(worker),
+            cleanup_error: None,
         }
+    }
+
+    #[cfg(test)]
+    fn start_with_completion_gate_for_test(
+        samples_tx: mpsc::SyncSender<StreamMessage>,
+        session: u64,
+        completion_gate: Arc<std::sync::Barrier>,
+    ) -> Self {
+        Self::start_with_completion_hook(samples_tx, session, move || {
+            completion_gate.wait();
+        })
     }
 
     fn sink(&self) -> BoundedSink<PreparedFrame> {
@@ -715,7 +770,9 @@ impl SessionAsrAdapter {
         self.drain_after_capture(STREAM_DRAIN_ON_STOP)
             .and_then(|status| match status {
                 AdapterDrainStatus::Drained => Ok(()),
-                AdapterDrainStatus::TimedOut => Err("ASR adapter drain timed out.".to_string()),
+                AdapterDrainStatus::TimedOut | AdapterDrainStatus::TimedOutRetained => {
+                    Err("ASR adapter drain timed out.".to_string())
+                }
             })
     }
 
@@ -725,8 +782,16 @@ impl SessionAsrAdapter {
             AdapterDrainStatus::Drained => Ok(AdapterDrainStatus::Drained),
             AdapterDrainStatus::TimedOut => {
                 self.cancelled.store(true, Ordering::SeqCst);
-                self.close_and_reap_after_cancel();
-                Ok(AdapterDrainStatus::TimedOut)
+                match self.close_and_reap_after_cancel() {
+                    Ok(()) => Ok(AdapterDrainStatus::TimedOut),
+                    Err(error) => {
+                        self.cleanup_error = Some(error);
+                        Ok(AdapterDrainStatus::TimedOutRetained)
+                    }
+                }
+            }
+            AdapterDrainStatus::TimedOutRetained => {
+                unreachable!("only drain_after_capture retains adapter ownership")
             }
         }
     }
@@ -754,35 +819,89 @@ impl SessionAsrAdapter {
         }
     }
 
-    fn close_and_reap_after_cancel(&mut self) {
+    fn close_and_reap_after_cancel(&mut self) -> Result<(), String> {
         self.frames_tx.close();
         match self.wait_for_completion(ASR_ADAPTER_CANCEL_GRACE) {
-            Ok(AdapterDrainStatus::Drained) => {}
+            Ok(AdapterDrainStatus::Drained) => Ok(()),
             Ok(AdapterDrainStatus::TimedOut) => self.hand_off_worker(),
-            Err(error) => {
-                crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"))
+            Ok(AdapterDrainStatus::TimedOutRetained) => {
+                unreachable!("only drain_after_capture retains adapter ownership")
             }
+            Err(error) => Err(error),
         }
     }
 
-    fn hand_off_worker(&mut self) {
-        if let (Some(worker), Some(completed_rx)) = (self.worker.take(), self.completed_rx.take()) {
-            let _ = thread::Builder::new()
-                .name("live-asr-adapter-reaper".to_string())
-                .spawn(move || {
-                    let _ = completed_rx.recv();
-                    if let Err(error) = join_worker(worker) {
-                        crate::stt::log_yap(&format!("live ASR adapter reaper failed: {error}"));
-                    }
-                });
+    fn hand_off_worker(&mut self) -> Result<(), String> {
+        let (Some(worker), Some(completed_rx)) = (self.worker.take(), self.completed_rx.take())
+        else {
+            return Ok(());
+        };
+        let payload = Arc::new(Mutex::new(Some(AdapterReapPayload {
+            worker,
+            completed_rx,
+        })));
+        let reaper_payload = Arc::clone(&payload);
+        match spawn_adapter_reaper(move || {
+            let payload = reaper_payload
+                .lock()
+                .expect("ASR adapter reaper payload poisoned")
+                .take()
+                .expect("ASR adapter reaper owns one payload");
+            let _ = payload.completed_rx.recv();
+            if let Err(error) = join_worker(payload.worker) {
+                crate::stt::log_yap(&format!("live ASR adapter reaper failed: {error}"));
+            }
+        }) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let payload = payload
+                    .lock()
+                    .map_err(|_| "ASR adapter reaper payload became unavailable.".to_string())?
+                    .take()
+                    .expect("failed reaper spawn leaves the adapter payload owned locally");
+                self.worker = Some(payload.worker);
+                self.completed_rx = Some(payload.completed_rx);
+                Err(error)
+            }
         }
     }
 
     fn cancel_and_join(&mut self) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
-        self.close_and_reap_after_cancel();
-        Ok(())
+        self.close_and_reap_after_cancel()
     }
+
+    fn take_cleanup_error(&mut self) -> Option<String> {
+        self.cleanup_error.take()
+    }
+
+    fn retains_cleanup_ownership(&self) -> bool {
+        self.worker.is_some() || self.completed_rx.is_some()
+    }
+
+    #[cfg(test)]
+    fn retains_cleanup_ownership_for_test(&self) -> bool {
+        self.worker.is_some() && self.completed_rx.is_some()
+    }
+}
+
+fn spawn_adapter_reaper<F>(run: F) -> Result<JoinHandle<()>, String>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    if FAIL_NEXT_REAPER_SPAWN.with(|fail| fail.replace(false)) {
+        return Err("ASR adapter reaper could not start (synthetic failure).".to_string());
+    }
+    thread::Builder::new()
+        .name("live-asr-adapter-reaper".to_string())
+        .spawn(run)
+        .map_err(|error| format!("ASR adapter reaper could not start: {error}"))
+}
+
+#[cfg(test)]
+fn set_reaper_spawn_failure_for_test() {
+    FAIL_NEXT_REAPER_SPAWN.with(|fail| fail.set(true));
 }
 
 #[cfg(test)]
@@ -793,7 +912,9 @@ fn stop_after_capture_for_test(
 ) -> StreamFinishStatus {
     match adapter.drain_after_capture(timeout) {
         Ok(AdapterDrainStatus::Drained) => finisher.finish_session(),
-        Ok(AdapterDrainStatus::TimedOut) => StreamFinishStatus::TimedOut,
+        Ok(AdapterDrainStatus::TimedOut | AdapterDrainStatus::TimedOutRetained) => {
+            StreamFinishStatus::TimedOut
+        }
         Err(_) => StreamFinishStatus::Disconnected,
     }
 }
@@ -1820,6 +1941,50 @@ mod tests {
             samples_rx.recv_timeout(Duration::from_millis(25)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
+    }
+
+    #[test]
+    fn reaper_spawn_failure_retains_adapter_ownership_and_reports_a_bounded_stop() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+        samples_tx
+            .try_send(StreamMessage::Samples {
+                session: 7,
+                samples: vec![0.0],
+            })
+            .unwrap();
+        let completion_gate = Arc::new(Barrier::new(2));
+        let mut adapter = SessionAsrAdapter::start_with_completion_gate_for_test(
+            samples_tx.clone(),
+            7,
+            Arc::clone(&completion_gate),
+        );
+        let port = adapter.sink();
+        port.try_send(prepared_frame(0.25)).unwrap();
+        port.close();
+        let finisher = StreamFinisher {
+            samples_tx,
+            session: 7,
+        };
+
+        set_reaper_spawn_failure_for_test();
+        let started = Instant::now();
+        let status =
+            stop_after_capture_for_test(&mut adapter, &finisher, Duration::from_millis(25));
+
+        assert_eq!(status, StreamFinishStatus::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(adapter.retains_cleanup_ownership_for_test());
+        assert!(matches!(
+            samples_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            StreamMessage::Samples { .. }
+        ));
+        assert!(matches!(
+            samples_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        completion_gate.wait();
+        adapter.cancel_and_join().unwrap();
     }
 
     #[test]
