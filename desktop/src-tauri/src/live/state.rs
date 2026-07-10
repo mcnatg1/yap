@@ -267,6 +267,29 @@ impl LiveSessionState {
         }
     }
 
+    pub(crate) fn try_begin_local_start(
+        &self,
+        active_capture_mode: LiveCaptureMode,
+        input_device_id: Option<String>,
+        input_device_label: Option<String>,
+    ) -> Option<LiveSessionView> {
+        let mut view = self.view.lock().expect("live state poisoned");
+        if !matches!(
+            view.status,
+            LiveSessionStatus::Idle | LiveSessionStatus::Blocked
+        ) {
+            return None;
+        }
+        view.error = None;
+        view.input_device_id = input_device_id;
+        view.input_device_label = input_device_label;
+        view.level = Some(0.0);
+        view.route = LiveRoute::LocalFallback;
+        view.status = LiveSessionStatus::Armed;
+        view.active_capture_mode = Some(active_capture_mode);
+        Some(view.clone())
+    }
+
     pub fn route_loss(&self, fallback_ready: bool) -> LiveSessionView {
         self.clear_startup_shortcut_failure(false);
         self.update(|view| {
@@ -450,6 +473,10 @@ fn append_final_text(existing: Option<&str>, next: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Barrier,
+    };
 
     #[test]
     fn live_start_uses_local_fallback_without_server() {
@@ -587,6 +614,53 @@ mod tests {
 
         assert_eq!(view.status, LiveSessionStatus::Armed);
         assert!(!is_live_capture_active(view.status));
+    }
+
+    #[test]
+    fn concurrent_start_claims_capture_once_and_leaves_listening_stoppable() {
+        let state = Arc::new(LiveSessionState::new(LiveSettings::default()));
+        let race_point = Arc::new(Barrier::new(3));
+        let capture_starts = Arc::new(AtomicUsize::new(0));
+        let (results_tx, results_rx) = mpsc::channel();
+
+        let workers = (0..2)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let race_point = Arc::clone(&race_point);
+                let capture_starts = Arc::clone(&capture_starts);
+                let results_tx = results_tx.clone();
+                std::thread::spawn(move || {
+                    // Both action callers complete preflight before racing for the state claim.
+                    race_point.wait();
+                    let claimed = state
+                        .try_begin_local_start(
+                            LiveCaptureMode::Toggle,
+                            None,
+                            Some("Default".into()),
+                        )
+                        .is_some();
+                    if claimed {
+                        capture_starts.fetch_add(1, Ordering::SeqCst);
+                        state.try_begin_listening_from_armed().unwrap();
+                    }
+                    results_tx.send(claimed).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(results_tx);
+
+        race_point.wait();
+        let claims = results_rx.iter().collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(claims.iter().filter(|claimed| **claimed).count(), 1);
+        assert_eq!(capture_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.snapshot().status, LiveSessionStatus::Listening);
+
+        assert!(state.try_begin_saving(true).is_some());
+        assert_eq!(state.finish_saving().status, LiveSessionStatus::Idle);
     }
 
     #[test]

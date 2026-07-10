@@ -232,6 +232,16 @@ pub(crate) fn start_live_runtime(
         return view;
     }
 
+    let requested_device_id = live.snapshot().input_device_id;
+    let resolved = live::devices::resolve_input_device(requested_device_id.as_deref());
+    let Some(view) = live.try_begin_local_start(
+        active_capture_mode,
+        requested_device_id.clone(),
+        resolved.label.clone(),
+    ) else {
+        return live.snapshot();
+    };
+
     if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
         let view = live.block_with_error(&crate::runtime_error_to_stt(error).message);
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
@@ -243,20 +253,13 @@ pub(crate) fn start_live_runtime(
         return view;
     }
 
-    let requested_device_id = live.snapshot().input_device_id;
-    let resolved = live::devices::resolve_input_device(requested_device_id.as_deref());
-
-    let view = live.update(|view| {
-        view.error = resolved
-            .recovered
-            .then(|| "Selected microphone unavailable. Using default.".into());
-        view.input_device_id = requested_device_id.clone();
-        view.input_device_label = resolved.label.clone();
-        view.level = Some(0.0);
-        view.route = live::state::LiveRoute::LocalFallback;
-        view.status = live::state::LiveSessionStatus::Armed;
-        view.active_capture_mode = Some(active_capture_mode);
-    });
+    let view = if resolved.recovered {
+        live.update(|view| {
+            view.error = Some("Selected microphone unavailable. Using default.".into());
+        })
+    } else {
+        view
+    };
     if let Err(error) = live::overlay_window::ensure_active(&app) {
         crate::log_line(&format!("live overlay start show failed: {error}"));
     }
