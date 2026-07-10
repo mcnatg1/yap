@@ -48,7 +48,12 @@ import {
 import { canDeleteTranscriptHistoryEntry, maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
-import { createPreviewTextLoader, previewSearchEntries, shouldSearchTranscriptBodies } from "@/lib/history-preview-loader";
+import {
+  createPreviewSearchGenerationGuard,
+  createPreviewTextLoader,
+  previewSearchEntries,
+  shouldSearchTranscriptBodies,
+} from "@/lib/history-preview-loader";
 import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 
@@ -183,6 +188,7 @@ export function HistoryPanel({
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
   const previewTextByPathRef = useRef(previewTextByPath);
   const previewLoaderRef = useRef(createPreviewTextLoader());
+  const previewSearchGenerationRef = useRef(createPreviewSearchGenerationGuard());
 
   useEffect(() => {
     previewTextByPathRef.current = previewTextByPath;
@@ -209,6 +215,7 @@ export function HistoryPanel({
     if (!shouldSearchTranscriptBodies(searchFilter) || !onLoadPreviewText) return;
 
     let cancelled = false;
+    const generation = previewSearchGenerationRef.current.begin();
     void (async () => {
       for (const entry of searchableEntries) {
         if (cancelled) break;
@@ -219,7 +226,7 @@ export function HistoryPanel({
             previewTextByPathRef.current,
             onLoadPreviewText,
             (outputPath, text) => {
-              if (cancelled) return;
+              if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
               setPreviewTextByPath((current) =>
                 current[outputPath] === undefined
                   ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)

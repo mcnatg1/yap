@@ -21,6 +21,21 @@ export type WorkspaceNavigationAction =
   | { type: "setRailCollapsed"; collapsed: boolean }
   | { type: "showDetails" };
 
+export type WorkspaceNavigationIntent =
+  | { type: "openWorkspace"; action: RailAction }
+  | { type: "showDetails" };
+
+export type WorkspaceNavigationEffect = "openPolish" | "refreshDetails";
+
+export function workspaceNavigationEffectForIntent(
+  intent: WorkspaceNavigationIntent,
+): WorkspaceNavigationEffect | undefined {
+  if (intent.type === "showDetails") return undefined;
+  if (intent.action === "details") return "refreshDetails";
+  if (intent.action === "polish") return "openPolish";
+  return undefined;
+}
+
 export const initialWorkspaceNavigationState: WorkspaceNavigationState = {
   activeRail: "home",
   detailsOpen: false,
@@ -79,8 +94,9 @@ export function useWorkspaceNavigation({
 
   const openWorkspace = useCallback((action: RailAction) => {
     setNavigation((state) => workspaceNavigationStateForAction(state, { type: "openWorkspace", action }));
-    if (action === "details") onOpenDetailsRef.current();
-    if (action === "polish") onOpenPolishRef.current();
+    const effect = workspaceNavigationEffectForIntent({ type: "openWorkspace", action });
+    if (effect === "refreshDetails") onOpenDetailsRef.current();
+    if (effect === "openPolish") onOpenPolishRef.current();
   }, []);
 
   const showDetails = useCallback(() => {

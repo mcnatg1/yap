@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   initialWorkspaceNavigationState,
+  workspaceNavigationEffectForIntent,
   workspaceNavigationStateForAction,
   type WorkspaceNavigationState,
 } from "@/hooks/use-workspace-navigation";
@@ -11,6 +12,16 @@ function state(overrides: Partial<WorkspaceNavigationState> = {}): WorkspaceNavi
 }
 
 describe("workspace navigation", () => {
+  it("selects callbacks only for rail-driven details and polish", () => {
+    expect(workspaceNavigationEffectForIntent({ type: "openWorkspace", action: "details" }))
+      .toBe("refreshDetails");
+    expect(workspaceNavigationEffectForIntent({ type: "openWorkspace", action: "polish" }))
+      .toBe("openPolish");
+    expect(workspaceNavigationEffectForIntent({ type: "openWorkspace", action: "home" }))
+      .toBeUndefined();
+    expect(workspaceNavigationEffectForIntent({ type: "showDetails" })).toBeUndefined();
+  });
+
   it("opens details without changing the workspace view", () => {
     expect(
       workspaceNavigationStateForAction(

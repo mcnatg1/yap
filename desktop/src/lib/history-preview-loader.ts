@@ -15,6 +15,19 @@ export function previewSearchEntries(entries: TranscriptHistoryEntry[]) {
   return entries.slice(0, maxTranscriptHistoryEntries);
 }
 
+export function createPreviewSearchGenerationGuard() {
+  let current = 0;
+  return {
+    begin() {
+      current += 1;
+      return current;
+    },
+    isCurrent(generation: number) {
+      return generation === current;
+    },
+  };
+}
+
 export function createPreviewTextLoader() {
   const inFlight = new Map<string, Promise<string>>();
 

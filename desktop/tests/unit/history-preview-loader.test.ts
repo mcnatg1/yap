@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 
 import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
-import { createPreviewTextLoader, previewSearchEntries, shouldSearchTranscriptBodies } from "@/lib/history-preview-loader";
+import {
+  createPreviewSearchGenerationGuard,
+  createPreviewTextLoader,
+  previewSearchEntries,
+  shouldSearchTranscriptBodies,
+} from "@/lib/history-preview-loader";
 
 describe("history preview loader", () => {
+  it("invalidates late preview results when a newer search begins", () => {
+    const guard = createPreviewSearchGenerationGuard();
+    const first = guard.begin();
+    const second = guard.begin();
+
+    expect(guard.isCurrent(first)).toBe(false);
+    expect(guard.isCurrent(second)).toBe(true);
+  });
+
   it("dedupes concurrent reads by output path", async () => {
     const loader = createPreviewTextLoader();
     const entry = { outputPath: "C:\\recordings\\live-1.txt" };
