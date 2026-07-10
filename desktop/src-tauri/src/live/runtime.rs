@@ -35,6 +35,7 @@ fn active_session_matches(active_session: u64, session: u64) -> bool {
 pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
+    recording_finalization: Arc<RecordingFinalization>,
     transition: Arc<LifecycleGate>,
     warming: Arc<AtomicBool>,
 }
@@ -45,13 +46,47 @@ struct LiveRuntimeInner {
     stream: Option<SessionStream>,
     asr_adapter: Option<SessionAsrAdapter>,
     recording: Option<RecordingSinkHandle>,
-    finalized_recording: Option<RecordingFinalizeResult>,
     level: Option<JoinHandle<()>>,
     last_used: Instant,
     #[cfg(test)]
     has_capture_for_test: bool,
     #[cfg(test)]
     has_stream_for_test: bool,
+}
+
+struct RecordingFinalization {
+    state: Mutex<RecordingFinalizationState>,
+    completed: Condvar,
+}
+
+enum RecordingFinalizationState {
+    Pending,
+    Finalizing,
+    Finalized(Box<Option<RecordingFinalizeResult>>),
+    Failed(String),
+}
+
+impl RecordingFinalization {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(RecordingFinalizationState::Pending),
+            completed: Condvar::new(),
+        }
+    }
+
+    fn reset(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("recording finalization state poisoned");
+        while matches!(*state, RecordingFinalizationState::Finalizing) {
+            state = self
+                .completed
+                .wait(state)
+                .expect("recording finalization state poisoned");
+        }
+        *state = RecordingFinalizationState::Pending;
+    }
 }
 
 struct LifecycleGate {
@@ -181,6 +216,7 @@ impl LiveRuntime {
         Self {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
+            recording_finalization: Arc::new(RecordingFinalization::new()),
             transition: Arc::new(LifecycleGate::new()),
             warming: Arc::new(AtomicBool::new(false)),
         }
@@ -201,12 +237,17 @@ impl LiveRuntime {
     ) -> Result<(), LiveStartFailure> {
         let _transition = self.transition.begin_start();
         let (session, local_asr) = {
+            let inner = self.inner.lock().expect("live runtime poisoned");
+            if inner.capture.is_some() {
+                return Ok(());
+            }
+            drop(inner);
+            self.recording_finalization.reset();
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
                 return Ok(());
             }
             inner.session = inner.session.saturating_add(1);
-            inner.finalized_recording = None;
             inner.last_used = Instant::now();
             let session = inner.session;
             self.active_session.store(session, Ordering::SeqCst);
@@ -384,20 +425,50 @@ impl LiveRuntime {
     }
 
     pub(crate) fn finalize_recording(&self) -> Result<Option<RecordingFinalizeResult>, String> {
-        let recording = {
-            let mut inner = self.inner.lock().expect("live runtime poisoned");
-            if let Some(result) = &inner.finalized_recording {
-                return Ok(Some(result.clone()));
+        {
+            let mut state = self
+                .recording_finalization
+                .state
+                .lock()
+                .map_err(|_| "recording finalization state became unavailable")?;
+            loop {
+                match &*state {
+                    RecordingFinalizationState::Finalized(result) => return Ok((**result).clone()),
+                    RecordingFinalizationState::Failed(error) => return Err(error.clone()),
+                    RecordingFinalizationState::Pending => {
+                        *state = RecordingFinalizationState::Finalizing;
+                        break;
+                    }
+                    RecordingFinalizationState::Finalizing => {
+                        state = self
+                            .recording_finalization
+                            .completed
+                            .wait(state)
+                            .map_err(|_| "recording finalization state became unavailable")?;
+                    }
+                }
             }
+        }
+
+        let recording = {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| "live runtime became unavailable")?;
             inner.recording.take()
         };
-        let Some(recording) = recording else {
-            return Ok(None);
+        let result = recording.map(|recording| recording.finalize()).transpose();
+        let mut state = self
+            .recording_finalization
+            .state
+            .lock()
+            .map_err(|_| "recording finalization state became unavailable")?;
+        *state = match &result {
+            Ok(result) => RecordingFinalizationState::Finalized(Box::new(result.clone())),
+            Err(error) => RecordingFinalizationState::Failed(error.clone()),
         };
-        let result = recording.finalize()?;
-        let mut inner = self.inner.lock().expect("live runtime poisoned");
-        inner.finalized_recording = Some(result.clone());
-        Ok(Some(result))
+        self.recording_finalization.completed.notify_all();
+        result
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -460,7 +531,6 @@ impl LiveRuntimeInner {
             stream: None,
             asr_adapter: None,
             recording: None,
-            finalized_recording: None,
             level: None,
             last_used: Instant::now(),
             #[cfg(test)]
@@ -1745,6 +1815,53 @@ mod tests {
         assert!(!claim_warmup(&warming));
         release_warmup(&warming);
         assert!(claim_warmup(&warming));
+    }
+
+    #[test]
+    fn concurrent_recording_finalizers_share_one_cached_result_and_one_worker_finalization() {
+        let runtime = LiveRuntime::new();
+        let directory =
+            std::env::temp_dir().join(format!("yap-runtime-finalize-race-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        let session_id = SessionId::new("runtime-finalize-race").unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        let (recording, finalization_count) =
+            RecordingSinkHandle::spawn_with_finalization_counter_for_test(
+                directory.clone(),
+                session_id.clone(),
+                sink,
+                receiver,
+            );
+        runtime.inner.lock().unwrap().recording = Some(recording);
+        let barrier = Arc::new(Barrier::new(3));
+        let left_runtime = runtime.clone();
+        let left_barrier = Arc::clone(&barrier);
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            left_runtime.finalize_recording().unwrap()
+        });
+        let right_runtime = runtime.clone();
+        let right_barrier = Arc::clone(&barrier);
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            right_runtime.finalize_recording().unwrap()
+        });
+
+        barrier.wait();
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+
+        assert_eq!(left, right);
+        assert_eq!(
+            finalization_count.load(Ordering::SeqCst),
+            1,
+            "only one caller may close, join, and publish the recording"
+        );
+        assert!(directory
+            .join(format!("live-{session_id}.commit.json"))
+            .is_file());
+        assert_eq!(runtime.finalize_recording().unwrap(), left);
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]

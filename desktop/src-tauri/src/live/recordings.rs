@@ -58,24 +58,43 @@ fn save_finalized_capture_to_dir(
         .then_some(TRANSCRIPT_DEGRADED_WARNING.to_string());
     let created_at_ms = unix_millis_now()?;
     let output_path = stable_existing_path_string(&transcript_path);
+    let status =
+        if capture.status == recording::CaptureStatus::Partial || view.transcription_degraded {
+            ResultStatus::Partial
+        } else {
+            ResultStatus::Complete
+        };
+    let revision_warning = capture
+        .capture_sidecar_sha256()
+        .ok_or_else(|| "Capture lineage is unavailable for the transcript revision".to_string())
+        .and_then(|capture_sidecar_sha256| {
+            write_transcript_revision(
+                dir,
+                &capture.session_id,
+                capture_sidecar_sha256,
+                &transcript_path,
+                &transcript,
+                status,
+            )
+        })
+        .err();
     let Some(committed) = capture.committed else {
         return Ok(Some(SavedLiveSession {
             name,
             source_path: output_path.clone(),
             output_path,
             created_at_ms,
-            warning: combine_warning(warning, AUDIO_SAVE_FAILED_WARNING),
+            warning: revision_warning.map_or_else(
+                || combine_warning(warning.clone(), AUDIO_SAVE_FAILED_WARNING),
+                |error| {
+                    combine_warning(
+                        combine_warning(warning.clone(), AUDIO_SAVE_FAILED_WARNING),
+                        format!("Transcript revision was not saved: {error}"),
+                    )
+                },
+            ),
         }));
     };
-
-    let revision_warning = write_transcript_revision(
-        dir,
-        &committed.manifest,
-        &transcript_path,
-        &transcript,
-        view.transcription_degraded,
-    )
-    .err();
     let audio_path = dir.join(&committed.manifest.audio_file);
     Ok(Some(SavedLiveSession {
         name,
@@ -158,6 +177,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
         };
         if dir.join(format!("{stem}.capture.journal.part")).exists()
             || dir.join(format!("{stem}.capture.json")).exists()
+            || dir.join(format!("{stem}.capture.partial.json")).exists()
             || dir.join(format!("{stem}.commit.json")).exists()
         {
             continue;
@@ -197,25 +217,21 @@ fn committed_at_ms(value: &str) -> u64 {
 
 fn write_transcript_revision(
     dir: &std::path::Path,
-    manifest: &recording::CaptureCommitManifest,
+    session_id: &crate::audio::session::SessionId,
+    capture_sidecar_sha256: &str,
     transcript_path: &std::path::Path,
     transcript: &str,
-    transcription_degraded: bool,
+    status: ResultStatus,
 ) -> Result<(), String> {
-    let revision = next_transcript_revision(dir, &manifest.session_id)?;
-    let status = if transcription_degraded {
-        ResultStatus::Partial
-    } else {
-        ResultStatus::Complete
-    };
+    let revision = next_transcript_revision(dir, session_id)?;
     let model = ModelRevision::new(crate::stt::nemotron::MODEL_ID, "local", "local")
         .map_err(|error| format!("Failed to describe local transcript model: {error}"))?;
     let result = if revision == 1 {
         TranscriptResultRevision::new(
-            manifest.session_id.clone(),
+            session_id.clone(),
             revision,
             ResultAuthority::LocalProvisional,
-            manifest.capture_sidecar_sha256.clone(),
+            capture_sidecar_sha256,
             None,
             status,
             transcript,
@@ -223,7 +239,7 @@ fn write_transcript_revision(
             vec![model],
         )
     } else {
-        let previous_path = transcript_revision_path(dir, &manifest.session_id, revision - 1);
+        let previous_path = transcript_revision_path(dir, session_id, revision - 1);
         let previous_text = std::fs::read_to_string(&previous_path)
             .map_err(|error| format!("Failed to read prior transcript revision: {error}"))?;
         let previous: TranscriptResultRevision = serde_json::from_str(&previous_text)
@@ -231,7 +247,7 @@ fn write_transcript_revision(
         previous.next_revision(
             revision,
             ResultAuthority::LocalProvisional,
-            manifest.capture_sidecar_sha256.clone(),
+            capture_sidecar_sha256,
             recording::sha256_file(&previous_path)?,
             status,
             transcript,
@@ -240,13 +256,13 @@ fn write_transcript_revision(
         )
     }
     .map_err(|error| format!("Failed to build transcript revision: {error}"))?;
-    let path = transcript_revision_path(dir, &manifest.session_id, revision);
+    let path = transcript_revision_path(dir, session_id, revision);
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&path)
         .map_err(|error| format!("Failed to create transcript revision: {error}"))?;
-    let serialized = transcript_result_value(&result, manifest, transcript_path)?;
+    let serialized = transcript_result_value(&result, capture_sidecar_sha256, transcript_path)?;
     serde_json::to_writer(&mut file, &serialized)
         .map_err(|error| format!("Failed to write transcript revision: {error}"))?;
     file.write_all(b"\n")
@@ -257,7 +273,7 @@ fn write_transcript_revision(
 
 fn transcript_result_value(
     result: &TranscriptResultRevision,
-    manifest: &recording::CaptureCommitManifest,
+    capture_sidecar_sha256: &str,
     transcript_path: &std::path::Path,
 ) -> Result<serde_json::Value, String> {
     let text_file = transcript_path
@@ -291,7 +307,7 @@ fn transcript_result_value(
     );
     object.insert(
         "captureSidecarSha256".into(),
-        serde_json::Value::from(manifest.capture_sidecar_sha256.clone()),
+        serde_json::Value::from(capture_sidecar_sha256),
     );
     Ok(value)
 }
@@ -435,6 +451,24 @@ fn fix_word_casing(word: &str) -> String {
 }
 
 fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    write_new_text_file_with(
+        path,
+        text,
+        |file| file.sync_all(),
+        |from, to| std::fs::rename(from, to),
+    )
+}
+
+fn write_new_text_file_with<S, R>(
+    path: &std::path::Path,
+    text: &str,
+    sync: S,
+    rename: R,
+) -> std::io::Result<()>
+where
+    S: FnOnce(&std::fs::File) -> std::io::Result<()>,
+    R: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
     if path.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
@@ -446,7 +480,7 @@ fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()
         .write(true)
         .create_new(true)
         .open(&partial)?;
-    let result = file.write_all(text.as_bytes());
+    let result = file.write_all(text.as_bytes()).and_then(|_| sync(&file));
     drop(file);
     let result = result.and_then(|_| {
         if path.exists() {
@@ -455,7 +489,7 @@ fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()
                 "live transcript already exists",
             ));
         }
-        std::fs::rename(&partial, path)
+        rename(&partial, path)
     });
     if result.is_err() {
         std::fs::remove_file(&partial).ok();
@@ -479,7 +513,7 @@ fn partial_text_path(path: &std::path::Path) -> std::io::Result<std::path::PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::recording::StreamingRecording;
+    use crate::audio::recording::{CommitFaultPoint, StreamingRecording};
     use crate::audio::session::SessionId;
 
     fn live_view(
@@ -598,6 +632,41 @@ mod tests {
     }
 
     #[test]
+    fn partial_capture_before_sidecar_publication_keeps_transcript_and_publishes_partial_revision()
+    {
+        assert_partial_capture_transcript(CommitFaultPoint::AudioSync);
+    }
+
+    #[test]
+    fn partial_capture_after_sidecar_publication_keeps_transcript_and_publishes_partial_revision() {
+        assert_partial_capture_transcript(CommitFaultPoint::CommitSync);
+    }
+
+    #[test]
+    fn transcript_sync_failure_does_not_rename_the_partial_file() {
+        let dir = test_dir("transcript-sync-failure");
+        let transcript = dir.join("live-301.txt");
+        let renamed = std::cell::Cell::new(false);
+
+        let error = write_new_text_file_with(
+            &transcript,
+            "hello\n",
+            |_| Err(std::io::Error::other("injected transcript sync failure")),
+            |from, to| {
+                renamed.set(true);
+                std::fs::rename(from, to)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(!renamed.get());
+        assert!(!transcript.exists());
+        assert!(!partial_text_path(&transcript).unwrap().exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn transcript_revisions_are_create_new_and_monotonic() {
         let dir = test_dir("transcript-revisions");
         let session = SessionId::new("s-revisions").unwrap();
@@ -607,8 +676,24 @@ mod tests {
         let text_path = dir.join(format!("live-{session}.txt"));
         write_new_text_file(&text_path, "first\n").unwrap();
 
-        write_transcript_revision(&dir, &manifest, &text_path, "first", false).unwrap();
-        write_transcript_revision(&dir, &manifest, &text_path, "second", false).unwrap();
+        write_transcript_revision(
+            &dir,
+            &manifest.session_id,
+            &manifest.capture_sidecar_sha256,
+            &text_path,
+            "first",
+            ResultStatus::Complete,
+        )
+        .unwrap();
+        write_transcript_revision(
+            &dir,
+            &manifest.session_id,
+            &manifest.capture_sidecar_sha256,
+            &text_path,
+            "second",
+            ResultStatus::Complete,
+        )
+        .unwrap();
 
         assert!(transcript_revision_path(&dir, &session, 1).is_file());
         assert!(transcript_revision_path(&dir, &session, 2).is_file());
@@ -755,5 +840,55 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn assert_partial_capture_transcript(fault: CommitFaultPoint) {
+        let dir = test_dir(&format!("partial-transcript-{fault:?}"));
+        let session = SessionId::new("s-partial-transcript").unwrap();
+        let mut recording =
+            StreamingRecording::create_with_fault(&dir, session.clone(), fault).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        let lineage_hash = capture.capture_sidecar_sha256().unwrap().to_string();
+        let lineage_file = capture
+            .partial_lineage
+            .as_ref()
+            .map(|lineage| lineage.capture_sidecar_file.clone())
+            .or_else(|| {
+                capture
+                    .committed
+                    .as_ref()
+                    .map(|committed| committed.manifest.capture_sidecar_file.clone())
+            })
+            .unwrap();
+
+        let saved = save_finalized_capture_to_dir(
+            &dir,
+            &live_view(Some("transcript survives"), None),
+            Some(capture),
+        )
+        .unwrap()
+        .unwrap();
+
+        let transcript = dir.join(format!("live-{session}.txt"));
+        let revision = transcript_revision_path(&dir, &session, 1);
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&revision).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(transcript).unwrap(),
+            "transcript survives\n"
+        );
+        assert_eq!(value["status"], "partial");
+        assert_eq!(value["captureSidecarSha256"], lineage_hash);
+        assert_eq!(
+            recording::sha256_file(&dir.join(lineage_file)).unwrap(),
+            lineage_hash
+        );
+        assert!(saved.warning.unwrap().contains(AUDIO_SAVE_FAILED_WARNING));
+        let scanned = recording::scan_recordings(&dir).unwrap();
+        assert!(scanned.complete.is_empty());
+        assert_eq!(scanned.partial.len(), 1);
+        assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

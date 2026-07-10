@@ -94,17 +94,39 @@ impl RecordingScan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialCaptureLineage {
+    pub capture_sidecar_file: String,
+    pub capture_sidecar_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingFinalizeResult {
     pub session_id: SessionId,
     pub status: CaptureStatus,
     pub committed: Option<CommittedCapture>,
+    pub partial_lineage: Option<PartialCaptureLineage>,
     pub error: Option<String>,
+}
+
+impl RecordingFinalizeResult {
+    pub fn capture_sidecar_sha256(&self) -> Option<&str> {
+        self.committed
+            .as_ref()
+            .map(|capture| capture.manifest.capture_sidecar_sha256.as_str())
+            .or_else(|| {
+                self.partial_lineage
+                    .as_ref()
+                    .map(|lineage| lineage.capture_sidecar_sha256.as_str())
+            })
+    }
 }
 
 pub struct RecordingSinkHandle {
     sink: BoundedSink<PreparedFrame>,
     state: Mutex<RecordingSinkState>,
     completed: Condvar,
+    #[cfg(test)]
+    finalization_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct RecordingSinkState {
@@ -132,7 +154,21 @@ impl RecordingSinkHandle {
                 finalizing: false,
             }),
             completed: Condvar::new(),
+            #[cfg(test)]
+            finalization_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_with_finalization_counter_for_test(
+        directory: PathBuf,
+        session_id: SessionId,
+        sink: BoundedSink<PreparedFrame>,
+        receiver: BoundedReceiver<PreparedFrame>,
+    ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let handle = Self::spawn(directory, session_id, sink, receiver);
+        let count = std::sync::Arc::clone(&handle.finalization_count);
+        (handle, count)
     }
 
     pub fn sink(&self) -> BoundedSink<PreparedFrame> {
@@ -151,6 +187,9 @@ impl RecordingSinkHandle {
             }
             if !state.finalizing {
                 state.finalizing = true;
+                #[cfg(test)]
+                self.finalization_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 break state.worker.take();
             }
             state = self
@@ -190,6 +229,7 @@ fn run_recording_worker(
                 session_id,
                 status: CaptureStatus::Partial,
                 committed: None,
+                partial_lineage: None,
                 error: Some(error),
             };
         }
@@ -209,6 +249,7 @@ fn run_recording_worker(
             session_id,
             status: CaptureStatus::Partial,
             committed: None,
+            partial_lineage: None,
             error: Some(error),
         })
 }
@@ -227,6 +268,26 @@ struct CaptureSidecar {
     sequence_gaps: Vec<SequenceGap>,
     sink_degraded: bool,
     directory_sync_supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialCaptureSidecar {
+    schema_version: u16,
+    session_id: SessionId,
+    status: CaptureStatus,
+}
+
+impl PartialCaptureSidecar {
+    fn validate(&self, session_id: &SessionId) -> Result<(), String> {
+        if self.schema_version != CAPTURE_SCHEMA_VERSION
+            || self.session_id != *session_id
+            || self.status != CaptureStatus::Partial
+        {
+            return Err("partial capture sidecar does not match the session".into());
+        }
+        Ok(())
+    }
 }
 
 impl CaptureSidecar {
@@ -411,6 +472,8 @@ struct RecordingPaths {
     wav: PathBuf,
     sidecar: PathBuf,
     sidecar_part: PathBuf,
+    partial_sidecar: PathBuf,
+    partial_sidecar_part: PathBuf,
     commit: PathBuf,
     commit_part: PathBuf,
 }
@@ -426,6 +489,8 @@ impl RecordingPaths {
             wav: directory.join(format!("{prefix}.wav")),
             sidecar: directory.join(format!("{prefix}.capture.json")),
             sidecar_part: directory.join(format!("{prefix}.capture.json.part")),
+            partial_sidecar: directory.join(format!("{prefix}.capture.partial.json")),
+            partial_sidecar_part: directory.join(format!("{prefix}.capture.partial.json.part")),
             commit: directory.join(format!("{prefix}.commit.json")),
             commit_part: directory.join(format!("{prefix}.commit.json.part")),
         }
@@ -450,7 +515,7 @@ impl StreamingRecording {
     }
 
     #[cfg(test)]
-    fn create_with_fault(
+    pub(crate) fn create_with_fault(
         directory: &Path,
         session_id: SessionId,
         fault: CommitFaultPoint,
@@ -591,6 +656,7 @@ impl StreamingRecording {
                 manifest: read_manifest(&self.paths.commit)?,
                 directory: self.paths.directory.clone(),
             }),
+            partial_lineage: None,
             error: None,
         };
         self.finalized = Some(result.clone());
@@ -669,14 +735,80 @@ impl StreamingRecording {
     }
 
     fn partial_result(&mut self) -> RecordingFinalizeResult {
+        let partial_lineage = self.publish_partial_lineage();
+        let error = match (self.failure.clone(), partial_lineage.as_ref()) {
+            (Some(error), Ok(_)) => Some(error),
+            (Some(error), Err(lineage_error)) => Some(format!(
+                "{error}; failed to publish partial capture lineage: {lineage_error}"
+            )),
+            (None, Err(lineage_error)) => Some(format!(
+                "Failed to publish partial capture lineage: {lineage_error}"
+            )),
+            (None, Ok(_)) => None,
+        };
         let result = RecordingFinalizeResult {
             session_id: self.paths.session_id.clone(),
             status: CaptureStatus::Partial,
             committed: None,
-            error: self.failure.clone(),
+            partial_lineage: partial_lineage.ok(),
+            error,
         };
         self.finalized = Some(result.clone());
         result
+    }
+
+    fn publish_partial_lineage(&self) -> Result<PartialCaptureLineage, String> {
+        if self.paths.sidecar.is_file() {
+            return Ok(PartialCaptureLineage {
+                capture_sidecar_file: self.paths.sidecar_file_name(),
+                capture_sidecar_sha256: sha256_file(&self.paths.sidecar)?,
+            });
+        }
+        if self.paths.partial_sidecar.is_file() {
+            let text = fs::read_to_string(&self.paths.partial_sidecar)
+                .map_err(|error| format!("Failed to read partial capture sidecar: {error}"))?;
+            let sidecar: PartialCaptureSidecar = serde_json::from_str(&text)
+                .map_err(|error| format!("Failed to parse partial capture sidecar: {error}"))?;
+            sidecar.validate(&self.paths.session_id)?;
+            return Ok(PartialCaptureLineage {
+                capture_sidecar_file: self
+                    .paths
+                    .partial_sidecar
+                    .file_name()
+                    .expect("partial sidecar has a file name")
+                    .to_string_lossy()
+                    .into_owned(),
+                capture_sidecar_sha256: sha256_file(&self.paths.partial_sidecar)?,
+            });
+        }
+
+        let sidecar = PartialCaptureSidecar {
+            schema_version: CAPTURE_SCHEMA_VERSION,
+            session_id: self.paths.session_id.clone(),
+            status: CaptureStatus::Partial,
+        };
+        write_json_file(
+            &self.paths.partial_sidecar_part,
+            &sidecar,
+            "partial capture sidecar",
+        )?;
+        sync_file(&self.paths.partial_sidecar_part, "partial capture sidecar")?;
+        fs::rename(
+            &self.paths.partial_sidecar_part,
+            &self.paths.partial_sidecar,
+        )
+        .map_err(|error| format!("Failed to publish partial capture sidecar: {error}"))?;
+        let _ = sync_parent_directory(&self.paths.directory);
+        Ok(PartialCaptureLineage {
+            capture_sidecar_file: self
+                .paths
+                .partial_sidecar
+                .file_name()
+                .expect("partial sidecar has a file name")
+                .to_string_lossy()
+                .into_owned(),
+            capture_sidecar_sha256: sha256_file(&self.paths.partial_sidecar)?,
+        })
     }
 
     fn fail<T>(&mut self, error: String) -> Result<T, String> {
@@ -924,10 +1056,15 @@ fn resolve_artifact(directory: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 fn session_from_private_artifact(name: &str) -> Option<SessionId> {
-    let session = name
-        .strip_prefix("live-")?
-        .strip_suffix(".capture.journal.part")?;
-    SessionId::new(session).ok()
+    let session = name.strip_prefix("live-")?;
+    [
+        ".capture.journal.part",
+        ".capture.partial.json",
+        ".capture.partial.json.part",
+    ]
+    .into_iter()
+    .find_map(|suffix| session.strip_suffix(suffix))
+    .and_then(|session| SessionId::new(session).ok())
 }
 
 fn session_from_commit_name(name: &str) -> Option<SessionId> {
@@ -936,7 +1073,7 @@ fn session_from_commit_name(name: &str) -> Option<SessionId> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommitFaultPoint {
+pub(crate) enum CommitFaultPoint {
     Append,
     PeriodicFlush,
     WavHeaderPatch,
@@ -1016,6 +1153,37 @@ mod tests {
                 "{point:?} hid the partial recovery candidate"
             );
         }
+    }
+
+    #[test]
+    fn partial_finalization_publishes_a_hashed_partial_capture_lineage() {
+        let dir = tempfile_dir("partial-lineage");
+        let session = SessionId::new("s-partial-lineage").unwrap();
+        let mut recording = StreamingRecording::create_with_fault(
+            &dir,
+            session.clone(),
+            CommitFaultPoint::AudioSync,
+        )
+        .unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+
+        let result = recording.finalize().unwrap();
+
+        let lineage = result.partial_lineage.expect("partial capture lineage");
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert_eq!(
+            lineage.capture_sidecar_sha256,
+            sha256_file(&dir.join(&lineage.capture_sidecar_file)).unwrap()
+        );
+        let sidecar: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join(&lineage.capture_sidecar_file)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["sessionId"], session.as_str());
+        assert_eq!(sidecar["status"], "partial");
+        let scanned = scan_recordings(&dir).unwrap();
+        assert!(scanned.complete.is_empty());
+        assert_eq!(scanned.partial.len(), 1);
     }
 
     #[test]
