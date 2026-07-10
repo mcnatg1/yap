@@ -662,7 +662,7 @@ impl StreamFinisher {
             match self.samples_tx.try_send(message) {
                 Ok(()) => {
                     return match done_rx.recv_timeout(STREAM_DRAIN_ON_STOP) {
-                        Ok(()) => StreamFinishStatus::Completed,
+                        Ok(status) => status,
                         Err(mpsc::RecvTimeoutError::Timeout) => StreamFinishStatus::TimedOut,
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             StreamFinishStatus::Disconnected
@@ -1003,17 +1003,58 @@ fn run_stream_worker(
 
     let mut frames_closed = false;
     while !cancelled.load(Ordering::Relaxed) {
+        let mut finish = None;
         while let Ok(message) = samples_rx.try_recv() {
-            process_stream_message(
-                &mut engine,
-                &mut buffer,
-                &mut profile,
-                &app,
-                &active_session,
-                &stream_session,
-                &mut active_stream_session,
-                message,
+            match message {
+                message @ StreamMessage::Finish { .. } => {
+                    finish = Some(message);
+                    break;
+                }
+                StreamMessage::Samples { .. } => process_stream_message(
+                    &mut engine,
+                    &mut buffer,
+                    &mut profile,
+                    &app,
+                    &active_session,
+                    &stream_session,
+                    &mut active_stream_session,
+                    message,
+                ),
+            }
+        }
+        if let Some(StreamMessage::Finish { session, done }) = finish {
+            let status = drain_closed_asr_frames_before_finalizing(
+                &frames_rx,
+                |frame| {
+                    process_stream_message(
+                        &mut engine,
+                        &mut buffer,
+                        &mut profile,
+                        &app,
+                        &active_session,
+                        &stream_session,
+                        &mut active_stream_session,
+                        StreamMessage::from_prepared(stream_session.load(Ordering::SeqCst), frame),
+                    );
+                },
+                || {},
+                STREAM_DRAIN_ON_STOP,
             );
+            if status == StreamFinishStatus::Completed {
+                process_stream_message(
+                    &mut engine,
+                    &mut buffer,
+                    &mut profile,
+                    &app,
+                    &active_session,
+                    &stream_session,
+                    &mut active_stream_session,
+                    StreamMessage::Finish { session, done },
+                );
+            } else {
+                let _ = done.send(status);
+                break;
+            }
         }
         if frames_closed {
             match samples_rx.recv_timeout(Duration::from_millis(100)) {
@@ -1045,6 +1086,32 @@ fn run_stream_worker(
             ),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => frames_closed = true,
+        }
+    }
+}
+
+fn drain_closed_asr_frames_before_finalizing<F, G>(
+    frames_rx: &BoundedReceiver<PreparedFrame>,
+    mut process_frame: F,
+    finalize: G,
+    timeout: Duration,
+) -> StreamFinishStatus
+where
+    F: FnMut(PreparedFrame),
+    G: FnOnce(),
+{
+    let started = Instant::now();
+    loop {
+        match frames_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(frame) => process_frame(frame),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                finalize();
+                return StreamFinishStatus::Completed;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if started.elapsed() >= timeout => {
+                return StreamFinishStatus::TimedOut;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -1092,7 +1159,7 @@ fn process_stream_message(
                 buffer.clear();
                 *active_stream_session = 0;
             }
-            let _ = done.send(());
+            let _ = done.send(StreamFinishStatus::Completed);
         }
     }
 }
@@ -1233,6 +1300,9 @@ impl LiveRuntimeInner {
 mod tests {
     use super::*;
     use crate::audio::capture::{new_callback_boundary, CapturePacket, CapturePorts};
+    use crate::audio::coordinator::{bounded_sink, SinkKind};
+    use crate::audio::frame::{AudioFrame, PreparedFrame};
+    use crate::audio::session::{SessionId, TrackId};
     use crate::audio::timeline::LossAccumulator;
     use std::sync::Barrier;
 
@@ -1589,6 +1659,51 @@ mod tests {
     }
 
     #[test]
+    fn finish_waits_for_the_last_accepted_asr_frame_before_acknowledging_once() {
+        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, 1);
+        frames_tx
+            .try_send(PreparedFrame {
+                metadata: AudioFrame {
+                    session_id: SessionId::new("finish-test").unwrap(),
+                    track_id: TrackId::new("microphone").unwrap(),
+                    sequence: 0,
+                    sample_rate_hz: 16_000,
+                    channels: 1,
+                    start_ms: 0,
+                    duration_ms: 1,
+                    sample_count: 1,
+                },
+                samples: Arc::from([0.25_f32]),
+            })
+            .unwrap();
+        frames_tx.close();
+
+        let (processed_tx, processed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let finalizations = Arc::new(AtomicU64::new(0));
+        let finalizations_for_worker = Arc::clone(&finalizations);
+        let worker = std::thread::spawn(move || {
+            drain_closed_asr_frames_before_finalizing(
+                &frames_rx,
+                |_| {
+                    processed_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {
+                    finalizations_for_worker.fetch_add(1, Ordering::SeqCst);
+                },
+                Duration::from_secs(1),
+            )
+        });
+
+        processed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(finalizations.load(Ordering::SeqCst), 0);
+        release_tx.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), StreamFinishStatus::Completed);
+        assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn stop_tail_silence_covers_final_silence_window() {
         assert_eq!(stream::silence_samples(Duration::from_millis(1500)), 24_000);
     }
@@ -1626,7 +1741,7 @@ mod tests {
             match samples_rx.recv().unwrap() {
                 StreamMessage::Finish { session, done } => {
                     assert_eq!(session, 42);
-                    done.send(()).unwrap();
+                    done.send(StreamFinishStatus::Completed).unwrap();
                 }
                 StreamMessage::Samples { .. } => panic!("expected finish message"),
             }
@@ -1649,7 +1764,7 @@ mod tests {
         let worker = std::thread::spawn(move || match samples_rx.recv().unwrap() {
             StreamMessage::Finish { session, done } => {
                 assert_eq!(session, 42);
-                done.send(()).unwrap();
+                done.send(StreamFinishStatus::Completed).unwrap();
             }
             StreamMessage::Samples { .. } => panic!("expected finish message"),
         });

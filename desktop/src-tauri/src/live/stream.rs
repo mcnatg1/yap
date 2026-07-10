@@ -17,7 +17,7 @@ pub(crate) enum StreamMessage {
     },
     Finish {
         session: u64,
-        done: mpsc::Sender<()>,
+        done: mpsc::Sender<super::runtime::StreamFinishStatus>,
     },
 }
 
