@@ -63,16 +63,29 @@ impl CaptureAdapter {
         let worker = std::thread::spawn(move || run_worker(ports, error_receiver));
         if let Err(error) = stream.play() {
             drop(stream);
-            let _ = worker.join();
-            return Err(format!("Microphone access failed: {error}"));
+            let message = format!("Microphone access failed: {error}");
+            return match join_capture_worker(worker) {
+                Ok(()) => Err(message),
+                Err(join_error) => Err(format!("{message}; {join_error}")),
+            };
         }
         Ok(Self { stream, worker })
     }
 
-    pub fn shutdown(self) {
-        drop(self.stream);
-        let _ = self.worker.join();
+    pub fn shutdown(self) -> Result<(), String> {
+        let Self { stream, worker } = self;
+        drop(stream);
+        join_capture_worker(worker)
     }
+}
+
+pub(crate) fn join_capture_worker(worker: JoinHandle<()>) -> Result<(), String> {
+    if worker.thread().id() == std::thread::current().id() {
+        return Err("Capture worker attempted to join itself.".to_string());
+    }
+    worker
+        .join()
+        .map_err(|_| "Capture worker panicked during shutdown.".to_string())
 }
 
 fn buffer_capacity_samples(buffer_size: cpal::BufferSize, channels: u16) -> Result<usize, String> {
@@ -110,7 +123,7 @@ where
         .map_err(|error| format!("Microphone access failed: {error}"))
 }
 
-struct CaptureCallback {
+pub(crate) struct CaptureCallback {
     channels: u16,
     sample_rate_hz: u32,
     buffer_capacity_samples: usize,
@@ -122,7 +135,7 @@ struct CaptureCallback {
     losses: Arc<LossAccumulator>,
 }
 
-fn new_callback_boundary(
+pub(crate) fn new_callback_boundary(
     channels: u16,
     sample_rate_hz: u32,
     buffer_capacity_samples: usize,
@@ -174,19 +187,18 @@ impl CaptureCallback {
         };
         let channels = usize::from(self.channels);
         if !input.len().is_multiple_of(channels) {
-            self.losses
-                .record(source_position_frames, 1, GapCause::DeviceDiscontinuity);
-            self.source_position_frames = None;
-            return;
-        }
-        let frame_count = match u64::try_from(input.len() / channels) {
-            Ok(frame_count) => frame_count,
-            Err(_) => {
-                self.losses
-                    .record(source_position_frames, 1, GapCause::DeviceDiscontinuity);
+            let Some(frame_count) = callback_frame_count(input.len(), channels, true) else {
+                self.losses.invalidate();
                 self.source_position_frames = None;
                 return;
-            }
+            };
+            self.record_discontinuity(source_position_frames, frame_count);
+            return;
+        }
+        let Some(frame_count) = callback_frame_count(input.len(), channels, false) else {
+            self.losses.invalidate();
+            self.source_position_frames = None;
+            return;
         };
         if frame_count == 0 {
             return;
@@ -261,6 +273,25 @@ impl CaptureCallback {
         }
     }
 
+    fn record_discontinuity(&mut self, source_position_frames: u64, frame_count: u64) {
+        let Some(next_source_position_frames) = source_position_frames.checked_add(frame_count)
+        else {
+            self.losses.record(
+                source_position_frames,
+                frame_count,
+                GapCause::DeviceDiscontinuity,
+            );
+            self.source_position_frames = None;
+            return;
+        };
+        self.source_position_frames = Some(next_source_position_frames);
+        self.losses.record(
+            source_position_frames,
+            frame_count,
+            GapCause::DeviceDiscontinuity,
+        );
+    }
+
     fn return_buffer(&mut self, mut buffer: Vec<f32>) {
         buffer.clear();
         if let Err(error) = self.return_sender.try_send(buffer) {
@@ -271,6 +302,20 @@ impl CaptureCallback {
             });
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn write_f32_for_test(&mut self, input: &[f32]) {
+        self.write(input);
+    }
+}
+
+fn callback_frame_count(input_len: usize, channels: usize, ceil: bool) -> Option<u64> {
+    let frames = if ceil {
+        input_len.checked_add(channels.checked_sub(1)?)? / channels
+    } else {
+        input_len / channels
+    };
+    u64::try_from(frames).ok()
 }
 
 trait CaptureSample {
@@ -303,7 +348,7 @@ mod tests {
     use crate::audio::frame::GapCause;
     use crate::audio::timeline::{LossSnapshot, TimelineError};
 
-    use super::{buffer_capacity_samples, new_callback_boundary};
+    use super::{buffer_capacity_samples, join_capture_worker, new_callback_boundary};
 
     const CHANNELS: u16 = 2;
     const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -482,5 +527,32 @@ mod tests {
             ports.packets.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn malformed_callback_records_its_ceil_frame_interval_and_keeps_positions_honest() {
+        let (mut callback, ports) =
+            new_callback_boundary(CHANNELS, SAMPLE_RATE_HZ, 4, 8, 100).unwrap();
+
+        callback.write(&[0.0_f32; 3]);
+        callback.write(&[0.0_f32; 2]);
+
+        assert_eq!(
+            ports.losses.drain(),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: 100,
+                dropped_frames: 2,
+                cause: GapCause::DeviceDiscontinuity,
+                generation: 0,
+            }))
+        );
+        assert_eq!(ports.packets.recv().unwrap().source_position_frames, 102);
+    }
+
+    #[test]
+    fn panicked_capture_worker_join_is_reported() {
+        let worker = std::thread::spawn(|| panic!("synthetic capture worker panic"));
+
+        assert!(join_capture_worker(worker).is_err());
     }
 }

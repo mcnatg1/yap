@@ -539,9 +539,10 @@ pub struct LossAccumulator {
     // The full handoff generation, rather than only its low slot bit, prevents ABA.
     active_generation: AtomicU64,
     registration_started: AtomicU64,
-    registration_completed: AtomicU64,
     registration_drained: AtomicU64,
     registration_completion_tickets: [AtomicU64; REGISTRATION_TICKET_CAPACITY],
+    invalid: AtomicBool,
+    registration_resetting: AtomicBool,
     drain_in_progress: AtomicBool,
     slots: [LossSlot; 2],
 }
@@ -551,10 +552,11 @@ impl LossAccumulator {
         Self {
             active_generation: AtomicU64::new(0),
             registration_started: AtomicU64::new(0),
-            registration_completed: AtomicU64::new(0),
             registration_drained: AtomicU64::new(0),
             registration_completion_tickets: [const { AtomicU64::new(0) };
                 REGISTRATION_TICKET_CAPACITY],
+            invalid: AtomicBool::new(false),
+            registration_resetting: AtomicBool::new(false),
             drain_in_progress: AtomicBool::new(false),
             slots: [LossSlot::new(), LossSlot::new()],
         }
@@ -562,6 +564,10 @@ impl LossAccumulator {
 
     pub fn record(&self, source_position_frames: u64, dropped_frames: u64, cause: GapCause) {
         self.record_inner(source_position_frames, dropped_frames, cause, || {}, || {});
+    }
+
+    pub fn invalidate(&self) {
+        self.invalid.store(true, Ordering::SeqCst);
     }
 
     fn record_inner<F, G>(
@@ -578,16 +584,9 @@ impl LossAccumulator {
         if dropped_frames == 0 {
             return;
         }
-        let started = self.registration_started.fetch_add(1, Ordering::SeqCst);
-        assert_ne!(started, u64::MAX, "loss registration counter exhausted");
-        let registration_floor = self.registration_drained.load(Ordering::SeqCst);
-        let outstanding_registrations = started
-            .checked_sub(registration_floor)
-            .expect("loss registration tickets regressed");
-        assert!(
-            outstanding_registrations < REGISTRATION_TICKET_CAPACITY as u64,
-            "loss registration ticket capacity exhausted"
-        );
+        let Some(started) = self.reserve_registration_ticket() else {
+            return;
+        };
         after_entrant_registered();
         let generation = self.active_generation.load(Ordering::SeqCst);
         after_generation_read();
@@ -596,15 +595,38 @@ impl LossAccumulator {
         let completed_ticket = started + 1;
         self.registration_completion_tickets[started as usize % REGISTRATION_TICKET_CAPACITY]
             .store(completed_ticket, Ordering::SeqCst);
-        let completed = self.registration_completed.fetch_add(1, Ordering::SeqCst);
-        assert_ne!(
-            completed,
-            u64::MAX,
-            "loss registration completion counter exhausted"
-        );
 
         slot.record(source_position_frames, dropped_frames, cause);
         slot.writers.fetch_sub(1, Ordering::Release);
+    }
+
+    fn reserve_registration_ticket(&self) -> Option<u64> {
+        if self.registration_resetting.load(Ordering::SeqCst) {
+            self.invalidate();
+            return None;
+        }
+
+        loop {
+            let started = self.registration_started.load(Ordering::SeqCst);
+            let registration_floor = self.registration_drained.load(Ordering::SeqCst);
+            let Some(outstanding_registrations) = started.checked_sub(registration_floor) else {
+                self.invalidate();
+                return None;
+            };
+            if started == u64::MAX
+                || outstanding_registrations >= REGISTRATION_TICKET_CAPACITY as u64
+            {
+                self.invalidate();
+                return None;
+            }
+            if self
+                .registration_started
+                .compare_exchange_weak(started, started + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Some(started);
+            }
+        }
     }
 
     pub fn drain(&self) -> Result<Option<LossSnapshot>, TimelineError> {
@@ -623,37 +645,76 @@ impl LossAccumulator {
         H: FnOnce(),
     {
         let _guard = self.acquire_drain(on_contention);
-        let generation = self
-            .active_generation
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| TimelineError::InvalidTiming)?;
+        let generation = self.advance_generation();
         let registration_floor = self.registration_drained.load(Ordering::SeqCst);
         let registration_target = self.registration_started.load(Ordering::SeqCst);
-        let pending_registrations = registration_target
-            .checked_sub(registration_floor)
-            .ok_or(TimelineError::InvalidTiming)?;
-        if pending_registrations > REGISTRATION_TICKET_CAPACITY as u64 {
-            return Err(TimelineError::InvalidTiming);
+        let pending_registrations = registration_target.checked_sub(registration_floor);
+        let registration_invalid = pending_registrations
+            .is_none_or(|pending| pending > REGISTRATION_TICKET_CAPACITY as u64);
+        if registration_invalid {
+            self.invalidate();
         }
         after_flip();
-        for ticket in registration_floor..registration_target {
-            let expected = ticket.checked_add(1).ok_or(TimelineError::InvalidTiming)?;
-            let completion = &self.registration_completion_tickets
-                [ticket as usize % REGISTRATION_TICKET_CAPACITY];
-            while completion.load(Ordering::SeqCst) != expected {
-                spin_loop();
+        if registration_invalid {
+            self.reset_registration_counters();
+        } else {
+            for ticket in registration_floor..registration_target {
+                let expected = ticket + 1;
+                let completion = &self.registration_completion_tickets
+                    [ticket as usize % REGISTRATION_TICKET_CAPACITY];
+                while completion.load(Ordering::SeqCst) != expected {
+                    spin_loop();
+                }
+            }
+            self.registration_drained
+                .store(registration_target, Ordering::SeqCst);
+            if registration_target == u64::MAX {
+                self.reset_registration_counters();
             }
         }
-        self.registration_drained
-            .store(registration_target, Ordering::SeqCst);
         after_registration_wait();
         let slot = &self.slots[(generation & 1) as usize];
         while slot.writers.load(Ordering::Acquire) != 0 {
             spin_loop();
         }
-        slot.take(generation)
+        let snapshot = slot.take(generation);
+        if self.invalid.swap(false, Ordering::SeqCst) {
+            Err(TimelineError::InvalidTiming)
+        } else {
+            snapshot
+        }
+    }
+
+    fn advance_generation(&self) -> u64 {
+        loop {
+            let generation = self.active_generation.load(Ordering::SeqCst);
+            let next_generation = generation.checked_add(1).unwrap_or_else(|| {
+                self.invalidate();
+                0
+            });
+            if self
+                .active_generation
+                .compare_exchange_weak(
+                    generation,
+                    next_generation,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return generation;
+            }
+        }
+    }
+
+    fn reset_registration_counters(&self) {
+        self.registration_resetting.store(true, Ordering::SeqCst);
+        self.registration_started.store(0, Ordering::SeqCst);
+        self.registration_drained.store(0, Ordering::SeqCst);
+        for ticket in &self.registration_completion_tickets {
+            ticket.store(0, Ordering::SeqCst);
+        }
+        self.registration_resetting.store(false, Ordering::SeqCst);
     }
 
     fn acquire_drain<F>(&self, on_contention: F) -> DrainGuard<'_>
@@ -1500,7 +1561,6 @@ mod tests {
         losses.record(10, 10, GapCause::CallbackPoolExhausted);
 
         assert_eq!(registration_target, 1);
-        assert_eq!(losses.registration_completed.load(Ordering::SeqCst), 1);
         assert!(!losses.registration_ticket_completed(0));
 
         release_old_registration.wait();
@@ -1509,25 +1569,47 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "loss registration counter exhausted")]
-    fn registration_started_overflow_fails_fast() {
+    fn registration_counter_exhaustion_is_invalid_and_recovers_after_drain() {
         let losses = LossAccumulator::new();
         losses
             .registration_started
             .store(u64::MAX, Ordering::Relaxed);
 
         losses.record(0, 1, GapCause::CallbackPoolExhausted);
+        assert_eq!(losses.drain(), Err(TimelineError::InvalidTiming));
+
+        losses.record(1, 1, GapCause::CallbackPoolExhausted);
+        assert_eq!(
+            losses.drain(),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: 1,
+                dropped_frames: 1,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 1,
+            }))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "loss registration completion counter exhausted")]
-    fn registration_completed_overflow_fails_fast() {
+    fn sustained_loss_past_run_and_ticket_capacity_never_panics_or_hangs() {
         let losses = LossAccumulator::new();
-        losses
-            .registration_completed
-            .store(u64::MAX, Ordering::Relaxed);
+        let records = u64::try_from(super::REGISTRATION_TICKET_CAPACITY * 3).unwrap();
 
-        losses.record(0, 1, GapCause::CallbackPoolExhausted);
+        for position in 0..records {
+            losses.record(position, 1, GapCause::CallbackPoolExhausted);
+        }
+
+        assert_eq!(losses.drain(), Err(TimelineError::InvalidTiming));
+        losses.record(records, 1, GapCause::CallbackPoolExhausted);
+        assert_eq!(
+            losses.drain(),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: records,
+                dropped_frames: 1,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 1,
+            }))
+        );
     }
 
     #[test]

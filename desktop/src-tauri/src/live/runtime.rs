@@ -1,3 +1,4 @@
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -288,7 +289,9 @@ impl LiveRuntime {
         ) {
             inner.last_used = Instant::now();
             drop(inner);
-            capture.shutdown();
+            if let Err(error) = capture.shutdown() {
+                crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
+            }
             drop(level);
             return Ok(());
         }
@@ -311,11 +314,12 @@ impl LiveRuntime {
     }
 
     pub fn stop(&self) -> StreamFinishStatus {
-        let finisher = {
+        let (finisher, shutdown_errors) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
-            inner.stop_capture();
-            inner.stream_finisher()
+            let shutdown_errors = inner.stop_capture();
+            (inner.stream_finisher(), shutdown_errors)
         };
+        log_worker_shutdown_errors(shutdown_errors);
         let finish_status = finisher
             .as_ref()
             .map(StreamFinisher::finish_session)
@@ -339,9 +343,11 @@ impl LiveRuntime {
     pub fn shutdown(&self) {
         let _transition = self.transition_guard();
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        inner.stop_capture();
+        let shutdown_errors = inner.stop_capture();
         inner.retire_stream();
         self.active_session.store(0, Ordering::SeqCst);
+        drop(inner);
+        log_worker_shutdown_errors(shutdown_errors);
     }
 
     pub(crate) fn take_recorded_pcm(&self) -> RecordedPcm {
@@ -498,7 +504,9 @@ impl LiveRuntimeInner {
         active_session: Arc<AtomicU64>,
     ) {
         if let Some(handle) = self.level.take() {
-            let _ = handle.join();
+            if let Err(error) = join_worker(handle) {
+                crate::stt::log_yap(&format!("live level worker shutdown failed: {error}"));
+            }
         }
         let handle = std::thread::spawn(move || {
             let state = app.state::<LiveSessionState>();
@@ -519,22 +527,30 @@ impl LiveRuntimeInner {
         self.level = Some(handle);
     }
 
-    fn stop_capture(&mut self) {
+    fn stop_capture(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
         if let Some(capture) = self.capture.take() {
-            capture.shutdown();
+            if let Err(error) = capture.shutdown() {
+                errors.push(error);
+            }
         }
         if let Some(handle) = self.level.take() {
-            join_worker(handle);
+            if let Err(error) = join_worker(handle) {
+                errors.push(error);
+            }
         }
         #[cfg(test)]
         {
             self.has_capture_for_test = false;
         }
+        errors
     }
 
     fn retire_stream(&mut self) {
         if let Some(stream) = self.stream.take() {
-            stream.shutdown(true);
+            if let Err(error) = stream.shutdown(true) {
+                crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
+            }
         }
         #[cfg(test)]
         {
@@ -544,7 +560,9 @@ impl LiveRuntimeInner {
 
     fn retire_stream_detached_reader(&mut self) {
         if let Some(stream) = self.stream.take() {
-            stream.shutdown(false);
+            if let Err(error) = stream.shutdown(false) {
+                crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
+            }
         }
         #[cfg(test)]
         {
@@ -571,14 +589,15 @@ impl SessionStream {
         }
     }
 
-    fn shutdown(mut self, join_reader: bool) {
+    fn shutdown(mut self, join_reader: bool) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
         drop(self.samples_tx);
         if join_reader {
             if let Some(handle) = self.worker.take() {
-                let _ = handle.join();
+                return join_worker(handle);
             }
         }
+        Ok(())
     }
 }
 
@@ -662,118 +681,233 @@ fn run_capture_worker(
     errors: mpsc::Receiver<cpal::StreamError>,
     context: CaptureWorkerContext,
 ) {
-    let packet_runtime = context.runtime.clone();
-    let packet_app = context.app.clone();
+    let CaptureWorkerContext {
+        runtime,
+        app,
+        session,
+        active_session,
+        samples_tx,
+        recorded_pcm,
+        level_tx,
+    } = context;
+    let packet_runtime = runtime.clone();
+    let packet_app = app.clone();
+    let error_runtime = runtime.clone();
+    let error_app = app.clone();
+    let loss_runtime = runtime.clone();
+    let loss_app = app.clone();
     let mut resampler = None;
     let mut capture_config = None;
     let mut level_normalizer = LiveAudioLevelNormalizer::new();
     let mut decoder_backpressure_reported = false;
     let mut decoder_disconnected_reported = false;
-    run_capture_packet_loop(
-        ports,
-        errors,
-        move |packet| {
-            if !active_session_matches(
-                context.active_session.load(Ordering::SeqCst),
-                context.session,
-            ) {
-                return;
-            }
-            let config = (packet.channels, packet.sample_rate_hz);
-            if packet.channels == 0
-                || packet.sample_rate_hz == 0
-                || capture_config.is_some_and(|current| current != config)
-            {
-                if !decoder_disconnected_reported {
-                    decoder_disconnected_reported = true;
-                    spawn_stream_crash_handler(
-                        packet_app.clone(),
-                        packet_runtime.clone(),
-                        context.session,
-                        "Microphone input configuration changed unexpectedly.".to_string(),
-                    );
-                }
-                return;
-            }
-            capture_config.get_or_insert(config);
-            let resampler = resampler.get_or_insert_with(|| {
-                LinearResampler::new(packet.sample_rate_hz, TARGET_SAMPLE_RATE)
-            });
-            let mono = downmix_to_mono(&packet.samples, usize::from(packet.channels));
-            let level = level_normalizer.normalized_level(rms_level(&mono));
-            let resampled = resampler.push(&mono);
-            let bytes = f32_to_i16_le_bytes(&resampled);
-            if !bytes.is_empty() {
-                context
-                    .recorded_pcm
-                    .lock()
-                    .expect("live pcm poisoned")
-                    .append(&bytes);
-                match try_send_stream_samples(&context.samples_tx, context.session, resampled) {
-                    StreamSendStatus::Sent => {}
-                    StreamSendStatus::BackedUp => {
-                        if !decoder_backpressure_reported {
-                            decoder_backpressure_reported = true;
-                            let state = packet_app.state::<LiveSessionState>();
-                            let view = state.mark_transcription_backpressure();
-                            let _ = packet_app.emit("live-session", &view);
-                        }
+    run_guarded_capture_packet_worker(
+        || {
+            run_capture_packet_loop(
+                ports,
+                errors,
+                move |packet| {
+                    if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
+                        return false;
                     }
-                    StreamSendStatus::Disconnected => {
+                    let config = (packet.channels, packet.sample_rate_hz);
+                    if packet.channels == 0
+                        || packet.sample_rate_hz == 0
+                        || capture_config.is_some_and(|current| current != config)
+                    {
                         if !decoder_disconnected_reported {
                             decoder_disconnected_reported = true;
                             spawn_stream_crash_handler(
                                 packet_app.clone(),
                                 packet_runtime.clone(),
-                                context.session,
-                                "Live transcription stopped unexpectedly.".to_string(),
+                                session,
+                                "Microphone input configuration changed unexpectedly.".to_string(),
                             );
                         }
+                        return true;
                     }
-                }
-            }
-            let _ = context.level_tx.send(level);
-        },
-        move |error| {
-            let message = format!("Microphone input stopped: {error}");
-            crate::stt::log_yap(&format!("live input stream error: {error}"));
-            spawn_stream_crash_handler(
-                context.app.clone(),
-                context.runtime.clone(),
-                context.session,
-                message,
+                    capture_config.get_or_insert(config);
+                    let resampler = resampler.get_or_insert_with(|| {
+                        LinearResampler::new(packet.sample_rate_hz, TARGET_SAMPLE_RATE)
+                    });
+                    let mono = downmix_to_mono(&packet.samples, usize::from(packet.channels));
+                    let level = level_normalizer.normalized_level(rms_level(&mono));
+                    let resampled = resampler.push(&mono);
+                    let bytes = f32_to_i16_le_bytes(&resampled);
+                    if !bytes.is_empty() {
+                        match recorded_pcm.lock() {
+                            Ok(mut recorded_pcm) => {
+                                recorded_pcm.append(&bytes);
+                            }
+                            Err(_) => {
+                                spawn_stream_crash_handler(
+                                    packet_app.clone(),
+                                    packet_runtime.clone(),
+                                    session,
+                                    "Live recording buffer became unavailable.".to_string(),
+                                );
+                                return true;
+                            }
+                        }
+                        match try_send_stream_samples(&samples_tx, session, resampled) {
+                            StreamSendStatus::Sent => {}
+                            StreamSendStatus::BackedUp => {
+                                if !decoder_backpressure_reported {
+                                    decoder_backpressure_reported = true;
+                                    let state = packet_app.state::<LiveSessionState>();
+                                    let view = state.mark_transcription_backpressure();
+                                    let _ = packet_app.emit("live-session", &view);
+                                }
+                            }
+                            StreamSendStatus::Disconnected => {
+                                if !decoder_disconnected_reported {
+                                    decoder_disconnected_reported = true;
+                                    spawn_stream_crash_handler(
+                                        packet_app.clone(),
+                                        packet_runtime.clone(),
+                                        session,
+                                        "Live transcription stopped unexpectedly.".to_string(),
+                                    );
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                    let _ = level_tx.send(level);
+                    false
+                },
+                move |error| {
+                    let message = format!("Microphone input stopped: {error}");
+                    crate::stt::log_yap(&format!("live input stream error: {error}"));
+                    spawn_stream_crash_handler(
+                        error_app.clone(),
+                        error_runtime.clone(),
+                        session,
+                        message,
+                    );
+                    true
+                },
+                move |loss| match loss {
+                    Ok(snapshot) => {
+                        crate::stt::log_yap(&format!(
+                            "live capture degraded: source_position_frames={} dropped_frames={} cause={:?}",
+                            snapshot.first_source_position_frames,
+                            snapshot.dropped_frames,
+                            snapshot.cause
+                        ));
+                        false
+                    }
+                    Err(_) => {
+                        spawn_stream_crash_handler(
+                            loss_app.clone(),
+                            loss_runtime.clone(),
+                            session,
+                            "Microphone capture timing became invalid.".to_string(),
+                        );
+                        true
+                    }
+                },
             );
         },
+        move |message| spawn_stream_crash_handler(app, runtime, session, message),
     );
 }
 
-fn run_capture_packet_loop<P, E>(
+fn run_guarded_capture_packet_worker<R, C>(run: R, process_crash: C)
+where
+    R: FnOnce(),
+    C: FnOnce(String),
+{
+    if catch_unwind(AssertUnwindSafe(run)).is_err() {
+        process_crash("Live capture worker stopped unexpectedly.".to_string());
+    }
+}
+
+fn run_capture_packet_loop<P, E, L>(
     ports: CapturePorts,
     errors: mpsc::Receiver<cpal::StreamError>,
+    process_packet: P,
+    process_error: E,
+    process_loss: L,
+) where
+    P: FnMut(&CapturePacket) -> bool,
+    E: FnMut(cpal::StreamError) -> bool,
+    L: FnMut(
+        Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
+    ) -> bool,
+{
+    run_capture_packet_loop_with_timeout(
+        ports,
+        errors,
+        Duration::from_millis(50),
+        process_packet,
+        process_error,
+        process_loss,
+    );
+}
+
+fn run_capture_packet_loop_with_timeout<P, E, L>(
+    ports: CapturePorts,
+    errors: mpsc::Receiver<cpal::StreamError>,
+    receive_timeout: Duration,
     mut process_packet: P,
     mut process_error: E,
+    mut process_loss: L,
 ) where
-    P: FnMut(&CapturePacket),
-    E: FnMut(cpal::StreamError),
+    P: FnMut(&CapturePacket) -> bool,
+    E: FnMut(cpal::StreamError) -> bool,
+    L: FnMut(
+        Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
+    ) -> bool,
 {
     let CapturePorts {
         packets,
         returned_buffers,
-        losses: _losses,
+        losses,
     } = ports;
     loop {
-        while let Ok(error) = errors.try_recv() {
-            process_error(error);
+        if drain_capture_losses(&losses, &mut process_loss) {
+            break;
         }
-        match packets.recv_timeout(Duration::from_millis(50)) {
+        let mut should_exit = false;
+        while let Ok(error) = errors.try_recv() {
+            if process_error(error) {
+                should_exit = true;
+                break;
+            }
+        }
+        if should_exit {
+            break;
+        }
+        match packets.recv_timeout(receive_timeout) {
             Ok(mut packet) => {
-                process_packet(&packet);
+                let should_exit = process_packet(&packet);
                 packet.samples.clear();
                 let _ = returned_buffers.try_send(packet.samples);
+                if should_exit {
+                    break;
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+    let _ = drain_capture_losses(&losses, &mut process_loss);
+}
+
+fn drain_capture_losses<L>(
+    losses: &crate::audio::timeline::LossAccumulator,
+    process_loss: &mut L,
+) -> bool
+where
+    L: FnMut(
+        Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
+    ) -> bool,
+{
+    match losses.drain() {
+        Ok(Some(snapshot)) => process_loss(Ok(snapshot)),
+        Ok(None) => false,
+        Err(error) => process_loss(Err(error)),
     }
 }
 
@@ -798,11 +932,19 @@ fn spawn_stream_crash_handler(
     std::thread::spawn(move || runtime.handle_stream_crash(app, session, &message));
 }
 
-fn join_worker(handle: JoinHandle<()>) {
+fn join_worker(handle: JoinHandle<()>) -> Result<(), String> {
     if handle.thread().id() == thread::current().id() {
-        return;
+        return Err("Worker attempted to join itself.".to_string());
     }
-    let _ = handle.join();
+    handle
+        .join()
+        .map_err(|_| "Worker panicked during shutdown.".to_string())
+}
+
+fn log_worker_shutdown_errors(errors: Vec<String>) {
+    for error in errors {
+        crate::stt::log_yap(&format!("live worker shutdown failed: {error}"));
+    }
 }
 
 fn claim_warmup(warming: &AtomicBool) -> bool {
@@ -1003,7 +1145,7 @@ impl LiveRuntimeInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::capture::{CapturePacket, CapturePorts};
+    use crate::audio::capture::{new_callback_boundary, CapturePacket, CapturePorts};
     use crate::audio::timeline::LossAccumulator;
 
     #[test]
@@ -1030,7 +1172,7 @@ mod tests {
         };
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run_capture_packet_loop(ports, error_rx, |_| {}, |_| {});
+            run_capture_packet_loop(ports, error_rx, |_| false, |_| false, |_| false);
             done_tx.send(()).unwrap();
         });
         let mut samples = Vec::with_capacity(4);
@@ -1052,6 +1194,131 @@ mod tests {
         drop(error_tx);
 
         done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn capture_packet_loop_drains_loss_on_timeout_without_packets() {
+        let (packet_tx, packet_rx) = mpsc::sync_channel(1);
+        let (returned_tx, _) = mpsc::sync_channel(8);
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let losses = Arc::new(LossAccumulator::new());
+        let ports = CapturePorts {
+            packets: packet_rx,
+            returned_buffers: returned_tx,
+            losses: Arc::clone(&losses),
+        };
+        let (loss_tx, loss_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_capture_packet_loop_with_timeout(
+                ports,
+                error_rx,
+                Duration::from_millis(1),
+                |_| false,
+                |_| false,
+                move |loss| loss_tx.send(loss).is_err(),
+            );
+        });
+
+        std::thread::sleep(Duration::from_millis(5));
+        losses.record(240, 160, crate::audio::frame::GapCause::SinkUnavailable);
+        let snapshot = loss_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.first_source_position_frames, 240);
+        assert_eq!(snapshot.dropped_frames, 160);
+        assert_eq!(
+            snapshot.cause,
+            crate::audio::frame::GapCause::SinkUnavailable
+        );
+
+        drop(packet_tx);
+        drop(error_tx);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn capture_packet_loop_periodically_drains_sustained_losses_with_honest_positions() {
+        let (mut callback, ports) = new_callback_boundary(2, 48_000, 2, 0, 1_000).unwrap();
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let (loss_tx, loss_rx) = mpsc::channel();
+        let (packet_started_tx, packet_started_rx) = mpsc::channel();
+        let (release_packet_tx, release_packet_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_capture_packet_loop_with_timeout(
+                ports,
+                error_rx,
+                Duration::from_millis(1),
+                move |_| {
+                    packet_started_tx.send(()).unwrap();
+                    release_packet_rx.recv().unwrap();
+                    false
+                },
+                |_| false,
+                move |loss| loss_tx.send(loss).is_err(),
+            );
+        });
+
+        let mut next_source_position = 1_000_u64;
+        for _ in 0..64 {
+            loop {
+                callback.write_f32_for_test(&[0.0_f32, 0.0]);
+                next_source_position += 1;
+                if packet_started_rx
+                    .recv_timeout(Duration::from_millis(10))
+                    .is_ok()
+                {
+                    break;
+                }
+                let snapshot = loss_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    snapshot.first_source_position_frames,
+                    next_source_position - 1
+                );
+                assert_eq!(snapshot.dropped_frames, 1);
+            }
+
+            let first_lost_position = next_source_position;
+            for _ in 0..8 {
+                callback.write_f32_for_test(&[0.0_f32, 0.0]);
+                next_source_position += 1;
+            }
+            release_packet_tx.send(()).unwrap();
+            let snapshot = loss_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.first_source_position_frames, first_lost_position);
+            assert_eq!(snapshot.dropped_frames, 8);
+            assert_eq!(
+                snapshot.cause,
+                crate::audio::frame::GapCause::SinkUnavailable
+            );
+        }
+
+        drop(callback);
+        drop(error_tx);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn guarded_capture_packet_worker_reports_a_synthetic_panic_and_exits() {
+        let (crash_tx, crash_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_guarded_capture_packet_worker(
+                || panic!("synthetic packet worker panic"),
+                move |message| crash_tx.send(message).unwrap(),
+            );
+        });
+
+        assert_eq!(
+            crash_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "Live capture worker stopped unexpectedly."
+        );
         worker.join().unwrap();
     }
 
