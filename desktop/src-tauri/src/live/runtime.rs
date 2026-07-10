@@ -5,9 +5,9 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tauri::{Emitter, Manager};
 
+use crate::audio::capture::{CaptureAdapter, CapturePacket, CapturePorts};
 use crate::audio::preprocess::{
     downmix_to_mono, f32_to_i16_le_bytes, rms_level,
     AudioLevelNormalizer as LiveAudioLevelNormalizer, LinearResampler,
@@ -39,9 +39,8 @@ pub struct LiveRuntime {
 
 struct LiveRuntimeInner {
     session: u64,
-    capture: Option<cpal::Stream>,
+    capture: Option<CaptureAdapter>,
     stream: Option<SessionStream>,
-    audio: Option<JoinHandle<()>>,
     level: Option<JoinHandle<()>>,
     last_used: Instant,
     #[cfg(test)]
@@ -66,11 +65,6 @@ enum StreamMessage {
         session: u64,
         done: mpsc::Sender<()>,
     },
-}
-
-struct RawAudio {
-    session: u64,
-    samples: Vec<f32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -255,21 +249,36 @@ impl LiveRuntime {
         };
         let _ = app.emit("live-session", &view);
 
-        let capture = open_capture(
-            self.clone(),
-            app.clone(),
-            selected_device_id.as_deref(),
-            session,
-            Arc::clone(&self.active_session),
-            stream_tx,
-            Arc::clone(&self.recorded_pcm),
-        );
-        let (capture, level, audio) = match capture {
-            Ok(capture) => capture,
-            Err(error) => {
-                return Err(LiveStartFailure::new(session, error));
-            }
-        };
+        let resolved = super::devices::resolve_capture_device(selected_device_id.as_deref())
+            .map_err(|error| LiveStartFailure::new(session, error))?;
+        let stream_config = resolved.config.config();
+        let sample_format = resolved.config.sample_format();
+        let (level_tx, level) = mpsc::channel::<f32>();
+        let capture_runtime = self.clone();
+        let capture_app = app.clone();
+        let capture_active_session = Arc::clone(&self.active_session);
+        let capture_recorded_pcm = Arc::clone(&self.recorded_pcm);
+        let capture = CaptureAdapter::open(
+            resolved.device,
+            stream_config,
+            sample_format,
+            move |ports, errors| {
+                run_capture_worker(
+                    ports,
+                    errors,
+                    CaptureWorkerContext {
+                        runtime: capture_runtime,
+                        app: capture_app,
+                        session,
+                        active_session: capture_active_session,
+                        samples_tx: stream_tx,
+                        recorded_pcm: capture_recorded_pcm,
+                        level_tx,
+                    },
+                );
+            },
+        )
+        .map_err(|error| LiveStartFailure::new(session, error))?;
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         if !should_install_capture(
             session,
@@ -279,13 +288,11 @@ impl LiveRuntime {
         ) {
             inner.last_used = Instant::now();
             drop(inner);
-            drop(capture);
+            capture.shutdown();
             drop(level);
-            drop(audio);
             return Ok(());
         }
         inner.capture = Some(capture);
-        inner.audio = Some(audio);
         inner.start_level_worker(app, level, session, Arc::clone(&self.active_session));
         Ok(())
     }
@@ -426,7 +433,6 @@ impl LiveRuntimeInner {
             session: 0,
             capture: None,
             stream: None,
-            audio: None,
             level: None,
             last_used: Instant::now(),
             #[cfg(test)]
@@ -514,9 +520,8 @@ impl LiveRuntimeInner {
     }
 
     fn stop_capture(&mut self) {
-        self.capture.take();
-        if let Some(handle) = self.audio.take() {
-            join_worker(handle);
+        if let Some(capture) = self.capture.take() {
+            capture.shutdown();
         }
         if let Some(handle) = self.level.take() {
             join_worker(handle);
@@ -642,113 +647,134 @@ impl StreamFinisher {
     }
 }
 
-fn open_capture(
+struct CaptureWorkerContext {
     runtime: LiveRuntime,
     app: tauri::AppHandle,
-    selected_device_id: Option<&str>,
     session: u64,
     active_session: Arc<AtomicU64>,
     samples_tx: mpsc::SyncSender<StreamMessage>,
     recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
-) -> Result<(cpal::Stream, mpsc::Receiver<f32>, JoinHandle<()>), String> {
-    let host = cpal::default_host();
-    let device = resolve_capture_device(&host, selected_device_id)
-        .ok_or_else(|| "No input detected.".to_string())?;
-    let config = device
-        .default_input_config()
-        .map_err(|err| format!("Microphone access failed: {err}"))?;
-    let channels = usize::from(config.channels());
-    let sample_rate = config.sample_rate().0;
-    let stream_config = config.config();
-    let (raw_tx, raw_rx) = mpsc::sync_channel::<RawAudio>(8);
-    let raw_ready = Arc::new(AtomicBool::new(true));
-    let (level_tx, level_rx) = mpsc::channel::<f32>();
-    let audio_active_session = Arc::clone(&active_session);
-    let audio_raw_ready = Arc::clone(&raw_ready);
-    let audio_runtime = runtime.clone();
-    let audio_app = app.clone();
-    let decoder_backpressure_reported = Arc::new(AtomicBool::new(false));
-    let audio_decoder_backpressure_reported = Arc::clone(&decoder_backpressure_reported);
-    let decoder_disconnected_reported = Arc::new(AtomicBool::new(false));
-    let audio_decoder_disconnected_reported = Arc::clone(&decoder_disconnected_reported);
-    let audio = std::thread::spawn(move || {
-        let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE);
-        let mut level_normalizer = LiveAudioLevelNormalizer::new();
-        while let Ok(raw) = raw_rx.recv() {
-            if !active_session_matches(audio_active_session.load(Ordering::SeqCst), raw.session) {
-                audio_raw_ready.store(true, Ordering::Release);
-                continue;
+    level_tx: mpsc::Sender<f32>,
+}
+
+fn run_capture_worker(
+    ports: CapturePorts,
+    errors: mpsc::Receiver<cpal::StreamError>,
+    context: CaptureWorkerContext,
+) {
+    let packet_runtime = context.runtime.clone();
+    let packet_app = context.app.clone();
+    let mut resampler = None;
+    let mut capture_config = None;
+    let mut level_normalizer = LiveAudioLevelNormalizer::new();
+    let mut decoder_backpressure_reported = false;
+    let mut decoder_disconnected_reported = false;
+    run_capture_packet_loop(
+        ports,
+        errors,
+        move |packet| {
+            if !active_session_matches(
+                context.active_session.load(Ordering::SeqCst),
+                context.session,
+            ) {
+                return;
             }
-            let mono = downmix_to_mono(&raw.samples, channels);
+            let config = (packet.channels, packet.sample_rate_hz);
+            if packet.channels == 0
+                || packet.sample_rate_hz == 0
+                || capture_config.is_some_and(|current| current != config)
+            {
+                if !decoder_disconnected_reported {
+                    decoder_disconnected_reported = true;
+                    spawn_stream_crash_handler(
+                        packet_app.clone(),
+                        packet_runtime.clone(),
+                        context.session,
+                        "Microphone input configuration changed unexpectedly.".to_string(),
+                    );
+                }
+                return;
+            }
+            capture_config.get_or_insert(config);
+            let resampler = resampler.get_or_insert_with(|| {
+                LinearResampler::new(packet.sample_rate_hz, TARGET_SAMPLE_RATE)
+            });
+            let mono = downmix_to_mono(&packet.samples, usize::from(packet.channels));
             let level = level_normalizer.normalized_level(rms_level(&mono));
             let resampled = resampler.push(&mono);
             let bytes = f32_to_i16_le_bytes(&resampled);
             if !bytes.is_empty() {
-                // Keep live WAV data in memory for short dictation sessions.
-                recorded_pcm
+                context
+                    .recorded_pcm
                     .lock()
                     .expect("live pcm poisoned")
                     .append(&bytes);
-                // If the decoder falls behind, keep the saved WAV path bounded and drop the live chunk.
-                match try_send_stream_samples(&samples_tx, raw.session, resampled) {
+                match try_send_stream_samples(&context.samples_tx, context.session, resampled) {
                     StreamSendStatus::Sent => {}
                     StreamSendStatus::BackedUp => {
-                        if !audio_decoder_backpressure_reported.swap(true, Ordering::AcqRel) {
-                            let state = audio_app.state::<LiveSessionState>();
+                        if !decoder_backpressure_reported {
+                            decoder_backpressure_reported = true;
+                            let state = packet_app.state::<LiveSessionState>();
                             let view = state.mark_transcription_backpressure();
-                            let _ = audio_app.emit("live-session", &view);
+                            let _ = packet_app.emit("live-session", &view);
                         }
                     }
                     StreamSendStatus::Disconnected => {
-                        if !audio_decoder_disconnected_reported.swap(true, Ordering::AcqRel) {
+                        if !decoder_disconnected_reported {
+                            decoder_disconnected_reported = true;
                             spawn_stream_crash_handler(
-                                audio_app.clone(),
-                                audio_runtime.clone(),
-                                raw.session,
+                                packet_app.clone(),
+                                packet_runtime.clone(),
+                                context.session,
                                 "Live transcription stopped unexpectedly.".to_string(),
                             );
                         }
                     }
                 }
             }
-            let _ = level_tx.send(level);
-            audio_raw_ready.store(true, Ordering::Release);
+            let _ = context.level_tx.send(level);
+        },
+        move |error| {
+            let message = format!("Microphone input stopped: {error}");
+            crate::stt::log_yap(&format!("live input stream error: {error}"));
+            spawn_stream_crash_handler(
+                context.app.clone(),
+                context.runtime.clone(),
+                context.session,
+                message,
+            );
+        },
+    );
+}
+
+fn run_capture_packet_loop<P, E>(
+    ports: CapturePorts,
+    errors: mpsc::Receiver<cpal::StreamError>,
+    mut process_packet: P,
+    mut process_error: E,
+) where
+    P: FnMut(&CapturePacket),
+    E: FnMut(cpal::StreamError),
+{
+    let CapturePorts {
+        packets,
+        returned_buffers,
+        losses: _losses,
+    } = ports;
+    loop {
+        while let Ok(error) = errors.try_recv() {
+            process_error(error);
         }
-    });
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => build_capture_stream::<f32>(
-            &device,
-            &stream_config,
-            session,
-            Arc::clone(&active_session),
-            Arc::clone(&raw_ready),
-            raw_tx,
-            capture_error_handler(runtime.clone(), app.clone(), session),
-        ),
-        cpal::SampleFormat::I16 => build_capture_stream::<i16>(
-            &device,
-            &stream_config,
-            session,
-            Arc::clone(&active_session),
-            Arc::clone(&raw_ready),
-            raw_tx,
-            capture_error_handler(runtime.clone(), app.clone(), session),
-        ),
-        cpal::SampleFormat::U16 => build_capture_stream::<u16>(
-            &device,
-            &stream_config,
-            session,
-            Arc::clone(&active_session),
-            Arc::clone(&raw_ready),
-            raw_tx,
-            capture_error_handler(runtime, app, session),
-        ),
-        sample_format => Err(format!("Unsupported microphone format: {sample_format}")),
-    }?;
-    stream
-        .play()
-        .map_err(|err| format!("Microphone access failed: {err}"))?;
-    Ok((stream, level_rx, audio))
+        match packets.recv_timeout(Duration::from_millis(50)) {
+            Ok(mut packet) => {
+                process_packet(&packet);
+                packet.samples.clear();
+                let _ = returned_buffers.try_send(packet.samples);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }
 
 fn try_send_stream_samples(
@@ -760,18 +786,6 @@ fn try_send_stream_samples(
         Ok(()) => StreamSendStatus::Sent,
         Err(mpsc::TrySendError::Full(_)) => StreamSendStatus::BackedUp,
         Err(mpsc::TrySendError::Disconnected(_)) => StreamSendStatus::Disconnected,
-    }
-}
-
-fn capture_error_handler(
-    runtime: LiveRuntime,
-    app: tauri::AppHandle,
-    session: u64,
-) -> impl FnMut(cpal::StreamError) + Send + 'static {
-    move |err| {
-        let message = format!("Microphone input stopped: {err}");
-        crate::stt::log_yap(&format!("live input stream error: {err}"));
-        spawn_stream_crash_handler(app.clone(), runtime.clone(), session, message);
     }
 }
 
@@ -789,45 +803,6 @@ fn join_worker(handle: JoinHandle<()>) {
         return;
     }
     let _ = handle.join();
-}
-
-fn build_capture_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    session: u64,
-    active_session: Arc<AtomicU64>,
-    raw_ready: Arc<AtomicBool>,
-    raw_tx: mpsc::SyncSender<RawAudio>,
-    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
-) -> Result<cpal::Stream, String>
-where
-    T: cpal::SizedSample + SampleToF32,
-{
-    device
-        .build_input_stream(
-            config,
-            move |data: &[T], _| {
-                if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
-                    return;
-                }
-                if !claim_raw_audio_slot(&raw_ready) {
-                    return;
-                }
-                let samples = data.iter().map(SampleToF32::to_f32).collect::<Vec<_>>();
-                if raw_tx.try_send(RawAudio { session, samples }).is_err() {
-                    raw_ready.store(true, Ordering::Release);
-                }
-            },
-            err_fn,
-            Some(Duration::from_millis(250)),
-        )
-        .map_err(|err| format!("Microphone access failed: {err}"))
-}
-
-fn claim_raw_audio_slot(raw_ready: &AtomicBool) -> bool {
-    raw_ready
-        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
 }
 
 fn claim_warmup(warming: &AtomicBool) -> bool {
@@ -1013,78 +988,6 @@ fn should_install_capture(
         && !has_capture
 }
 
-fn resolve_capture_device(host: &cpal::Host, selected_id: Option<&str>) -> Option<cpal::Device> {
-    let default_name = host
-        .default_input_device()
-        .and_then(|device| device.name().ok());
-    let devices = host.input_devices().ok()?;
-    let named_devices = devices
-        .enumerate()
-        .filter_map(|(index, device)| {
-            let name = device.name().ok()?;
-            Some((index, device, name))
-        })
-        .collect::<Vec<_>>();
-    let selected_index = choose_capture_device_index(
-        named_devices
-            .iter()
-            .map(|(index, _, name)| (*index, Some(name.as_str()))),
-        default_name.as_deref(),
-        selected_id,
-    )?;
-    named_devices
-        .into_iter()
-        .find_map(|(index, device, _)| (index == selected_index).then_some(device))
-}
-
-fn choose_capture_device_index<'a, I>(
-    devices: I,
-    default_name: Option<&str>,
-    selected_id: Option<&str>,
-) -> Option<usize>
-where
-    I: IntoIterator<Item = (usize, Option<&'a str>)>,
-{
-    let mut first = None;
-    let mut default = None;
-    for (index, name) in devices {
-        let Some(name) = name else {
-            continue;
-        };
-        let id = format!("{index}:{name}");
-        if selected_id.is_some_and(|selected| selected == id) {
-            return Some(index);
-        }
-        first.get_or_insert(index);
-        if default.is_none() && default_name == Some(name) {
-            default = Some(index);
-        }
-    }
-    default.or(first)
-}
-
-trait SampleToF32 {
-    fn to_f32(&self) -> f32;
-}
-
-impl SampleToF32 for f32 {
-    fn to_f32(&self) -> f32 {
-        *self
-    }
-}
-
-impl SampleToF32 for i16 {
-    fn to_f32(&self) -> f32 {
-        (*self as f32 / i16::MAX as f32).clamp(-1.0, 1.0)
-    }
-}
-
-impl SampleToF32 for u16 {
-    fn to_f32(&self) -> f32 {
-        ((*self as f32 - 32_768.0) / 32_768.0).clamp(-1.0, 1.0)
-    }
-}
-
 #[cfg(test)]
 impl LiveRuntimeInner {
     fn for_test() -> Self {
@@ -1100,6 +1003,8 @@ impl LiveRuntimeInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::capture::{CapturePacket, CapturePorts};
+    use crate::audio::timeline::LossAccumulator;
 
     #[test]
     fn stream_crash_retires_runtime_handles() {
@@ -1114,25 +1019,40 @@ mod tests {
     }
 
     #[test]
-    fn stop_capture_detaches_current_audio_worker_without_deadlock() {
-        let inner = Arc::new(Mutex::new(LiveRuntimeInner::for_test()));
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (go_tx, go_rx) = mpsc::channel();
+    fn capture_packet_worker_returns_buffer_and_joins_after_disconnect() {
+        let (packet_tx, packet_rx) = mpsc::sync_channel(1);
+        let (returned_tx, returned_rx) = mpsc::sync_channel(8);
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let ports = CapturePorts {
+            packets: packet_rx,
+            returned_buffers: returned_tx,
+            losses: Arc::new(LossAccumulator::new()),
+        };
         let (done_tx, done_rx) = mpsc::channel();
-        let worker_inner = Arc::clone(&inner);
-        let handle = std::thread::spawn(move || {
-            ready_tx.send(()).unwrap();
-            go_rx.recv().unwrap();
-            worker_inner.lock().unwrap().stop_capture();
+        let worker = std::thread::spawn(move || {
+            run_capture_packet_loop(ports, error_rx, |_| {}, |_| {});
             done_tx.send(()).unwrap();
         });
+        let mut samples = Vec::with_capacity(4);
+        samples.extend([0.25, -0.25]);
+        let allocation = samples.as_ptr();
+        packet_tx
+            .send(CapturePacket {
+                source_position_frames: 0,
+                channels: 2,
+                sample_rate_hz: 48_000,
+                samples,
+            })
+            .unwrap();
 
-        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        inner.lock().unwrap().audio = Some(handle);
-        go_tx.send(()).unwrap();
+        let returned = returned_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(returned.as_ptr(), allocation);
+        assert!(returned.is_empty());
+        drop(packet_tx);
+        drop(error_tx);
 
         done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(inner.lock().unwrap().audio.is_none());
+        worker.join().unwrap();
     }
 
     #[test]
@@ -1206,26 +1126,6 @@ mod tests {
         drop(first);
         acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         worker.join().unwrap();
-    }
-
-    #[test]
-    fn capture_device_selection_skips_unreadable_names() {
-        let devices = [(0, None), (1, Some("USB mic"))];
-
-        assert_eq!(
-            choose_capture_device_index(devices, Some("USB mic"), None),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn audio_callback_claims_only_one_raw_slot() {
-        let ready = AtomicBool::new(true);
-
-        assert!(claim_raw_audio_slot(&ready));
-        assert!(!claim_raw_audio_slot(&ready));
-        ready.store(true, Ordering::Release);
-        assert!(claim_raw_audio_slot(&ready));
     }
 
     #[test]

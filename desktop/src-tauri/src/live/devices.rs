@@ -24,6 +24,12 @@ pub struct ResolvedInputDevice {
     pub recovered: bool,
 }
 
+pub(crate) struct ResolvedCaptureDevice {
+    pub(crate) selection: ResolvedInputDevice,
+    pub(crate) device: cpal::Device,
+    pub(crate) config: cpal::SupportedStreamConfig,
+}
+
 pub fn list_input_devices(selected_id: Option<&str>) -> Vec<LiveInputDeviceView> {
     let host = cpal::default_host();
     let devices = input_device_infos(&host);
@@ -63,29 +69,14 @@ fn resolve_input_device_from_infos(
 }
 
 pub fn preflight_input_device(selected_id: Option<&str>) -> Result<ResolvedInputDevice, String> {
-    let host = cpal::default_host();
-    let resolved = resolve_input_device(selected_id);
-    let Some(selected_id) = resolved.id.as_deref() else {
-        return Err("No input detected.".into());
-    };
-    let device = host
-        .input_devices()
-        .map_err(|err| format!("Microphone access failed: {err}"))?
-        .enumerate()
-        .find_map(|(index, device)| {
-            let name = device.name().ok()?;
-            (device_id(index, &name) == selected_id).then_some(device)
-        })
-        .ok_or_else(|| "Selected microphone is unavailable.".to_string())?;
-    let config = device
-        .default_input_config()
-        .map_err(|err| format!("Microphone access failed: {err}"))?;
+    let resolved = resolve_capture_device(selected_id)?;
     let heard_input = Arc::new(AtomicBool::new(false));
     let heard_input_for_callback = Arc::clone(&heard_input);
-    let stream = device
+    let stream = resolved
+        .device
         .build_input_stream_raw(
-            &config.config(),
-            config.sample_format(),
+            &resolved.config.config(),
+            resolved.config.sample_format(),
             move |data, _| {
                 if data.len() > 0 {
                     heard_input_for_callback.store(true, Ordering::Relaxed);
@@ -103,7 +94,55 @@ pub fn preflight_input_device(selected_id: Option<&str>) -> Result<ResolvedInput
     if !heard_input.load(Ordering::Relaxed) {
         return Err("No input detected.".into());
     }
-    Ok(resolved)
+    Ok(resolved.selection)
+}
+
+pub(crate) fn resolve_capture_device(
+    selected_id: Option<&str>,
+) -> Result<ResolvedCaptureDevice, String> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let devices = host
+        .input_devices()
+        .map_err(|error| format!("Microphone access failed: {error}"))?
+        .enumerate()
+        .filter_map(|(index, device)| {
+            let label = device.name().ok()?;
+            Some((
+                DeviceInfo {
+                    id: device_id(index, &label),
+                    is_default: default_name.as_deref() == Some(label.as_str()),
+                    label,
+                },
+                device,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let infos = devices
+        .iter()
+        .map(|(info, _)| info.clone())
+        .collect::<Vec<_>>();
+    let selected =
+        select_input_device(&infos, selected_id).ok_or_else(|| "No input detected.".to_string())?;
+    let recovered = selected_id.is_some_and(|requested| requested != selected.id);
+    let (_, device) = devices
+        .into_iter()
+        .find(|(info, _)| info.id == selected.id)
+        .ok_or_else(|| "Selected microphone is unavailable.".to_string())?;
+    let config = device
+        .default_input_config()
+        .map_err(|error| format!("Microphone access failed: {error}"))?;
+    Ok(ResolvedCaptureDevice {
+        selection: ResolvedInputDevice {
+            id: Some(selected.id),
+            label: Some(selected.label),
+            recovered,
+        },
+        device,
+        config,
+    })
 }
 
 fn input_device_infos(host: &cpal::Host) -> Vec<DeviceInfo> {
