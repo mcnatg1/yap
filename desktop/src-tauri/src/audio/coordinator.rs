@@ -258,6 +258,8 @@ pub struct Coordinator {
     level_normalizer: AudioLevelNormalizer,
     pending_losses: Vec<crate::audio::timeline::LossSnapshot>,
     revision_events: Vec<RevisionEvent>,
+    #[cfg(test)]
+    loss_pending_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Coordinator {
@@ -274,6 +276,8 @@ impl Coordinator {
             level_normalizer: AudioLevelNormalizer::new(),
             pending_losses: Vec::new(),
             revision_events: Vec::new(),
+            #[cfg(test)]
+            loss_pending_hook: None,
         }
     }
 
@@ -440,6 +444,11 @@ impl Coordinator {
         &self.revision_events
     }
 
+    #[cfg(test)]
+    fn set_loss_pending_hook_for_test(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.loss_pending_hook = Some(hook);
+    }
+
     fn sink(&self, kind: SinkKind) -> Option<&BoundedSink<PreparedFrame>> {
         match kind {
             SinkKind::Recording => Some(&self.ports.recording),
@@ -457,7 +466,14 @@ impl Coordinator {
         loop {
             match losses.try_drain() {
                 Ok(TryDrain::Snapshot(loss)) => drained.push(loss),
-                Ok(TryDrain::Pending | TryDrain::Empty) => return Ok(drained),
+                Ok(TryDrain::Pending) => {
+                    #[cfg(test)]
+                    if let Some(hook) = self.loss_pending_hook.take() {
+                        hook();
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(TryDrain::Empty) => return Ok(drained),
                 Err(error) => return Err(format!("Capture loss timing failed: {error}")),
             }
         }
@@ -893,6 +909,70 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, TimelineEvent::Frame(frame) if frame.sequence == 1 && frame.start_ms == 20)
         ));
+    }
+
+    #[test]
+    fn pending_loss_registration_blocks_rate_change_until_the_old_clock_applies_it() {
+        let (ports, _recording_rx, _) = ports(2, None);
+        let mut coordinator = Coordinator::new(session(), track(), ports);
+        let losses = Arc::new(LossAccumulator::new());
+        coordinator.consume(&packet(0), &losses).unwrap();
+
+        let registration_started = Arc::new(Barrier::new(2));
+        let release_registration = Arc::new(Barrier::new(2));
+        let loss_writer = {
+            let losses = Arc::clone(&losses);
+            let registration_started = Arc::clone(&registration_started);
+            let release_registration = Arc::clone(&release_registration);
+            std::thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    480,
+                    480,
+                    GapCause::SinkUnavailable,
+                    || {
+                        registration_started.wait();
+                    },
+                    || {
+                        release_registration.wait();
+                    },
+                );
+            })
+        };
+        registration_started.wait();
+
+        let rate_change_pending = Arc::new(Barrier::new(2));
+        coordinator.set_loss_pending_hook_for_test({
+            let rate_change_pending = Arc::clone(&rate_change_pending);
+            Arc::new(move || {
+                rate_change_pending.wait();
+            })
+        });
+        std::thread::scope(|scope| {
+            let consume = scope.spawn(|| {
+                coordinator.consume(
+                    &CapturePacket {
+                        sample_rate_hz: 44_100,
+                        ..packet(960)
+                    },
+                    &losses,
+                )
+            });
+            rate_change_pending.wait();
+            release_registration.wait();
+            consume.join().unwrap().unwrap();
+        });
+        loss_writer.join().unwrap();
+
+        let events = coordinator.timeline_events();
+        let gap_index = events
+            .iter()
+            .position(|event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 10 && gap.duration_ms == 10))
+            .unwrap();
+        let new_configuration_index = events
+            .iter()
+            .position(|event| matches!(event, TimelineEvent::TrackConfigured(configuration) if configuration.revision == 2))
+            .unwrap();
+        assert!(gap_index < new_configuration_index);
     }
 
     #[test]

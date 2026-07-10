@@ -26,6 +26,7 @@ const MAX_RECORDED_PCM_SECONDS: usize = 10 * 60;
 const MAX_RECORDED_PCM_BYTES: usize = TARGET_SAMPLE_RATE as usize * 2 * MAX_RECORDED_PCM_SECONDS;
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
+const ASR_ADAPTER_CANCEL_GRACE: Duration = Duration::from_millis(100);
 const CRASH_CLAIM_BIT: u64 = 1 << 63;
 
 fn active_session_matches(active_session: u64, session: u64) -> bool {
@@ -65,7 +66,14 @@ struct SessionStream {
 struct SessionAsrAdapter {
     frames_tx: BoundedSink<PreparedFrame>,
     cancelled: Arc<AtomicBool>,
+    completed_rx: Option<mpsc::Receiver<()>>,
     worker: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterDrainStatus {
+    Drained,
+    TimedOut,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -345,16 +353,25 @@ impl LiveRuntime {
     }
 
     pub fn stop(&self) -> StreamFinishStatus {
-        let (finisher, shutdown_errors) = {
+        let (finisher, adapter_status, shutdown_errors) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
-            let shutdown_errors = inner.stop_capture();
-            (inner.stream_finisher(), shutdown_errors)
+            let (shutdown_errors, adapter_status) = inner.stop_capture();
+            (
+                adapter_status
+                    .is_none()
+                    .then(|| inner.stream_finisher())
+                    .flatten(),
+                adapter_status,
+                shutdown_errors,
+            )
         };
         log_worker_shutdown_errors(shutdown_errors);
-        let finish_status = finisher
-            .as_ref()
-            .map(StreamFinisher::finish_session)
-            .unwrap_or(StreamFinishStatus::NoStream);
+        let finish_status = adapter_status.unwrap_or_else(|| {
+            finisher
+                .as_ref()
+                .map(StreamFinisher::finish_session)
+                .unwrap_or(StreamFinishStatus::NoStream)
+        });
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         if finish_status.should_retire_stream() {
             inner.retire_stream_detached_reader();
@@ -374,7 +391,7 @@ impl LiveRuntime {
     pub fn shutdown(&self) {
         let _transition = self.transition_guard();
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        let shutdown_errors = inner.stop_capture();
+        let (shutdown_errors, _) = inner.stop_capture();
         inner.retire_stream();
         self.active_session.store(0, Ordering::SeqCst);
         drop(inner);
@@ -569,8 +586,9 @@ impl LiveRuntimeInner {
         self.level = Some(handle);
     }
 
-    fn stop_capture(&mut self) -> Vec<String> {
+    fn stop_capture(&mut self) -> (Vec<String>, Option<StreamFinishStatus>) {
         let mut errors = Vec::new();
+        let mut adapter_status = None;
         if let Some(capture) = self.capture.take() {
             if let Err(error) = capture.shutdown() {
                 errors.push(error);
@@ -582,8 +600,15 @@ impl LiveRuntimeInner {
             }
         }
         if let Some(mut adapter) = self.asr_adapter.take() {
-            if let Err(error) = adapter.join_after_capture() {
-                errors.push(error);
+            match adapter.drain_after_capture(STREAM_DRAIN_ON_STOP) {
+                Ok(AdapterDrainStatus::Drained) => {}
+                Ok(AdapterDrainStatus::TimedOut) => {
+                    adapter_status = Some(StreamFinishStatus::TimedOut);
+                }
+                Err(error) => {
+                    errors.push(error);
+                    adapter_status = Some(StreamFinishStatus::Disconnected);
+                }
             }
         }
         if let Some(handle) = self.level.take() {
@@ -595,7 +620,7 @@ impl LiveRuntimeInner {
         {
             self.has_capture_for_test = false;
         }
-        errors
+        (errors, adapter_status)
     }
 
     fn retire_stream(&mut self) {
@@ -668,12 +693,15 @@ impl SessionAsrAdapter {
         let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
-            run_session_asr_adapter_worker(frames_rx, samples_tx, session, worker_cancelled)
+            run_session_asr_adapter_worker(frames_rx, samples_tx, session, worker_cancelled);
+            let _ = completed_tx.send(());
         });
         Self {
             frames_tx,
             cancelled,
+            completed_rx: Some(completed_rx),
             worker: Some(worker),
         }
     }
@@ -682,18 +710,91 @@ impl SessionAsrAdapter {
         self.frames_tx.clone()
     }
 
+    #[cfg(test)]
     fn join_after_capture(&mut self) -> Result<(), String> {
-        if let Some(worker) = self.worker.take() {
-            join_worker(worker)
-        } else {
-            Ok(())
+        self.drain_after_capture(STREAM_DRAIN_ON_STOP)
+            .and_then(|status| match status {
+                AdapterDrainStatus::Drained => Ok(()),
+                AdapterDrainStatus::TimedOut => Err("ASR adapter drain timed out.".to_string()),
+            })
+    }
+
+    fn drain_after_capture(&mut self, timeout: Duration) -> Result<AdapterDrainStatus, String> {
+        self.frames_tx.close();
+        match self.wait_for_completion(timeout)? {
+            AdapterDrainStatus::Drained => Ok(AdapterDrainStatus::Drained),
+            AdapterDrainStatus::TimedOut => {
+                self.cancelled.store(true, Ordering::SeqCst);
+                self.close_and_reap_after_cancel();
+                Ok(AdapterDrainStatus::TimedOut)
+            }
+        }
+    }
+
+    fn wait_for_completion(&mut self, timeout: Duration) -> Result<AdapterDrainStatus, String> {
+        let completed_rx = self
+            .completed_rx
+            .as_ref()
+            .ok_or_else(|| "ASR adapter completion was already consumed.".to_string())?;
+        match completed_rx.recv_timeout(timeout) {
+            Ok(()) => {
+                self.completed_rx.take();
+                if let Some(worker) = self.worker.take() {
+                    join_worker(worker)?;
+                }
+                Ok(AdapterDrainStatus::Drained)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(AdapterDrainStatus::TimedOut),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(worker) = self.worker.take() {
+                    join_worker(worker)?;
+                }
+                Err("ASR adapter stopped without reporting completion.".to_string())
+            }
+        }
+    }
+
+    fn close_and_reap_after_cancel(&mut self) {
+        self.frames_tx.close();
+        match self.wait_for_completion(ASR_ADAPTER_CANCEL_GRACE) {
+            Ok(AdapterDrainStatus::Drained) => {}
+            Ok(AdapterDrainStatus::TimedOut) => self.hand_off_worker(),
+            Err(error) => {
+                crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"))
+            }
+        }
+    }
+
+    fn hand_off_worker(&mut self) {
+        if let (Some(worker), Some(completed_rx)) = (self.worker.take(), self.completed_rx.take()) {
+            let _ = thread::Builder::new()
+                .name("live-asr-adapter-reaper".to_string())
+                .spawn(move || {
+                    let _ = completed_rx.recv();
+                    if let Err(error) = join_worker(worker) {
+                        crate::stt::log_yap(&format!("live ASR adapter reaper failed: {error}"));
+                    }
+                });
         }
     }
 
     fn cancel_and_join(&mut self) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
-        self.frames_tx.close();
-        self.join_after_capture()
+        self.close_and_reap_after_cancel();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn stop_after_capture_for_test(
+    adapter: &mut SessionAsrAdapter,
+    finisher: &StreamFinisher,
+    timeout: Duration,
+) -> StreamFinishStatus {
+    match adapter.drain_after_capture(timeout) {
+        Ok(AdapterDrainStatus::Drained) => finisher.finish_session(),
+        Ok(AdapterDrainStatus::TimedOut) => StreamFinishStatus::TimedOut,
+        Err(_) => StreamFinishStatus::Disconnected,
     }
 }
 
@@ -1684,6 +1785,41 @@ mod tests {
             }
             StreamMessage::Finish { .. } => panic!("expected the accepted frame"),
         }
+    }
+
+    #[test]
+    fn stalled_recognizer_times_out_stop_without_enqueuing_finish() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+        samples_tx
+            .try_send(StreamMessage::Samples {
+                session: 7,
+                samples: vec![0.0],
+            })
+            .unwrap();
+        let mut adapter = SessionAsrAdapter::start(samples_tx.clone(), 7);
+        let port = adapter.sink();
+        port.try_send(prepared_frame(0.25)).unwrap();
+        port.close();
+        let finisher = StreamFinisher {
+            samples_tx,
+            session: 7,
+        };
+
+        let started = Instant::now();
+        let status =
+            stop_after_capture_for_test(&mut adapter, &finisher, Duration::from_millis(25));
+
+        assert_eq!(status, StreamFinishStatus::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(adapter.worker.is_none());
+        assert!(matches!(
+            samples_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            StreamMessage::Samples { .. }
+        ));
+        assert!(matches!(
+            samples_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
     }
 
     #[test]
