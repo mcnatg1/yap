@@ -51,8 +51,23 @@ pub struct RetryMetadata {
     pub max_attempts: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CaptureChunkDescriptor {
+    pub session_id: SessionId,
+    pub track_id: TrackId,
+    pub chunk_id: String,
+    pub sequence_start: u64,
+    pub sequence_end: u64,
+    pub start_ms: u64,
+    pub duration_ms: u32,
+    pub sample_rate_hz: u32,
+    pub codec: AudioCodec,
+    pub vad_segments: Vec<VadSegment>,
+    pub purpose: AudioPurpose,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioChunkEnvelope {
     pub session_id: SessionId,
     pub track_id: TrackId,
@@ -126,6 +141,79 @@ impl AudioChunkEnvelope {
                 attempt: 1,
                 max_attempts: 1,
             },
+        })
+    }
+
+    pub fn capture_descriptor(&self) -> CaptureChunkDescriptor {
+        CaptureChunkDescriptor {
+            session_id: self.session_id.clone(),
+            track_id: self.track_id.clone(),
+            chunk_id: self.chunk_id.clone(),
+            sequence_start: self.sequence_start,
+            sequence_end: self.sequence_end,
+            start_ms: self.start_ms,
+            duration_ms: self.duration_ms,
+            sample_rate_hz: self.sample_rate_hz,
+            codec: self.codec,
+            vad_segments: self.vad_segments.clone(),
+            purpose: self.purpose,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureChunkDescriptorWire {
+    session_id: LegacyChunkSessionId,
+    #[serde(default)]
+    track_id: Option<TrackId>,
+    chunk_id: String,
+    sequence_start: u64,
+    #[serde(default)]
+    sequence_end: Option<u64>,
+    start_ms: u64,
+    duration_ms: u32,
+    sample_rate_hz: u32,
+    codec: AudioCodec,
+    vad_segments: Vec<VadSegment>,
+    purpose: AudioPurpose,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum LegacyChunkSessionId {
+    Current(SessionId),
+    Numeric(u64),
+}
+
+impl<'de> serde::Deserialize<'de> for CaptureChunkDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CaptureChunkDescriptorWire::deserialize(deserializer)?;
+        let session_id = match wire.session_id {
+            LegacyChunkSessionId::Current(session_id) => session_id,
+            LegacyChunkSessionId::Numeric(value) => {
+                SessionId::new(format!("legacy-{value}")).map_err(serde::de::Error::custom)?
+            }
+        };
+        let track_id = wire
+            .track_id
+            .unwrap_or_else(|| TrackId::new("legacy-0").expect("static legacy track ID is valid"));
+
+        Ok(Self {
+            session_id,
+            track_id,
+            chunk_id: wire.chunk_id,
+            sequence_start: wire.sequence_start,
+            sequence_end: wire.sequence_end.unwrap_or(wire.sequence_start),
+            start_ms: wire.start_ms,
+            duration_ms: wire.duration_ms,
+            sample_rate_hz: wire.sample_rate_hz,
+            codec: wire.codec,
+            vad_segments: wire.vad_segments,
+            purpose: wire.purpose,
         })
     }
 }
@@ -217,6 +305,23 @@ mod tests {
         assert_eq!(envelope.duration_ms, 40);
         assert_eq!(envelope.vad_segments, vad_segments);
         assert!(envelope.retry.idempotency_key.contains("mic-1"));
+    }
+
+    #[test]
+    fn capture_chunk_descriptor_serialization_excludes_transport_retry_metadata() {
+        let envelope = AudioChunkEnvelope::from_frames(
+            &[frame(1, 0, 20, 320)],
+            AudioCodec::PcmS16Le,
+            Vec::new(),
+            AudioPurpose::CaptureEnvelope,
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(envelope.capture_descriptor()).unwrap();
+
+        assert!(value.get("retry").is_none());
+        assert!(value.get("attempt").is_none());
+        assert!(value.get("maxAttempts").is_none());
     }
 
     #[test]

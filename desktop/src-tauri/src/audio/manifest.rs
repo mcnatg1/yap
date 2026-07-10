@@ -1,4 +1,6 @@
-use crate::audio::frame::{AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, VadSegment};
+use crate::audio::frame::{
+    AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, CaptureChunkDescriptor, VadSegment,
+};
 use crate::audio::session::{
     CaptureSource, CaptureTrackDescriptor, ImportedTrackProvenance, SessionId, SessionMode,
     SessionOrigin, TrackId, TrackSource,
@@ -14,7 +16,7 @@ pub struct AudioSessionEnvelope {
     pub tracks: Vec<CaptureTrackDescriptor>,
     pub started_at_ms: u64,
     pub sample_rate_hz: u32,
-    pub chunks: Vec<AudioChunkEnvelope>,
+    pub chunks: Vec<CaptureChunkDescriptor>,
     pub degraded: bool,
 }
 
@@ -88,7 +90,7 @@ pub struct AudioSessionEnvelopeBuilder {
     tracks: Vec<CaptureTrackDescriptor>,
     started_at_ms: u64,
     sample_rate_hz: u32,
-    chunks: Vec<AudioChunkEnvelope>,
+    chunks: Vec<CaptureChunkDescriptor>,
     degraded: bool,
 }
 
@@ -114,14 +116,15 @@ impl AudioSessionEnvelopeBuilder {
     }
 
     pub fn push_chunk(&mut self, chunk: AudioChunkEnvelope) {
-        self.chunks.push(chunk);
+        self.chunks.push(chunk.capture_descriptor());
     }
 
     pub fn mark_degraded(&mut self) {
         self.degraded = true;
     }
 
-    pub fn finish(mut self) -> AudioSessionEnvelope {
+    pub fn finish(mut self) -> Result<AudioSessionEnvelope, String> {
+        validate_track_sources(self.session_origin, &self.tracks)?;
         self.chunks.sort_by_key(|chunk| {
             (
                 chunk.track_id.as_str().to_owned(),
@@ -131,7 +134,7 @@ impl AudioSessionEnvelopeBuilder {
             )
         });
 
-        AudioSessionEnvelope {
+        Ok(AudioSessionEnvelope {
             session_id: self.session_id,
             session_mode: self.session_mode,
             session_origin: self.session_origin,
@@ -140,7 +143,7 @@ impl AudioSessionEnvelopeBuilder {
             sample_rate_hz: self.sample_rate_hz,
             chunks: self.chunks,
             degraded: self.degraded,
-        }
+        })
     }
 }
 
@@ -161,7 +164,7 @@ struct AudioSessionEnvelopeWire {
     #[serde(default)]
     sample_rate_hz: u32,
     #[serde(default)]
-    chunks: Vec<AudioChunkEnvelope>,
+    chunks: Vec<CaptureChunkDescriptor>,
     #[serde(default)]
     degraded: bool,
 }
@@ -203,6 +206,7 @@ impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
         let tracks = wire
             .tracks
             .unwrap_or_else(|| vec![legacy_track_descriptor(session_origin)]);
+        validate_track_sources(session_origin, &tracks).map_err(serde::de::Error::custom)?;
 
         Ok(Self {
             session_id,
@@ -215,6 +219,28 @@ impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
             degraded: wire.degraded,
         })
     }
+}
+
+fn validate_track_sources(
+    session_origin: SessionOrigin,
+    tracks: &[CaptureTrackDescriptor],
+) -> Result<(), String> {
+    let expected = match session_origin {
+        SessionOrigin::LiveCapture => "captured",
+        SessionOrigin::ImportedFile => "imported",
+    };
+    if tracks.iter().all(|track| {
+        matches!(
+            (session_origin, &track.source),
+            (SessionOrigin::LiveCapture, TrackSource::Captured { .. })
+                | (SessionOrigin::ImportedFile, TrackSource::Imported { .. })
+        )
+    }) {
+        return Ok(());
+    }
+    Err(format!(
+        "{session_origin:?} sessions must contain only {expected} tracks"
+    ))
 }
 
 fn legacy_track_descriptor(origin: SessionOrigin) -> CaptureTrackDescriptor {
@@ -606,7 +632,7 @@ mod tests {
         AudioSessionEnvelopeBuilder, ChunkWindowConfig,
     };
     use crate::audio::frame::{
-        AudioChunkEnvelope, AudioCodec, AudioFrame, AudioPurpose, RetryMetadata, VadSegment,
+        AudioCodec, AudioFrame, AudioPurpose, CaptureChunkDescriptor, RetryMetadata, VadSegment,
     };
     use crate::audio::session::{
         CaptureSource, CaptureTrackDescriptor, SessionId, SessionMode, SessionOrigin, TrackId,
@@ -661,7 +687,7 @@ mod tests {
             tracks: vec![track_descriptor()],
             started_at_ms: 1_000,
             sample_rate_hz: 16_000,
-            chunks: vec![AudioChunkEnvelope {
+            chunks: vec![CaptureChunkDescriptor {
                 session_id: session_id(55),
                 track_id: track_id(),
                 chunk_id: "s-55-mic-1-2-3-40".into(),
@@ -678,11 +704,6 @@ mod tests {
                     rms: 0.33,
                 }],
                 purpose: AudioPurpose::CaptureEnvelope,
-                retry: RetryMetadata {
-                    idempotency_key: "s-55-2-3-s-55-mic-1-2-3-40".into(),
-                    attempt: 1,
-                    max_attempts: 1,
-                },
             }],
             degraded: true,
         };
@@ -697,6 +718,7 @@ mod tests {
         assert_eq!(value["sampleRateHz"], 16_000);
         assert_eq!(value["degraded"], true);
         assert_eq!(value["chunks"][0]["chunkId"], "s-55-mic-1-2-3-40");
+        assert!(value["chunks"][0].get("retry").is_none());
     }
 
     #[test]
@@ -822,7 +844,7 @@ mod tests {
         session_builder.push_chunk(second_chunk);
         session_builder.mark_degraded();
 
-        let session = session_builder.finish();
+        let session = session_builder.finish().unwrap();
 
         assert_eq!(session.session_id, session_id(55));
         assert_eq!(session.session_origin, SessionOrigin::LiveCapture);
@@ -832,6 +854,20 @@ mod tests {
         assert_eq!(session.chunks.len(), 2);
         assert_eq!(session.chunks[0].sequence_start, 2);
         assert_eq!(session.chunks[1].sequence_start, 4);
+    }
+
+    #[test]
+    fn session_builder_rejects_origin_and_track_source_mismatch() {
+        let builder = AudioSessionEnvelopeBuilder::new(
+            session_id(55),
+            SessionMode::Dictation,
+            SessionOrigin::ImportedFile,
+            vec![track_descriptor()],
+            1_000,
+            16_000,
+        );
+
+        assert!(builder.finish().is_err());
     }
 
     fn window_config(preserve_silence_markers: bool) -> ChunkWindowConfig {
@@ -1191,6 +1227,59 @@ mod tests {
             manifest.tracks[0].source,
             crate::audio::session::TrackSource::Captured { .. }
         ));
+    }
+
+    #[test]
+    fn legacy_manifest_with_numeric_nested_chunk_session_ids_deserializes() {
+        let manifest: AudioSessionEnvelope = serde_json::from_value(serde_json::json!({
+            "sessionId": 7,
+            "source": "live",
+            "startedAtMs": 0,
+            "sampleRateHz": 16_000,
+            "chunks": [{
+                "sessionId": 7,
+                "chunkId": "7-1-20",
+                "sequenceStart": 1,
+                "startMs": 0,
+                "durationMs": 20,
+                "sampleRateHz": 16_000,
+                "codec": "pcm_s16_le",
+                "vadSegments": [],
+                "purpose": "captureEnvelope",
+                "retry": {
+                    "idempotencyKey": "7-1-7-1-20",
+                    "attempt": 1,
+                    "maxAttempts": 1
+                }
+            }],
+            "degraded": false
+        }))
+        .unwrap();
+
+        assert_eq!(manifest.session_id.as_str(), "legacy-7");
+        assert_eq!(manifest.chunks[0].session_id.as_str(), "legacy-7");
+        assert_eq!(manifest.chunks[0].track_id.as_str(), "legacy-0");
+        assert_eq!(manifest.chunks[0].sequence_end, 1);
+    }
+
+    #[test]
+    fn manifest_deserialization_rejects_origin_and_track_source_mismatch() {
+        let result = serde_json::from_value::<AudioSessionEnvelope>(serde_json::json!({
+            "sessionId": "s-imported",
+            "sessionMode": "dictation",
+            "sessionOrigin": "imported_file",
+            "tracks": [{
+                "trackId": "mic-1",
+                "source": { "kind": "captured", "source": "microphone" },
+                "deviceId": "dev-opaque"
+            }],
+            "startedAtMs": 0,
+            "sampleRateHz": 16_000,
+            "chunks": [],
+            "degraded": false
+        }));
+
+        assert!(result.is_err());
     }
 
     #[test]
