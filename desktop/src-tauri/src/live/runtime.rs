@@ -63,7 +63,10 @@ enum RecordingFinalizationState {
     Pending,
     Finalizing,
     Finalized(Box<Option<RecordingFinalizeResult>>),
-    Failed(String),
+    Failed {
+        error: String,
+        session_id: Option<SessionId>,
+    },
 }
 
 impl RecordingFinalization {
@@ -74,18 +77,16 @@ impl RecordingFinalization {
         }
     }
 
-    fn reset(&self) {
+    fn prepare_for_new_recording(&self) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
-            .expect("recording finalization state poisoned");
-        while matches!(*state, RecordingFinalizationState::Finalizing) {
-            state = self
-                .completed
-                .wait(state)
-                .expect("recording finalization state poisoned");
+            .map_err(|_| "recording finalization state became unavailable")?;
+        if matches!(*state, RecordingFinalizationState::Finalizing) {
+            return Err("Previous live recording is still finalizing.".into());
         }
         *state = RecordingFinalizationState::Pending;
+        Ok(())
     }
 }
 
@@ -105,6 +106,7 @@ impl<'a> RecordingFinalizationLease<'a> {
     fn finish(
         mut self,
         result: Result<Option<RecordingFinalizeResult>, String>,
+        session_id: Option<SessionId>,
     ) -> Result<Option<RecordingFinalizeResult>, String> {
         let mut state = self
             .finalization
@@ -113,7 +115,10 @@ impl<'a> RecordingFinalizationLease<'a> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *state = match &result {
             Ok(result) => RecordingFinalizationState::Finalized(Box::new(result.clone())),
-            Err(error) => RecordingFinalizationState::Failed(error.clone()),
+            Err(error) => RecordingFinalizationState::Failed {
+                error: error.clone(),
+                session_id,
+            },
         };
         self.completed = true;
         self.finalization.completed.notify_all();
@@ -132,9 +137,10 @@ impl Drop for RecordingFinalizationLease<'_> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if matches!(*state, RecordingFinalizationState::Finalizing) {
-            *state = RecordingFinalizationState::Failed(
-                "recording finalization interrupted before completion".into(),
-            );
+            *state = RecordingFinalizationState::Failed {
+                error: "recording finalization interrupted before completion".into(),
+                session_id: None,
+            };
         }
         self.finalization.completed.notify_all();
     }
@@ -293,7 +299,8 @@ impl LiveRuntime {
                 return Ok(());
             }
             drop(inner);
-            self.recording_finalization.reset();
+            self.ensure_recording_ready_to_start()
+                .map_err(|message| LiveStartFailure::new(0, message))?;
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
                 return Ok(());
@@ -347,9 +354,13 @@ impl LiveRuntime {
         let capture_active_session = Arc::clone(&self.active_session);
         let (recording_sink, recording_rx) =
             bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
-        let recording_handle = RecordingSinkHandle::spawn(
-            super::recordings::recordings_dir(),
-            SessionId::new(format!("live-{session}")).expect("live session IDs are valid"),
+        let recording_directory = super::recordings::recordings_dir();
+        let recording_session =
+            crate::audio::recording::allocate_recording_session(&recording_directory)
+                .map_err(|message| LiveStartFailure::new(session, message))?;
+        let recording_handle = RecordingSinkHandle::spawn_reserved(
+            recording_directory,
+            recording_session,
             recording_sink,
             recording_rx,
         );
@@ -485,7 +496,7 @@ impl LiveRuntime {
             loop {
                 match &*state {
                     RecordingFinalizationState::Finalized(result) => return Ok((**result).clone()),
-                    RecordingFinalizationState::Failed(error) => return Err(error.clone()),
+                    RecordingFinalizationState::Failed { error, .. } => return Err(error.clone()),
                     RecordingFinalizationState::Pending => {
                         *state = RecordingFinalizationState::Finalizing;
                         break RecordingFinalizationLease::new(&self.recording_finalization);
@@ -500,17 +511,60 @@ impl LiveRuntime {
                 }
             }
         };
-        let result = (|| {
-            let recording = {
-                let mut inner = self
-                    .inner
-                    .lock()
-                    .map_err(|_| "live runtime became unavailable")?;
-                inner.recording.take()
-            };
-            recording.map(|recording| recording.finalize()).transpose()
-        })();
-        lease.finish(result)
+        let (result, session_id) = match self.inner.lock() {
+            Ok(mut inner) => {
+                let recording = inner.recording.take();
+                let session_id = recording
+                    .as_ref()
+                    .map(|recording| recording.session_id().clone());
+                (
+                    recording.map(|recording| recording.finalize()).transpose(),
+                    session_id,
+                )
+            }
+            Err(_) => (Err("live runtime became unavailable".into()), None),
+        };
+        lease.finish(result, session_id)
+    }
+
+    pub(crate) fn recording_finalization_failure(&self) -> Option<(SessionId, String)> {
+        let state = self.recording_finalization.state.lock().ok()?;
+        match &*state {
+            RecordingFinalizationState::Failed {
+                error,
+                session_id: Some(session_id),
+            } => Some((session_id.clone(), error.clone())),
+            _ => None,
+        }
+    }
+
+    fn ensure_recording_ready_to_start(&self) -> Result<(), String> {
+        let prior_recording = self
+            .inner
+            .lock()
+            .map_err(|_| "live runtime became unavailable")?
+            .recording
+            .is_some();
+        if prior_recording {
+            return Err("Previous live recording must be finalized before starting again.".into());
+        }
+        self.recording_finalization.prepare_for_new_recording()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_unavailable_recording_for_test(&self, session_id: SessionId) {
+        let (sink, _receiver) = bounded_sink(SinkKind::Recording, 1);
+        self.inner.lock().unwrap().recording = Some(
+            RecordingSinkHandle::spawn_unavailable_for_test(sink, session_id),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_panicking_recording_for_test(&self, session_id: SessionId) {
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        self.inner.lock().unwrap().recording = Some(RecordingSinkHandle::spawn_panicking_for_test(
+            sink, receiver, session_id,
+        ));
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -1935,6 +1989,51 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first, repeated);
         assert_eq!(first.unwrap_err(), "live runtime became unavailable");
+    }
+
+    #[test]
+    fn direct_stop_then_start_rejects_unconsumed_recording_until_finalized() {
+        let runtime = LiveRuntime::new();
+        let session_id = SessionId::new("s-direct-restart").unwrap();
+        runtime.install_unavailable_recording_for_test(session_id.clone());
+
+        assert_eq!(
+            runtime.ensure_recording_ready_to_start(),
+            Err("Previous live recording must be finalized before starting again.".into())
+        );
+        assert_eq!(
+            runtime.finalize_recording(),
+            Err("recording worker is unavailable".into())
+        );
+        assert_eq!(
+            runtime.recording_finalization_failure(),
+            Some((session_id, "recording worker is unavailable".into()))
+        );
+        assert!(runtime.ensure_recording_ready_to_start().is_ok());
+    }
+
+    #[test]
+    fn direct_stop_then_successful_finalize_allows_the_next_start() {
+        let runtime = LiveRuntime::new();
+        let directory =
+            std::env::temp_dir().join(format!("yap-runtime-direct-restart-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        let session_id = SessionId::new("s-direct-restart-success").unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        runtime.inner.lock().unwrap().recording = Some(RecordingSinkHandle::spawn(
+            directory.clone(),
+            session_id,
+            sink,
+            receiver,
+        ));
+
+        assert!(runtime.ensure_recording_ready_to_start().is_err());
+        assert_eq!(
+            runtime.finalize_recording().unwrap().unwrap().status,
+            crate::audio::recording::CaptureStatus::Complete
+        );
+        assert!(runtime.ensure_recording_ready_to_start().is_ok());
+        std::fs::remove_dir_all(directory).ok();
     }
 
     fn wait_for_recording_finalizing(runtime: &LiveRuntime) {

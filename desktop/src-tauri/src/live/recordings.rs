@@ -32,8 +32,46 @@ fn save_session_files_to_dir(
     view: &live::state::LiveSessionView,
     dir: &std::path::Path,
 ) -> Result<Option<SavedLiveSession>, String> {
-    let capture = live_runtime.finalize_recording()?;
-    save_finalized_capture_to_dir(dir, view, capture)
+    match live_runtime.finalize_recording() {
+        Ok(capture) => save_finalized_capture_to_dir(dir, view, capture),
+        Err(error) => {
+            let (session_id, cached_error) =
+                live_runtime.recording_finalization_failure().ok_or(error)?;
+            save_unavailable_capture_transcript_to_dir(dir, view, session_id, cached_error)
+        }
+    }
+}
+
+fn save_unavailable_capture_transcript_to_dir(
+    dir: &std::path::Path,
+    view: &live::state::LiveSessionView,
+    session_id: crate::audio::session::SessionId,
+    capture_error: String,
+) -> Result<Option<SavedLiveSession>, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|err| format!("Failed to create live recordings folder: {err}"))?;
+    let name = format!("live-{session_id}");
+    let transcript_path = dir.join(format!("{name}.txt"));
+    let transcript = transcript_text(view)
+        .unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
+    write_new_text_file(&transcript_path, &format!("{transcript}\n"))
+        .map_err(|error| format!("Failed to save live transcript: {error}"))?;
+    let output_path = stable_existing_path_string(&transcript_path);
+    let warning = combine_warning(
+        view.transcription_degraded
+            .then_some(TRANSCRIPT_DEGRADED_WARNING.to_string()),
+        AUDIO_SAVE_FAILED_WARNING,
+    );
+    Ok(Some(SavedLiveSession {
+        name,
+        source_path: output_path.clone(),
+        output_path,
+        created_at_ms: unix_millis_now()?,
+        warning: combine_warning(
+            warning,
+            format!("Capture finalization failed: {capture_error}"),
+        ),
+    }))
 }
 
 fn save_finalized_capture_to_dir(
@@ -455,7 +493,10 @@ fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()
         path,
         text,
         |file| file.sync_all(),
-        |from, to| std::fs::rename(from, to),
+        |from, to| {
+            recording::publish_no_replace(from, to, "publish live transcript")
+                .map_err(std::io::Error::other)
+        },
     )
 }
 
@@ -640,6 +681,16 @@ mod tests {
     #[test]
     fn partial_capture_after_sidecar_publication_keeps_transcript_and_publishes_partial_revision() {
         assert_partial_capture_transcript(CommitFaultPoint::CommitSync);
+    }
+
+    #[test]
+    fn worker_panic_still_publishes_a_usable_transcript_without_fabricating_history() {
+        assert_unavailable_recording_transcript("s-worker-panic", true);
+    }
+
+    #[test]
+    fn unavailable_worker_still_publishes_a_usable_transcript_without_fabricating_history() {
+        assert_unavailable_recording_transcript("s-worker-unavailable", false);
     }
 
     #[test]
@@ -889,6 +940,37 @@ mod tests {
         assert!(scanned.complete.is_empty());
         assert_eq!(scanned.partial.len(), 1);
         assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn assert_unavailable_recording_transcript(session: &str, panicking: bool) {
+        let dir = test_dir(&format!("unavailable-recording-{session}"));
+        let runtime = live::runtime::LiveRuntime::new();
+        let session_id = SessionId::new(session).unwrap();
+        if panicking {
+            runtime.install_panicking_recording_for_test(session_id.clone());
+        } else {
+            runtime.install_unavailable_recording_for_test(session_id.clone());
+        }
+
+        let saved = save_session_files_to_dir(&runtime, &live_view(Some("survives"), None), &dir)
+            .unwrap()
+            .unwrap();
+        let transcript = dir.join(format!("live-{session_id}.txt"));
+
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), "survives\n");
+        assert_eq!(saved.source_path, saved.output_path);
+        assert!(saved.warning.unwrap().contains(AUDIO_SAVE_FAILED_WARNING));
+        assert!(!transcript_revision_path(&dir, &session_id, 1).exists());
+        assert!(recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .is_empty());
+        assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
+        assert!(
+            runtime.finalize_recording().is_err(),
+            "terminal error remains cached"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

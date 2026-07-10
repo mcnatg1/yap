@@ -14,7 +14,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use crate::audio::coordinator::{BoundedReceiver, BoundedSink};
 use crate::audio::frame::PreparedFrame;
 use crate::audio::preprocess::f32_to_i16_le_bytes;
-use crate::audio::session::SessionId;
+use crate::audio::session::{self, SessionId};
 
 const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const WAV_HEADER_BYTES: u64 = 44;
@@ -127,6 +127,7 @@ impl RecordingFinalizeResult {
 
 pub struct RecordingSinkHandle {
     sink: BoundedSink<PreparedFrame>,
+    session_id: SessionId,
     state: Mutex<RecordingSinkState>,
     completed: Condvar,
     #[cfg(test)]
@@ -146,19 +147,40 @@ impl RecordingSinkHandle {
         sink: BoundedSink<PreparedFrame>,
         receiver: BoundedReceiver<PreparedFrame>,
     ) -> Self {
+        Self::spawn_inner(directory, session_id, sink, receiver, false)
+    }
+
+    pub(crate) fn spawn_reserved(
+        directory: PathBuf,
+        session_id: SessionId,
+        sink: BoundedSink<PreparedFrame>,
+        receiver: BoundedReceiver<PreparedFrame>,
+    ) -> Self {
+        Self::spawn_inner(directory, session_id, sink, receiver, true)
+    }
+
+    fn spawn_inner(
+        directory: PathBuf,
+        session_id: SessionId,
+        sink: BoundedSink<PreparedFrame>,
+        receiver: BoundedReceiver<PreparedFrame>,
+        reserved_wav_part: bool,
+    ) -> Self {
         let worker_session_id = session_id.clone();
         let worker = std::thread::spawn(move || {
-            run_recording_worker(directory, worker_session_id, receiver)
+            run_recording_worker(directory, worker_session_id, receiver, reserved_wav_part)
         });
-        Self::with_worker(sink, worker)
+        Self::with_worker(sink, session_id, worker)
     }
 
     fn with_worker(
         sink: BoundedSink<PreparedFrame>,
+        session_id: SessionId,
         worker: JoinHandle<RecordingFinalizeResult>,
     ) -> Self {
         Self {
             sink,
+            session_id,
             state: Mutex::new(RecordingSinkState {
                 worker: Some(worker),
                 result: None,
@@ -174,13 +196,33 @@ impl RecordingSinkHandle {
     pub(crate) fn spawn_panicking_for_test(
         sink: BoundedSink<PreparedFrame>,
         _receiver: BoundedReceiver<PreparedFrame>,
+        session_id: SessionId,
     ) -> Self {
         Self::with_worker(
             sink,
+            session_id,
             std::thread::spawn(|| -> RecordingFinalizeResult {
                 panic!("injected recording worker panic")
             }),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_unavailable_for_test(
+        sink: BoundedSink<PreparedFrame>,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            sink,
+            session_id,
+            state: Mutex::new(RecordingSinkState {
+                worker: None,
+                result: None,
+                finalizing: false,
+            }),
+            completed: Condvar::new(),
+            finalization_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     #[cfg(test)]
@@ -197,6 +239,10 @@ impl RecordingSinkHandle {
 
     pub fn sink(&self) -> BoundedSink<PreparedFrame> {
         self.sink.clone()
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
     }
 
     pub fn finalize(&self) -> Result<RecordingFinalizeResult, String> {
@@ -243,8 +289,13 @@ fn run_recording_worker(
     directory: PathBuf,
     session_id: SessionId,
     receiver: BoundedReceiver<PreparedFrame>,
+    reserved_wav_part: bool,
 ) -> RecordingFinalizeResult {
-    let mut recording = match StreamingRecording::create(&directory, session_id.clone()) {
+    let mut recording = match if reserved_wav_part {
+        StreamingRecording::create_reserved(&directory, session_id.clone())
+    } else {
+        StreamingRecording::create(&directory, session_id.clone())
+    } {
         Ok(recording) => recording,
         Err(error) => {
             return RecordingFinalizeResult {
@@ -558,9 +609,49 @@ impl RecordingPaths {
     }
 }
 
+/// Allocates a persistent recording identity by atomically reserving its first
+/// on-disk artifact. Runtime-local counters are deliberately not part of this ID.
+pub(crate) fn allocate_recording_session(directory: &Path) -> Result<SessionId, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
+    session::allocate_recording(|session_id| reserve_wav_part(directory, session_id))
+}
+
+fn reserve_wav_part(directory: &Path, session_id: &SessionId) -> std::io::Result<()> {
+    let paths = RecordingPaths::new(directory, session_id.clone());
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&paths.wav_part)?;
+    file.sync_all()?;
+    drop(file);
+
+    let prefix = format!("live-{session_id}.");
+    let conflicting_artifact = fs::read_dir(directory)?.any(|entry| {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with(&prefix) && entry.path() != paths.wav_part
+    });
+    if conflicting_artifact {
+        fs::remove_file(&paths.wav_part)?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "recording artifact prefix already exists",
+        ));
+    }
+    Ok(())
+}
+
 impl StreamingRecording {
     pub fn create(directory: &Path, session_id: SessionId) -> Result<Self, String> {
-        Self::create_inner(directory, session_id, None)
+        Self::create_inner(directory, session_id, false, None)
+    }
+
+    pub(crate) fn create_reserved(directory: &Path, session_id: SessionId) -> Result<Self, String> {
+        Self::create_inner(directory, session_id, true, None)
     }
 
     #[cfg(test)]
@@ -569,19 +660,36 @@ impl StreamingRecording {
         session_id: SessionId,
         fault: CommitFaultPoint,
     ) -> Result<Self, String> {
-        Self::create_inner(directory, session_id, Some(fault))
+        Self::create_inner(directory, session_id, false, Some(fault))
     }
 
     fn create_inner(
         directory: &Path,
         session_id: SessionId,
+        reserved_wav_part: bool,
         #[cfg(test)] fault: Option<CommitFaultPoint>,
         #[cfg(not(test))] _fault: Option<()>,
     ) -> Result<Self, String> {
         fs::create_dir_all(directory)
             .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
         let paths = RecordingPaths::new(directory, session_id.clone());
-        let mut audio = create_new(&paths.wav_part, "recording audio")?;
+        let mut audio = if reserved_wav_part {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&paths.wav_part)
+                .map_err(|error| format!("Failed to open reserved recording audio: {error}"))?
+        } else {
+            create_new(&paths.wav_part, "recording audio")?
+        };
+        if audio
+            .metadata()
+            .map_err(|error| format!("Failed to inspect recording audio: {error}"))?
+            .len()
+            != 0
+        {
+            return Err("Reserved recording audio was unexpectedly non-empty".into());
+        }
         write_wav_header(&mut audio, 0)?;
         audio
             .sync_data()
@@ -724,8 +832,7 @@ impl StreamingRecording {
         drop(self.journal_file.take());
 
         self.hit_fault(CommitFaultPoint::FinalArtifactRename)?;
-        fs::rename(&self.paths.wav_part, &self.paths.wav)
-            .map_err(|error| format!("Failed to finalize live audio: {error}"))?;
+        publish_no_replace(&self.paths.wav_part, &self.paths.wav, "finalize live audio")?;
 
         let audio_sha256 = sha256_file(&self.paths.wav)?;
         let audio_bytes = fs::metadata(&self.paths.wav)
@@ -748,8 +855,11 @@ impl StreamingRecording {
         write_json_file(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
         self.hit_fault(CommitFaultPoint::SidecarSync)?;
         sync_file(&self.paths.sidecar_part, "capture sidecar")?;
-        fs::rename(&self.paths.sidecar_part, &self.paths.sidecar)
-            .map_err(|error| format!("Failed to publish capture sidecar: {error}"))?;
+        publish_no_replace(
+            &self.paths.sidecar_part,
+            &self.paths.sidecar,
+            "publish capture sidecar",
+        )?;
         let sidecar_sha256 = sha256_file(&self.paths.sidecar)?;
 
         let manifest = CaptureCommitManifest {
@@ -768,8 +878,11 @@ impl StreamingRecording {
         self.hit_fault(CommitFaultPoint::CommitSync)?;
         sync_file(&self.paths.commit_part, "capture commit")?;
         self.hit_fault(CommitFaultPoint::CommitRename)?;
-        fs::rename(&self.paths.commit_part, &self.paths.commit)
-            .map_err(|error| format!("Failed to publish capture commit: {error}"))?;
+        publish_no_replace(
+            &self.paths.commit_part,
+            &self.paths.commit,
+            "publish capture commit",
+        )?;
         let _ = sync_parent_directory(&self.paths.directory);
         fs::remove_file(&self.paths.journal_part).ok();
         Ok(())
@@ -834,11 +947,11 @@ impl StreamingRecording {
             "partial capture sidecar",
         )?;
         sync_file(&self.paths.partial_sidecar_part, "partial capture sidecar")?;
-        fs::rename(
+        publish_no_replace(
             &self.paths.partial_sidecar_part,
             &self.paths.partial_sidecar,
-        )
-        .map_err(|error| format!("Failed to publish partial capture sidecar: {error}"))?;
+            "publish partial capture sidecar",
+        )?;
         let _ = sync_parent_directory(&self.paths.directory);
         Ok(PartialCaptureLineage {
             capture_sidecar_file: self
@@ -896,6 +1009,19 @@ fn create_new(path: &Path, label: &str) -> Result<File, String> {
         .read(true)
         .open(path)
         .map_err(|error| format!("Failed to create {label}: {error}"))
+}
+
+/// Publishes a fully synced same-directory artifact without ever replacing an
+/// existing path. Hard-link creation is atomic and refuses collisions on the
+/// supported local filesystems used for recordings.
+pub(crate) fn publish_no_replace(
+    source: &Path,
+    destination: &Path,
+    label: &str,
+) -> Result<(), String> {
+    fs::hard_link(source, destination).map_err(|error| format!("Failed to {label}: {error}"))?;
+    fs::remove_file(source)
+        .map_err(|error| format!("Failed to remove published {label} staging file: {error}"))
 }
 
 fn write_wav_header(file: &mut File, data_bytes: u64) -> Result<(), String> {
@@ -1363,7 +1489,9 @@ mod tests {
     fn sink_handle_caches_worker_panic_for_racing_and_repeated_callers() {
         let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
         let handle = Arc::new(RecordingSinkHandle::spawn_panicking_for_test(
-            sink, receiver,
+            sink,
+            receiver,
+            SessionId::new("s-panicking-recording").unwrap(),
         ));
         let barrier = Arc::new(std::sync::Barrier::new(3));
 
@@ -1409,6 +1537,90 @@ mod tests {
         assert!(scan.complete.is_empty());
         assert_eq!(scan.partial.len(), 1);
         assert_eq!(scan.partial[0].session_id.as_ref(), Some(&session));
+    }
+
+    #[test]
+    fn persistent_allocation_survives_runtime_restarts_without_reusing_numeric_names() {
+        let dir = tempfile_dir("persistent-allocation-restart");
+        let first = allocate_recording_session(&dir).unwrap();
+        let mut first_recording = StreamingRecording::create_reserved(&dir, first.clone()).unwrap();
+        first_recording.append_pcm16(&[1, 0]).unwrap();
+        first_recording.finalize().unwrap();
+
+        let second = allocate_recording_session(&dir).unwrap();
+
+        assert_ne!(first, second);
+        assert!(dir.join(format!("live-{first}.commit.json")).is_file());
+        assert!(dir.join(format!("live-{second}.wav.part")).is_file());
+    }
+
+    #[test]
+    fn reservation_rejects_every_preexisting_artifact_for_the_same_session() {
+        let session = SessionId::new("s-existing-artifact").unwrap();
+        for suffix in [
+            ".wav",
+            ".txt",
+            ".capture.json",
+            ".capture.partial.json",
+            ".commit.json",
+            ".transcript.r1.json",
+            ".capture.journal.part",
+        ] {
+            let dir = tempfile_dir(&format!("preexisting-{}", suffix.replace('.', "-")));
+            std::fs::write(dir.join(format!("live-{session}{suffix}")), b"existing").unwrap();
+
+            let error = reserve_wav_part(&dir, &session).unwrap_err();
+
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{suffix}");
+            assert!(!dir.join(format!("live-{session}.wav.part")).exists());
+        }
+    }
+
+    #[test]
+    fn concurrent_persistent_allocations_reserve_distinct_wav_parts() {
+        let dir = tempfile_dir("concurrent-persistent-allocation");
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let directory = dir.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                allocate_recording_session(&directory).unwrap()
+            }));
+        }
+        barrier.wait();
+        let sessions = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(sessions.len(), 4);
+        for session in sessions {
+            assert!(dir.join(format!("live-{session}.wav.part")).is_file());
+        }
+    }
+
+    #[test]
+    fn collision_safe_publication_never_overwrites_an_existing_artifact() {
+        let dir = tempfile_dir("no-overwrite-publication");
+        for suffix in [
+            ".wav",
+            ".capture.json",
+            ".capture.partial.json",
+            ".commit.json",
+            ".txt",
+            ".transcript.r1.json",
+        ] {
+            let source = dir.join(format!("staged{suffix}.part"));
+            let destination = dir.join(format!("live-s-safe{suffix}"));
+            std::fs::write(&source, b"new").unwrap();
+            std::fs::write(&destination, b"old").unwrap();
+
+            assert!(publish_no_replace(&source, &destination, "test publish").is_err());
+            assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+            assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        }
     }
 
     #[test]
