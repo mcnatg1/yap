@@ -45,6 +45,7 @@ struct LiveRuntimeInner {
     session: u64,
     capture: Option<CaptureAdapter>,
     stream: Option<SessionStream>,
+    asr_adapter: Option<SessionAsrAdapter>,
     recording: Option<JoinHandle<()>>,
     level: Option<JoinHandle<()>>,
     last_used: Instant,
@@ -56,8 +57,13 @@ struct LiveRuntimeInner {
 
 struct SessionStream {
     session: Arc<AtomicU64>,
-    frames_tx: BoundedSink<PreparedFrame>,
     samples_tx: mpsc::SyncSender<StreamMessage>,
+    cancelled: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+struct SessionAsrAdapter {
+    frames_tx: BoundedSink<PreparedFrame>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -216,12 +222,9 @@ impl LiveRuntime {
             if let Err(message) = inner.ensure_stream(self.clone(), app.clone(), session) {
                 return Err(LiveStartFailure::new(session, message));
             }
-            let Some(local_asr) = inner.stream_sink() else {
-                return Err(LiveStartFailure::new(
-                    session,
-                    "Live stream is unavailable.".into(),
-                ));
-            };
+            let local_asr = inner
+                .start_asr_adapter(session)
+                .map_err(|message| LiveStartFailure::new(session, message))?;
             (session, local_asr)
         };
 
@@ -233,12 +236,24 @@ impl LiveRuntime {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             );
+            self.inner
+                .lock()
+                .expect("live runtime poisoned")
+                .cancel_asr_adapter();
             return Ok(());
         };
         let _ = app.emit("live-session", &view);
 
-        let resolved = super::devices::resolve_capture_device(selected_device_id.as_deref())
-            .map_err(|error| LiveStartFailure::new(session, error))?;
+        let resolved = match super::devices::resolve_capture_device(selected_device_id.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.inner
+                    .lock()
+                    .expect("live runtime poisoned")
+                    .cancel_asr_adapter();
+                return Err(LiveStartFailure::new(session, error));
+            }
+        };
         let stream_config = resolved.config.config();
         let sample_format = resolved.config.sample_format();
         let (level_tx, level) = mpsc::channel::<f32>();
@@ -283,6 +298,10 @@ impl LiveRuntime {
             Err(error) => {
                 recording.close();
                 let _ = join_worker(recording_worker);
+                self.inner
+                    .lock()
+                    .expect("live runtime poisoned")
+                    .cancel_asr_adapter();
                 return Err(LiveStartFailure::new(session, error));
             }
         };
@@ -299,6 +318,10 @@ impl LiveRuntime {
                 crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
             }
             let _ = join_worker(recording_worker);
+            self.inner
+                .lock()
+                .expect("live runtime poisoned")
+                .cancel_asr_adapter();
             drop(level);
             return Ok(());
         }
@@ -447,6 +470,7 @@ impl LiveRuntimeInner {
             session: 0,
             capture: None,
             stream: None,
+            asr_adapter: None,
             recording: None,
             level: None,
             last_used: Instant::now(),
@@ -472,7 +496,6 @@ impl LiveRuntimeInner {
         self.retire_stream();
 
         let engine = LiveStreamEngine::new().map_err(|err| err.user_message().to_string())?;
-        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
         let (samples_tx, samples_rx) = mpsc::sync_channel::<StreamMessage>(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let stream_session = Arc::new(AtomicU64::new(session));
@@ -484,7 +507,6 @@ impl LiveRuntimeInner {
             move || {
                 run_stream_worker(
                     engine,
-                    frames_rx,
                     samples_rx,
                     stream_session,
                     active_session,
@@ -496,7 +518,6 @@ impl LiveRuntimeInner {
 
         self.stream = Some(SessionStream {
             session: stream_session,
-            frames_tx,
             samples_tx,
             cancelled,
             worker: Some(worker),
@@ -504,8 +525,17 @@ impl LiveRuntimeInner {
         Ok(())
     }
 
-    fn stream_sink(&self) -> Option<BoundedSink<PreparedFrame>> {
-        self.stream.as_ref().map(|stream| stream.frames_tx.clone())
+    fn start_asr_adapter(&mut self, session: u64) -> Result<BoundedSink<PreparedFrame>, String> {
+        self.cancel_asr_adapter();
+        let samples_tx = self
+            .stream
+            .as_ref()
+            .map(|stream| stream.samples_tx.clone())
+            .ok_or_else(|| "Live stream is unavailable.".to_string())?;
+        let adapter = SessionAsrAdapter::start(samples_tx, session);
+        let frames_tx = adapter.sink();
+        self.asr_adapter = Some(adapter);
+        Ok(frames_tx)
     }
 
     fn start_level_worker(
@@ -551,6 +581,11 @@ impl LiveRuntimeInner {
                 errors.push(error);
             }
         }
+        if let Some(mut adapter) = self.asr_adapter.take() {
+            if let Err(error) = adapter.join_after_capture() {
+                errors.push(error);
+            }
+        }
         if let Some(handle) = self.level.take() {
             if let Err(error) = join_worker(handle) {
                 errors.push(error);
@@ -564,6 +599,7 @@ impl LiveRuntimeInner {
     }
 
     fn retire_stream(&mut self) {
+        self.cancel_asr_adapter();
         if let Some(stream) = self.stream.take() {
             if let Err(error) = stream.shutdown(true) {
                 crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
@@ -576,6 +612,7 @@ impl LiveRuntimeInner {
     }
 
     fn retire_stream_detached_reader(&mut self) {
+        self.cancel_asr_adapter();
         if let Some(stream) = self.stream.take() {
             if let Err(error) = stream.shutdown(false) {
                 crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
@@ -589,6 +626,14 @@ impl LiveRuntimeInner {
 
     fn stream_finisher(&self) -> Option<StreamFinisher> {
         self.stream.as_ref().map(SessionStream::finisher)
+    }
+
+    fn cancel_asr_adapter(&mut self) {
+        if let Some(mut adapter) = self.asr_adapter.take() {
+            if let Err(error) = adapter.cancel_and_join() {
+                crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
+            }
+        }
     }
 }
 
@@ -608,7 +653,6 @@ impl SessionStream {
 
     fn shutdown(mut self, join_reader: bool) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
-        self.frames_tx.close();
         drop(self.samples_tx);
         if join_reader {
             if let Some(handle) = self.worker.take() {
@@ -616,6 +660,40 @@ impl SessionStream {
             }
         }
         Ok(())
+    }
+}
+
+impl SessionAsrAdapter {
+    fn start(samples_tx: mpsc::SyncSender<StreamMessage>, session: u64) -> Self {
+        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker = std::thread::spawn(move || {
+            run_session_asr_adapter_worker(frames_rx, samples_tx, session, worker_cancelled)
+        });
+        Self {
+            frames_tx,
+            cancelled,
+            worker: Some(worker),
+        }
+    }
+
+    fn sink(&self) -> BoundedSink<PreparedFrame> {
+        self.frames_tx.clone()
+    }
+
+    fn join_after_capture(&mut self) -> Result<(), String> {
+        if let Some(worker) = self.worker.take() {
+            join_worker(worker)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn cancel_and_join(&mut self) -> Result<(), String> {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.frames_tx.close();
+        self.join_after_capture()
     }
 }
 
@@ -990,7 +1068,6 @@ fn release_warmup(warming: &AtomicBool) {
 
 fn run_stream_worker(
     mut engine: LiveStreamEngine,
-    frames_rx: BoundedReceiver<PreparedFrame>,
     samples_rx: mpsc::Receiver<StreamMessage>,
     stream_session: Arc<AtomicU64>,
     active_session: Arc<AtomicU64>,
@@ -1001,80 +1078,9 @@ fn run_stream_worker(
     let mut buffer = Vec::<f32>::with_capacity(stream::chunk_samples() * 2);
     let mut profile = StreamProfile::default();
 
-    let mut frames_closed = false;
     while !cancelled.load(Ordering::Relaxed) {
-        let mut finish = None;
-        while let Ok(message) = samples_rx.try_recv() {
-            match message {
-                message @ StreamMessage::Finish { .. } => {
-                    finish = Some(message);
-                    break;
-                }
-                StreamMessage::Samples { .. } => process_stream_message(
-                    &mut engine,
-                    &mut buffer,
-                    &mut profile,
-                    &app,
-                    &active_session,
-                    &stream_session,
-                    &mut active_stream_session,
-                    message,
-                ),
-            }
-        }
-        if let Some(StreamMessage::Finish { session, done }) = finish {
-            let status = drain_closed_asr_frames_before_finalizing(
-                &frames_rx,
-                |frame| {
-                    process_stream_message(
-                        &mut engine,
-                        &mut buffer,
-                        &mut profile,
-                        &app,
-                        &active_session,
-                        &stream_session,
-                        &mut active_stream_session,
-                        StreamMessage::from_prepared(stream_session.load(Ordering::SeqCst), frame),
-                    );
-                },
-                || {},
-                STREAM_DRAIN_ON_STOP,
-            );
-            if status == StreamFinishStatus::Completed {
-                process_stream_message(
-                    &mut engine,
-                    &mut buffer,
-                    &mut profile,
-                    &app,
-                    &active_session,
-                    &stream_session,
-                    &mut active_stream_session,
-                    StreamMessage::Finish { session, done },
-                );
-            } else {
-                let _ = done.send(status);
-                break;
-            }
-        }
-        if frames_closed {
-            match samples_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(message) => process_stream_message(
-                    &mut engine,
-                    &mut buffer,
-                    &mut profile,
-                    &app,
-                    &active_session,
-                    &stream_session,
-                    &mut active_stream_session,
-                    message,
-                ),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-            continue;
-        }
-        match frames_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(frame) => process_stream_message(
+        match samples_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(message) => process_stream_message(
                 &mut engine,
                 &mut buffer,
                 &mut profile,
@@ -1082,36 +1088,39 @@ fn run_stream_worker(
                 &active_session,
                 &stream_session,
                 &mut active_stream_session,
-                StreamMessage::from_prepared(stream_session.load(Ordering::SeqCst), frame),
+                message,
             ),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => frames_closed = true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
-fn drain_closed_asr_frames_before_finalizing<F, G>(
-    frames_rx: &BoundedReceiver<PreparedFrame>,
-    mut process_frame: F,
-    finalize: G,
-    timeout: Duration,
-) -> StreamFinishStatus
-where
-    F: FnMut(PreparedFrame),
-    G: FnOnce(),
-{
-    let started = Instant::now();
-    loop {
-        match frames_rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(frame) => process_frame(frame),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                finalize();
-                return StreamFinishStatus::Completed;
+fn run_session_asr_adapter_worker(
+    frames_rx: BoundedReceiver<PreparedFrame>,
+    samples_tx: mpsc::SyncSender<StreamMessage>,
+    session: u64,
+    cancelled: Arc<AtomicBool>,
+) {
+    while !cancelled.load(Ordering::Acquire) {
+        let frame = match frames_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(frame) => frame,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let mut message = StreamMessage::from_prepared(session, frame);
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) if started.elapsed() >= timeout => {
-                return StreamFinishStatus::TimedOut;
+            match samples_tx.try_send(message) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    message = returned;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -1158,8 +1167,10 @@ fn process_stream_message(
                 engine.reset();
                 buffer.clear();
                 *active_stream_session = 0;
+                let _ = done.send(StreamFinishStatus::Completed);
+            } else {
+                let _ = done.send(StreamFinishStatus::NoStream);
             }
-            let _ = done.send(StreamFinishStatus::Completed);
         }
     }
 }
@@ -1300,7 +1311,6 @@ impl LiveRuntimeInner {
 mod tests {
     use super::*;
     use crate::audio::capture::{new_callback_boundary, CapturePacket, CapturePorts};
-    use crate::audio::coordinator::{bounded_sink, SinkKind};
     use crate::audio::frame::{AudioFrame, PreparedFrame};
     use crate::audio::session::{SessionId, TrackId};
     use crate::audio::timeline::LossAccumulator;
@@ -1659,48 +1669,98 @@ mod tests {
     }
 
     #[test]
-    fn finish_waits_for_the_last_accepted_asr_frame_before_acknowledging_once() {
-        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, 1);
-        frames_tx
-            .try_send(PreparedFrame {
-                metadata: AudioFrame {
-                    session_id: SessionId::new("finish-test").unwrap(),
-                    track_id: TrackId::new("microphone").unwrap(),
-                    sequence: 0,
-                    sample_rate_hz: 16_000,
-                    channels: 1,
-                    start_ms: 0,
-                    duration_ms: 1,
-                    sample_count: 1,
-                },
-                samples: Arc::from([0.25_f32]),
-            })
-            .unwrap();
-        frames_tx.close();
+    fn asr_adapter_forwards_the_last_accepted_frame_before_it_joins() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+        let mut adapter = SessionAsrAdapter::start(samples_tx, 7);
+        let port = adapter.sink();
+        port.try_send(prepared_frame(0.25)).unwrap();
+        port.close();
 
-        let (processed_tx, processed_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let finalizations = Arc::new(AtomicU64::new(0));
-        let finalizations_for_worker = Arc::clone(&finalizations);
-        let worker = std::thread::spawn(move || {
-            drain_closed_asr_frames_before_finalizing(
-                &frames_rx,
-                |_| {
-                    processed_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                },
-                || {
-                    finalizations_for_worker.fetch_add(1, Ordering::SeqCst);
-                },
-                Duration::from_secs(1),
-            )
+        adapter.join_after_capture().unwrap();
+        match samples_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            StreamMessage::Samples { session, samples } => {
+                assert_eq!(session, 7);
+                assert_eq!(samples, vec![0.25]);
+            }
+            StreamMessage::Finish { .. } => panic!("expected the accepted frame"),
+        }
+    }
+
+    #[test]
+    fn two_capture_sessions_use_fresh_asr_ports_and_finish_each_once_in_fifo_order() {
+        let (samples_tx, samples_rx) = mpsc::sync_channel(8);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let delivered_for_worker = Arc::clone(&delivered);
+        let recognizer = std::thread::spawn(move || {
+            let mut finishes = 0;
+            while finishes < 2 {
+                match samples_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                    StreamMessage::Samples { session, samples } => {
+                        delivered_for_worker
+                            .lock()
+                            .unwrap()
+                            .push((session, samples));
+                    }
+                    StreamMessage::Finish { session, done } => {
+                        delivered_for_worker
+                            .lock()
+                            .unwrap()
+                            .push((session, Vec::new()));
+                        finishes += 1;
+                        done.send(StreamFinishStatus::Completed).unwrap();
+                    }
+                }
+            }
         });
 
-        processed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(finalizations.load(Ordering::SeqCst), 0);
-        release_tx.send(()).unwrap();
-        assert_eq!(worker.join().unwrap(), StreamFinishStatus::Completed);
-        assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+        let mut first = SessionAsrAdapter::start(samples_tx.clone(), 1);
+        let first_port = first.sink();
+        first_port.try_send(prepared_frame(0.25)).unwrap();
+        first_port.close();
+        first.join_after_capture().unwrap();
+        assert_eq!(
+            StreamFinisher {
+                samples_tx: samples_tx.clone(),
+                session: 1,
+            }
+            .finish_session(),
+            StreamFinishStatus::Completed
+        );
+        assert_eq!(first_port.outcome().accepted_frames, 1);
+        assert_eq!(first_port.outcome().dropped_frames, 0);
+        assert_eq!(first_port.outcome().error, None);
+
+        let mut second = SessionAsrAdapter::start(samples_tx.clone(), 2);
+        let second_port = second.sink();
+        assert!(matches!(
+            first_port.try_send(prepared_frame(0.5)),
+            Err(crate::audio::coordinator::SinkSendError::Closed)
+        ));
+        second_port.try_send(prepared_frame(0.75)).unwrap();
+        second_port.close();
+        second.join_after_capture().unwrap();
+        assert_eq!(
+            StreamFinisher {
+                samples_tx,
+                session: 2,
+            }
+            .finish_session(),
+            StreamFinishStatus::Completed
+        );
+        assert_eq!(second_port.outcome().accepted_frames, 1);
+        assert_eq!(second_port.outcome().dropped_frames, 0);
+        assert_eq!(second_port.outcome().error, None);
+
+        recognizer.join().unwrap();
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![
+                (1, vec![0.25]),
+                (1, Vec::new()),
+                (2, vec![0.75]),
+                (2, Vec::new()),
+            ]
+        );
     }
 
     #[test]
@@ -1795,5 +1855,21 @@ mod tests {
         assert_eq!(status, StreamFinishStatus::Disconnected);
         assert!(status.should_retire_stream());
         assert!(status.should_report());
+    }
+
+    fn prepared_frame(sample: f32) -> PreparedFrame {
+        PreparedFrame {
+            metadata: AudioFrame {
+                session_id: SessionId::new("adapter-test").unwrap(),
+                track_id: TrackId::new("microphone").unwrap(),
+                sequence: 0,
+                sample_rate_hz: 16_000,
+                channels: 1,
+                start_ms: 0,
+                duration_ms: 1,
+                sample_count: 1,
+            },
+            samples: Arc::from([sample]),
+        }
     }
 }

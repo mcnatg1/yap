@@ -771,6 +771,63 @@ mod tests {
     }
 
     #[test]
+    fn cloned_producers_preserve_exact_high_water_and_roll_back_failed_sends() {
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 2);
+        let start = Arc::new(Barrier::new(3));
+        let complete = Arc::new(Barrier::new(3));
+        let first = sink.clone();
+        let second = sink.clone();
+        let first_start = Arc::clone(&start);
+        let first_complete = Arc::clone(&complete);
+        let first_worker = std::thread::spawn(move || {
+            first_start.wait();
+            let result = first.try_send(1_u8);
+            first_complete.wait();
+            result
+        });
+        let second_start = Arc::clone(&start);
+        let second_complete = Arc::clone(&complete);
+        let second_worker = std::thread::spawn(move || {
+            second_start.wait();
+            let result = second.try_send(2_u8);
+            second_complete.wait();
+            result
+        });
+
+        start.wait();
+        complete.wait();
+        assert!(first_worker.join().unwrap().is_ok());
+        assert!(second_worker.join().unwrap().is_ok());
+        assert_eq!(sink.high_water_mark(), 2);
+        assert_eq!(sink.queued_frames_for_test(), 2);
+        let mut received = [
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ];
+        received.sort_unstable();
+        assert_eq!(received, [1, 2]);
+        assert_eq!(sink.queued_frames_for_test(), 0);
+
+        let (full_sink, _full_receiver) = bounded_sink(SinkKind::Recording, 1);
+        assert!(full_sink.try_send(1_u8).is_ok());
+        assert!(matches!(
+            full_sink.try_send(2_u8),
+            Err(super::SinkSendError::Full)
+        ));
+        assert_eq!(full_sink.queued_frames_for_test(), 1);
+        assert_eq!(full_sink.high_water_mark(), 1);
+
+        let (disconnected_sink, disconnected_receiver) = bounded_sink(SinkKind::Recording, 1);
+        drop(disconnected_receiver);
+        assert!(matches!(
+            disconnected_sink.try_send(1_u8),
+            Err(super::SinkSendError::Closed)
+        ));
+        assert_eq!(disconnected_sink.queued_frames_for_test(), 0);
+        assert_eq!(disconnected_sink.high_water_mark(), 0);
+    }
+
+    #[test]
     fn source_positions_and_losses_leave_a_timeline_gap() {
         let (ports, recording_rx, _) = ports(1, None);
         let mut coordinator = Coordinator::new(session(), track(), ports);
