@@ -7,6 +7,7 @@ pub mod evidence;
 pub mod frame;
 pub mod manifest;
 pub mod preprocess;
+pub mod recording;
 pub mod results;
 pub mod session;
 pub mod timeline;

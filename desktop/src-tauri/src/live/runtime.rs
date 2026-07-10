@@ -14,7 +14,7 @@ use crate::audio::coordinator::{
     LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
 };
 use crate::audio::frame::PreparedFrame;
-use crate::audio::preprocess::f32_to_i16_le_bytes;
+use crate::audio::recording::{RecordingFinalizeResult, RecordingSinkHandle};
 use crate::audio::session::{SessionId, TrackId};
 
 use super::state::{LiveLevelView, LiveSessionState};
@@ -22,8 +22,6 @@ use super::stream::{self, LiveStreamEngine, StreamMessage};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
-const MAX_RECORDED_PCM_SECONDS: usize = 10 * 60;
-const MAX_RECORDED_PCM_BYTES: usize = TARGET_SAMPLE_RATE as usize * 2 * MAX_RECORDED_PCM_SECONDS;
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 const ASR_ADAPTER_CANCEL_GRACE: Duration = Duration::from_millis(100);
@@ -37,7 +35,6 @@ fn active_session_matches(active_session: u64, session: u64) -> bool {
 pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
-    recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
     transition: Arc<LifecycleGate>,
     warming: Arc<AtomicBool>,
 }
@@ -47,7 +44,8 @@ struct LiveRuntimeInner {
     capture: Option<CaptureAdapter>,
     stream: Option<SessionStream>,
     asr_adapter: Option<SessionAsrAdapter>,
-    recording: Option<JoinHandle<()>>,
+    recording: Option<RecordingSinkHandle>,
+    finalized_recording: Option<RecordingFinalizeResult>,
     level: Option<JoinHandle<()>>,
     last_used: Instant,
     #[cfg(test)]
@@ -104,23 +102,6 @@ thread_local! {
     static FAIL_NEXT_REAPER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum RecordedPcmAppendStatus {
-    Stored,
-    Capped,
-}
-
-struct RecordedPcmBuffer {
-    bytes: Vec<u8>,
-    capped: bool,
-    max_bytes: usize,
-}
-
-pub(crate) struct RecordedPcm {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) capped: bool,
-}
-
 pub(crate) struct LiveStartFailure {
     session: u64,
     message: String,
@@ -129,89 +110,6 @@ pub(crate) struct LiveStartFailure {
 impl LiveStartFailure {
     fn new(session: u64, message: String) -> Self {
         Self { session, message }
-    }
-}
-
-impl RecordedPcmBuffer {
-    fn new() -> Self {
-        Self {
-            bytes: Vec::new(),
-            capped: false,
-            max_bytes: MAX_RECORDED_PCM_BYTES,
-        }
-    }
-
-    #[cfg(test)]
-    fn with_limit_for_test(max_bytes: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            capped: false,
-            max_bytes,
-        }
-    }
-
-    fn append(&mut self, bytes: &[u8]) -> RecordedPcmAppendStatus {
-        if bytes.is_empty() {
-            return RecordedPcmAppendStatus::Stored;
-        }
-        let remaining = self.max_bytes.saturating_sub(self.bytes.len());
-        if remaining == 0 {
-            self.capped = true;
-            return RecordedPcmAppendStatus::Capped;
-        }
-        let accepted = remaining.min(bytes.len()) & !1;
-        if accepted == 0 {
-            self.capped = true;
-            return RecordedPcmAppendStatus::Capped;
-        }
-        if self.bytes.try_reserve(accepted).is_err() {
-            self.capped = true;
-            return RecordedPcmAppendStatus::Capped;
-        }
-        self.bytes.extend_from_slice(&bytes[..accepted]);
-        if accepted < bytes.len() {
-            self.capped = true;
-            RecordedPcmAppendStatus::Capped
-        } else {
-            RecordedPcmAppendStatus::Stored
-        }
-    }
-
-    fn take(&mut self) -> RecordedPcm {
-        let capped = self.capped;
-        self.capped = false;
-        RecordedPcm {
-            bytes: std::mem::take(&mut self.bytes),
-            capped,
-        }
-    }
-
-    fn restore(&mut self, pcm: RecordedPcm) {
-        if pcm.bytes.is_empty() {
-            return;
-        }
-        self.bytes = pcm.bytes;
-        self.capped = pcm.capped;
-    }
-
-    #[cfg(test)]
-    fn reserve(&mut self, additional: usize) {
-        self.bytes.reserve(additional);
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    #[cfg(test)]
-    fn capacity(&self) -> usize {
-        self.bytes.capacity()
-    }
-
-    #[cfg(test)]
-    fn was_capped(&self) -> bool {
-        self.capped
     }
 }
 
@@ -283,7 +181,6 @@ impl LiveRuntime {
         Self {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
-            recorded_pcm: Arc::new(Mutex::new(RecordedPcmBuffer::new())),
             transition: Arc::new(LifecycleGate::new()),
             warming: Arc::new(AtomicBool::new(false)),
         }
@@ -308,8 +205,8 @@ impl LiveRuntime {
             if inner.capture.is_some() {
                 return Ok(());
             }
-            self.discard_recorded_pcm();
             inner.session = inner.session.saturating_add(1);
+            inner.finalized_recording = None;
             inner.last_used = Instant::now();
             let session = inner.session;
             self.active_session.store(session, Ordering::SeqCst);
@@ -356,20 +253,15 @@ impl LiveRuntime {
         let capture_runtime = self.clone();
         let capture_app = app.clone();
         let capture_active_session = Arc::clone(&self.active_session);
-        let capture_recorded_pcm = Arc::clone(&self.recorded_pcm);
-        let (recording, recording_rx) = bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
-        let recording_runtime = self.clone();
-        let recording_app = app.clone();
-        let recording_worker = std::thread::spawn(move || {
-            run_recording_sink_worker(
-                recording_rx,
-                recording_runtime,
-                recording_app,
-                session,
-                capture_recorded_pcm,
-            )
-        });
-        let recording_for_capture = recording.clone();
+        let (recording_sink, recording_rx) =
+            bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
+        let recording_handle = RecordingSinkHandle::spawn(
+            super::recordings::recordings_dir(),
+            SessionId::new(format!("live-{session}")).expect("live session IDs are valid"),
+            recording_sink,
+            recording_rx,
+        );
+        let recording_for_capture = recording_handle.sink();
         let capture = match CaptureAdapter::open(
             resolved.device,
             stream_config,
@@ -392,8 +284,7 @@ impl LiveRuntime {
         ) {
             Ok(capture) => capture,
             Err(error) => {
-                recording.close();
-                let _ = join_worker(recording_worker);
+                let _ = recording_handle.finalize();
                 let _ = self
                     .inner
                     .lock()
@@ -414,7 +305,7 @@ impl LiveRuntime {
             if let Err(error) = capture.shutdown() {
                 crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
             }
-            let _ = join_worker(recording_worker);
+            let _ = recording_handle.finalize();
             let _ = self
                 .inner
                 .lock()
@@ -424,7 +315,7 @@ impl LiveRuntime {
             return Ok(());
         }
         inner.capture = Some(capture);
-        inner.recording = Some(recording_worker);
+        inner.recording = Some(recording_handle);
         inner.start_level_worker(app, level, session, Arc::clone(&self.active_session));
         Ok(())
     }
@@ -488,38 +379,25 @@ impl LiveRuntime {
         inner.retire_stream();
         self.active_session.store(0, Ordering::SeqCst);
         drop(inner);
+        let _ = self.finalize_recording();
         log_worker_shutdown_errors(shutdown_errors);
     }
 
-    pub(crate) fn take_recorded_pcm(&self) -> RecordedPcm {
-        self.recorded_pcm.lock().expect("live pcm poisoned").take()
-    }
-
-    pub(crate) fn restore_recorded_pcm(&self, pcm: RecordedPcm) {
-        self.recorded_pcm
-            .lock()
-            .expect("live pcm poisoned")
-            .restore(pcm);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn append_recorded_pcm_for_test(&self, bytes: &[u8]) {
-        self.recorded_pcm
-            .lock()
-            .expect("live pcm poisoned")
-            .append(bytes);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_recorded_pcm_limit_for_test(&self, max_bytes: usize) {
-        self.recorded_pcm
-            .lock()
-            .expect("live pcm poisoned")
-            .max_bytes = max_bytes;
-    }
-
-    fn discard_recorded_pcm(&self) {
-        let _ = self.take_recorded_pcm();
+    pub(crate) fn finalize_recording(&self) -> Result<Option<RecordingFinalizeResult>, String> {
+        let recording = {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            if let Some(result) = &inner.finalized_recording {
+                return Ok(Some(result.clone()));
+            }
+            inner.recording.take()
+        };
+        let Some(recording) = recording else {
+            return Ok(None);
+        };
+        let result = recording.finalize()?;
+        let mut inner = self.inner.lock().expect("live runtime poisoned");
+        inner.finalized_recording = Some(result.clone());
+        Ok(Some(result))
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -582,6 +460,7 @@ impl LiveRuntimeInner {
             stream: None,
             asr_adapter: None,
             recording: None,
+            finalized_recording: None,
             level: None,
             last_used: Instant::now(),
             #[cfg(test)]
@@ -684,11 +563,6 @@ impl LiveRuntimeInner {
         let mut adapter_status = None;
         if let Some(capture) = self.capture.take() {
             if let Err(error) = capture.shutdown() {
-                errors.push(error);
-            }
-        }
-        if let Some(worker) = self.recording.take() {
-            if let Err(error) = join_worker(worker) {
                 errors.push(error);
             }
         }
@@ -1294,43 +1168,6 @@ fn mark_local_asr_degraded_once(reported: &AtomicBool) -> bool {
         .is_ok()
 }
 
-fn run_recording_sink_worker(
-    frames: BoundedReceiver<PreparedFrame>,
-    runtime: LiveRuntime,
-    app: tauri::AppHandle,
-    session: u64,
-    recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
-) {
-    let run = || loop {
-        match frames.recv_timeout(Duration::from_millis(100)) {
-            Ok(frame) => match recorded_pcm.lock() {
-                Ok(mut recorded_pcm) => {
-                    recorded_pcm.append(&f32_to_i16_le_bytes(&frame.samples));
-                }
-                Err(_) => {
-                    spawn_stream_crash_handler(
-                        app.clone(),
-                        runtime.clone(),
-                        session,
-                        "Live recording buffer became unavailable.".to_string(),
-                    );
-                    break;
-                }
-            },
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    };
-    if catch_unwind(AssertUnwindSafe(run)).is_err() {
-        spawn_stream_crash_handler(
-            app,
-            runtime,
-            session,
-            "Live recording worker stopped unexpectedly.".to_string(),
-        );
-    }
-}
-
 fn spawn_stream_crash_handler(
     app: tauri::AppHandle,
     runtime: LiveRuntime,
@@ -1908,37 +1745,6 @@ mod tests {
         assert!(!claim_warmup(&warming));
         release_warmup(&warming);
         assert!(claim_warmup(&warming));
-    }
-
-    #[test]
-    fn taking_recorded_pcm_releases_buffer_without_clone() {
-        let runtime = LiveRuntime::new();
-        {
-            let mut pcm = runtime.recorded_pcm.lock().unwrap();
-            pcm.reserve(1024);
-            assert_eq!(pcm.append(&[1, 2, 3, 4]), RecordedPcmAppendStatus::Stored);
-        }
-
-        let pcm = runtime.take_recorded_pcm();
-
-        assert_eq!(pcm.bytes, vec![1, 2, 3, 4]);
-        assert!(!pcm.capped);
-        let retained = runtime.recorded_pcm.lock().unwrap();
-        assert!(retained.is_empty());
-        assert_eq!(retained.capacity(), 0);
-    }
-
-    #[test]
-    fn recorded_pcm_buffer_caps_retained_audio() {
-        let mut pcm = RecordedPcmBuffer::with_limit_for_test(6);
-
-        assert_eq!(pcm.append(&[1, 2, 3, 4]), RecordedPcmAppendStatus::Stored);
-        assert_eq!(pcm.append(&[5, 6, 7, 8]), RecordedPcmAppendStatus::Capped);
-
-        assert!(pcm.was_capped());
-        let taken = pcm.take();
-        assert_eq!(taken.bytes, vec![1, 2, 3, 4, 5, 6]);
-        assert!(taken.capped);
     }
 
     #[test]

@@ -1,11 +1,14 @@
 use std::io::Write;
 
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+use crate::audio::evidence::ModelRevision;
+use crate::audio::recording::{self, RecordingFinalizeResult};
+use crate::audio::results::{ResultAuthority, ResultStatus, TranscriptResultRevision};
 use crate::{file_actions, live};
 
-const LIVE_WAV_SAMPLE_RATE: u32 = 16_000;
 const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
 const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Audio was saved.";
-const AUDIO_CAPPED_WARNING: &str = "Live audio was capped at 10 minutes.";
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,83 +32,63 @@ fn save_session_files_to_dir(
     view: &live::state::LiveSessionView,
     dir: &std::path::Path,
 ) -> Result<Option<SavedLiveSession>, String> {
-    let transcript = transcript_text(view);
-    let created_at_ms = unix_millis_now()?;
-    let pcm = live_runtime.take_recorded_pcm();
-    let warning = session_warning(view, pcm.capped);
-    match save_session_parts_to_dir(dir, created_at_ms, transcript, &pcm.bytes, warning) {
-        Ok(saved) => Ok(saved),
-        Err(error) => {
-            live_runtime.restore_recorded_pcm(pcm);
-            Err(error)
-        }
-    }
+    let capture = live_runtime.finalize_recording()?;
+    save_finalized_capture_to_dir(dir, view, capture)
 }
 
-fn save_session_parts_to_dir(
+fn save_finalized_capture_to_dir(
     dir: &std::path::Path,
-    created_at_ms: u64,
-    transcript: Option<String>,
-    pcm: &[u8],
-    warning: Option<String>,
+    view: &live::state::LiveSessionView,
+    capture: Option<RecordingFinalizeResult>,
 ) -> Result<Option<SavedLiveSession>, String> {
-    if transcript.is_none() && pcm.is_empty() {
+    let Some(capture) = capture else {
         return Ok(None);
-    }
-
+    };
     std::fs::create_dir_all(dir)
         .map_err(|err| format!("Failed to create live recordings folder: {err}"))?;
-    let transcript_body =
-        transcript.unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
+    let name = format!("live-{}", capture.session_id);
+    let transcript_path = dir.join(format!("{name}.txt"));
+    let transcript = transcript_text(view)
+        .unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
+    write_new_text_file(&transcript_path, &format!("{transcript}\n"))
+        .map_err(|error| format!("Failed to save live transcript: {error}"))?;
 
-    for suffix in 0..1000 {
-        let (name, transcript_path, audio_path) = session_paths(dir, created_at_ms, suffix);
-        if audio_path.exists() {
-            continue;
-        }
-        match write_new_text_file(&transcript_path, &format!("{transcript_body}\n")) {
-            Ok(()) => {
-                if !pcm.is_empty() && write_pcm16_wav(&audio_path, pcm).is_err() {
-                    let transcript_path = stable_existing_path_string(&transcript_path);
-                    return Ok(Some(SavedLiveSession {
-                        name,
-                        source_path: transcript_path.clone(),
-                        output_path: transcript_path,
-                        created_at_ms,
-                        warning: combine_warning(warning, AUDIO_SAVE_FAILED_WARNING),
-                    }));
-                }
-
-                let output_path = stable_existing_path_string(&transcript_path);
-                return Ok(Some(SavedLiveSession {
-                    name,
-                    source_path: if pcm.is_empty() {
-                        output_path.clone()
-                    } else {
-                        stable_existing_path_string(&audio_path)
-                    },
-                    output_path,
-                    created_at_ms,
-                    warning,
-                }));
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(format!("Failed to save live transcript: {err}")),
-        }
-    }
-
-    Err("Failed to allocate a live recording filename.".into())
-}
-
-fn session_warning(view: &live::state::LiveSessionView, audio_capped: bool) -> Option<String> {
     let warning = view
         .transcription_degraded
         .then_some(TRANSCRIPT_DEGRADED_WARNING.to_string());
-    if audio_capped {
-        combine_warning(warning, AUDIO_CAPPED_WARNING)
-    } else {
-        warning
-    }
+    let created_at_ms = unix_millis_now()?;
+    let output_path = stable_existing_path_string(&transcript_path);
+    let Some(committed) = capture.committed else {
+        return Ok(Some(SavedLiveSession {
+            name,
+            source_path: output_path.clone(),
+            output_path,
+            created_at_ms,
+            warning: combine_warning(warning, AUDIO_SAVE_FAILED_WARNING),
+        }));
+    };
+
+    let revision_warning = write_transcript_revision(
+        dir,
+        &committed.manifest,
+        &transcript_path,
+        &transcript,
+        view.transcription_degraded,
+    )
+    .err();
+    let audio_path = dir.join(&committed.manifest.audio_file);
+    Ok(Some(SavedLiveSession {
+        name,
+        source_path: stable_existing_path_string(&audio_path),
+        output_path,
+        created_at_ms,
+        warning: revision_warning.map_or(warning.clone(), |error| {
+            combine_warning(
+                warning,
+                format!("Transcript revision was not saved: {error}"),
+            )
+        }),
+    }))
 }
 
 fn combine_warning(base: Option<String>, next: impl AsRef<str>) -> Option<String> {
@@ -117,21 +100,6 @@ fn combine_warning(base: Option<String>, next: impl AsRef<str>) -> Option<String
         Some(base) if !base.is_empty() => Some(format!("{base} {next}")),
         _ => Some(next.to_string()),
     }
-}
-
-fn session_paths(
-    dir: &std::path::Path,
-    created_at_ms: u64,
-    suffix: usize,
-) -> (String, std::path::PathBuf, std::path::PathBuf) {
-    let name = if suffix == 0 {
-        format!("live-{created_at_ms}")
-    } else {
-        format!("live-{created_at_ms}-{suffix}")
-    };
-    let transcript_path = dir.join(format!("{name}.txt"));
-    let audio_path = dir.join(format!("{name}.wav"));
-    (name, transcript_path, audio_path)
 }
 
 pub fn list_session_files() -> Result<Vec<SavedLiveSession>, String> {
@@ -157,7 +125,26 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
         return Ok(Vec::new());
     }
 
-    let mut sessions = Vec::new();
+    let mut sessions = recording::scan_recordings(dir)?
+        .complete
+        .into_iter()
+        .map(|committed| {
+            let name = format!("live-{}", committed.manifest.session_id);
+            let transcript = dir.join(format!("{name}.txt"));
+            let audio = dir.join(&committed.manifest.audio_file);
+            SavedLiveSession {
+                name,
+                source_path: stable_existing_path_string(&audio),
+                output_path: if transcript.is_file() {
+                    stable_existing_path_string(&transcript)
+                } else {
+                    stable_existing_path_string(&audio)
+                },
+                created_at_ms: committed_at_ms(&committed.manifest.committed_at_utc),
+                warning: None,
+            }
+        })
+        .collect::<Vec<_>>();
     for entry in
         std::fs::read_dir(dir).map_err(|err| format!("Failed to read live recordings: {err}"))?
     {
@@ -169,6 +156,12 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+        if dir.join(format!("{stem}.capture.journal.part")).exists()
+            || dir.join(format!("{stem}.capture.json")).exists()
+            || dir.join(format!("{stem}.commit.json")).exists()
+        {
+            continue;
+        }
         let created_at_ms = created_at_ms_from_live_stem(stem)
             .expect("primary live transcript predicate validates the stem");
 
@@ -193,6 +186,149 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             .then_with(|| b.name.cmp(&a.name))
     });
     Ok(sessions)
+}
+
+fn committed_at_ms(value: &str) -> u64 {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000).ok())
+        .unwrap_or(0)
+}
+
+fn write_transcript_revision(
+    dir: &std::path::Path,
+    manifest: &recording::CaptureCommitManifest,
+    transcript_path: &std::path::Path,
+    transcript: &str,
+    transcription_degraded: bool,
+) -> Result<(), String> {
+    let revision = next_transcript_revision(dir, &manifest.session_id)?;
+    let status = if transcription_degraded {
+        ResultStatus::Partial
+    } else {
+        ResultStatus::Complete
+    };
+    let model = ModelRevision::new(crate::stt::nemotron::MODEL_ID, "local", "local")
+        .map_err(|error| format!("Failed to describe local transcript model: {error}"))?;
+    let result = if revision == 1 {
+        TranscriptResultRevision::new(
+            manifest.session_id.clone(),
+            revision,
+            ResultAuthority::LocalProvisional,
+            manifest.capture_sidecar_sha256.clone(),
+            None,
+            status,
+            transcript,
+            Vec::new(),
+            vec![model],
+        )
+    } else {
+        let previous_path = transcript_revision_path(dir, &manifest.session_id, revision - 1);
+        let previous_text = std::fs::read_to_string(&previous_path)
+            .map_err(|error| format!("Failed to read prior transcript revision: {error}"))?;
+        let previous: TranscriptResultRevision = serde_json::from_str(&previous_text)
+            .map_err(|error| format!("Failed to parse prior transcript revision: {error}"))?;
+        previous.next_revision(
+            revision,
+            ResultAuthority::LocalProvisional,
+            manifest.capture_sidecar_sha256.clone(),
+            recording::sha256_file(&previous_path)?,
+            status,
+            transcript,
+            Vec::new(),
+            vec![model],
+        )
+    }
+    .map_err(|error| format!("Failed to build transcript revision: {error}"))?;
+    let path = transcript_revision_path(dir, &manifest.session_id, revision);
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("Failed to create transcript revision: {error}"))?;
+    let serialized = transcript_result_value(&result, manifest, transcript_path)?;
+    serde_json::to_writer(&mut file, &serialized)
+        .map_err(|error| format!("Failed to write transcript revision: {error}"))?;
+    file.write_all(b"\n")
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Failed to finalize transcript revision: {error}"))?;
+    Ok(())
+}
+
+fn transcript_result_value(
+    result: &TranscriptResultRevision,
+    manifest: &recording::CaptureCommitManifest,
+    transcript_path: &std::path::Path,
+) -> Result<serde_json::Value, String> {
+    let text_file = transcript_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Transcript path has no valid file name".to_string())?;
+    recording::validate_artifact_name(text_file)?;
+    let mut value = serde_json::to_value(result)
+        .map_err(|error| format!("Failed to serialize transcript revision: {error}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Transcript revision did not serialize as an object".to_string())?;
+    object.insert("schemaVersion".into(), serde_json::Value::from(1u16));
+    object.insert("textFile".into(), serde_json::Value::from(text_file));
+    object.insert(
+        "textSha256".into(),
+        serde_json::Value::from(recording::sha256_file(transcript_path)?),
+    );
+    object.insert(
+        "modelId".into(),
+        serde_json::Value::from(crate::stt::nemotron::MODEL_ID),
+    );
+    object.insert("modelRevision".into(), serde_json::Value::from("local"));
+    object.insert(
+        "createdAtUtc".into(),
+        serde_json::Value::from(
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|_| "Failed to format transcript revision time")?,
+        ),
+    );
+    object.insert(
+        "captureSidecarSha256".into(),
+        serde_json::Value::from(manifest.capture_sidecar_sha256.clone()),
+    );
+    Ok(value)
+}
+
+fn next_transcript_revision(
+    dir: &std::path::Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<u64, String> {
+    let prefix = format!("live-{session_id}.transcript.r");
+    let mut highest = 0;
+    for entry in std::fs::read_dir(dir)
+        .map_err(|error| format!("Failed to read transcript revisions: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("Failed to read transcript revision: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Some(revision) = name
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix(".json"))
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            highest = highest.max(revision);
+        }
+    }
+    highest
+        .checked_add(1)
+        .ok_or_else(|| "Transcript revision overflowed".into())
+}
+
+fn transcript_revision_path(
+    dir: &std::path::Path,
+    session_id: &crate::audio::session::SessionId,
+    revision: u64,
+) -> std::path::PathBuf {
+    dir.join(format!("live-{session_id}.transcript.r{revision}.json"))
 }
 
 pub(crate) fn stable_existing_path_string(path: &std::path::Path) -> String {
@@ -340,71 +476,11 @@ fn partial_text_path(path: &std::path::Path) -> std::io::Result<std::path::PathB
     Ok(path.with_file_name(format!("{file_name}.part")))
 }
 
-fn write_pcm16_wav(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
-    let partial = partial_wav_path(path)?;
-    std::fs::remove_file(&partial).ok();
-    if let Err(err) = write_pcm16_wav_bytes(&partial, pcm) {
-        std::fs::remove_file(&partial).ok();
-        return Err(err);
-    }
-    std::fs::rename(&partial, path).map_err(|err| {
-        std::fs::remove_file(&partial).ok();
-        format!("Failed to finalize live audio: {err}")
-    })
-}
-
-fn partial_wav_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Live recording path has no file name.".to_string())?;
-    Ok(path.with_file_name(format!("{file_name}.part")))
-}
-
-fn write_pcm16_wav_bytes(path: &std::path::Path, pcm: &[u8]) -> Result<(), String> {
-    let data_len =
-        u32::try_from(pcm.len()).map_err(|_| "Live recording is too large to save.".to_string())?;
-    let riff_len = 36u32
-        .checked_add(data_len)
-        .ok_or_else(|| "Live recording is too large to save.".to_string())?;
-    let byte_rate = LIVE_WAV_SAMPLE_RATE * 2;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|err| format!("Failed to save live audio: {err}"))?;
-
-    file.write_all(b"RIFF").map_err(wav_write_error)?;
-    file.write_all(&riff_len.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(b"WAVEfmt ").map_err(wav_write_error)?;
-    file.write_all(&16u32.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(&1u16.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(&1u16.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(&LIVE_WAV_SAMPLE_RATE.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(&byte_rate.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(&2u16.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(&16u16.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(b"data").map_err(wav_write_error)?;
-    file.write_all(&data_len.to_le_bytes())
-        .map_err(wav_write_error)?;
-    file.write_all(pcm).map_err(wav_write_error)
-}
-
-fn wav_write_error(err: std::io::Error) -> String {
-    format!("Failed to save live audio: {err}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::recording::StreamingRecording;
+    use crate::audio::session::SessionId;
 
     fn live_view(
         final_text: Option<&str>,
@@ -469,56 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn write_pcm16_wav_writes_standard_header_and_data() {
-        let path = std::env::temp_dir().join(format!("yap-live-{}.wav", std::process::id()));
-        let pcm = [0, 0, 255, 127];
-        std::fs::remove_file(&path).ok();
-
-        write_pcm16_wav(&path, &pcm).unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(&bytes[12..16], b"fmt ");
-        assert_eq!(&bytes[36..40], b"data");
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4);
-        assert_eq!(&bytes[44..], pcm);
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn write_pcm16_wav_replaces_stale_partial_file() {
-        let path = std::env::temp_dir().join(format!("yap-live-stale-{}.wav", std::process::id()));
-        let partial = partial_wav_path(&path).unwrap();
-        std::fs::remove_file(&path).ok();
-        std::fs::remove_file(&partial).ok();
-        std::fs::write(&partial, b"stale").unwrap();
-
-        write_pcm16_wav(&path, &[1, 0]).unwrap();
-
-        assert!(path.exists());
-        assert!(!partial.exists());
-        assert_ne!(std::fs::read(&path).unwrap(), b"stale");
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn write_pcm16_wav_does_not_create_final_file_when_partial_fails() {
-        let dir = std::env::temp_dir().join(format!("yap-live-partial-dir-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("clip.wav");
-        let partial = partial_wav_path(&path).unwrap();
-        std::fs::create_dir_all(&partial).unwrap();
-
-        let err = write_pcm16_wav(&path, &[1, 0]).unwrap_err();
-
-        assert!(err.contains("Failed to save live audio"));
-        assert!(!path.exists());
-        assert!(partial.is_dir());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
     fn saved_live_session_scan_pairs_transcripts_with_audio() {
         let dir = std::env::temp_dir().join(format!("yap-live-scan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -535,6 +561,63 @@ mod tests {
         assert_eq!(sessions[0].name, "live-200");
         assert_eq!(sessions[0].output_path, transcript.display().to_string());
         assert_eq!(sessions[0].source_path, audio.display().to_string());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn new_style_uncommitted_artifacts_are_not_listed_as_legacy_history() {
+        let dir = test_dir("uncommitted-new-style");
+        let session = SessionId::new("s-pending").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        std::fs::write(dir.join(format!("live-{session}.txt")), "pending\n").unwrap();
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+
+        assert!(sessions.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn committed_capture_is_listed_only_after_manifest_validation() {
+        let dir = test_dir("committed-history");
+        let session = SessionId::new("s-history").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        save_finalized_capture_to_dir(&dir, &live_view(Some("hello"), None), Some(capture))
+            .unwrap();
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, format!("live-{session}"));
+        assert!(sessions[0].source_path.ends_with(".wav"));
+        assert!(sessions[0].created_at_ms > 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_revisions_are_create_new_and_monotonic() {
+        let dir = test_dir("transcript-revisions");
+        let session = SessionId::new("s-revisions").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let manifest = recording.finalize().unwrap().committed.unwrap().manifest;
+        let text_path = dir.join(format!("live-{session}.txt"));
+        write_new_text_file(&text_path, "first\n").unwrap();
+
+        write_transcript_revision(&dir, &manifest, &text_path, "first", false).unwrap();
+        write_transcript_revision(&dir, &manifest, &text_path, "second", false).unwrap();
+
+        assert!(transcript_revision_path(&dir, &session, 1).is_file());
+        assert!(transcript_revision_path(&dir, &session, 2).is_file());
+        let revision =
+            std::fs::read_to_string(transcript_revision_path(&dir, &session, 1)).unwrap();
+        let revision: serde_json::Value = serde_json::from_str(&revision).unwrap();
+        assert_eq!(revision["textFile"], format!("live-{session}.txt"));
+        assert_eq!(revision["textSha256"].as_str().unwrap().len(), 64);
+        assert_eq!(revision["modelId"], crate::stt::nemotron::MODEL_ID);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -639,77 +722,6 @@ mod tests {
     }
 
     #[test]
-    fn save_session_files_restores_pcm_when_directory_create_fails() {
-        let runtime = live::runtime::LiveRuntime::new();
-        runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
-        let dir_file =
-            std::env::temp_dir().join(format!("yap-live-dir-file-{}", std::process::id()));
-        std::fs::remove_file(&dir_file).ok();
-        std::fs::write(&dir_file, b"not a directory").unwrap();
-
-        let err = save_session_files_to_dir(&runtime, &live_view(Some("hello"), None), &dir_file)
-            .unwrap_err();
-
-        assert!(err.contains("Failed to create live recordings folder"));
-        let restored = runtime.take_recorded_pcm();
-        assert_eq!(restored.bytes, vec![1, 0, 2, 0]);
-        assert!(!restored.capped);
-        std::fs::remove_file(dir_file).ok();
-    }
-
-    #[test]
-    fn save_session_files_warns_when_transcript_was_degraded() {
-        let runtime = live::runtime::LiveRuntime::new();
-        runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
-        let dir = std::env::temp_dir().join(format!("yap-live-degraded-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut view = live_view(Some("hello"), None);
-        view.transcription_degraded = true;
-
-        let saved = save_session_files_to_dir(&runtime, &view, &dir)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(saved.warning.as_deref(), Some(TRANSCRIPT_DEGRADED_WARNING));
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn save_session_files_warns_when_audio_was_capped() {
-        let runtime = live::runtime::LiveRuntime::new();
-        runtime.set_recorded_pcm_limit_for_test(2);
-        runtime.append_recorded_pcm_for_test(&[1, 0, 2, 0]);
-        let dir = std::env::temp_dir().join(format!("yap-live-capped-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let saved = save_session_files_to_dir(&runtime, &live_view(Some("hello"), None), &dir)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(saved.warning.as_deref(), Some(AUDIO_CAPPED_WARNING));
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn save_session_parts_returns_transcript_only_when_wav_write_fails() {
-        let dir =
-            std::env::temp_dir().join(format!("yap-live-wav-fallback-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let partial = dir.join("live-42.wav.part");
-        std::fs::create_dir_all(&partial).unwrap();
-
-        let saved = save_session_parts_to_dir(&dir, 42, Some("hello".into()), &[1, 0], None)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(saved.source_path, saved.output_path);
-        assert_eq!(saved.warning.as_deref(), Some(AUDIO_SAVE_FAILED_WARNING));
-        assert!(std::path::Path::new(&saved.output_path).exists());
-        assert!(!dir.join("live-42.wav").exists());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
     fn write_new_text_file_does_not_scan_partial_transcripts() {
         let dir =
             std::env::temp_dir().join(format!("yap-live-text-partial-{}", std::process::id()));
@@ -725,64 +737,6 @@ mod tests {
     }
 
     #[test]
-    fn save_session_parts_avoids_same_millisecond_overwrite() {
-        let dir = std::env::temp_dir().join(format!("yap-live-collision-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let first = save_session_parts_to_dir(&dir, 123, Some("first".into()), &[], None)
-            .unwrap()
-            .unwrap();
-        let second = save_session_parts_to_dir(&dir, 123, Some("second".into()), &[], None)
-            .unwrap()
-            .unwrap();
-
-        assert_ne!(first.name, second.name);
-        assert_eq!(
-            std::fs::read_to_string(first.output_path).unwrap(),
-            "first\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(second.output_path).unwrap(),
-            "second\n"
-        );
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn save_session_parts_retries_concurrent_same_millisecond_saves() {
-        let dir = std::env::temp_dir().join(format!(
-            "yap-live-concurrent-collision-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let left_dir = dir.clone();
-        let left_barrier = std::sync::Arc::clone(&barrier);
-        let left = std::thread::spawn(move || {
-            left_barrier.wait();
-            save_session_parts_to_dir(&left_dir, 456, Some("left".into()), &[], None)
-                .unwrap()
-                .unwrap()
-        });
-        let right_dir = dir.clone();
-        let right_barrier = std::sync::Arc::clone(&barrier);
-        let right = std::thread::spawn(move || {
-            right_barrier.wait();
-            save_session_parts_to_dir(&right_dir, 456, Some("right".into()), &[], None)
-                .unwrap()
-                .unwrap()
-        });
-
-        let first = left.join().unwrap();
-        let second = right.join().unwrap();
-
-        assert_ne!(first.name, second.name);
-        assert!(std::path::Path::new(&first.output_path).exists());
-        assert!(std::path::Path::new(&second.output_path).exists());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
     fn saved_live_session_scan_uses_filename_timestamp() {
         let dir = std::env::temp_dir().join(format!("yap-live-timestamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -794,5 +748,12 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].created_at_ms, 999);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn test_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("yap-live-{label}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
