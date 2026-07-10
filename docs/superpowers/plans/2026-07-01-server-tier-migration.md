@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Author:** Architecture
-**Status:** Active
+**Status:** Superseded as an execution plan by the canonical roadmap in [VOICE-OS-ARCHITECTURE.md](../../VOICE-OS-ARCHITECTURE.md) and the meeting decision in [ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md). Retained as historical rationale.
 
 ---
 

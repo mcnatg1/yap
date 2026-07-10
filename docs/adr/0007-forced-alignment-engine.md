@@ -3,6 +3,7 @@
 **Date:** 2026-06-30
 **Status:** Accepted (roadmap — Phase 7a)
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (resolves the aligner "TBD"), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (CrispASR runtime)
+**Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - alignment consumes revisioned source-aware diarization results. Its resource gate is measured with the selected diarization path rather than a fixed WeSpeaker companion.
 
 ## Context
 
@@ -28,7 +29,7 @@ Selection rule in worker: `en → wav2vec2-en`; otherwise `canary`. Both produce
 Confirm the default against fixtures before locking:
 
 1. **Coverage** — canary must align all 14 codes; if a language fails, fall back to whole-chunk speaker (single dominant speaker) rather than crash.
-2. **Footprint** — model + runtime peak < 300 MB alongside WeSpeaker.
+2. **Footprint** — model + runtime peak < 300 MB within the measured shared preprocessing and diarization budget.
 3. **Quality** — word boundary error acceptable for >50% overlap rule (coarse is fine; we need segment attribution, not karaoke).
 4. **Invocation** — prefer CrispASR-exposed aligner (one runtime) over a second ONNX dependency; choose worker-ONNX only if the pinned CrispASR build lacks `-am`.
 
@@ -54,4 +55,4 @@ Confirm the default against fixtures before locking:
 
 ## References
 - [ADR 0004](0004-background-diarization-okf-agents.md) — diarization, intersection, worker
-- [Testing strategy](../specs/testing-strategy.md) — `two-speaker-2min.wav` fixture
+- [Testing strategy](../specs/testing-strategy.md) — source-aware meeting fixtures and timing gates

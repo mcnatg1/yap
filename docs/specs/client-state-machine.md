@@ -175,7 +175,7 @@ flowchart LR
     Intake["Intake"] --> Pre["Preprocessing: normalize, VAD, chunks, LID"]
     Pre --> STT["Transcription: Nemotron fallback or server router"]
     STT --> Align["Alignment and timestamps"]
-    Align --> Diar["Diarization: solo fallback or server two-pass"]
+    Align --> Diar["Diarization: local anonymous evidence or server reconciliation"]
     Diar --> Post["Postprocess: history, OKF, KB handoff"]
 ```
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Status:** Accepted (roadmap — canonical Phase 10)
-**Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier), [ADR 0017](0017-knowledge-base-compiler.md) (yap-knowledge as Git source-of-truth)
+**Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier), [ADR 0017](0017-knowledge-base-compiler.md) (yap-knowledge as Git source-of-truth), [ADR 0020](0020-meeting-capture-diarization-authority.md) (meeting capture and diarization authority)
 
 ## Context
 
@@ -38,7 +38,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | Tauri + React thin client |
 | **Primary language** | Rust (Tauri backend) + TypeScript (React frontend) |
 | **Deployment** | NSIS installer (Windows); future: macOS DMG, Linux AppImage |
-| **Responsibilities** | Mic capture; Silero VAD; Opus encoding; global hotkey + text injection (ADR 0013); ghost / preview UI; server connector (WSS + HTTP); local file selection; local Nemotron INT8 fallback; Settings UI |
+| **Responsibilities** | Track-aware capture and deterministic preprocessing; recording; global hotkey + text injection (ADR 0013); ghost / preview UI; optional anonymous speaker evidence; server connector (WSS + HTTP); local file selection; local Nemotron INT8 fallback; Settings UI |
 | **Maps from** | `cohere-transcribe-local/desktop/` |
 
 `yap-desktop` ships to end-user machines. It must be code-signed and notarised per-platform. It contains no server-side logic and no knowledge data.
@@ -50,7 +50,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | GB-class server node: workload router, model pools, KB compiler, auth middleware, APIs |
 | **Primary language** | Python (ML inference services) + Rust (router / API server) |
 | **Deployment** | Docker Compose / Kubernetes on org-managed GB-class hardware |
-| **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); Streaming ASR pool (WSS); Cohere batch pool (concurrent GPU workers); LLM pool (Scribe/polish/agents); ECAPA-TDNN + two-pass diarization service (ADR 0015); KB compiler service (ADR 0017); Auth middleware + identity DB (ADR 0016); APIs: live WSS, batch job queue, KB query |
+| **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); streaming and batch ASR pools; LLM pool (Scribe/polish/agents); authoritative model-selected diarization and reconciliation (ADR 0020); purpose-authorized identity service (ADR 0016); KB compiler service (ADR 0017); APIs for live streams, batch jobs, result revisions, and KB queries |
 | **Infrastructure-as-code** | `yap-server/infra/` contains Postgres migrations, Redis config, vector index config, S3 bucket/lifecycle policy, docker-compose/k8s manifests. The storage **data** lives on the running server node; the repo holds migrations + IaC only. |
 | **Maps from** | `cohere-transcribe-local/server/` plus `infra/yap-server-node/` after MVP staging |
 

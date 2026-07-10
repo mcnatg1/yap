@@ -5,6 +5,7 @@
 **Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (local fallback runtime history), [ADR 0005](0005-llama-server-agents.md) (LLM sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (runtime state machine)
 **Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the team profile still defaults to server-hosted live ASR when connected, but the desktop-local offline/degraded fallback is Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`.
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
+**Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
 
 ## Context
 
@@ -32,7 +33,7 @@ Yap supports two deployment profiles. Neither profile is deleted. The team profi
 | STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server-hosted streaming ASR pool |
 | STT (batch) | Queue/block every imported recording when offline; no local file-ASR path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
-| Diarization | Server-less L3 worker (legacy phase map) | Two-pass server pipeline (ADR 0015, canonical Phase 8) |
+| Diarization | Optional local anonymous evidence; no durable voice profiles | Server-authoritative reconciliation and purpose-authorized identity (ADR 0020, canonical Phase 8) |
 | Knowledge base | Local OKF markdown (legacy phase map) | `yap-knowledge` Git repo + KB compiler (ADR 0017, canonical Phase 9) |
 | Auth | None / local | Entra ID / MSAL (ADR 0016, canonical Phase 7) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
@@ -43,9 +44,9 @@ The Tauri desktop app (`yap-desktop`) retains everything that cannot be delegate
 
 | Responsibility | Notes |
 |----------------|-------|
-| **Mic capture** | Platform audio API; always local |
-| **VAD / endpointing** | Silero ONNX in Rust (ADR 0006); produces Opus chunks + `vad_segments` |
-| **Opus chunk encoding** | Compress before wire transfer; reduces bandwidth by ~10× vs PCM |
+| **Track-aware capture** | Platform audio API; microphone now and optional system loopback later; always local |
+| **VAD / endpointing** | Client-side advisory boundaries and endpointing; source audio remains authoritative |
+| **Transport encoding** | Negotiate PCM/Opus with the server contract; preserve source-track and gap metadata |
 | **Global hotkey + text injection** | ADR 0013; OS-level; cannot be delegated |
 | **Ghost / preview UI** | Tauri webview overlay; latency-sensitive rendering |
 | **Local file selection** | OS file picker; files may be uploaded to server for batch |
@@ -70,7 +71,7 @@ flowchart TB
         end
 
         KB["Knowledge compiler\n(ADR 0017)"]
-        Diar["Diarization service\n(ADR 0015)"]
+        Diar["Diarization service\n(ADR 0020)"]
     end
 
     Client -->|"Opus stream (WSS)"| Router

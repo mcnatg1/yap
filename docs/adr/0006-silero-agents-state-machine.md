@@ -3,7 +3,8 @@
 **Date:** 2026-06-30
 **Status:** Accepted
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md), [ADR 0005](0005-llama-server-agents.md)
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and PR3 — model residency for Moonshine/Cohere moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus a local Moonshine v2 tiny fallback path. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context; PR3 does not load local Cohere.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and [ADR 0019](0019-local-streaming-model-selection.md) — heavy model residency moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus the local Nemotron fallback selected by ADR 0019. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context.
+**Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - VAD remains useful for endpointing and advisory segment hints, but it is not authoritative for meeting reprocessing. Speaker work runs through an independent bounded sink and may re-evaluate activity from retained audio.
 
 ## Context
 
@@ -28,12 +29,12 @@ This ADR specifies **where Silero lives**, **scoped agent profiles**, and a **ru
 | **Silence-anchored chunk cut** | Same Rust audio path | Trigger when silence ≥ **1.5–2 s** and speech buffer ≥ **30 s** |
 | **`vad_segments` for L3 manifest** | Rust → chunk JSON | Millisecond intervals **relative to chunk**; required field |
 | **Live STT gating** | Optional | Feed speech regions to crispasr stream; or rely on CrispASR `--vad` **only if** it does not duplicate Rust Silero (pick one path in implementation — **prefer single Silero in Rust** for chunker + segments) |
-| **L3 diarization** | knowledge worker | **Must not** re-run Silero when `vad_segments` is non-empty |
+| **Meeting diarization** | Optional client evidence / server reconciliation | Client hints may be reused, but authoritative processing may re-evaluate activity; a client false negative never removes source audio |
 | **CrispASR Firered VAD** | Optional fallback | Batch/long-file paths inside crispasr only if Rust Silero not run on that audio |
 
 **Bundle:** ship `silero_vad.onnx` (or equivalent pinned Silero v4/v5 ONNX) under `%LOCALAPPDATA%/Yap/models/`.
 
-**Not on hot path:** WeSpeaker, alignment, spectral clustering.
+**Not on hot path:** speaker evidence, alignment, or clustering.
 
 ### 2. Agent profiles (scoped)
 

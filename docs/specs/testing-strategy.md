@@ -1,7 +1,7 @@
 # Spec: Testing strategy
 
-**Status:** Draft (2026-06-30)
-**Scope:** Cross-cutting test approach for the sidecar/worker architecture — fixtures, accuracy spot-checks, and the CI matrix that pins native runtimes.
+**Status:** Draft (updated 2026-07-10)
+**Scope:** Cross-cutting tests for the desktop runtime, track-aware audio contracts, local fallback, source-aware diarization, server contracts, and native UI.
 
 This is the shared reference the phase specs point to for their acceptance tests.
 
@@ -15,6 +15,9 @@ This is the shared reference the phase specs point to for their acceptance tests
 | **Integration** | Rust ↔ sidecar over real IPC; one fixture in → expected shape out | `cargo test` w/ sidecar launched; tagged `#[ignore]` unless binaries present |
 | **E2E (smoke)** | App boots, overlay responds, desktop shell opens | Playwright for browser/Tauri shell surfaces; WebdriverIO for true desktop smoke |
 | **Accuracy** | WER spot-check vs golden transcripts | Python `jiwer` script in CI, tolerance-gated |
+| **Diarization** | DER/JER, speaker count, short-turn recall, overlap, and identity false-name gates | License-clear RTTM fixtures + benchmark harness |
+| **Reliability/privacy** | Gap recovery, reconnect revisions, consent, deletion, tenant isolation | Rust integration and server contract tests |
+| **Performance** | Capture drops, ASR regression, CPU, RSS, and RTF | Deterministic profiler jobs; hardware results recorded separately from CI pass/fail when hosts differ |
 
 Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
 
@@ -48,7 +51,11 @@ Future speech fixtures should be stored under `desktop/tests/fixtures/`
 | `multi-fr-30s.wav` | `-l fr` batch | Non-empty French; LID detects `fr` |
 | `silence-5s.wav` | VAD/no-speech | No phrases finalized |
 | `corrupt.m4a` | decode failure | `AUDIO_DECODE` error |
-| `two-speaker-2min.wav` | Phase 7 diarization | ≥2 `SPEAKER_XX`, stable across chunks |
+| `meeting-one-speaker.wav` + RTTM | Baseline attribution | One stable anonymous cluster; no false name |
+| `meeting-two-speaker.wav` + RTTM | Turn-taking diarization | DER/JER and speaker-count gates |
+| `meeting-short-turns.wav` + RTTM | Sub-1.6 s evidence | Short turns preserved; weak evidence may remain unknown |
+| `meeting-overlap.wav` + RTTM | Concurrent speakers | Overlap scored explicitly; challenger promotion gate |
+| `meeting-echo-two-track/` | Future mic/system leakage | No duplicate speaker inflation; track drift and gaps represented |
 
 Golden transcripts live beside fixtures. Comparison is **WER-tolerant**, never byte-equal (quantized models drift).
 
@@ -70,6 +77,27 @@ timestamp-shape coverage without shipping private or unclear audio.
 | Nemotron INT8 live (en, finals) | ≤ 0.18 |
 
 - A regression beyond gate **fails CI** for that backend; server pool sizing/model choice is the mitigation.
+
+### Diarization and identity gates
+
+Starting targets from the source-aware design:
+
+| Metric | Gate |
+|--------|------|
+| No-collar DER with overlap scored | ≤ 0.20 |
+| Speaker-count mean absolute error | ≤ 0.5 |
+| Named identity precision | ≥ 0.995 |
+| Open-set false-name rate | ≤ 0.001 |
+| Local anonymous diarization RSS increase | < 150 MB |
+| Client p95 CPU increase on reference hardware | < 5 percentage points |
+| Local-ASR latency regression while evidence is active | < 10% |
+| Supported-load audio callback drops | 0 |
+
+Named-identity gates remain inactive until the purpose-authorized server identity phase exists. Anonymous clustering must never manufacture a name to improve a metric.
+
+The approved diarization suite is a checked-in `desktop/tests/fixtures/diarization/manifest.json` plus license/provenance records, SHA-256 hashes, audio, transcripts, and RTTM annotations for the meeting cases above. The baseline cannot be accepted while any required fixture or license record is missing. The initial client reference profile is Windows 11 x64, CPU-only, 4 physical cores/8 threads in the Intel Core i5-1135G7 performance class, 16 GB RAM, normal process priority, and the OS balanced power plan. Every benchmark result records exact CPU, RAM, OS build, runtime/model revisions, and power mode.
+
+The supported-load callback test runs 48 kHz stereo capture converted to the required prepared format while local ASR, recording, and anonymous speaker evidence are active. It includes deterministic queue saturation and a four-hour accelerated timeline. Hardware-specific performance gates run on the pinned reference host; portable CI still runs deterministic contract, fixture-shape, and loss-accounting tests.
 
 ---
 
@@ -97,7 +125,9 @@ The risk is **native runtimes**, not app logic. CI must run the pinned Nemotron/
 | A–D LLM | Polish parity, 400 ms Scribe bypass, backend flag, empty-completion retry |
 | 3 Live | partial latency, silence finalize, raw-mode badge, mic-denied recovery, dual-STT block |
 | 4 LID | code mapping, low-confidence gate, multi-window probe agreement |
-| 7a–c L3 | speaker-vault stability across chunks, align-on-raw, FIFO degraded mode, quarantine on bad write |
+| 6 Preprocessing | mixed-session rejection, track-aware content IDs, explicit gaps, bounded windows, advisory VAD |
+| 7 Identity/access | Yap API token audience, `(tid, oid)` isolation, consent and withdrawal, profile-version compatibility |
+| 8 Meeting evidence | one/two/overlap/short/noisy speakers, stable result revisions, bounded clusters, no local names or persistent embeddings |
 | 7d–e Agents | citation-required Analyst, three-strike Student, RAG confidence floor |
 
 ---
@@ -109,10 +139,32 @@ The risk is **native runtimes**, not app logic. CI must run the pinned Nemotron/
 - Future contract tests cover server health/auth, batch upload/job status, live WSS tokens, and fallback events.
 - Event-order tests must use job IDs before server upload work ships.
 
+## 7. Source-aware meeting tests
+
+- `SessionMode`, trigger gesture, physical `CaptureSource`, local speaker slot, session speaker, and durable identity are independently serialized and validated.
+- Recording remains correct when ASR, speaker evidence, or transport is absent, backpressured, or crashed.
+- Long meeting recording uses bounded memory; an interrupted write is recoverable and cannot appear complete.
+- Cross-session and cross-track frames fail closed instead of being relabeled.
+- Lost callback intervals produce explicit gaps and a partial/degraded result.
+- A saturated callback handoff reports the exact loss through the reserved accumulator.
+- A callback update racing an accumulator drain appears in the next loss generation.
+- `Unknown` may pass through a hidden candidate state and become `Speaker N` in a new revision; neither state may become a local name.
+- Repeated weak evidence may establish an anonymous cluster but cannot update a profile.
+- The local baseline passes the absolute DER, speaker-count, CPU, RSS, latency, and callback-drop gates before release.
+- Server reconciliation appends a revision and cannot silently overwrite a user correction.
+- Contact import and transcript renaming create no biometric enrollment.
+- Unenrolled, withdrawn, expired, cross-tenant, and incompatible-model profiles cannot match; enrollment, matching, and adaptation grants are checked separately, and matching-grant withdrawal denies naming without requiring profile deletion.
+- Same replay key/same hash is idempotent; same key/different hash conflicts; different keys/same hash remain distinct.
+- Fault injection around every recording commit step cannot produce a false-complete session.
+- Withdrawal during in-flight matching prevents publication, and backup restore honors deletion tombstones.
+- Replayed server results apply an authorized profile adaptation at most once; conflicting evidence fails closed.
+- Transient embeddings are absent from logs, sidecars, temporary artifacts, and SQLite after normal and crashed runs.
+- Four-hour and 64-speaker synthetic tests prove bounded memory and assignment state.
+
 ---
 
-## 7. Non-goals
+## 8. Non-goals
 
 - No cloud test infra (local-first; fixtures are committed/small).
-- No load/perf benchmarking suite in v1 beyond the WER + latency spot-checks above.
+- No generic enterprise load laboratory in v1; targeted capture, ASR, diarization, and reconnect stress tests are required for their phases.
 - No telemetry — debugging uses local logs (`%LOCALAPPDATA%/Yap/logs/`).

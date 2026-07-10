@@ -1,11 +1,11 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-01)
-**Authority:** Decisions are normative in [ADR 0001–0019](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
+**Status:** Living document (2026-07-10)
+**Authority:** Decisions are normative in [ADR 0001–0020](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 > **2026-07-08 — Local model reset:** Yap keeps one local live/offline fallback model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Client-side fusion routing is rejected; model routing belongs on the server.
 
-> **ADR precedence:** ADR 0014-0019 are the current direction for team/server mode, official large-recording paths, and local fallback model selection. Older local-heavy ADR details remain useful for solo/local fallback where they have not been amended. The desktop owns mic capture, VAD/endpointing, Opus chunks, hotkey/UI, server connector, and local live fallback. In team/server mode, the server owns official long-recording STT, preprocessing, diarization, auth, KB compilation, and agent workloads.
+> **ADR precedence:** ADR 0014-0020 define the current thin-client, server, local-fallback, and meeting-processing direction. ADR 0020 supersedes conflicting diarization details in ADR 0004 and ADR 0015. The desktop owns capture, deterministic preprocessing, recording, hotkey/UI, local live fallback, optional anonymous speaker evidence, and future transport packaging. The server owns official long-recording STT, authoritative meeting reconciliation, purpose-authorized named identity, team storage, KB compilation, and agent workloads.
 
 ---
 
@@ -21,8 +21,8 @@
 | **On-prem GPU (team profile)** | The GB-class server node is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
 | **Critical path isolation** | Live stays fast; heavy work (diarization, OKF, agents) never blocks typing. |
 | **Right model per job** | Nemotron INT8 for local live/offline fallback; server router for official recordings/live; **LLM pool** for polish/agents — not one model for everything. |
-| **Two-pass diarization** | ECAPA-TDNN live labels + AHC/VBx post-meeting accuracy; rolling centroid improves speaker recognition over time. |
-| **Modular diarizer** | WeSpeaker + vault (~200 MB) for solo; ECAPA-TDNN on GPU for team — realistic on both hardware targets. |
+| **Revisioned diarization** | Local results may use anonymous `Unknown` and `Speaker N`; server reconciliation may refine boundaries and attach purpose-authorized names. |
+| **Model-agnostic diarizer** | Existing `sherpa-onnx` APIs provide the first local baseline; SphereVBx-PF and overlap-aware models must earn promotion through benchmarks. |
 | **Graceful degradation** | Dual-track Scribe, quarantine folder, RAG confidence gates, offline fallback to local sidecar — production-minded. |
 | **Recordings as moat** | Journalists/researchers already have files; Cohere batch (GPU-accelerated in team profile) is differentiated vs pure dictation apps. |
 
@@ -39,7 +39,7 @@
 ### Verdict
 
 - **Yap (batch + live EN + polish):** Strong product — ship this.
-- **Background diarization + speaker vault:** Good idea for meetings/interviews — canonical Phase 8, after server STT and preprocessing are stable.
+- **Source-aware meeting diarization:** Good idea for meetings/interviews - canonical Phase 8 after track/timeline contracts are stable; never block dictation on it.
 - **Full agentic KB + MCP:** Ambitious second product layer — good *direction*, don’t block the live dictation path on it.
 
 ---
@@ -53,7 +53,7 @@
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
 | STT runtime | **Nemotron INT8 sherpa fallback** + future server connector | Same client shell; heavier pools move server-side |
 | Polish | **llama-server** (bundled, CPU `-ngl 0`) | Scribe + agents; Ollama dev fallback |
-| Speakers | Plain transcript | Diarization + vault + OKF |
+| Speakers | Plain dictation; optional anonymous meeting labels later | Revisioned diarization + purpose-authorized server identity + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Git + compiler (team) | OKF + glossary agents + Q&A |
 
 ---
@@ -66,8 +66,8 @@
 | STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server streaming ASR pool (WSS) |
 | STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
 | LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
-| Diarization | WeSpeaker + vault (old 7b, ADR 0004) | ECAPA-TDNN two-pass (Phase 8, ADR 0015) |
-| Identity | None | Entra ID / MSAL (ADR 0016) |
+| Diarization | Optional local `Unknown` / `Speaker N`; no durable profiles | Server-authoritative reconciliation; algorithms selected by benchmark (ADR 0020) |
+| Identity | Per-transcript contact labels only; no biometric matching | Entra ID / MSAL + explicit voice enrollment (ADR 0016/0020) |
 | Knowledge base | Local OKF markdown (old 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
@@ -75,7 +75,7 @@ The **client shell** (`yap-desktop`) is identical in both profiles: mic capture,
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
-Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0015](adr/0015-two-pass-diarization-speaker-identity.md) (diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos)
+Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0020](adr/0020-meeting-capture-diarization-authority.md) (meeting capture and diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth and purpose-authorized identity) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos)
 
 ---
 
@@ -85,20 +85,20 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 2. **Live mic / offline fallback → Nemotron INT8** (English v1).
 3. **One warm local sherpa recognizer**; server router owns heavier model residency.
 4. **SpeechBrain LID** = language **gate** (“Detected French — continue?”), not silent auto-`-l`.
-5. **L3 background worker** = separate subprocess (not Python thread — avoids GIL).
-6. **Diarization** = off hot path; silence-anchored chunks + **Speaker Vault**.
+5. **Meeting enrichment** = independent bounded sinks and revisioned results; never block dictation.
+6. **Diarization** = local anonymous evidence when available; server-authoritative reconciliation and purpose-authorized names.
 7. **Align raw STT**, never polished LLM text, before word→speaker intersection.
 8. **On-prem GPU** = "our hardware, our network" — not cloud; extends local-first trust to the org's LAN (team profile).
-9. **Auth** = Entra ID / MSAL; objectId→voice-centroid bridge in identity DB; biometric consent required before enrollment.
+9. **Auth** = Entra ID / MSAL; `(tid, oid)` principal key; Yap API audience validation; explicit consent before any durable voice profile.
 10. **KB compiler** = Git source-of-truth + deterministic compile → Postgres + Redis + vector DB (all indexes disposable).
 
-Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0015](adr/0015-two-pass-diarization-speaker-identity.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md)
+Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md) · [0020](adr/0020-meeting-capture-diarization-authority.md)
 
 ---
 
 ## Pipeline charts
 
-Two views of the same architecture — **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Nemotron INT8 fallback, and server model pools for official large-recording work. Normative rules live in [ADR 0001–0019](adr/README.md); sections below expand each box.
+Two views of the same architecture - **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Nemotron INT8 fallback, source-aware meeting evidence, and server model pools for official processing. Normative rules live in [ADR 0001–0020](adr/README.md); sections below expand each box.
 
 **Read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
 
@@ -119,7 +119,7 @@ flowchart TB
     subgraph Sidecars["Local runtimes — client-owned"]
         CR["in-process sherpa-onnx<br/>Nemotron INT8 fallback"]
         LL["llama-server<br/>Scribe + agents · -ngl 0"]
-        KW["yap-knowledge-worker<br/>align · diarize · OKF"]
+        KW["optional speaker-evidence worker<br/>anonymous · bounded · cold"]
     end
 
     subgraph L1["L1 — OS + pre-warm · current client seam"]
@@ -131,10 +131,10 @@ flowchart TB
         Batch["File drop → server Cohere path / queue → History"]
     end
 
-    Handoff["Async handoff<br/>silence chunks · FIFO ≤ 3 · chunk manifest"]
+    Handoff["Async handoff<br/>track-aware bounded chunks · explicit gaps · manifest"]
 
     subgraph L3["L3 — background enrich · Phase 8"]
-        L3n["Align raw · WeSpeaker vault · word→speaker · stitch"]
+        L3n["Anonymous speaker timeline · result revisions<br/>server reconciliation when connected"]
     end
 
     L4["L4 — OKF knowledge_base/ · Phase 9"]
@@ -151,7 +151,8 @@ flowchart TB
     UI -.->|Polish panel| LL
     Live --> Handoff
     Batch --> Handoff
-    Handoff --> KW --> L3 --> L4
+    Handoff --> KW --> L3
+    L3 -.->|authoritative server result| L4
     L4 --> L5 & L6 & L7
     L5 --> LL
     L7 --> LL
@@ -170,7 +171,7 @@ flowchart TB
 
     subgraph Client["yap-desktop (Tauri + React)"]
         UI["Transcribe · Live · History · KB agents"]
-        Mic["Mic · Silero VAD · Opus encoder"]
+        Mic["Capture · VAD hints · track manifest<br/>mic now · system loopback later"]
         Hotkey["Global hotkey · inject (ADR 0013)"]
         Conn["Server connector\n(WSS live · HTTP batch)"]
         LocalFB["Local fallback sidecar\n(offline / degraded)"]
@@ -181,7 +182,7 @@ flowchart TB
         ASR["Streaming ASR pool\n(WSS)"]
         Batch["Cohere batch pool\n(concurrent GPU workers)"]
         LLM["LLM pool\n(Scribe · agents · GPU)"]
-        Diar["Diarization service\n(ECAPA-TDNN · VBx · ADR 0015)"]
+        Diar["Diarization service\nserver reconciliation · ADR 0020"]
         KB["KB compiler service\n(ADR 0017)"]
     end
 
@@ -196,7 +197,8 @@ flowchart TB
     Conn -->|"file upload (HTTP)"| Router
     Router --> ASR & Batch & LLM
     ASR & Batch --> Diar
-    ASR -->|"tokens + speaker labels"| Conn
+    ASR -->|"tokens"| Conn
+    Diar -->|"revisioned speaker result"| Conn
     Batch -->|"transcript JSON"| Conn
     LLM -->|"polish / agent response"| Conn
     KB -->|"permission-filtered KB view"| Conn
@@ -230,7 +232,7 @@ flowchart TB
     subgraph Sidecars["Local runtime / sidecars"]
         CR["sherpa-onnx<br/>Nemotron INT8 fallback"]
         LL["llama-server<br/>~2B Q4 · CPU -ngl 0"]
-        KW["yap-knowledge-worker<br/>BELOW_NORMAL · ORT 2 threads · idle exit 5 min"]
+        KW["speaker-evidence worker<br/>optional · anonymous · bounded"]
     end
 
     subgraph L1["L1 — OS listeners + pre-warm · client-owned"]
@@ -257,16 +259,16 @@ flowchart TB
     end
 
     subgraph Handoff["Handoff — non-blocking · never on L2 hot thread"]
-        Chunk["Silence chunker · 1.5–2 s silence · ≥ 30 s speech"]
-        Writer["Async .opus writer · ring buffer"]
-        Manifest["Chunk manifest · text_raw · vad_segments · degraded"]
-        FIFO["FIFO queue · max depth 3"]
+        Chunk["Bounded transport windows · VAD boundary hints"]
+        Writer["Async source-track writer · explicit gaps"]
+        Manifest["Versioned track manifest · hashes · VAD hints · degraded"]
+        FIFO["Independent bounded sinks"]
     end
 
-    subgraph L3["L3 — yap-knowledge-worker · Phases 8–9"]
-        Align["Forced align · canary-ctc-aligner · raw text only"]
-        Diar["WeSpeaker ResNet34 · vault match ≥ 0.70 · cluster unmatched · cap 15"]
-        Intersect["Word → speaker · > 50% overlap · SPEAKER_XX"]
+    subgraph L3["L3 — meeting evidence and authoritative reconciliation · Phases 8–9"]
+        Align["Forced align · raw text only · server final"]
+        Diar["Local Unknown / Speaker N<br/>server algorithm selected by benchmark"]
+        Intersect["Revisioned word-to-speaker timeline"]
         Archivist["Archivist · OKF markdown + YAML · no LLM"]
         Stitch["Session stitch · merge chunks → one conversation"]
         Quarantine["quarantine/ on write fail"]
@@ -342,7 +344,7 @@ flowchart TB
     Student -.->|optional| LL
 ```
 
-**Batch vs live on L3:** files **under 5 minutes** enqueue one whole-file manifest; **≥ 5 minutes** or **live sessions** use the silence chunk pipeline ([ADR 0004](adr/0004-background-diarization-okf-agents.md)).
+**Meeting transport:** bounded windows may align to VAD boundaries but never grow without bound. Full retained source audio remains available for authoritative reprocessing; client VAD is advisory ([ADR 0020](adr/0020-meeting-capture-diarization-authority.md)).
 
 ---
 
@@ -355,20 +357,20 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **L1** Global OS listeners | ✅ | ADR 0013 | Tauri hotkeys + Windows target-validated injection are active; other platforms follow |
 | **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005, 0019 | Warm **Nemotron recognizer** + **llama-server** + mic |
 | **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Optional AGC; Silero required |
-| **L2** Silero VAD | ✅ | ADR 0004 §3, §10 | Shared `vad_segments` → L3 |
+| **L2** VAD | ✅ Reconciled | Local audio spec, ADR 0020 | Advisory boundaries and endpointing; false negatives never erase source audio |
 | **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2**; batch gate is canonical Phase 6 |
 | **L2** ASR | ✅ Reconciled | ADR 0001–0002/0014/0019 | **Nemotron local fallback**; **server router** for official recordings/live |
 | **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | **llama-server** ~2B Q4, `-ngl 0` |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
 | **L2** Cross-app injector | ✅ | ADR 0013 + `live/injection.rs` | Revalidate stop-time target; Unicode input; visible clipboard fallback |
-| **L2** Silence chunker → FIFO | ✅ | ADR 0004 §3, §10 | Async writer; max queue 3 |
-| **L3** Handoff audio + raw text | ✅ | ADR 0004 chunk manifest | `text_raw` frozen at boundary |
-| **L3** Wav2Vec2 / MMS align | ✅ | ADR 0004 §5 | Align **raw** only; canary-ctc-aligner default |
-| **L3** WeSpeaker + spectral cluster | ✅ | ADR 0004 §4 | **Vault-first**; cluster unmatched only |
-| **L3** Speaker Vault (>0.70) | ✅ | ADR 0004 §4, §10 | Merge centroids ≥0.85 |
-| **L3** Word→speaker intersection | ✅ | ADR 0004 §5 | >50% overlap rule |
+| **L2** Bounded track handoff | ✅ Reconciled | Local audio spec, ADR 0020 | Independent sinks, content identity, and explicit gaps |
+| **L3** Handoff audio + raw text | ✅ Reconciled | ADR 0020 | Versioned source tracks and immutable raw artifacts |
+| **L3** Forced alignment | ✅ Reconciled | ADR 0007, ADR 0020 | Align raw text only; server result is authoritative |
+| **L3** Anonymous local speaker evidence | ✅ Reconciled | ADR 0020 | `Unknown` / `Speaker N`; existing sherpa APIs provide the first baseline |
+| **L3** Server diarization + identity | ✅ Reconciled | ADR 0016, ADR 0020 | Revisioned reconciliation; names require active purpose grants and provenance |
+| **L3** Word-to-speaker timeline | ✅ Reconciled | ADR 0020 | Model-derived boundaries with result revision and confidence |
 | **L3** OKF parser | ✅ | ADR 0004 §6 | Phase 9 |
-| **L3** Python thread worker | ✅ Reconciled | ADR 0004 §7 | **`yap-knowledge-worker` subprocess** (not thread) |
+| **L3** Worker isolation | ✅ Reconciled | ADR 0020 | Optional client evidence and server reconciliation are independent from capture/ASR |
 | **L4** knowledge_base dirs | ✅ | § Process layout | + `team_knowledge/` in long-term OKF |
 | **L5** Student, Curator, Watcher loop | ✅ | § Agents | Three-strike + git opt-in |
 | **L5** Auditor | ✅ | § Agents | Weekly cron; Phase 9 |
@@ -376,11 +378,11 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **L6** IDE, MCP, VectorDB | ✅ | Phase 9 | Open-folder KB |
 | **L7** Librarian, Analyst, Coordinator | ✅ | § Agents | RAG + citations + todos |
 | **Failure states** (Scribe, Archivist, …) | ✅ | § Failure states | Full spec below |
-| **Bottleneck / thread caps** | ✅ | § Resource profiling | ORT/torch 2 threads in worker |
+| **Bottleneck / resource caps** | ✅ | § Resource profiling | Bounded sinks, bounded session clusters, benchmarked CPU/RSS/latency gates |
 | **Silero VAD (L2 + segments → L3)** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | Rust ONNX; no re-VAD in worker |
 | **Agent profiles (8 personas)** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | Mutex groups; v1 = Scribe only |
 | **Runtime state machine** | ✅ | [ADR 0006](adr/0006-silero-agents-state-machine.md) | One client-local Nemotron session; server pools schedule independently; bounded LLM queue |
-| **16 GB RAM budget** | ✅ | ADR 0004 §9 | Pyannote rejected |
+| **16 GB RAM budget** | ✅ Reconciled | ADR 0020 | No diarization model is promoted without measured CPU, RSS, and latency evidence |
 | **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server batch only; queue/block during disconnects; never use local Nemotron |
 
 Rows marked as future remain architecture-only. The Windows hotkey/injection path and current local live fallback are implemented client behavior.
@@ -420,12 +422,13 @@ Mic → optional AGC → Silero VAD
   → ghost UI + focused-field injection (Windows)   ← clipboard fallback if blocked
 
 Parallel (never blocks above):
-  VAD silence (1.5–2s) + buffer ≥30s speech
-    → async write .opus chunk
-    → push manifest to FIFO (vad_segments included)
+  prepared microphone frames + explicit gaps
+    → recording sink
+    → optional anonymous speaker-evidence sink
+    → future retryable server-transport sink
 ```
 
-**Not on L2:** Cohere, SpeechBrain LID (v1), diarization, alignment, OKF.
+**Not on the L2 hot thread:** official server ASR, language ID, speaker inference, alignment, reconciliation, identity matching, and OKF.
 
 ---
 
@@ -435,36 +438,52 @@ Parallel (never blocks above):
 
 ```json
 {
+  "schema_version": 1,
   "chunk_id": "...",
+  "owner_namespace": "local:<install-id>",
   "session_id": "...",
-  "audio_path": "...",
-  "text_raw": "...",
-  "text_polished": "...",
-  "t_start_ms": 0,
-  "t_end_ms": 32000,
-  "language": "en",
-  "source": "live|batch",
+  "track_id": "mic-0",
+  "track_source": { "kind": "captured", "source": "microphone" },
+  "sequence_start": 0,
+  "sequence_end": 319,
+  "start_ms": 0,
+  "duration_ms": 32000,
+  "sample_rate_hz": 16000,
+  "codec": "pcm_s16le",
+  "content_sha256": "...",
+  "audio_artifact_id": "...",
+  "session_mode": "dictation|meeting",
+  "session_origin": "live_capture|imported_file",
   "vad_segments": [[1200, 3400]],
+  "gaps": [],
+  "route": "local_fallback|server_live|server_batch",
   "degraded": false
 }
 ```
 
+For an import, `track_source` is `{ "kind": "imported", "provenance": "unknown|mixed|user_declared" }` with an optional declared source. The local owner namespace prevents collisions on one installation; when a chunk crosses the server boundary, the server replaces it with the token-derived `(tenant_id, owner_subject_id)` and never trusts a client-supplied tenant owner.
+
+Raw/polished text, language, and speaker attribution are not capture-manifest fields. Each belongs to a separate immutable result revision that references the capture or chunk hash, so reprocessing cannot mutate capture history.
+
 ### Processing per chunk
 
-1. **Align** raw text to audio (`canary-ctc-aligner` default).
-2. **Diarize:** WeSpeaker embeddings → **vault match first** (sim ≥0.70) → cluster **unmatched only**.
-3. **Intersect:** majority overlap → `SPEAKER_XX`.
-4. **Append** to session store; **stitch** at session end into one conversation file.
+1. **Validate** schema, session, track, timing, content identity, and gaps.
+2. **Preserve** raw audio and raw text as immutable inputs.
+3. **Project local evidence** to `Unknown` or session-scoped `Speaker N` when the optional client path is available.
+4. **Reconcile on the server** from retained source audio; align raw text and publish a new result revision.
+5. **Attach names only** through purpose-authorized, tenant-scoped profiles with model and calibration provenance.
 
 ### Back-pressure
 
-- FIFO depth **3**. Overflow → `degraded: true`; finish labels after session ends.
-- Worker **BELOW_NORMAL** priority; **2** ONNX threads; **idle exit** after 5 min empty.
+- Every sink is bounded and reports its own degraded state.
+- Recording has priority over optional ASR, evidence, and transport work.
+- Exceeding the local speaker safety ceiling yields `Unknown` plus a server-reprocessing marker.
+- Thread counts, queue depths, and idle policy are measured runtime configuration, not fixed architecture constants.
 
 ### Batch recordings
 
-- Files **&lt;5 min:** whole-file path (no micro-chunks).
-- Files **≥5 min** or live sessions: chunk pipeline.
+- Imported files retain a whole-file artifact and may use bounded processing windows.
+- Live meetings retain source tracks and may use bounded transport windows aligned to VAD hints.
 
 ---
 
@@ -510,11 +529,11 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 | Local STT loaded | Client fallback loads **Nemotron INT8 only**; server router owns fusion/routing |
 | Scribe (HOT) | **1** at a time; **400 ms** max |
 | Background LLM agents | **1 queued** (Student, Curator, Analyst, …) |
-| Knowledge worker | **1 chunk** processing; **3** pending max → degraded |
+| Speaker evidence | Optional, bounded, anonymous, and independently degradable |
 | Background agents during live | **Blocked** except Scribe |
-| Worker idle | Exit after **5 min** empty queue |
+| Meeting workers | Load only for meeting work; release by measured idle/resource policy |
 
-**Silero:** ONNX in **Rust** on audio thread → live VAD + chunk cuts + `vad_segments`; worker **does not** re-run Silero.
+**VAD:** Runs outside inference ownership and supplies advisory endpointing and segment hints. Source audio remains authoritative, so later processing may revise VAD decisions.
 
 ```
 Idle ↔ FallbackReady ↔ FallbackRunning  (local Nemotron INT8)
@@ -535,6 +554,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Recording history | Keep one canonical transcript/review surface and one cache owner. | Do not maintain separate preview dialogs, separate read-through caches, or fake recording adapters for the same transcript row. |
 | Settings and controls | Use native controls or already-installed primitives when they cover the job. Keep copy user-facing. | Do not add bespoke controls for simple select/radio/toggle behavior or explain CPU/GPU plumbing in normal settings copy. |
 | Docs and code | Update the ADR/spec/product surface in the same phase as the code. | Do not ship behavior that contradicts the client/server split: live local fallback is allowed; official long recordings queue for server. |
+| Speaker privacy | Persist anonymous timelines and user labels; keep local embeddings transient. | Do not turn contact import, transcript renaming, or meeting attendance into passive voice enrollment. |
 | Server staging | Keep `server/` to health, contract, route selection, and tests until the API/WSS contract is real. | Do not add placeholder pools/config/schema packages, app firewall exposure, Docker deployment, or service-disabling host tweaks before Phase 3-4 need them. |
 
 ---
@@ -543,12 +563,12 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 
 | Concern | Fix |
 |---------|-----|
-| CPU thread thrashing | L3 in **subprocess**; worker `torch`/ORT **2 threads**; `BELOW_NORMAL` priority |
-| RAM OOM (Pyannote/Nemo) | **WeSpeaker + sklearn** ~200 MB; reject Pyannote default |
-| Live dropouts | No align/diarize on L2; chunk write **async** |
-| Speaker over-cluster (1–15) | Vault-first; sim truncate **0.68**; min segment **500 ms** |
-| Chunk identity swap | **Speaker Vault** sim ≥ **0.70**; merge ≥ **0.85** |
-| Queue backlog | FIFO **3** → degraded mode; stitch at session end |
+| CPU thread thrashing | Independent bounded sinks; speaker work stays off the capture/ASR hot thread |
+| RAM growth | Session clusters target 32 and stop at the 64-speaker safety ceiling; exemplars remain bounded and transient |
+| Live dropouts | Recording is the priority sink; callback loss becomes an explicit timeline gap |
+| Short or noisy turns | Under 1.6 seconds is weak evidence; use calibrated score, margin, quality, and cumulative speech rather than a forced match |
+| Speaker-label churn | Stable IDs within a result revision; merges, splits, server reconciliation, and user corrections create explicit revisions |
+| Queue backlog | Each sink degrades independently; automatic reconnect drain waits for a Rust-owned durable ledger |
 
 ---
 
@@ -573,7 +593,7 @@ UI copy: **“Local fallback: English · Server files: 14 languages”**
 Yap (Tauri)  [yap-desktop]
   ├─ sherpa recognizer         STT — Nemotron INT8 fallback
   ├─ llama-server sidecar      Polish + LLM agents (CPU -ngl 0)
-  └─ yap-knowledge-worker      align + diarize + OKF (queue-driven)
+  └─ speaker-evidence worker   optional anonymous meeting labels; no durable identity
 
 %LOCALAPPDATA%/Yap/
   models/                      pinned model cache
@@ -593,7 +613,7 @@ Yap (Tauri)  [yap-desktop]
 
 ```
 yap-desktop (Tauri) — thin client shell
-  ├─ Silero VAD (Rust ONNX)    VAD + Opus encoding + vad_segments
+  ├─ Track-aware capture       VAD hints + source manifests + explicit gaps
   ├─ sherpa recognizer         Offline fallback only (Nemotron INT8)
   └─ Server connector          WSS (live) + HTTP (batch) to yap-server
 
@@ -602,9 +622,9 @@ yap-server (GB-class server node, org LAN/VPN)
   ├─ Streaming ASR pool         WSS endpoint
   ├─ Cohere batch pool          concurrent GPU workers
   ├─ LLM pool                   Scribe + agents, GPU
-  ├─ Diarization service        ECAPA-TDNN + AHC/VBx (ADR 0015)
+  ├─ Diarization service        authoritative model-selected reconciliation (ADR 0020)
   ├─ KB compiler service        Lane 1 + Lane 2 → Postgres + Redis + vector DB (ADR 0017)
-  ├─ Identity DB (Postgres)     objectId → voice centroid (ADR 0016)
+  ├─ Identity DB (Postgres)     (tid, oid) → purpose-authorized versioned voice profile (ADR 0016/0020)
   ├─ Redis                      hot permission cache
   ├─ Vector DB                  disposable semantic RAG index
   └─ S3                         raw blobs, backups, snapshots
@@ -649,8 +669,8 @@ timeline
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
 | **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server ASR routing. | Old Phase 5/8 |
 | **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
-| **7** | identity/access | Entra/MSAL bridge, consent, voice identity DB, and permission hooks needed by speaker identity and KB. | Old Phase 9; ADR 0016 |
-| **8** | diarization | Solo fallback diarization plus server two-pass ECAPA/VBx, speaker vault/centroids, and post-meeting correction. | Old 7b/10; ADR 0004/0015 |
+| **7** | identity/access | Entra/MSAL bridge, Yap API audience, consent, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
+| **8** | meeting evidence | Track-aware capture contracts, local anonymous speaker evidence, revisioned server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
 | **9** | knowledge | OKF, KB compiler, agents, RAG, MCP, and permission-filtered views. | Old 7c-7e/11; ADR 0010/0011/0012/0017 |
 | **10** | enterprise/release | Zscaler/corporate access hardening, audit/deploy runbooks, packaging, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
 
@@ -665,16 +685,16 @@ timeline
 | **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
-| **7** | Planned | Auth/identity bridge design exists; implementation waits for a server entrypoint. |
-| **8** | Planned, not optional | Diarization remains first-class: solo fallback plus server two-pass speaker identity. |
+| **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, consent records, and a server entrypoint. |
+| **8** | Decision accepted; spec in review | ADR 0020 fixes the direction; the source-aware written design awaits sign-off before its implementation plan begins. |
 | **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
 | **10** | Later | Corporate access hardening, release packaging, and repo split come after the MVP server is real. |
 
 Solo/local fallback and team/server mode share concepts, but the server path is now canonical for the main roadmap.
 
-**Future (unnumbered):** multilingual live router — its own ADR once per-language streaming backends are chosen; server GPU removes the latency excuse.
+**Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
-**Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Testing](specs/testing-strategy.md). Diarization gets a dedicated build spec when implementation begins.
+**Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
 ---
 
@@ -690,8 +710,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
 | **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
-| **7** Identity/access | Entra sign-in, consent, identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
-| **8** Diarization | Solo fallback + server two-pass diarization | [ADR 0004](adr/0004-background-diarization-okf-agents.md); [ADR 0015](adr/0015-two-pass-diarization-speaker-identity.md) |
+| **7** Identity/access | Entra sign-in, Yap API token validation, consent, tenant-scoped identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
+| **8** Meeting evidence | Track/timeline contracts, anonymous local labels, result revisions, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) |
 | **9** Knowledge/agents | OKF, KB compiler, RAG, MCP | KB compiler spec; permission compile SLA |
 | **10** Enterprise/release | Zscaler/corp access, packaging, repo split | CI/CD migration; cross-repo link update |
 
@@ -719,16 +739,16 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [ ] Migrate polish.ts to `/v1/chat/completions`
 - [ ] `YAP_LLM_BACKEND=ollama|llama`
 
-**Diarization/enrichment (Phases 8–9)**
+**Meeting evidence and diarization (Phases 8–9)**
 
-- [ ] Subprocess worker, not thread
-- [ ] `vad_segments` in every manifest
-- [ ] Async chunk writer (ring buffer)
-- [ ] FIFO max 3 + degraded mode
-- [ ] Vault-first diarization
+- [ ] Track-aware frames, manifests, content hashes, and explicit gaps
+- [ ] Independent bounded recording, ASR, evidence, and transport sinks
+- [ ] Local `Unknown` / `Speaker N` state and immutable result revisions
+- [ ] Transient client embeddings; no passive contact/profile enrollment
+- [ ] Rust-owned durable reconnect ledger before automatic drain
+- [ ] Server-authoritative reconciliation and purpose-authorized identity
 - [ ] Align raw STT only
-- [ ] Session stitch job
-- [ ] Worker idle shutdown + local logs
+- [ ] Benchmark baseline, SphereVBx-PF, and overlap-aware challenger before promotion
 
 ---
 
@@ -739,7 +759,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Streaming live vs server batch split | [0001](adr/0001-dual-stt-backends.md) |
 | Local fallback runtime history | [0002](adr/0002-crispasr-unified-stt-runtime.md), [0019](adr/0019-local-streaming-model-selection.md) |
 | SpeechBrain LID gate, recordings moat | [0003](adr/0003-long-term-voice-architecture.md) |
-| Diarization, vault, micro-batches, OKF, agents | [0004](adr/0004-background-diarization-okf-agents.md) |
+| Historical background pipeline principles, OKF, agents | [0004](adr/0004-background-diarization-okf-agents.md) |
 | llama-server for Scribe + agents | [0005](adr/0005-llama-server-agents.md) |
 | Silero, agent profiles, state machine | [0006](adr/0006-silero-agents-state-machine.md) |
 | Forced-alignment engine pick | [0007](adr/0007-forced-alignment-engine.md) |
@@ -750,11 +770,12 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | MCP server surface | [0012](adr/0012-mcp-server-surface.md) |
 | Global hotkey + injection (L1) | [0013](adr/0013-global-hotkey-injection.md) |
 | Server tier topology + thin client + workload router + two profiles | [0014](adr/0014-server-tier-compute-topology.md) |
-| Two-pass diarization + speaker identity (ECAPA-TDNN, VBx, rolling centroid) | [0015](adr/0015-two-pass-diarization-speaker-identity.md) |
-| Auth + identity bridge (Entra ID / MSAL, objectId→centroid, biometric consent) | [0016](adr/0016-auth-identity-bridge.md) |
+| Superseded server-only diarization decision | [0015](adr/0015-two-pass-diarization-speaker-identity.md) |
+| Auth + identity bridge (Entra ID / MSAL, `(tid, oid)`, biometric consent) | [0016](adr/0016-auth-identity-bridge.md) |
 | Team KB compiler (source-of-truth, two-lane store, permission model, disposable indexes) | [0017](adr/0017-knowledge-base-compiler.md) |
 | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | [0018](adr/0018-three-repo-topology.md) |
 | Local Nemotron INT8 streaming fallback | [0019](adr/0019-local-streaming-model-selection.md) |
+| Meeting capture, anonymous evidence, server reconciliation, contact/privacy boundary | [0020](adr/0020-meeting-capture-diarization-authority.md) |
 
 ### Build specs (how to implement)
 
@@ -765,6 +786,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | [Local LLM sidecar](specs/local-llm-sidecar.md) | polish/Scribe |
 | [Live dictation client](specs/live-dictation-client-ux.md) | 1–2 |
 | [Server tier MVP](specs/server-tier-mvp.md) | 3–4 |
+| [Source-aware diarization design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | 8 |
 | [Testing strategy](specs/testing-strategy.md) | all |
 
 ## Related documents
