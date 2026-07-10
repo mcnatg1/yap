@@ -72,18 +72,62 @@ impl AudioGap {
         self.session_id == *session_id
             && self.track_id == *track_id
             && self.end_ms().is_some_and(|gap_end_ms| {
-                self.start_ms <= start_ms && gap_end_ms >= end_ms && gap_end_ms > self.start_ms
+                self.start_ms == start_ms && gap_end_ms == end_ms && gap_end_ms > self.start_ms
             })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackConfigurationRevision {
-    pub track_id: TrackId,
-    pub revision: u32,
-    pub effective_at_ms: u64,
-    pub sample_rate_hz: u32,
+    pub(crate) track_id: TrackId,
+    pub(crate) revision: u32,
+    pub(crate) effective_at_ms: u64,
+    pub(crate) sample_rate_hz: u32,
+}
+
+impl TrackConfigurationRevision {
+    pub fn new(
+        track_id: TrackId,
+        revision: u32,
+        effective_at_ms: u64,
+        sample_rate_hz: u32,
+    ) -> Result<Self, ManifestError> {
+        if revision == 0 || sample_rate_hz == 0 {
+            return Err(ManifestError::InvalidConfigurationRevision);
+        }
+        Ok(Self {
+            track_id,
+            revision,
+            effective_at_ms,
+            sample_rate_hz,
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackConfigurationRevisionWire {
+    track_id: TrackId,
+    revision: u32,
+    effective_at_ms: u64,
+    sample_rate_hz: u32,
+}
+
+impl<'de> serde::Deserialize<'de> for TrackConfigurationRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TrackConfigurationRevisionWire::deserialize(deserializer)?;
+        Self::new(
+            wire.track_id,
+            wire.revision,
+            wire.effective_at_ms,
+            wire.sample_rate_hz,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 pub struct ChunkBuildContext<'a> {
@@ -107,6 +151,8 @@ pub enum ManifestError {
     TimingDiscontinuity,
     MixedSampleRates,
     MissingConversionRevision,
+    InvalidConfigurationRevision,
+    InvalidRouteForOrigin,
     InvalidArtifactId,
     InvalidVadTiming,
     InvalidGapTiming,
@@ -279,6 +325,7 @@ impl AudioChunkEnvelope {
         if context.audio_artifact_id.is_empty() {
             return Err(ManifestError::InvalidArtifactId);
         }
+        validate_route(context.session_origin, context.route, purpose)?;
         validate_frames(
             &session_id,
             &context.track.track_id,
@@ -296,8 +343,6 @@ impl AudioChunkEnvelope {
             .and_then(|duration| u32::try_from(duration).ok())
             .ok_or(ManifestError::DurationOverflow)?;
         validate_vad_segments(first.start_ms, end_ms, &vad_segments)?;
-        validate_gaps(&session_id, &context.track.track_id, &gaps)?;
-
         let replay_key = ChunkReplayKey {
             schema_version: CHUNK_SCHEMA_VERSION,
             owner_namespace: context.owner_namespace.clone(),
@@ -382,16 +427,28 @@ fn content_identity(encoded_audio: &[u8]) -> ContentIdentity {
     }
 }
 
-fn chunk_id_from_replay_key(key: &ChunkReplayKey) -> String {
+pub(crate) fn chunk_id_from_replay_key(key: &ChunkReplayKey) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"yap.chunk-replay-key.v1\0");
+    hasher.update(key.schema_version.to_be_bytes());
+    update_length_prefixed(&mut hasher, key.owner_namespace.as_str().as_bytes());
+    update_length_prefixed(&mut hasher, key.session_id.as_str().as_bytes());
+    update_length_prefixed(&mut hasher, key.track_id.as_str().as_bytes());
+    hasher.update(key.sequence_start.to_be_bytes());
+    hasher.update(key.sequence_end.to_be_bytes());
+    let digest = hasher.finalize();
     format!(
-        "chunk-v{}-{}-{}-{}-{}-{}",
-        key.schema_version,
-        key.owner_namespace,
-        key.session_id,
-        key.track_id,
-        key.sequence_start,
-        key.sequence_end
+        "chunk-{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
     )
+}
+
+fn update_length_prefixed(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 fn validate_frames(
@@ -402,6 +459,7 @@ fn validate_frames(
     conversions: &[TrackConfigurationRevision],
 ) -> Result<(), ManifestError> {
     let first = frames.first().ok_or(ManifestError::EmptyFrames)?;
+    validate_gaps(session_id, track_id, frames, gaps)?;
     let mut previous: Option<&AudioFrame> = None;
     for frame in frames {
         if frame.session_id != *session_id {
@@ -466,15 +524,37 @@ fn validate_vad_segments(
 fn validate_gaps(
     session_id: &SessionId,
     track_id: &TrackId,
+    frames: &[AudioFrame],
     gaps: &[AudioGap],
 ) -> Result<(), ManifestError> {
     if gaps.iter().any(|gap| {
         gap.session_id != *session_id
             || gap.track_id != *track_id
             || gap.duration_ms == 0
+            || gap.dropped_frames == 0
             || gap.end_ms().is_none()
+            || frames.iter().any(|frame| {
+                let frame_end_ms = frame.checked_end_ms().unwrap_or(u64::MAX);
+                gap.start_ms < frame_end_ms
+                    && gap
+                        .end_ms()
+                        .is_some_and(|gap_end_ms| gap_end_ms > frame.start_ms)
+            })
     }) {
         return Err(ManifestError::InvalidGapTiming);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_route(
+    origin: SessionOrigin,
+    route: AudioRoute,
+    purpose: AudioPurpose,
+) -> Result<(), ManifestError> {
+    if origin == SessionOrigin::ImportedFile
+        && (route == AudioRoute::LocalFallback || purpose == AudioPurpose::LocalFallback)
+    {
+        return Err(ManifestError::InvalidRouteForOrigin);
     }
     Ok(())
 }
@@ -509,7 +589,7 @@ struct CaptureChunkDescriptorWire {
     codec: AudioCodec,
     vad_segments: Vec<VadSegment>,
     #[serde(default)]
-    gaps: Vec<AudioGap>,
+    gaps: Option<Vec<AudioGap>>,
     purpose: AudioPurpose,
 }
 
@@ -526,12 +606,91 @@ impl<'de> serde::Deserialize<'de> for CaptureChunkDescriptor {
         D: serde::Deserializer<'de>,
     {
         let wire = CaptureChunkDescriptorWire::deserialize(deserializer)?;
+        let is_current = matches!(&wire.session_id, LegacyChunkSessionId::Current(_))
+            || wire.replay_key.is_some()
+            || wire.content_identity.is_some()
+            || wire.session_mode.is_some()
+            || wire.session_origin.is_some()
+            || wire.track_source.is_some()
+            || wire.route.is_some()
+            || wire.audio_artifact_id.is_some()
+            || wire.gaps.is_some();
         let session_id = match wire.session_id {
             LegacyChunkSessionId::Current(session_id) => session_id,
-            LegacyChunkSessionId::Numeric(value) => {
+            LegacyChunkSessionId::Numeric(value) if !is_current => {
                 SessionId::new(format!("legacy-{value}")).map_err(serde::de::Error::custom)?
             }
+            LegacyChunkSessionId::Numeric(_) => {
+                return Err(serde::de::Error::custom(
+                    "current chunks cannot use numeric session IDs",
+                ));
+            }
         };
+        if is_current {
+            let replay_key = wire
+                .replay_key
+                .ok_or_else(|| serde::de::Error::missing_field("replayKey"))?;
+            let content_identity = wire
+                .content_identity
+                .ok_or_else(|| serde::de::Error::missing_field("contentIdentity"))?;
+            let session_mode = wire
+                .session_mode
+                .ok_or_else(|| serde::de::Error::missing_field("sessionMode"))?;
+            let session_origin = wire
+                .session_origin
+                .ok_or_else(|| serde::de::Error::missing_field("sessionOrigin"))?;
+            let track_source = wire
+                .track_source
+                .ok_or_else(|| serde::de::Error::missing_field("trackSource"))?;
+            let route = wire
+                .route
+                .ok_or_else(|| serde::de::Error::missing_field("route"))?;
+            let audio_artifact_id = wire
+                .audio_artifact_id
+                .ok_or_else(|| serde::de::Error::missing_field("audioArtifactId"))?;
+            let track_id = wire
+                .track_id
+                .ok_or_else(|| serde::de::Error::missing_field("trackId"))?;
+            let sequence_end = wire
+                .sequence_end
+                .ok_or_else(|| serde::de::Error::missing_field("sequenceEnd"))?;
+            let gaps = wire
+                .gaps
+                .ok_or_else(|| serde::de::Error::missing_field("gaps"))?;
+            if replay_key.schema_version != CHUNK_SCHEMA_VERSION
+                || !content_identity.is_valid_sha256()
+                || replay_key.session_id != session_id
+                || replay_key.track_id != track_id
+                || replay_key.sequence_start != wire.sequence_start
+                || replay_key.sequence_end != sequence_end
+                || audio_artifact_id.is_empty()
+            {
+                return Err(serde::de::Error::custom("invalid current chunk identity"));
+            }
+            validate_route(session_origin, route, wire.purpose)
+                .map_err(serde::de::Error::custom)?;
+            return Ok(Self {
+                replay_key,
+                content_identity,
+                session_mode,
+                session_origin,
+                track_source,
+                route,
+                audio_artifact_id,
+                session_id,
+                track_id,
+                chunk_id: wire.chunk_id,
+                sequence_start: wire.sequence_start,
+                sequence_end,
+                start_ms: wire.start_ms,
+                duration_ms: wire.duration_ms,
+                sample_rate_hz: wire.sample_rate_hz,
+                codec: wire.codec,
+                vad_segments: wire.vad_segments,
+                gaps,
+                purpose: wire.purpose,
+            });
+        }
         let track_id = wire
             .track_id
             .unwrap_or_else(|| TrackId::new("legacy-0").expect("static legacy track ID is valid"));
@@ -570,7 +729,7 @@ impl<'de> serde::Deserialize<'de> for CaptureChunkDescriptor {
             sample_rate_hz: wire.sample_rate_hz,
             codec: wire.codec,
             vad_segments: wire.vad_segments,
-            gaps: wire.gaps,
+            gaps: wire.gaps.unwrap_or_default(),
             purpose: wire.purpose,
         })
     }
@@ -752,7 +911,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(envelope.chunk_id, envelope.retry.idempotency_key);
-        assert!(envelope.chunk_id.contains("s-test-mic-1-11-12"));
+        assert_eq!(envelope.chunk_id.len(), 70);
+        assert!(envelope.chunk_id.starts_with("chunk-"));
         assert_eq!(envelope.content_identity.byte_length, 11);
         assert_eq!(envelope.content_identity.sha256.len(), 64);
         assert!(!envelope
@@ -788,6 +948,59 @@ mod tests {
     }
 
     #[test]
+    fn chunk_ids_are_collision_safe_for_hyphenated_replay_key_components() {
+        fn envelope(install_id: &str, session: &str) -> super::AudioChunkEnvelope {
+            let owner = OwnerNamespace::local(install_id).unwrap();
+            let track = CaptureTrackDescriptor::from_selector(
+                TrackId::new("d").unwrap(),
+                TrackSource::Captured {
+                    source: CaptureSource::Microphone,
+                },
+                install_id,
+                "device",
+            );
+            let frame = AudioFrame {
+                session_id: SessionId::new(session).unwrap(),
+                track_id: TrackId::new("d").unwrap(),
+                sequence: 1,
+                sample_rate_hz: 16_000,
+                channels: 1,
+                start_ms: 0,
+                duration_ms: 20,
+                sample_count: 320,
+            };
+            AudioChunkEnvelope::from_frames(
+                SessionId::new(session).unwrap(),
+                ChunkBuildContext {
+                    owner_namespace: &owner,
+                    session_mode: SessionMode::Dictation,
+                    session_origin: SessionOrigin::LiveCapture,
+                    track: &track,
+                    route: AudioRoute::ServerBatch,
+                    audio_artifact_id: "audio-1",
+                    encoded_audio: b"audio",
+                },
+                &[frame],
+                AudioCodec::PcmS16Le,
+                Vec::new(),
+                AudioPurpose::CaptureEnvelope,
+            )
+            .unwrap()
+        }
+
+        let first = envelope("a", "b-c");
+        let second = envelope("a-b", "c");
+        assert_ne!(first.replay_key, second.replay_key);
+        assert_ne!(first.chunk_id, second.chunk_id);
+        assert_eq!(first.chunk_id, envelope("a", "b-c").chunk_id);
+        assert_eq!(
+            first.chunk_id,
+            "chunk-cb1347611f88d88fa7cd97221d31d48e862b1ac4cb06728580901c6a129cdc8a"
+        );
+        assert!(first.chunk_id.starts_with("chunk-"));
+    }
+
+    #[test]
     fn prepared_frames_keep_samples_out_of_serializable_metadata() {
         let metadata = frame(1, 0, 20, 320);
         let prepared = PreparedFrame {
@@ -798,5 +1011,17 @@ mod tests {
         assert!(value.get("samples").is_none());
         assert_eq!(prepared.samples.len(), 2);
         assert_eq!(prepared.metadata.track_id.as_str(), "mic-1");
+    }
+
+    #[test]
+    fn configuration_revision_json_cannot_bypass_field_validation() {
+        let invalid = serde_json::json!({
+            "trackId": "mic-1",
+            "revision": 0,
+            "effectiveAtMs": 20,
+            "sampleRateHz": 0
+        });
+
+        assert!(serde_json::from_value::<super::TrackConfigurationRevision>(invalid).is_err());
     }
 }

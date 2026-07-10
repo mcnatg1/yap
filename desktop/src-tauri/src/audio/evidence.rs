@@ -1,11 +1,11 @@
 use crate::audio::session::TrackId;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRevision {
-    pub model_id: String,
-    pub revision: String,
-    pub calibration_revision: String,
+    model_id: String,
+    revision: String,
+    calibration_revision: String,
 }
 
 impl ModelRevision {
@@ -37,16 +37,16 @@ pub enum EvidenceQuality {
     Degraded,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerEvidence {
-    pub track_id: TrackId,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub local_slot_id: Option<String>,
-    pub model: ModelRevision,
-    pub quality: EvidenceQuality,
-    pub confidence: Option<f32>,
+    track_id: TrackId,
+    start_ms: u64,
+    end_ms: u64,
+    local_slot_id: Option<String>,
+    model: ModelRevision,
+    quality: EvidenceQuality,
+    confidence: Option<f32>,
 }
 
 impl SpeakerEvidence {
@@ -77,12 +77,27 @@ impl SpeakerEvidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SpeakerAttribution {
     Unknown,
-    SessionSpeaker { session_speaker_id: String },
+    SessionSpeaker(SessionSpeakerAssertion),
     Named(NamedSpeakerAssertion),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSpeakerAssertion {
+    session_speaker_id: String,
+}
+
+impl SessionSpeakerAssertion {
+    fn new(session_speaker_id: String) -> Result<Self, EvidenceError> {
+        if session_speaker_id.is_empty() {
+            return Err(EvidenceError::InvalidSessionSpeaker);
+        }
+        Ok(Self { session_speaker_id })
+    }
 }
 
 pub struct ClientSpeakerAttribution;
@@ -95,15 +110,38 @@ impl ClientSpeakerAttribution {
     pub fn session_speaker(
         session_speaker_id: impl Into<String>,
     ) -> Result<SpeakerAttribution, EvidenceError> {
-        let session_speaker_id = session_speaker_id.into();
-        if session_speaker_id.is_empty() {
-            return Err(EvidenceError::InvalidSessionSpeaker);
-        }
-        Ok(SpeakerAttribution::SessionSpeaker { session_speaker_id })
+        Ok(SpeakerAttribution::SessionSpeaker(
+            SessionSpeakerAssertion::new(session_speaker_id.into())?,
+        ))
     }
 }
 
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServerSpeakerAttribution;
+
+impl ServerSpeakerAttribution {
+    #[allow(clippy::too_many_arguments)]
+    pub fn named_from_result(
+        identity_id: impl Into<String>,
+        profile_revision: impl Into<String>,
+        model: ModelRevision,
+        confidence: f32,
+        purpose_grant_id: impl Into<String>,
+        revocation_epoch: u64,
+    ) -> Result<SpeakerAttribution, EvidenceError> {
+        Ok(SpeakerAttribution::Named(
+            NamedSpeakerAssertion::from_server_result(
+                identity_id,
+                profile_revision,
+                model,
+                confidence,
+                purpose_grant_id,
+                revocation_epoch,
+            )?,
+        ))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedSpeakerAssertion {
     identity_id: String,
@@ -130,7 +168,7 @@ impl std::fmt::Debug for NamedSpeakerAssertion {
 
 impl NamedSpeakerAssertion {
     #[allow(clippy::too_many_arguments)]
-    pub fn from_server_result(
+    fn from_server_result(
         identity_id: impl Into<String>,
         profile_revision: impl Into<String>,
         model: ModelRevision,
@@ -139,32 +177,50 @@ impl NamedSpeakerAssertion {
         revocation_epoch: u64,
     ) -> Result<Self, EvidenceError> {
         validate_confidence(Some(confidence))?;
-        let assertion = Self {
-            identity_id: identity_id.into(),
-            profile_revision: profile_revision.into(),
+        let confidence_micros = (confidence * 1_000_000.0).round() as u32;
+        Self::from_wire(
+            identity_id.into(),
+            profile_revision.into(),
             model,
-            confidence_micros: (confidence * 1_000_000.0).round() as u32,
-            purpose_grant_id: purpose_grant_id.into(),
+            confidence_micros,
+            purpose_grant_id.into(),
             revocation_epoch,
-        };
-        if assertion.identity_id.is_empty()
-            || assertion.profile_revision.is_empty()
-            || assertion.purpose_grant_id.is_empty()
-        {
+        )
+    }
+
+    fn from_wire(
+        identity_id: String,
+        profile_revision: String,
+        model: ModelRevision,
+        confidence_micros: u32,
+        purpose_grant_id: String,
+        revocation_epoch: u64,
+    ) -> Result<Self, EvidenceError> {
+        if identity_id.is_empty() || profile_revision.is_empty() || purpose_grant_id.is_empty() {
             return Err(EvidenceError::MissingNamedAssertionProvenance);
         }
-        Ok(assertion)
+        if confidence_micros > 1_000_000 {
+            return Err(EvidenceError::InvalidConfidence);
+        }
+        Ok(Self {
+            identity_id,
+            profile_revision,
+            model,
+            confidence_micros,
+            purpose_grant_id,
+            revocation_epoch,
+        })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerTurn {
-    pub turn_id: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub attribution: SpeakerAttribution,
-    pub confidence: Option<f32>,
+    turn_id: String,
+    start_ms: u64,
+    end_ms: u64,
+    attribution: SpeakerAttribution,
+    confidence: Option<f32>,
 }
 
 impl SpeakerTurn {
@@ -189,17 +245,21 @@ impl SpeakerTurn {
             confidence,
         })
     }
+
+    pub(crate) fn has_named_attribution(&self) -> bool {
+        matches!(self.attribution, SpeakerAttribution::Named(_))
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlignedWord {
-    pub index: u64,
-    pub text: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub turn_id: String,
-    pub attribution: SpeakerAttribution,
+    index: u64,
+    text: String,
+    start_ms: u64,
+    end_ms: u64,
+    turn_id: String,
+    attribution: SpeakerAttribution,
 }
 
 impl AlignedWord {
@@ -226,6 +286,10 @@ impl AlignedWord {
             attribution,
         })
     }
+
+    pub(crate) fn has_named_attribution(&self) -> bool {
+        matches!(self.attribution, SpeakerAttribution::Named(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +301,7 @@ pub enum EvidenceError {
     MissingNamedAssertionProvenance,
     InvalidTurnId,
     InvalidAlignedWord,
+    ClientCannotAssertNamed,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -260,6 +325,275 @@ fn validate_confidence(confidence: Option<f32>) -> Result<(), EvidenceError> {
         .ok_or(EvidenceError::InvalidConfidence)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelRevisionWire {
+    model_id: String,
+    revision: String,
+    calibration_revision: String,
+}
+
+impl TryFrom<ModelRevisionWire> for ModelRevision {
+    type Error = EvidenceError;
+
+    fn try_from(wire: ModelRevisionWire) -> Result<Self, Self::Error> {
+        Self::new(wire.model_id, wire.revision, wire.calibration_revision)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ModelRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ModelRevisionWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeakerEvidenceWire {
+    track_id: TrackId,
+    start_ms: u64,
+    end_ms: u64,
+    local_slot_id: Option<String>,
+    model: ModelRevision,
+    quality: EvidenceQuality,
+    confidence: Option<f32>,
+}
+
+impl<'de> serde::Deserialize<'de> for SpeakerEvidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SpeakerEvidenceWire::deserialize(deserializer)?;
+        Self::new(
+            wire.track_id,
+            wire.start_ms,
+            wire.end_ms,
+            wire.local_slot_id,
+            wire.model,
+            wire.quality,
+            wire.confidence,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NamedSpeakerAssertionWire {
+    identity_id: String,
+    profile_revision: String,
+    model: ModelRevision,
+    confidence_micros: u32,
+    purpose_grant_id: String,
+    revocation_epoch: u64,
+}
+
+impl TryFrom<NamedSpeakerAssertionWire> for NamedSpeakerAssertion {
+    type Error = EvidenceError;
+
+    fn try_from(wire: NamedSpeakerAssertionWire) -> Result<Self, Self::Error> {
+        Self::from_wire(
+            wire.identity_id,
+            wire.profile_revision,
+            wire.model,
+            wire.confidence_micros,
+            wire.purpose_grant_id,
+            wire.revocation_epoch,
+        )
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SpeakerAttributionWire {
+    Unknown,
+    SessionSpeaker(SessionSpeakerAssertionWire),
+    Named(NamedSpeakerAssertionWire),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSpeakerAssertionWire {
+    session_speaker_id: String,
+}
+
+impl SpeakerAttributionWire {
+    fn into_client(self) -> Result<SpeakerAttribution, EvidenceError> {
+        match self {
+            Self::Unknown => Ok(ClientSpeakerAttribution::unknown()),
+            Self::SessionSpeaker(assertion) => {
+                ClientSpeakerAttribution::session_speaker(assertion.session_speaker_id)
+            }
+            Self::Named(_) => Err(EvidenceError::ClientCannotAssertNamed),
+        }
+    }
+
+    fn into_server(self) -> Result<SpeakerAttribution, EvidenceError> {
+        match self {
+            Self::Unknown => Ok(ClientSpeakerAttribution::unknown()),
+            Self::SessionSpeaker(assertion) => {
+                ClientSpeakerAttribution::session_speaker(assertion.session_speaker_id)
+            }
+            Self::Named(assertion) => Ok(SpeakerAttribution::Named(assertion.try_into()?)),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SpeakerAttribution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        SpeakerAttributionWire::deserialize(deserializer)?
+            .into_client()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeakerTurnWire {
+    turn_id: String,
+    start_ms: u64,
+    end_ms: u64,
+    attribution: SpeakerAttribution,
+    confidence: Option<f32>,
+}
+
+impl<'de> serde::Deserialize<'de> for SpeakerTurn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SpeakerTurnWire::deserialize(deserializer)?;
+        Self::new(
+            wire.turn_id,
+            wire.start_ms,
+            wire.end_ms,
+            wire.attribution,
+            wire.confidence,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AlignedWordWire {
+    index: u64,
+    text: String,
+    start_ms: u64,
+    end_ms: u64,
+    turn_id: String,
+    attribution: SpeakerAttribution,
+}
+
+impl<'de> serde::Deserialize<'de> for AlignedWord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AlignedWordWire::deserialize(deserializer)?;
+        Self::new(
+            wire.index,
+            wire.text,
+            wire.start_ms,
+            wire.end_ms,
+            wire.turn_id,
+            wire.attribution,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+pub(crate) struct ServerSpeakerTurn(SpeakerTurn);
+
+impl ServerSpeakerTurn {
+    pub(crate) fn into_inner(self) -> SpeakerTurn {
+        self.0
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerSpeakerTurnWire {
+    turn_id: String,
+    start_ms: u64,
+    end_ms: u64,
+    attribution: SpeakerAttributionWire,
+    confidence: Option<f32>,
+}
+
+impl<'de> serde::Deserialize<'de> for ServerSpeakerTurn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ServerSpeakerTurnWire::deserialize(deserializer)?;
+        let attribution = wire
+            .attribution
+            .into_server()
+            .map_err(serde::de::Error::custom)?;
+        SpeakerTurn::new(
+            wire.turn_id,
+            wire.start_ms,
+            wire.end_ms,
+            attribution,
+            wire.confidence,
+        )
+        .map(Self)
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+pub(crate) struct ServerAlignedWord(AlignedWord);
+
+impl ServerAlignedWord {
+    pub(crate) fn into_inner(self) -> AlignedWord {
+        self.0
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerAlignedWordWire {
+    index: u64,
+    text: String,
+    start_ms: u64,
+    end_ms: u64,
+    turn_id: String,
+    attribution: SpeakerAttributionWire,
+}
+
+impl<'de> serde::Deserialize<'de> for ServerAlignedWord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ServerAlignedWordWire::deserialize(deserializer)?;
+        let attribution = wire
+            .attribution
+            .into_server()
+            .map_err(serde::de::Error::custom)?;
+        AlignedWord::new(
+            wire.index,
+            wire.text,
+            wire.start_ms,
+            wire.end_ms,
+            wire.turn_id,
+            attribution,
+        )
+        .map(Self)
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ClientSpeakerAttribution, SpeakerAttribution};
@@ -270,12 +604,65 @@ mod tests {
             ClientSpeakerAttribution::unknown(),
             SpeakerAttribution::Unknown
         );
-        assert_eq!(
-            ClientSpeakerAttribution::session_speaker("speaker-1").unwrap(),
-            SpeakerAttribution::SessionSpeaker {
-                session_speaker_id: "speaker-1".into(),
-            }
-        );
+        let session_speaker = ClientSpeakerAttribution::session_speaker("speaker-1").unwrap();
+        assert!(matches!(
+            session_speaker,
+            SpeakerAttribution::SessionSpeaker(_)
+        ));
         assert!(ClientSpeakerAttribution::session_speaker("").is_err());
+    }
+
+    #[test]
+    fn evidence_json_cannot_bypass_interval_confidence_or_named_provenance_validation() {
+        let invalid_evidence = serde_json::json!({
+            "trackId": "mic-1",
+            "startMs": 20,
+            "endMs": 20,
+            "localSlotId": "slot-1",
+            "model": {
+                "modelId": "speaker-model",
+                "revision": "r1",
+                "calibrationRevision": "calibration-r1"
+            },
+            "quality": "clean",
+            "confidence": 1.2
+        });
+        assert!(serde_json::from_value::<super::SpeakerEvidence>(invalid_evidence).is_err());
+
+        let invalid_named = serde_json::json!({
+            "named": {
+                "identityId": "",
+                "profileRevision": "profile-r1",
+                "model": {
+                    "modelId": "speaker-model",
+                    "revision": "r1",
+                    "calibrationRevision": "calibration-r1"
+                },
+                "confidenceMicros": 1_100_000,
+                "purposeGrantId": "grant-1",
+                "revocationEpoch": 1
+            }
+        });
+        assert!(serde_json::from_value::<super::SpeakerAttribution>(invalid_named).is_err());
+    }
+
+    #[test]
+    fn client_attribution_json_cannot_mint_a_named_speaker() {
+        let named = serde_json::json!({
+            "named": {
+                "identityId": "identity-1",
+                "profileRevision": "profile-r1",
+                "model": {
+                    "modelId": "speaker-model",
+                    "revision": "r1",
+                    "calibrationRevision": "calibration-r1"
+                },
+                "confidenceMicros": 900_000,
+                "purposeGrantId": "grant-1",
+                "revocationEpoch": 1
+            }
+        });
+
+        assert!(serde_json::from_value::<super::SpeakerAttribution>(named).is_err());
     }
 }
