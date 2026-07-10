@@ -89,6 +89,57 @@ impl RecordingFinalization {
     }
 }
 
+struct RecordingFinalizationLease<'a> {
+    finalization: &'a RecordingFinalization,
+    completed: bool,
+}
+
+impl<'a> RecordingFinalizationLease<'a> {
+    fn new(finalization: &'a RecordingFinalization) -> Self {
+        Self {
+            finalization,
+            completed: false,
+        }
+    }
+
+    fn finish(
+        mut self,
+        result: Result<Option<RecordingFinalizeResult>, String>,
+    ) -> Result<Option<RecordingFinalizeResult>, String> {
+        let mut state = self
+            .finalization
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = match &result {
+            Ok(result) => RecordingFinalizationState::Finalized(Box::new(result.clone())),
+            Err(error) => RecordingFinalizationState::Failed(error.clone()),
+        };
+        self.completed = true;
+        self.finalization.completed.notify_all();
+        result
+    }
+}
+
+impl Drop for RecordingFinalizationLease<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = self
+            .finalization
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, RecordingFinalizationState::Finalizing) {
+            *state = RecordingFinalizationState::Failed(
+                "recording finalization interrupted before completion".into(),
+            );
+        }
+        self.finalization.completed.notify_all();
+    }
+}
+
 struct LifecycleGate {
     state: Mutex<LifecycleState>,
     changed: Condvar,
@@ -425,7 +476,7 @@ impl LiveRuntime {
     }
 
     pub(crate) fn finalize_recording(&self) -> Result<Option<RecordingFinalizeResult>, String> {
-        {
+        let lease = {
             let mut state = self
                 .recording_finalization
                 .state
@@ -437,7 +488,7 @@ impl LiveRuntime {
                     RecordingFinalizationState::Failed(error) => return Err(error.clone()),
                     RecordingFinalizationState::Pending => {
                         *state = RecordingFinalizationState::Finalizing;
-                        break;
+                        break RecordingFinalizationLease::new(&self.recording_finalization);
                     }
                     RecordingFinalizationState::Finalizing => {
                         state = self
@@ -448,27 +499,18 @@ impl LiveRuntime {
                     }
                 }
             }
-        }
-
-        let recording = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| "live runtime became unavailable")?;
-            inner.recording.take()
         };
-        let result = recording.map(|recording| recording.finalize()).transpose();
-        let mut state = self
-            .recording_finalization
-            .state
-            .lock()
-            .map_err(|_| "recording finalization state became unavailable")?;
-        *state = match &result {
-            Ok(result) => RecordingFinalizationState::Finalized(Box::new(result.clone())),
-            Err(error) => RecordingFinalizationState::Failed(error.clone()),
-        };
-        self.recording_finalization.completed.notify_all();
-        result
+        let result = (|| {
+            let recording = {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| "live runtime became unavailable")?;
+                inner.recording.take()
+            };
+            recording.map(|recording| recording.finalize()).transpose()
+        })();
+        lease.finish(result)
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -1862,6 +1904,54 @@ mod tests {
             .is_file());
         assert_eq!(runtime.finalize_recording().unwrap(), left);
         std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn poisoned_runtime_inner_publishes_one_terminal_error_and_wakes_waiters() {
+        let runtime = LiveRuntime::new();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let poison_runtime = runtime.clone();
+        let poisoner = std::thread::spawn(move || {
+            let _inner = poison_runtime.inner.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            panic!("injected live runtime poison");
+        });
+        locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let first_runtime = runtime.clone();
+        let first = std::thread::spawn(move || first_runtime.finalize_recording());
+        wait_for_recording_finalizing(&runtime);
+        let second_runtime = runtime.clone();
+        let second = std::thread::spawn(move || second_runtime.finalize_recording());
+
+        release_tx.send(()).unwrap();
+        assert!(poisoner.join().is_err());
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        let repeated = runtime.finalize_recording();
+
+        assert_eq!(first, second);
+        assert_eq!(first, repeated);
+        assert_eq!(first.unwrap_err(), "live runtime became unavailable");
+    }
+
+    fn wait_for_recording_finalizing(runtime: &LiveRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if matches!(
+                *runtime.recording_finalization.state.lock().unwrap(),
+                RecordingFinalizationState::Finalizing
+            ) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "recording finalization was not claimed"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]

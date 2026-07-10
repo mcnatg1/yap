@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -17,6 +20,7 @@ const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const WAV_HEADER_BYTES: u64 = 44;
 const PCM16_BYTES_PER_SAMPLE: u64 = 2;
 const DEFAULT_SYNC_INTERVAL_SAMPLES: u64 = 16_000;
+const MAX_SEQUENCE_GAP_DETAILS: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,7 +135,7 @@ pub struct RecordingSinkHandle {
 
 struct RecordingSinkState {
     worker: Option<JoinHandle<RecordingFinalizeResult>>,
-    result: Option<RecordingFinalizeResult>,
+    result: Option<Result<RecordingFinalizeResult, String>>,
     finalizing: bool,
 }
 
@@ -146,6 +150,13 @@ impl RecordingSinkHandle {
         let worker = std::thread::spawn(move || {
             run_recording_worker(directory, worker_session_id, receiver)
         });
+        Self::with_worker(sink, worker)
+    }
+
+    fn with_worker(
+        sink: BoundedSink<PreparedFrame>,
+        worker: JoinHandle<RecordingFinalizeResult>,
+    ) -> Self {
         Self {
             sink,
             state: Mutex::new(RecordingSinkState {
@@ -157,6 +168,19 @@ impl RecordingSinkHandle {
             #[cfg(test)]
             finalization_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_panicking_for_test(
+        sink: BoundedSink<PreparedFrame>,
+        _receiver: BoundedReceiver<PreparedFrame>,
+    ) -> Self {
+        Self::with_worker(
+            sink,
+            std::thread::spawn(|| -> RecordingFinalizeResult {
+                panic!("injected recording worker panic")
+            }),
+        )
     }
 
     #[cfg(test)]
@@ -183,7 +207,7 @@ impl RecordingSinkHandle {
                 .lock()
                 .map_err(|_| "recording handle became unavailable")?;
             if let Some(result) = &state.result {
-                return Ok(result.clone());
+                return result.clone();
             }
             if !state.finalizing {
                 state.finalizing = true;
@@ -207,11 +231,9 @@ impl RecordingSinkHandle {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| "recording handle became unavailable")?;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.finalizing = false;
-        if let Ok(result) = &result {
-            state.result = Some(result.clone());
-        }
+        state.result = Some(result.clone());
         self.completed.notify_all();
         result
     }
@@ -266,6 +288,8 @@ struct CaptureSidecar {
     clock_mappings: Vec<JournalClockMapping>,
     sequence_coverage: Vec<SequenceCoverage>,
     sequence_gaps: Vec<SequenceGap>,
+    #[serde(default)]
+    sequence_gap_overflow: Option<SequenceGapOverflow>,
     sink_degraded: bool,
     directory_sync_supported: bool,
 }
@@ -338,7 +362,15 @@ struct SequenceGap {
     dropped_frames: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SequenceGapOverflow {
+    detail_capacity: u32,
+    omitted_gap_count: u64,
+    omitted_dropped_frames: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureJournal {
     schema_version: u16,
@@ -347,6 +379,8 @@ struct CaptureJournal {
     clock_mappings: Vec<JournalClockMapping>,
     sequence_coverage: Vec<SequenceCoverage>,
     sequence_gaps: Vec<SequenceGap>,
+    #[serde(default)]
+    sequence_gap_overflow: Option<SequenceGapOverflow>,
     sink_degraded: bool,
 }
 
@@ -359,6 +393,7 @@ impl CaptureJournal {
             clock_mappings: Vec::new(),
             sequence_coverage: Vec::new(),
             sequence_gaps: Vec::new(),
+            sequence_gap_overflow: None,
             sink_degraded: false,
         }
     }
@@ -435,11 +470,25 @@ impl CaptureJournal {
                 return;
             }
         }
-        self.sequence_gaps.push(SequenceGap {
-            track_id: track_id.to_string(),
-            first_sequence,
-            dropped_frames,
-        });
+        if self.sequence_gaps.len() < MAX_SEQUENCE_GAP_DETAILS {
+            self.sequence_gaps.push(SequenceGap {
+                track_id: track_id.to_string(),
+                first_sequence,
+                dropped_frames,
+            });
+            return;
+        }
+        let overflow = self
+            .sequence_gap_overflow
+            .get_or_insert(SequenceGapOverflow {
+                detail_capacity: MAX_SEQUENCE_GAP_DETAILS as u32,
+                omitted_gap_count: 0,
+                omitted_dropped_frames: 0,
+            });
+        overflow.omitted_gap_count = overflow.omitted_gap_count.saturating_add(1);
+        overflow.omitted_dropped_frames = overflow
+            .omitted_dropped_frames
+            .saturating_add(dropped_frames);
     }
 
     #[cfg(test)]
@@ -613,12 +662,7 @@ impl StreamingRecording {
             if let Err(error) = sync_result {
                 return self.fail(format!("Failed to flush live audio: {error}"));
             }
-            if let Some(journal_file) = self.journal_file.as_mut() {
-                write_journal_snapshot(journal_file, &self.journal)?;
-                journal_file
-                    .sync_data()
-                    .map_err(|error| format!("Failed to flush recording journal: {error}"))?;
-            }
+            self.persist_journal()?;
             self.samples_since_sync = 0;
         }
         Ok(())
@@ -676,12 +720,8 @@ impl StreamingRecording {
             .map_err(|error| format!("Failed to sync finalized live audio: {error}"))?;
         drop(audio);
 
-        if let Some(mut journal_file) = self.journal_file.take() {
-            write_journal_snapshot(&mut journal_file, &self.journal)?;
-            journal_file
-                .sync_all()
-                .map_err(|error| format!("Failed to sync recording journal: {error}"))?;
-        }
+        self.persist_journal()?;
+        drop(self.journal_file.take());
 
         self.hit_fault(CommitFaultPoint::FinalArtifactRename)?;
         fs::rename(&self.paths.wav_part, &self.paths.wav)
@@ -701,6 +741,7 @@ impl StreamingRecording {
             clock_mappings: self.journal.clock_mappings.clone(),
             sequence_coverage: self.journal.sequence_coverage.clone(),
             sequence_gaps: self.journal.sequence_gaps.clone(),
+            sequence_gap_overflow: self.journal.sequence_gap_overflow.clone(),
             sink_degraded: self.journal.sink_degraded,
             directory_sync_supported: sync_parent_directory(&self.paths.directory),
         };
@@ -825,6 +866,13 @@ impl StreamingRecording {
         Ok(())
     }
 
+    fn persist_journal(&mut self) -> Result<(), String> {
+        drop(self.journal_file.take());
+        let journal_file = replace_journal_snapshot(&self.paths.journal_part, &self.journal)?;
+        self.journal_file = Some(journal_file);
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_data_limit_for_test(&mut self, data_limit: u64) {
         self.data_limit = data_limit;
@@ -833,6 +881,11 @@ impl StreamingRecording {
     #[cfg(test)]
     fn journal_for_test(&self) -> &CaptureJournal {
         &self.journal
+    }
+
+    #[cfg(test)]
+    fn persist_journal_for_test(&mut self) -> Result<(), String> {
+        self.persist_journal()
     }
 }
 
@@ -876,6 +929,35 @@ fn write_journal_snapshot(file: &mut File, journal: &CaptureJournal) -> Result<(
         .map_err(|error| format!("Failed to write recording journal: {error}"))?;
     file.write_all(b"\n")
         .map_err(|error| format!("Failed to write recording journal: {error}"))
+}
+
+fn replace_journal_snapshot(path: &Path, journal: &CaptureJournal) -> Result<File, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "recording journal has no file name".to_string())?;
+    let replacement = path.with_file_name(format!("{file_name}.next"));
+    fs::remove_file(&replacement).ok();
+    let mut file = create_new(&replacement, "recording journal replacement")?;
+    write_journal_snapshot(&mut file, journal)?;
+    file.sync_all()
+        .map_err(|error| format!("Failed to sync recording journal: {error}"))?;
+    drop(file);
+    fs::rename(&replacement, path)
+        .map_err(|error| format!("Failed to replace recording journal: {error}"))?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("Failed to reopen recording journal: {error}"))
+}
+
+#[cfg(test)]
+fn read_journal_snapshot(path: &Path) -> Result<CaptureJournal, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read recording journal: {error}"))?;
+    serde_json::from_str(&text)
+        .map_err(|error| format!("Failed to parse recording journal: {error}"))
 }
 
 fn write_json_file<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Result<(), String> {
@@ -979,7 +1061,7 @@ pub fn scan_recordings(directory: &Path) -> Result<RecordingScan, String> {
     {
         let entry = entry.map_err(|error| format!("Failed to read live recording: {error}"))?;
         let path = entry.path();
-        if !path.is_file() {
+        if !is_regular_artifact(&path) {
             continue;
         }
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
@@ -1027,6 +1109,9 @@ fn validate_committed_capture(
     manifest.validate()?;
     let audio = resolve_artifact(directory, &manifest.audio_file)?;
     let sidecar = resolve_artifact(directory, &manifest.capture_sidecar_file)?;
+    if !is_regular_artifact(&audio) || !is_regular_artifact(&sidecar) {
+        return Err("committed recording artifact is not a regular same-directory file".into());
+    }
     if fs::metadata(&audio)
         .map_err(|error| format!("Failed to inspect committed audio: {error}"))?
         .len()
@@ -1055,9 +1140,24 @@ fn resolve_artifact(directory: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(directory.join(name))
 }
 
+fn is_regular_artifact(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x400 != 0 {
+        return false;
+    }
+    true
+}
+
 fn session_from_private_artifact(name: &str) -> Option<SessionId> {
     let session = name.strip_prefix("live-")?;
     [
+        ".wav.part",
         ".capture.journal.part",
         ".capture.partial.json",
         ".capture.partial.json.part",
@@ -1257,6 +1357,164 @@ mod tests {
         let right = right.join().unwrap();
         assert_eq!(left, right);
         assert_eq!(left.status, CaptureStatus::Complete);
+    }
+
+    #[test]
+    fn sink_handle_caches_worker_panic_for_racing_and_repeated_callers() {
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        let handle = Arc::new(RecordingSinkHandle::spawn_panicking_for_test(
+            sink, receiver,
+        ));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let left_handle = Arc::clone(&handle);
+        let left_barrier = Arc::clone(&barrier);
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            left_handle.finalize()
+        });
+        let right_handle = Arc::clone(&handle);
+        let right_barrier = Arc::clone(&barrier);
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            right_handle.finalize()
+        });
+
+        barrier.wait();
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+        let repeated = handle.finalize();
+
+        assert_eq!(left, right);
+        assert_eq!(left, repeated);
+        assert_eq!(
+            left.unwrap_err(),
+            "recording worker panicked during finalization"
+        );
+    }
+
+    #[test]
+    fn journal_create_failure_leaves_wav_part_as_a_recovery_candidate() {
+        let dir = tempfile_dir("journal-create-failure");
+        let session = SessionId::new("s-journal-create-failure").unwrap();
+        std::fs::write(
+            dir.join(format!("live-{session}.capture.journal.part")),
+            "occupied",
+        )
+        .unwrap();
+
+        assert!(StreamingRecording::create(&dir, session.clone()).is_err());
+
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+        assert_eq!(scan.partial[0].session_id.as_ref(), Some(&session));
+    }
+
+    #[test]
+    fn lone_wav_part_is_a_partial_candidate_without_inventing_metadata() {
+        let dir = tempfile_dir("lone-wav-part");
+        let session = SessionId::new("s-lone-wav-part").unwrap();
+        std::fs::write(dir.join(format!("live-{session}.wav.part")), b"RIFF").unwrap();
+
+        let scan = scan_recordings(&dir).unwrap();
+
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+        assert_eq!(scan.partial[0].session_id.as_ref(), Some(&session));
+        assert_eq!(scan.partial[0].directory, dir);
+    }
+
+    #[test]
+    fn scanner_ignores_malformed_or_unknown_partial_artifacts() {
+        let dir = tempfile_dir("malformed-partials");
+        for name in [
+            "live-.wav.part",
+            "live-not a session.wav.part",
+            "live-s-known.wav.partial",
+            "capture.wav.part",
+        ] {
+            std::fs::write(dir.join(name), b"partial").unwrap();
+        }
+
+        assert!(scan_recordings(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn alternating_four_hour_gaps_have_bounded_journal_memory_and_snapshot_size() {
+        const FOUR_HOURS_AT_TEN_HZ: u64 = 4 * 60 * 60 * 10;
+        const MAX_JOURNAL_BYTES: u64 = 128 * 1024;
+
+        let dir = tempfile_dir("journal-alternating-gaps");
+        let session = SessionId::new("s-journal-alternating-gaps").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session).unwrap();
+        for sequence in (0..FOUR_HOURS_AT_TEN_HZ * 2).step_by(2) {
+            recording.observe_frame_metadata("live-microphone", 16_000, 1, sequence, 0, 100);
+            if sequence % 20_000 == 0 {
+                recording.persist_journal_for_test().unwrap();
+            }
+        }
+        recording.persist_journal_for_test().unwrap();
+
+        assert_eq!(
+            recording.journal_for_test().sequence_gaps.len(),
+            MAX_SEQUENCE_GAP_DETAILS
+        );
+        assert!(recording.journal_for_test().sequence_gap_overflow.is_some());
+        assert!(
+            std::fs::metadata(&recording.paths.journal_part)
+                .unwrap()
+                .len()
+                <= MAX_JOURNAL_BYTES
+        );
+        let recovered = read_journal_snapshot(&recording.paths.journal_part).unwrap();
+        assert!(recovered.sequence_gap_overflow.is_some());
+        assert_eq!(
+            recovered.sequence_coverage[0].last_sequence,
+            FOUR_HOURS_AT_TEN_HZ * 2 - 2
+        );
+    }
+
+    #[test]
+    fn scan_rejects_symlinked_committed_artifacts_when_links_are_supported() {
+        let dir = tempfile_dir("symlinked-artifact");
+        let session = SessionId::new("s-symlinked-artifact").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+
+        let audio = dir.join(format!("live-{session}.wav"));
+        let outside = std::env::temp_dir().join(format!(
+            "yap-recording-symlink-target-{}-{session}.wav",
+            std::process::id()
+        ));
+        std::fs::remove_file(&outside).ok();
+        std::fs::rename(&audio, &outside).unwrap();
+        if let Err(error) = create_file_symlink_for_test(&outside, &audio) {
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314)
+            {
+                std::fs::rename(&outside, &audio).unwrap();
+                return;
+            }
+            panic!("failed to create symlink: {error}");
+        }
+
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+        std::fs::remove_file(&audio).ok();
+        std::fs::remove_file(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink_for_test(original: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(original, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink_for_test(original: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(original, link)
     }
 
     fn prepared_frame(session_id: &SessionId) -> PreparedFrame {
