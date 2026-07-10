@@ -1,0 +1,281 @@
+use crate::audio::session::TrackId;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRevision {
+    pub model_id: String,
+    pub revision: String,
+    pub calibration_revision: String,
+}
+
+impl ModelRevision {
+    pub fn new(
+        model_id: impl Into<String>,
+        revision: impl Into<String>,
+        calibration_revision: impl Into<String>,
+    ) -> Result<Self, EvidenceError> {
+        let value = Self {
+            model_id: model_id.into(),
+            revision: revision.into(),
+            calibration_revision: calibration_revision.into(),
+        };
+        if value.model_id.is_empty()
+            || value.revision.is_empty()
+            || value.calibration_revision.is_empty()
+        {
+            return Err(EvidenceError::MissingProvenance);
+        }
+        Ok(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceQuality {
+    Clean,
+    Weak,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerEvidence {
+    pub track_id: TrackId,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub local_slot_id: Option<String>,
+    pub model: ModelRevision,
+    pub quality: EvidenceQuality,
+    pub confidence: Option<f32>,
+}
+
+impl SpeakerEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        track_id: TrackId,
+        start_ms: u64,
+        end_ms: u64,
+        local_slot_id: Option<String>,
+        model: ModelRevision,
+        quality: EvidenceQuality,
+        confidence: Option<f32>,
+    ) -> Result<Self, EvidenceError> {
+        validate_interval(start_ms, end_ms)?;
+        validate_confidence(confidence)?;
+        if local_slot_id.as_deref().is_some_and(str::is_empty) {
+            return Err(EvidenceError::InvalidSessionSpeaker);
+        }
+        Ok(Self {
+            track_id,
+            start_ms,
+            end_ms,
+            local_slot_id,
+            model,
+            quality,
+            confidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SpeakerAttribution {
+    Unknown,
+    SessionSpeaker { session_speaker_id: String },
+    Named(NamedSpeakerAssertion),
+}
+
+pub struct ClientSpeakerAttribution;
+
+impl ClientSpeakerAttribution {
+    pub fn unknown() -> SpeakerAttribution {
+        SpeakerAttribution::Unknown
+    }
+
+    pub fn session_speaker(
+        session_speaker_id: impl Into<String>,
+    ) -> Result<SpeakerAttribution, EvidenceError> {
+        let session_speaker_id = session_speaker_id.into();
+        if session_speaker_id.is_empty() {
+            return Err(EvidenceError::InvalidSessionSpeaker);
+        }
+        Ok(SpeakerAttribution::SessionSpeaker { session_speaker_id })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedSpeakerAssertion {
+    identity_id: String,
+    profile_revision: String,
+    model: ModelRevision,
+    confidence_micros: u32,
+    purpose_grant_id: String,
+    revocation_epoch: u64,
+}
+
+impl std::fmt::Debug for NamedSpeakerAssertion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NamedSpeakerAssertion")
+            .field("identity_id", &self.identity_id)
+            .field("profile_revision", &self.profile_revision)
+            .field("model", &self.model)
+            .field("confidence_micros", &self.confidence_micros)
+            .field("purpose_grant_id", &self.purpose_grant_id)
+            .field("revocation_epoch", &self.revocation_epoch)
+            .finish()
+    }
+}
+
+impl NamedSpeakerAssertion {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_server_result(
+        identity_id: impl Into<String>,
+        profile_revision: impl Into<String>,
+        model: ModelRevision,
+        confidence: f32,
+        purpose_grant_id: impl Into<String>,
+        revocation_epoch: u64,
+    ) -> Result<Self, EvidenceError> {
+        validate_confidence(Some(confidence))?;
+        let assertion = Self {
+            identity_id: identity_id.into(),
+            profile_revision: profile_revision.into(),
+            model,
+            confidence_micros: (confidence * 1_000_000.0).round() as u32,
+            purpose_grant_id: purpose_grant_id.into(),
+            revocation_epoch,
+        };
+        if assertion.identity_id.is_empty()
+            || assertion.profile_revision.is_empty()
+            || assertion.purpose_grant_id.is_empty()
+        {
+            return Err(EvidenceError::MissingNamedAssertionProvenance);
+        }
+        Ok(assertion)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerTurn {
+    pub turn_id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub attribution: SpeakerAttribution,
+    pub confidence: Option<f32>,
+}
+
+impl SpeakerTurn {
+    pub fn new(
+        turn_id: impl Into<String>,
+        start_ms: u64,
+        end_ms: u64,
+        attribution: SpeakerAttribution,
+        confidence: Option<f32>,
+    ) -> Result<Self, EvidenceError> {
+        let turn_id = turn_id.into();
+        if turn_id.is_empty() {
+            return Err(EvidenceError::InvalidTurnId);
+        }
+        validate_interval(start_ms, end_ms)?;
+        validate_confidence(confidence)?;
+        Ok(Self {
+            turn_id,
+            start_ms,
+            end_ms,
+            attribution,
+            confidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlignedWord {
+    pub index: u64,
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub turn_id: String,
+    pub attribution: SpeakerAttribution,
+}
+
+impl AlignedWord {
+    pub fn new(
+        index: u64,
+        text: impl Into<String>,
+        start_ms: u64,
+        end_ms: u64,
+        turn_id: impl Into<String>,
+        attribution: SpeakerAttribution,
+    ) -> Result<Self, EvidenceError> {
+        let text = text.into();
+        let turn_id = turn_id.into();
+        if text.is_empty() || turn_id.is_empty() {
+            return Err(EvidenceError::InvalidAlignedWord);
+        }
+        validate_interval(start_ms, end_ms)?;
+        Ok(Self {
+            index,
+            text,
+            start_ms,
+            end_ms,
+            turn_id,
+            attribution,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceError {
+    InvalidInterval,
+    InvalidConfidence,
+    InvalidSessionSpeaker,
+    MissingProvenance,
+    MissingNamedAssertionProvenance,
+    InvalidTurnId,
+    InvalidAlignedWord,
+}
+
+impl std::fmt::Display for EvidenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for EvidenceError {}
+
+fn validate_interval(start_ms: u64, end_ms: u64) -> Result<(), EvidenceError> {
+    (end_ms > start_ms)
+        .then_some(())
+        .ok_or(EvidenceError::InvalidInterval)
+}
+
+fn validate_confidence(confidence: Option<f32>) -> Result<(), EvidenceError> {
+    confidence
+        .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+        .then_some(())
+        .ok_or(EvidenceError::InvalidConfidence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientSpeakerAttribution, SpeakerAttribution};
+
+    #[test]
+    fn client_evidence_builder_can_emit_only_unknown_or_session_speaker() {
+        assert_eq!(
+            ClientSpeakerAttribution::unknown(),
+            SpeakerAttribution::Unknown
+        );
+        assert_eq!(
+            ClientSpeakerAttribution::session_speaker("speaker-1").unwrap(),
+            SpeakerAttribution::SessionSpeaker {
+                session_speaker_id: "speaker-1".into(),
+            }
+        );
+        assert!(ClientSpeakerAttribution::session_speaker("").is_err());
+    }
+}
