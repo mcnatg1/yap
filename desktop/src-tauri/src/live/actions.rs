@@ -204,7 +204,6 @@ pub(crate) fn start_live_runtime(
     orchestrator: &runtime::RuntimeOrchestratorState,
     active_capture_mode: live::state::LiveCaptureMode,
 ) -> live::state::LiveSessionView {
-    let _transition = live_runtime.transition_guard();
     if live::state::is_live_session_started(live.snapshot().status) || live_runtime.is_active() {
         return live.snapshot();
     }
@@ -312,7 +311,6 @@ fn finalize_live_runtime(
     expected_session: Option<u64>,
     completion_error: Option<&str>,
 ) -> live::state::LiveSessionView {
-    let _transition = live_runtime.transition_guard();
     if expected_session.is_some_and(|session| !live_runtime.is_session_current(session)) {
         return live.snapshot();
     }

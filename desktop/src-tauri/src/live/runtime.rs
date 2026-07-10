@@ -1,7 +1,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc, Arc, Condvar, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
     recorded_pcm: Arc<Mutex<RecordedPcmBuffer>>,
-    transition: Arc<Mutex<()>>,
+    transition: Arc<LifecycleGate>,
     warming: Arc<AtomicBool>,
 }
 
@@ -54,6 +54,22 @@ struct LiveRuntimeInner {
     has_capture_for_test: bool,
     #[cfg(test)]
     has_stream_for_test: bool,
+}
+
+struct LifecycleGate {
+    state: Mutex<LifecycleState>,
+    changed: Condvar,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LifecycleState {
+    Idle,
+    Starting,
+    Stopping,
+}
+
+struct LifecycleOperation<'a> {
+    gate: &'a LifecycleGate,
 }
 
 struct SessionStream {
@@ -199,21 +215,78 @@ impl RecordedPcmBuffer {
     }
 }
 
+impl LifecycleGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(LifecycleState::Idle),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn begin_start(&self) -> LifecycleOperation<'_> {
+        self.begin(LifecycleState::Starting)
+    }
+
+    #[cfg(test)]
+    fn begin_start_with_wait_hook<F>(&self, on_wait: F) -> LifecycleOperation<'_>
+    where
+        F: FnOnce(),
+    {
+        self.begin_with_wait_hook(LifecycleState::Starting, Some(on_wait))
+    }
+
+    fn begin_stop(&self) -> LifecycleOperation<'_> {
+        self.begin(LifecycleState::Stopping)
+    }
+
+    fn begin(&self, next: LifecycleState) -> LifecycleOperation<'_> {
+        self.begin_with_wait_hook(next, None::<fn()>)
+    }
+
+    fn begin_with_wait_hook<F>(
+        &self,
+        next: LifecycleState,
+        mut on_wait: Option<F>,
+    ) -> LifecycleOperation<'_>
+    where
+        F: FnOnce(),
+    {
+        let mut state = self.state.lock().expect("live transition gate poisoned");
+        while *state != LifecycleState::Idle {
+            if let Some(on_wait) = on_wait.take() {
+                on_wait();
+            }
+            state = self
+                .changed
+                .wait(state)
+                .expect("live transition gate poisoned");
+        }
+        *state = next;
+        LifecycleOperation { gate: self }
+    }
+
+    fn complete(&self) {
+        let mut state = self.state.lock().expect("live transition gate poisoned");
+        *state = LifecycleState::Idle;
+        self.changed.notify_all();
+    }
+}
+
+impl Drop for LifecycleOperation<'_> {
+    fn drop(&mut self) {
+        self.gate.complete();
+    }
+}
+
 impl LiveRuntime {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
             recorded_pcm: Arc::new(Mutex::new(RecordedPcmBuffer::new())),
-            transition: Arc::new(Mutex::new(())),
+            transition: Arc::new(LifecycleGate::new()),
             warming: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub(crate) fn transition_guard(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.transition
-            .lock()
-            .expect("live transition gate poisoned")
     }
 
     pub fn is_active(&self) -> bool {
@@ -229,6 +302,7 @@ impl LiveRuntime {
         app: tauri::AppHandle,
         selected_device_id: Option<String>,
     ) -> Result<(), LiveStartFailure> {
+        let _transition = self.transition.begin_start();
         let (session, local_asr) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
@@ -356,6 +430,7 @@ impl LiveRuntime {
     }
 
     pub fn warm(&self, app: tauri::AppHandle) -> Result<(), String> {
+        let _transition = self.transition.begin_start();
         if !claim_warmup(&self.warming) {
             return Ok(());
         }
@@ -369,6 +444,7 @@ impl LiveRuntime {
     }
 
     pub fn stop(&self) -> StreamFinishStatus {
+        let _transition = self.transition.begin_stop();
         let (finisher, adapter_status, shutdown_errors) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             let (shutdown_errors, adapter_status) = inner.stop_capture();
@@ -398,6 +474,7 @@ impl LiveRuntime {
     }
 
     pub fn unload_if_idle(&self, threshold: Duration) {
+        let _transition = self.transition.begin_stop();
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         if inner.capture.is_none() && inner.last_used.elapsed() >= threshold {
             inner.retire_stream();
@@ -405,7 +482,7 @@ impl LiveRuntime {
     }
 
     pub fn shutdown(&self) {
-        let _transition = self.transition_guard();
+        let _transition = self.transition.begin_stop();
         let mut inner = self.inner.lock().expect("live runtime poisoned");
         let (shutdown_errors, _) = inner.stop_capture();
         inner.retire_stream();
@@ -1824,23 +1901,6 @@ mod tests {
     }
 
     #[test]
-    fn transition_gate_serializes_start_and_stop_ownership() {
-        let runtime = LiveRuntime::new();
-        let first = runtime.transition_guard();
-        let (acquired_tx, acquired_rx) = mpsc::channel();
-        let contender = runtime.clone();
-        let worker = std::thread::spawn(move || {
-            let _guard = contender.transition_guard();
-            acquired_tx.send(()).unwrap();
-        });
-
-        assert!(acquired_rx.recv_timeout(Duration::from_millis(25)).is_err());
-        drop(first);
-        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        worker.join().unwrap();
-    }
-
-    #[test]
     fn warmup_latch_allows_one_in_flight_warm() {
         let warming = AtomicBool::new(false);
 
@@ -2062,6 +2122,104 @@ mod tests {
                 (2, Vec::new()),
             ]
         );
+    }
+
+    #[test]
+    fn stop_finalizes_before_a_concurrent_start_activates_the_next_session() {
+        let lifecycle = Arc::new(LifecycleGate::new());
+        let (samples_tx, samples_rx) = mpsc::sync_channel(8);
+        let (old_adapter_drained_tx, old_adapter_drained_rx) = mpsc::channel();
+        let (allow_old_finish_tx, allow_old_finish_rx) = mpsc::channel();
+        let (old_finish_acked_tx, old_finish_acked_rx) = mpsc::channel();
+        let (new_start_attempted_tx, new_start_attempted_rx) = mpsc::channel();
+        let (new_start_waiting_tx, new_start_waiting_rx) = mpsc::channel();
+        let (new_start_complete_tx, new_start_complete_rx) = mpsc::channel();
+        let finalized = Arc::new(Mutex::new(Vec::new()));
+        let finalized_for_worker = Arc::clone(&finalized);
+        let recognizer = std::thread::spawn(move || {
+            let mut expected_session = 1;
+            while expected_session <= 2 {
+                match samples_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                    StreamMessage::Samples { session, .. } => {
+                        assert_eq!(session, expected_session);
+                    }
+                    StreamMessage::Finish { session, done } => {
+                        assert_eq!(session, expected_session);
+                        finalized_for_worker.lock().unwrap().push(session);
+                        done.send(StreamFinishStatus::Completed).unwrap();
+                        expected_session += 1;
+                    }
+                }
+            }
+        });
+
+        let mut old_adapter = SessionAsrAdapter::start(samples_tx.clone(), 1);
+        let old_port = old_adapter.sink();
+        old_port.try_send(prepared_frame(0.25)).unwrap();
+        old_port.close();
+
+        let stop_lifecycle = Arc::clone(&lifecycle);
+        let stop_samples_tx = samples_tx.clone();
+        let stopper = std::thread::spawn(move || {
+            let _stop = stop_lifecycle.begin_stop();
+            old_adapter.join_after_capture().unwrap();
+            old_adapter_drained_tx.send(()).unwrap();
+            allow_old_finish_rx.recv().unwrap();
+            let status = StreamFinisher {
+                samples_tx: stop_samples_tx,
+                session: 1,
+            }
+            .finish_session();
+            assert_eq!(status, StreamFinishStatus::Completed);
+            old_finish_acked_tx.send(()).unwrap();
+        });
+
+        old_adapter_drained_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let start_lifecycle = Arc::clone(&lifecycle);
+        let new_samples_tx = samples_tx;
+        let starter = std::thread::spawn(move || {
+            new_start_attempted_tx.send(()).unwrap();
+            let _start = start_lifecycle.begin_start_with_wait_hook(|| {
+                new_start_waiting_tx.send(()).unwrap();
+            });
+            let mut new_adapter = SessionAsrAdapter::start(new_samples_tx.clone(), 2);
+            let new_port = new_adapter.sink();
+            new_port.try_send(prepared_frame(0.75)).unwrap();
+            new_port.close();
+            new_adapter.join_after_capture().unwrap();
+            assert_eq!(
+                StreamFinisher {
+                    samples_tx: new_samples_tx,
+                    session: 2,
+                }
+                .finish_session(),
+                StreamFinishStatus::Completed
+            );
+            new_start_complete_tx.send(()).unwrap();
+        });
+
+        new_start_attempted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        new_start_waiting_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        allow_old_finish_tx.send(()).unwrap();
+        old_finish_acked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        new_start_complete_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        stopper.join().unwrap();
+        starter.join().unwrap();
+        recognizer.join().unwrap();
+        assert_eq!(*finalized.lock().unwrap(), vec![1, 2]);
     }
 
     #[test]
