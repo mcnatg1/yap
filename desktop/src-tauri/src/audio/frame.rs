@@ -154,6 +154,7 @@ pub enum ManifestError {
     InvalidConfigurationRevision,
     InvalidRouteForOrigin,
     InvalidArtifactId,
+    EmptyEncodedAudio,
     InvalidVadTiming,
     InvalidGapTiming,
     DurationOverflow,
@@ -325,6 +326,9 @@ impl AudioChunkEnvelope {
         if context.audio_artifact_id.is_empty() {
             return Err(ManifestError::InvalidArtifactId);
         }
+        if context.encoded_audio.is_empty() {
+            return Err(ManifestError::EmptyEncodedAudio);
+        }
         validate_route(context.session_origin, context.route, purpose)?;
         validate_frames(
             &session_id,
@@ -456,7 +460,7 @@ fn validate_frames(
     track_id: &TrackId,
     frames: &[AudioFrame],
     gaps: &[AudioGap],
-    conversions: &[TrackConfigurationRevision],
+    _conversions: &[TrackConfigurationRevision],
 ) -> Result<(), ManifestError> {
     let first = frames.first().ok_or(ManifestError::EmptyFrames)?;
     validate_gaps(session_id, track_id, frames, gaps)?;
@@ -469,14 +473,8 @@ fn validate_frames(
             return Err(ManifestError::TrackMismatch);
         }
         let frame_end_ms = frame.checked_end_ms()?;
-        if frame.sample_rate_hz != first.sample_rate_hz
-            && !conversions.iter().any(|revision| {
-                revision.track_id == *track_id
-                    && revision.sample_rate_hz == frame.sample_rate_hz
-                    && revision.effective_at_ms <= frame.start_ms
-            })
-        {
-            return Err(ManifestError::MissingConversionRevision);
+        if frame.sample_rate_hz != first.sample_rate_hz {
+            return Err(ManifestError::MixedSampleRates);
         }
         if let Some(previous) = previous {
             let previous_end_ms = previous.checked_end_ms()?;
@@ -559,6 +557,59 @@ pub(crate) fn validate_route(
     Ok(())
 }
 
+pub(crate) fn track_source_matches_origin(origin: SessionOrigin, source: &TrackSource) -> bool {
+    matches!(
+        (origin, source),
+        (SessionOrigin::LiveCapture, TrackSource::Captured { .. })
+            | (SessionOrigin::ImportedFile, TrackSource::Imported { .. })
+    )
+}
+
+pub(crate) fn validate_current_descriptor(
+    descriptor: &CaptureChunkDescriptor,
+) -> Result<(), ManifestError> {
+    if descriptor.replay_key.schema_version != CHUNK_SCHEMA_VERSION
+        || !descriptor.content_identity.is_valid_sha256()
+        || descriptor.content_identity.byte_length == 0
+        || descriptor.replay_key.session_id != descriptor.session_id
+        || descriptor.replay_key.track_id != descriptor.track_id
+        || descriptor.replay_key.sequence_start != descriptor.sequence_start
+        || descriptor.replay_key.sequence_end != descriptor.sequence_end
+        || descriptor.chunk_id != chunk_id_from_replay_key(&descriptor.replay_key)
+        || descriptor.audio_artifact_id.is_empty()
+        || descriptor.sequence_end < descriptor.sequence_start
+        || descriptor.duration_ms == 0
+        || descriptor.sample_rate_hz == 0
+        || !track_source_matches_origin(descriptor.session_origin, &descriptor.track_source)
+    {
+        return Err(ManifestError::SessionTrackReferenceMismatch);
+    }
+    validate_route(
+        descriptor.session_origin,
+        descriptor.route,
+        descriptor.purpose,
+    )?;
+    let chunk_end_ms = descriptor
+        .start_ms
+        .checked_add(u64::from(descriptor.duration_ms))
+        .ok_or(ManifestError::DurationOverflow)?;
+    validate_vad_segments(descriptor.start_ms, chunk_end_ms, &descriptor.vad_segments)?;
+    for gap in &descriptor.gaps {
+        let gap_end_ms = gap.end_ms().ok_or(ManifestError::InvalidGapTiming)?;
+        let is_internal = gap.start_ms >= descriptor.start_ms && gap_end_ms <= chunk_end_ms;
+        let is_preceding = gap_end_ms == descriptor.start_ms;
+        if gap.session_id != descriptor.session_id
+            || gap.track_id != descriptor.track_id
+            || gap.duration_ms == 0
+            || gap.dropped_frames == 0
+            || (!is_internal && !is_preceding)
+        {
+            return Err(ManifestError::InvalidGapTiming);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureChunkDescriptorWire {
@@ -606,8 +657,7 @@ impl<'de> serde::Deserialize<'de> for CaptureChunkDescriptor {
         D: serde::Deserializer<'de>,
     {
         let wire = CaptureChunkDescriptorWire::deserialize(deserializer)?;
-        let is_current = matches!(&wire.session_id, LegacyChunkSessionId::Current(_))
-            || wire.replay_key.is_some()
+        let is_current = wire.replay_key.is_some()
             || wire.content_identity.is_some()
             || wire.session_mode.is_some()
             || wire.session_origin.is_some()
@@ -657,19 +707,7 @@ impl<'de> serde::Deserialize<'de> for CaptureChunkDescriptor {
             let gaps = wire
                 .gaps
                 .ok_or_else(|| serde::de::Error::missing_field("gaps"))?;
-            if replay_key.schema_version != CHUNK_SCHEMA_VERSION
-                || !content_identity.is_valid_sha256()
-                || replay_key.session_id != session_id
-                || replay_key.track_id != track_id
-                || replay_key.sequence_start != wire.sequence_start
-                || replay_key.sequence_end != sequence_end
-                || audio_artifact_id.is_empty()
-            {
-                return Err(serde::de::Error::custom("invalid current chunk identity"));
-            }
-            validate_route(session_origin, route, wire.purpose)
-                .map_err(serde::de::Error::custom)?;
-            return Ok(Self {
+            let descriptor = Self {
                 replay_key,
                 content_identity,
                 session_mode,
@@ -689,7 +727,9 @@ impl<'de> serde::Deserialize<'de> for CaptureChunkDescriptor {
                 vad_segments: wire.vad_segments,
                 gaps,
                 purpose: wire.purpose,
-            });
+            };
+            validate_current_descriptor(&descriptor).map_err(serde::de::Error::custom)?;
+            return Ok(descriptor);
         }
         let track_id = wire
             .track_id
@@ -885,6 +925,66 @@ mod tests {
     }
 
     #[test]
+    fn from_frames_rejects_empty_encoded_audio() {
+        let owner = OwnerNamespace::local("install-1").unwrap();
+        let track = CaptureTrackDescriptor::from_selector(
+            TrackId::new("mic-1").unwrap(),
+            TrackSource::Captured {
+                source: CaptureSource::Microphone,
+            },
+            "install-1",
+            "mic",
+        );
+
+        assert!(AudioChunkEnvelope::from_frames(
+            SessionId::new("s-test").unwrap(),
+            context(&owner, &track, &[]),
+            &[frame(1, 0, 20, 320)],
+            AudioCodec::PcmS16Le,
+            Vec::new(),
+            AudioPurpose::CaptureEnvelope,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn from_frames_rejects_intra_chunk_rate_changes_even_with_revisions() {
+        let owner = OwnerNamespace::local("install-1").unwrap();
+        let track = CaptureTrackDescriptor::from_selector(
+            TrackId::new("mic-1").unwrap(),
+            TrackSource::Captured {
+                source: CaptureSource::Microphone,
+            },
+            "install-1",
+            "mic",
+        );
+        let mut frames = vec![frame(1, 0, 20, 320), frame(2, 20, 20, 160)];
+        frames[1].sample_rate_hz = 8_000;
+        let revisions =
+            [
+                super::TrackConfigurationRevision::new(
+                    TrackId::new("mic-1").unwrap(),
+                    99,
+                    20,
+                    8_000,
+                )
+                .unwrap(),
+            ];
+
+        assert!(AudioChunkEnvelope::from_frames_with_continuity(
+            SessionId::new("s-test").unwrap(),
+            context(&owner, &track, b"audio"),
+            &frames,
+            AudioCodec::PcmS16Le,
+            Vec::new(),
+            Vec::new(),
+            &revisions,
+            AudioPurpose::CaptureEnvelope,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn from_frames_builds_key_derived_chunk_and_separate_content_identity() {
         let owner = OwnerNamespace::local("install-1").unwrap();
         let track = CaptureTrackDescriptor::from_selector(
@@ -945,6 +1045,47 @@ mod tests {
         assert!(value.get("retry").is_none());
         assert_eq!(value["contentIdentity"]["byteLength"], 5);
         assert_eq!(value["replayKey"]["ownerNamespace"], "local:install-1");
+    }
+
+    #[test]
+    fn current_descriptor_json_rejects_local_contract_violations() {
+        let owner = OwnerNamespace::local("install-1").unwrap();
+        let track = CaptureTrackDescriptor::from_selector(
+            TrackId::new("mic-1").unwrap(),
+            TrackSource::Captured {
+                source: CaptureSource::Microphone,
+            },
+            "install-1",
+            "mic",
+        );
+        let descriptor = AudioChunkEnvelope::from_frames(
+            SessionId::new("s-test").unwrap(),
+            context(&owner, &track, b"audio"),
+            &[frame(1, 0, 20, 320)],
+            AudioCodec::PcmS16Le,
+            Vec::new(),
+            AudioPurpose::CaptureEnvelope,
+        )
+        .unwrap()
+        .capture_descriptor();
+        let value = serde_json::to_value(descriptor).unwrap();
+
+        let mut bad_chunk_id = value.clone();
+        bad_chunk_id["chunkId"] = serde_json::json!("chunk-tampered");
+        assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(bad_chunk_id).is_err());
+
+        let mut bad_rate = value.clone();
+        bad_rate["sampleRateHz"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(bad_rate).is_err());
+
+        let mut bad_vad = value.clone();
+        bad_vad["vadSegments"] = serde_json::json!([{
+            "startMs": 0,
+            "endMs": 21,
+            "kind": "speech",
+            "rms": 0.3
+        }]);
+        assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(bad_vad).is_err());
     }
 
     #[test]
