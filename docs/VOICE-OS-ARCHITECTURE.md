@@ -720,6 +720,8 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
+**Next implementation order:** [Client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md), then [server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). The second plan creates durable job ownership and real reachability, but leaves upload drain, WSS runtime, ASR pools, auth, and diarization to their canonical phases.
+
 ---
 
 ## Phase-gate checklist
