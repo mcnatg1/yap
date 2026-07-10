@@ -1798,7 +1798,6 @@ mod tests {
             AudioCodec::PcmS16Le,
             Vec::new(),
             vec![gap],
-            &[],
             AudioPurpose::CaptureEnvelope,
         )
         .unwrap()
@@ -2153,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn gaps_must_mark_manifests_degraded_and_cannot_overlap_retained_frames() {
+    fn gaps_must_mark_manifests_degraded_without_consuming_entire_chunks() {
         let mut builder = chunk_builder(55, AudioPurpose::CaptureEnvelope);
         builder.push(frame(55, 1, 0, 20, 16_000)).unwrap();
         let session = AudioSessionEnvelope {
@@ -2182,7 +2181,7 @@ mod tests {
 
         assert!(serde_json::from_value::<AudioSessionEnvelope>(value.clone()).is_err());
         value["degraded"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_ok());
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
 
         let owner = crate::audio::session::OwnerNamespace::local("install-1").unwrap();
         let track = track_descriptor();
@@ -2204,7 +2203,6 @@ mod tests {
                 AudioCodec::PcmS16Le,
                 Vec::new(),
                 vec![retained_gap],
-                &[],
                 AudioPurpose::CaptureEnvelope,
             )
             .is_err()

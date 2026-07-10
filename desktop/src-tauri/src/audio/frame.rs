@@ -306,12 +306,10 @@ impl AudioChunkEnvelope {
             codec,
             vad_segments,
             Vec::new(),
-            &[],
             purpose,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn from_frames_with_continuity(
         session_id: SessionId,
         context: ChunkBuildContext<'_>,
@@ -319,7 +317,6 @@ impl AudioChunkEnvelope {
         codec: AudioCodec,
         vad_segments: Vec<VadSegment>,
         gaps: Vec<AudioGap>,
-        conversions: &[TrackConfigurationRevision],
         purpose: AudioPurpose,
     ) -> Result<Self, ManifestError> {
         let first = frames.first().ok_or(ManifestError::EmptyFrames)?;
@@ -330,13 +327,7 @@ impl AudioChunkEnvelope {
             return Err(ManifestError::EmptyEncodedAudio);
         }
         validate_route(context.session_origin, context.route, purpose)?;
-        validate_frames(
-            &session_id,
-            &context.track.track_id,
-            frames,
-            &gaps,
-            conversions,
-        )?;
+        validate_frames(&session_id, &context.track.track_id, frames, &gaps)?;
 
         let end_ms = frames
             .last()
@@ -460,7 +451,6 @@ fn validate_frames(
     track_id: &TrackId,
     frames: &[AudioFrame],
     gaps: &[AudioGap],
-    _conversions: &[TrackConfigurationRevision],
 ) -> Result<(), ManifestError> {
     let first = frames.first().ok_or(ManifestError::EmptyFrames)?;
     validate_gaps(session_id, track_id, frames, gaps)?;
@@ -594,6 +584,7 @@ pub(crate) fn validate_current_descriptor(
         .checked_add(u64::from(descriptor.duration_ms))
         .ok_or(ManifestError::DurationOverflow)?;
     validate_vad_segments(descriptor.start_ms, chunk_end_ms, &descriptor.vad_segments)?;
+    let mut internal_gaps = Vec::new();
     for gap in &descriptor.gaps {
         let gap_end_ms = gap.end_ms().ok_or(ManifestError::InvalidGapTiming)?;
         let is_internal = gap.start_ms >= descriptor.start_ms && gap_end_ms <= chunk_end_ms;
@@ -606,6 +597,54 @@ pub(crate) fn validate_current_descriptor(
         {
             return Err(ManifestError::InvalidGapTiming);
         }
+        if is_internal {
+            internal_gaps.push((gap.start_ms, gap_end_ms));
+        }
+    }
+    validate_internal_gap_union(descriptor, &internal_gaps)?;
+    Ok(())
+}
+
+fn validate_internal_gap_union(
+    descriptor: &CaptureChunkDescriptor,
+    internal_gaps: &[(u64, u64)],
+) -> Result<(), ManifestError> {
+    let mut gaps = internal_gaps.to_vec();
+    gaps.sort_unstable();
+
+    let mut union_duration = 0_u64;
+    let mut current: Option<(u64, u64)> = None;
+    for (start_ms, end_ms) in gaps {
+        match current {
+            Some((_, current_end_ms)) if start_ms < current_end_ms => {
+                return Err(ManifestError::InvalidGapTiming);
+            }
+            Some((current_start_ms, current_end_ms)) if start_ms == current_end_ms => {
+                current = Some((current_start_ms, end_ms));
+            }
+            Some((current_start_ms, current_end_ms)) => {
+                union_duration = union_duration
+                    .checked_add(current_end_ms - current_start_ms)
+                    .ok_or(ManifestError::DurationOverflow)?;
+                current = Some((start_ms, end_ms));
+            }
+            None => current = Some((start_ms, end_ms)),
+        }
+    }
+    if let Some((start_ms, end_ms)) = current {
+        union_duration = union_duration
+            .checked_add(end_ms - start_ms)
+            .ok_or(ManifestError::DurationOverflow)?;
+    }
+    if union_duration >= u64::from(descriptor.duration_ms) {
+        return Err(ManifestError::InvalidGapTiming);
+    }
+    if descriptor.vad_segments.iter().any(|segment| {
+        internal_gaps
+            .iter()
+            .any(|(start_ms, end_ms)| segment.start_ms < *end_ms && segment.end_ms > *start_ms)
+    }) {
+        return Err(ManifestError::InvalidGapTiming);
     }
     Ok(())
 }
@@ -948,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn from_frames_rejects_intra_chunk_rate_changes_even_with_revisions() {
+    fn from_frames_rejects_intra_chunk_rate_changes() {
         let owner = OwnerNamespace::local("install-1").unwrap();
         let track = CaptureTrackDescriptor::from_selector(
             TrackId::new("mic-1").unwrap(),
@@ -960,16 +999,6 @@ mod tests {
         );
         let mut frames = vec![frame(1, 0, 20, 320), frame(2, 20, 20, 160)];
         frames[1].sample_rate_hz = 8_000;
-        let revisions =
-            [
-                super::TrackConfigurationRevision::new(
-                    TrackId::new("mic-1").unwrap(),
-                    99,
-                    20,
-                    8_000,
-                )
-                .unwrap(),
-            ];
 
         assert!(AudioChunkEnvelope::from_frames_with_continuity(
             SessionId::new("s-test").unwrap(),
@@ -978,7 +1007,6 @@ mod tests {
             AudioCodec::PcmS16Le,
             Vec::new(),
             Vec::new(),
-            &revisions,
             AudioPurpose::CaptureEnvelope,
         )
         .is_err());
@@ -1086,6 +1114,19 @@ mod tests {
             "rms": 0.3
         }]);
         assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(bad_vad).is_err());
+
+        let mut full_gap = value;
+        full_gap["gaps"] = serde_json::json!([{
+            "sessionId": "s-test",
+            "trackId": "mic-1",
+            "startMs": 0,
+            "durationMs": 20,
+            "sourcePositionFrames": 0,
+            "droppedFrames": 320,
+            "cause": "sink_unavailable",
+            "generation": 1
+        }]);
+        assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(full_gap).is_err());
     }
 
     #[test]
