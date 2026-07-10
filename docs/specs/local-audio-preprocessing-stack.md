@@ -1,6 +1,6 @@
 # Spec: Local Audio Preprocessing Stack
 
-**Status:** Draft
+**Status:** Accepted design contract; production capture integration is not implemented
 **Scope:** Desktop-side capture and deterministic preprocessing before local fallback or server upload.
 **Amended by:** [ADR 0020](../adr/0020-meeting-capture-diarization-authority.md) and the [Source-Aware Diarization Design](../superpowers/specs/2026-07-10-source-aware-diarization-design.md).
 

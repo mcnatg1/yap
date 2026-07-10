@@ -1,7 +1,7 @@
 # ADR 0011: Vector index + RAG retrieval (L6–L7)
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7e)
+**Status:** Accepted retrieval principles; team storage is amended by ADR 0017 (canonical Phase 9)
 **Builds on:** [ADR 0010](0010-okf-conversation-schema.md) (what gets indexed), [ADR 0005](0005-llama-server-agents.md) (Analyst LLM), [ADR 0006](0006-silero-agents-state-machine.md) (Librarian/Analyst profiles)
 **Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, the local SQLite + `sqlite-vec` index is **replaced by a server-side vector DB** (Milvus/pgvector-class) as a compiled disposable layer in `yap-server`. The vector schema gains `permission_hash`, `access_tags`, `repo_commit`/`content_hash` fields to support permission-filtered retrieval. The retrieval flow, reciprocal-rank fusion, and confidence gate (< 0.60 → refuse) are **preserved**. The **solo/local-first profile** retains the local SQLite approach defined in this ADR.
 

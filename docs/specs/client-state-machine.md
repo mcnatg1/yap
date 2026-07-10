@@ -1,6 +1,6 @@
 # Spec: Client Recording State Machine
 
-**Status:** Draft
+**Status:** Accepted client workflow contract; local/setup paths are partially implemented and server-owned transitions remain unimplemented
 **Scope:** Desktop client workflow for the thin-client MVP, with explicit hooks for server STT, preprocessing, and diarization.
 
 This is the build contract for the client workflow. It replaces the cosmetic readiness-layer approach: the queue and runtime state must model the actual recording lifecycle.
@@ -28,7 +28,7 @@ The current desktop bridge is allowed to keep React as the temporary owner of qu
 | `checking` | Reading local fallback status. | Checking |
 | `fallback_missing` | Required fallback artifacts are missing or failed verification. | Setup |
 | `fallback_installing` | Setup is downloading/verifying artifacts. | Installing |
-| `fallback_ready` | Sidecar, model, tokenizer, and punctuation assets are ready and enabled. | Ready |
+| `fallback_ready` | Local runtime, model, tokenizer, and punctuation assets are ready and enabled. | Ready |
 | `fallback_disabled` | User disabled local fallback. | Disabled |
 | `setup_error` | Setup check, install, or removal failed. | Needs attention |
 
@@ -73,7 +73,7 @@ These match ADR 0006's Rust-owned runtime shape.
 | `queued_server` | Job is queued for server path. | Server queued |
 | `preprocessing` | Normalization/VAD/chunk/LID/manifest work is active. | Preparing |
 | `uploading` | Desktop is uploading to server. | Uploading |
-| `server_processing_cohere` | Server Cohere batch job is processing. | Server |
+| `server_processing` | The server-selected batch backend is processing. | Server |
 | `local_transcribing` | Nemotron fallback is transcribing. | Fallback |
 | `saving` | Client is writing output/history. | Saving |
 | `diarization_queued` | Speaker work is queued. | Speakers queued |
@@ -86,7 +86,8 @@ These match ADR 0006's Rust-owned runtime shape.
 ## Recording Job Shape
 
 ```ts
-export type RecordingIntent = "live" | "recording";
+export type SessionMode = "dictation" | "meeting";
+export type SessionOrigin = "liveCapture" | "importedFile";
 export type RecordingRoute = "localFallback" | "serverBatch" | "serverLive";
 
 export type PipelineStageStatus =
@@ -108,9 +109,10 @@ export type RecordingPipelineState = {
 
 export type RecordingJobView = {
   id: string;
-  sourcePath: string;
+  sourcePath?: string;
   name: string;
-  intent: RecordingIntent;
+  sessionMode: SessionMode;
+  sessionOrigin: SessionOrigin;
   status: RecordingJobStatus;
   route?: RecordingRoute;
   outputPath?: string;
@@ -123,6 +125,8 @@ export type RecordingJobView = {
 ```
 
 Rust can use snake_case names internally and serialize typed snapshots/events to React. React can keep camelCase type aliases for UI code, but the values must remain aligned.
+
+`SessionMode` describes the product workflow. `SessionOrigin` describes how audio entered Yap. Neither is a physical track source; microphone, system loopback, and unknown/mixed imported provenance remain track metadata under ADR 0020. A live capture has no required `sourcePath` until the recording sink commits an artifact.
 
 ## Route Policy
 
@@ -152,17 +156,17 @@ stateDiagram-v2
     QueuedLocalFallback --> LocalTranscribing
     QueuedServer --> Preprocessing
     Preprocessing --> Uploading
-    Uploading --> ServerProcessingCohere
+    Uploading --> ServerProcessing
     LocalTranscribing --> Saving
-    ServerProcessingCohere --> Saving
+    ServerProcessing --> Saving
     Saving --> Complete
-    ServerProcessingCohere --> DiarizationQueued: async speakers
+    ServerProcessing --> DiarizationQueued: async speakers
     DiarizationQueued --> DiarizationRunning
     DiarizationRunning --> Complete
     DiarizationRunning --> Partial
     LocalTranscribing --> Failed
     Uploading --> Failed
-    ServerProcessingCohere --> Failed
+    ServerProcessing --> Failed
     Failed --> Preflighting: retry
     QueuedLocalFallback --> Cancelled
     QueuedServer --> Cancelled

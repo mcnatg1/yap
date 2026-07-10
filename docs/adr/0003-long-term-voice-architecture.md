@@ -1,7 +1,7 @@
 # ADR 0003: Long-term voice architecture — recordings, SpeechBrain LID, and phased voice OS
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — not all phases in scope for current Yap releases)
+**Status:** Accepted architectural principles; phase numbering is superseded by the canonical Voice OS roadmap
 **Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (CrispASR sidecar, English-only live v1)
 **Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — the "local-first" layer architecture (L1–L7) described here is reframed as the **solo/local-first deployment profile**. In the **team profile**, the STT inference (streaming + batch), LLM pool, and L3 background worker all relocate to the `yap-server` tier on a GB-class server node. The node is on-prem org-owned hardware and is **not** a cloud service; this is consistent with the "no cloud STT" principle. Client layers (L1 hotkey, L2 mic/VAD/UI, ghost preview) remain client-side in both profiles.
 

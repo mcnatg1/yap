@@ -1,7 +1,7 @@
 # ADR 0006: Silero VAD, agent profiles, and runtime state machine
 
 **Date:** 2026-06-30
-**Status:** Accepted
+**Status:** Accepted runtime/VAD principles; active routing is amended by ADR 0014, ADR 0019, and ADR 0020
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md), [ADR 0005](0005-llama-server-agents.md)
 **Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and [ADR 0019](0019-local-streaming-model-selection.md) — heavy model residency moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus the local Nemotron fallback selected by ADR 0019. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context.
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - VAD remains useful for endpointing and advisory segment hints, but it is not authoritative for meeting reprocessing. Speaker work runs through an independent bounded sink and may re-evaluate activity from retained audio.

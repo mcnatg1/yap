@@ -1,7 +1,7 @@
 # ADR 0010: OKF conversation schema
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7c)
+**Status:** Accepted schema (canonical Phase 9)
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (OKF dirs, Archivist), [ADR 0009](0009-knowledge-worker-protocol.md) (worker writes these)
 **Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, conversations enter **Lane 1** (content-addressed append store) rather than being written directly to OKF by the client worker; the **KB compiler** in `yap-server` normalises Lane 1 captures to OKF markdown and commits curated/stitched conversations to `yap-knowledge` (Lane 2). The **file schema** (frontmatter fields, markdown body format, dual-track raw/polished) defined in this ADR is **unchanged** — it is the output format of the KB compiler in both profiles.
 

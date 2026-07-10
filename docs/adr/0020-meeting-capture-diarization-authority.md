@@ -162,7 +162,7 @@ Enrollment, matching, and adaptation are separate purpose grants. A durable gran
 
 Every durable profile stores tenant ID, subject ID, model ID and revision, embedding dimension, normalization version, calibration version, purpose-grant IDs and revocation epochs, finite expiry, withdrawal state, and update provenance. Display names are presentation snapshots, not identity keys.
 
-Profile adaptation is an idempotent operation separate from result publication. Its logical key contains tenant, subject, profile model/revision, source session, source result revision, and independent authorization ID. Replaying the same key and evidence hash is a no-op; a conflicting hash fails closed. Consent and revocation epochs are rechecked in the same transaction that commits the new profile revision.
+Profile adaptation is an idempotent operation separate from result publication. Its logical key contains tenant, subject, profile model/revision, source session, source result revision, and independent authorization ID. Replaying the same key and evidence hash is a no-op; a conflicting hash fails closed. Purpose-grant and revocation epochs are rechecked in the same transaction that commits the new profile revision.
 
 The server derives `(tenant_id, owner_subject_id)` from the validated token, never from a client-supplied owner field. That namespace participates in every durable job, chunk idempotency key, result revision, profile lookup, object-store key, and audit event. A named assertion is valid only when its session, profile, purpose grants, and identity provenance belong to the same tenant.
 
@@ -222,6 +222,8 @@ Rejected as the first implementation. It offers stronger overlap modeling but ad
 Rejected by default. Renaming it a cache does not remove its biometric-identification purpose. Contacts and per-transcript labels provide most of the UX value without passive cross-session voice tracking.
 
 ## Implementation sequence
+
+Steps 1–4 are cross-phase client/server prerequisites and ship during canonical Phases 1, 3, and 5. Phase 8 begins at anonymous speaker inference in step 5. This preserves ADR 0020 as the authority for the contracts without postponing stable capture until after server upload work.
 
 1. Version the track, clock, gap, evidence, attribution, and result-revision contracts.
 2. Harden manifest validation, owner-scoped idempotency, and content identity.

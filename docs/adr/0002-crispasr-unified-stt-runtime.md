@@ -1,7 +1,7 @@
 # ADR 0002: CrispASR as unified STT runtime (warm daemon + GGUF)
 
 **Date:** 2026-06-30
-**Status:** Accepted
+**Status:** Historical runtime decision; the active local live runtime is superseded by ADR 0019
 **Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the committed local fallback pin is now Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. CrispASR remains historical runtime context and legacy helper code, not the active local live path.
 **Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, model residency and client/server routing move to the **server-side workload router**; the GPU pool can hold multiple models resident simultaneously. The on-prem GB-class server node is "our hardware, our network" — it is **not** a cloud service and does not conflict with local-first principles.
 **Supersedes:** Implementation details in [ADR 0001](0001-dual-stt-backends.md) (PyTorch `transcribe.py`, `moonshine-voice` ONNX, per-invocation subprocess, “no GGUF” rule). The product split from ADR 0001 remains: local streaming for live/offline fallback, server STT for larger recordings.

@@ -1,7 +1,7 @@
 # ADR 0012: MCP server surface
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7e)
+**Status:** Accepted tool surface; team hosting is amended by ADR 0017 (canonical Phase 9)
 **Builds on:** [ADR 0011](0011-vector-rag-retrieval.md) (retrieval backend), [ADR 0010](0010-okf-conversation-schema.md) (data), [ADR 0006](0006-silero-agents-state-machine.md) (agent profiles)
 **Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, the MCP server runs as a **sidecar of `yap-server`** (not the desktop app), exposing a compiled, permission-filtered KB view. The tool surface (`search_transcripts`, `get_conversation`, etc.) and read-mostly safety model are **preserved**. The **solo/local-first profile** retains the local stdio MCP server as specified in this ADR.
 

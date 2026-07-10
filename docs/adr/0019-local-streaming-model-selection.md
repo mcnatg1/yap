@@ -1,7 +1,7 @@
 # ADR 0019: Local streaming model selection
 
 **Date:** 2026-07-08
-**Status:** Accepted
+**Status:** Accepted (canonical Phase 2 local fallback)
 **Amends:** [ADR 0001](0001-dual-stt-backends.md), [ADR 0002](0002-crispasr-unified-stt-runtime.md), [ADR 0003](0003-long-term-voice-architecture.md), [ADR 0006](0006-silero-agents-state-machine.md), [ADR 0014](0014-server-tier-compute-topology.md), [ADR 0018](0018-three-repo-topology.md)
 
 ## Context

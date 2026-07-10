@@ -1,6 +1,6 @@
 # Spec: Live Dictation Client UX + Audio Thread
 
-**Status:** Draft (2026-06-30)
+**Status:** Implemented baseline; native interaction, latency, and resilience hardening continue
 **Implements:** [ADR 0006](../adr/0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [ADR 0013](../adr/0013-global-hotkey-injection.md) (hotkeys/injection), [ADR 0019](../adr/0019-local-streaming-model-selection.md) (Nemotron local live fallback)
 **Scope:** Define the **English-only client live path** as an implemented local baseline plus explicitly separate follow-on server/audio features.
 

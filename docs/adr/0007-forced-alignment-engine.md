@@ -1,9 +1,11 @@
 # ADR 0007: Forced-alignment engine for word→speaker
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7a)
+**Status:** Accepted alignment principle (canonical Phase 6); exact engine requires benchmark revalidation
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (resolves the aligner "TBD"), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (CrispASR runtime)
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - alignment consumes revisioned source-aware diarization results. Its resource gate is measured with the selected diarization path rather than a fixed WeSpeaker companion.
+
+> **Applicability:** Align raw STT and preserve word timestamps. The historical Canary/Wav2Vec2 engine selection is a benchmark candidate, not permission to add either runtime without current accuracy, licensing, CPU, memory, and packaging evidence.
 
 ## Context
 
@@ -45,7 +47,7 @@ Confirm the default against fixtures before locking:
 - Canary footprint/quality unverified until benched on real media.
 
 ### Neutral
-- Alignment is **Phase 7a**; nothing ships until L3 does.
+- Alignment is canonical **Phase 6**; the historical `7a` label is no longer used.
 
 ## Alternatives considered
 

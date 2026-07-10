@@ -1,6 +1,6 @@
 # Spec: Testing strategy
 
-**Status:** Draft (updated 2026-07-10)
+**Status:** Living verification contract (updated 2026-07-10); future phase gates activate only when their fixtures exist
 **Scope:** Cross-cutting tests for the desktop runtime, track-aware audio contracts, local fallback, source-aware diarization, server contracts, and native UI.
 
 This is the shared reference the phase specs point to for their acceptance tests.

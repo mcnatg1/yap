@@ -1,7 +1,7 @@
 # ADR 0009: Knowledge worker IPC protocol
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7a)
+**Status:** Accepted for the solo/local profile; team/server protocol is superseded by ADR 0017 (canonical Phase 9)
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (subprocess worker, FIFO, chunk manifest), [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator owns queue depth)
 **Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, the `yap-knowledge-worker` subprocess and the TCP JSON-lines IPC protocol defined here are **replaced by the `yap-server` KB compiler service** with REST/HTTP APIs. The chunk manifest schema (ADR 0004 §3) is preserved as the normalised document input format. The **solo/local-first profile** retains the TCP JSON-lines protocol on `YAP_KNOWLEDGE_PORT` as specified in this ADR.
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - the vault, `SPEAKER_XX`, and diarization events below are historical. Current speaker evidence uses revisioned `Unknown` / session-scoped `Speaker N` results and is not coupled to the OKF worker protocol.

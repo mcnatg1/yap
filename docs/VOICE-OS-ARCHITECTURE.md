@@ -685,14 +685,14 @@ timeline
 | Phase | Boundary | Deliverable | Old refs |
 |-------|----------|-------------|----------|
 | **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
-| **1** | desktop | Recordings home, playback, queue, settings, setup flow, and server connection state. | Phase 3 UI work |
+| **1** | desktop foundation | Recordings home, playback, setup, Rust-owned job state, source-aware capture contracts, bounded sink fan-out, and crash-safe recording. | Phase 3 UI work; ADR 0020 prerequisite slices |
 | **2** | desktop fallback | Local Nemotron INT8 live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002/0019 |
 | **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; server-tier spec |
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
 | **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server ASR routing. | Old Phase 5/8 |
 | **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
-| **7** | identity/access | Entra/MSAL bridge, Yap API audience, consent, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
-| **8** | meeting evidence | Track-aware capture contracts, local anonymous speaker evidence, revisioned server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
+| **7** | identity/access | Entra/MSAL bridge, Yap API audience, purpose grants, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
+| **8** | meeting evidence | Local anonymous speaker evidence, timestamped result revisions, server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
 | **9** | knowledge | OKF, KB compiler, agents, RAG, MCP, and permission-filtered views. | Old 7c-7e/11; ADR 0010/0011/0012/0017 |
 | **10** | enterprise/release | Zscaler/corporate access hardening, audit/deploy runbooks, packaging, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
 
@@ -701,18 +701,20 @@ timeline
 | Phase | Status | Where we are now |
 |-------|--------|------------------|
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
-| **1** | In progress | Desktop has recordings/playback; a typed recording-job workflow is the next required refactor before server connector wiring. |
-| **2** | In progress | Local Nemotron INT8 fallback is the active local path; install/remove/disable is explicit and UI copy stays terse. |
+| **1** | In progress | History/playback/setup and a Rust orchestrator skeleton exist. Rust does not yet own the full job lifecycle; capture still retains at most ten minutes in memory and lacks the source-aware sink/persistence foundation. |
+| **2** | Implemented baseline; hardening remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Native CI smoke, release packaging, and measured latency/accuracy gates remain. |
 | **3** | Starting now | `server/` exists as a small staging area; the real API/WSS contract still needs to be written. |
 | **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
-| **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, consent records, and a server entrypoint. |
-| **8** | Decision accepted; spec in review | ADR 0020 fixes the direction; the source-aware written design awaits sign-off before its implementation plan begins. |
+| **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
+| **8** | Design accepted; implementation not started | ADR 0020 and the source-aware design are canonical. Local anonymous inference waits on the pulled-forward capture foundation, benchmark fixtures, and server contract. |
 | **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
 | **10** | Later | Corporate access hardening, release packaging, and repo split come after the MVP server is real. |
 
 Solo/local fallback and team/server mode share concepts, but the server path is now canonical for the main roadmap.
+
+**Sequencing rule:** ADR 0020 spans both foundation and feature work. Its contract/manifest and independent recording-sink slices are pulled forward into the Phase 1 desktop foundation because Phase 3–5 server work must consume stable capture artifacts. Phase 8 begins with anonymous speaker inference and result reconciliation; it must not force a rewrite of capture or upload.
 
 **Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
@@ -726,14 +728,14 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 | Gate | Code done | Docs/product to update |
 |------|-----------|------------------------|
-| **1** Desktop thin client | Recordings home, playback, recording-job workflow, setup/settings | Product copy; setup flow; connected/offline states |
+| **1** Desktop foundation | Recordings home/playback, Rust-owned jobs, source-aware manifests, bounded fan-out, crash-safe recording | Client state spec; source-aware design; connected/offline and partial-recovery UX |
 | **2** Local fallback | Nemotron INT8 live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/local-live-fallback-sidecar.md) Accepted; setup download docs |
 | **3** Server contract | Health, jobs, WSS, errors, client connector | [Server tier MVP spec](specs/server-tier-mvp.md); OpenAPI/WSS docs |
 | **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
 | **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
-| **7** Identity/access | Entra sign-in, Yap API token validation, consent, tenant-scoped identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
-| **8** Meeting evidence | Track/timeline contracts, anonymous local labels, result revisions, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) |
+| **7** Identity/access | Entra sign-in, Yap API token validation, purpose grants, tenant-scoped identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
+| **8** Meeting evidence | Anonymous local labels, timestamped result revisions, benchmark gates, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) |
 | **9** Knowledge/agents | OKF, KB compiler, RAG, MCP | KB compiler spec; permission compile SLA |
 | **10** Enterprise/release | Zscaler/corp access, packaging, repo split | CI/CD migration; cross-repo link update |
 
@@ -744,13 +746,16 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 **Client live fallback (Phases 1–2)**
 
 - [x] In-process local Nemotron fallback
-- [ ] Pin Nemotron artifacts; CI smoke test
+- [x] Pin Nemotron artifacts by revision and SHA-256
+- [ ] Add native CI smoke and release-artifact verification
 - [x] Model/runtime readiness in Setup UI
-- [ ] Structured error codes → toasts
+- [x] Stable Rust error codes and frontend projections
+- [ ] Complete actionable toast/recovery coverage for every native error
 
 **Orchestrator (Phase 1+)**
 
-- [ ] Rust `RuntimeOrchestrator` state machine ([ADR 0006](adr/0006-silero-agents-state-machine.md))
+- [x] Rust `RuntimeOrchestrator` state skeleton ([ADR 0006](adr/0006-silero-agents-state-machine.md))
+- [ ] Move complete recording-job lifecycle ownership from React into Rust
 - [ ] Silero ONNX in Rust audio path; `vad_segments` in manifests
 - [ ] Agent profile registry; v1 enable `scribe` only
 - [ ] Enforce one client-local Nemotron session, one HOT LLM, and one background LLM queue; server pools schedule independently
@@ -761,13 +766,17 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [ ] Migrate polish.ts to `/v1/chat/completions`
 - [ ] `YAP_LLM_BACKEND=ollama|llama`
 
-**Meeting evidence and diarization (Phases 8–9)**
+**Client audio foundation (pulled forward into Phases 1–5)**
 
 - [ ] Track-aware frames, manifests, content hashes, and explicit gaps
 - [ ] Independent bounded recording, ASR, evidence, and transport sinks
+- [ ] Crash-safe streaming recording and immutable capture commit manifest
+- [ ] Rust-owned durable reconnect ledger before automatic drain
+
+**Meeting evidence and diarization (Phase 8)**
+
 - [ ] Local `Unknown` / `Speaker N` state and immutable result revisions
 - [ ] Transient client embeddings; no passive contact/profile enrollment
-- [ ] Rust-owned durable reconnect ledger before automatic drain
 - [ ] Server-authoritative reconciliation and purpose-authorized identity
 - [ ] Align raw STT only
 - [ ] Benchmark baseline, SphereVBx-PF, and overlap-aware challenger before promotion
@@ -784,8 +793,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Historical background pipeline principles, OKF, agents | [0004](adr/0004-background-diarization-okf-agents.md) |
 | llama-server for Scribe + agents | [0005](adr/0005-llama-server-agents.md) |
 | Silero, agent profiles, state machine | [0006](adr/0006-silero-agents-state-machine.md) |
-| Forced-alignment engine pick | [0007](adr/0007-forced-alignment-engine.md) |
-| SpeechBrain LID gate decisions | [0008](adr/0008-speechbrain-lid-gate.md) |
+| Forced-alignment principle; engine requires revalidation | [0007](adr/0007-forced-alignment-engine.md) |
+| Language-gate behavior; model/runtime requires revalidation | [0008](adr/0008-speechbrain-lid-gate.md) |
 | Knowledge worker IPC protocol | [0009](adr/0009-knowledge-worker-protocol.md) |
 | OKF conversation schema | [0010](adr/0010-okf-conversation-schema.md) |
 | Vector index + RAG retrieval | [0011](adr/0011-vector-rag-retrieval.md) |
@@ -793,7 +802,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Global hotkey + injection (L1) | [0013](adr/0013-global-hotkey-injection.md) |
 | Server tier topology + thin client + workload router + two profiles | [0014](adr/0014-server-tier-compute-topology.md) |
 | Superseded server-only diarization decision | [0015](adr/0015-two-pass-diarization-speaker-identity.md) |
-| Auth + identity bridge (Entra ID / MSAL, `(tid, oid)`, biometric consent) | [0016](adr/0016-auth-identity-bridge.md) |
+| Auth + identity bridge (Entra ID / MSAL, `(tid, oid)`, biometric purpose authorization) | [0016](adr/0016-auth-identity-bridge.md) |
 | Team KB compiler (source-of-truth, two-lane store, permission model, disposable indexes) | [0017](adr/0017-knowledge-base-compiler.md) |
 | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | [0018](adr/0018-three-repo-topology.md) |
 | Local Nemotron INT8 streaming fallback | [0019](adr/0019-local-streaming-model-selection.md) |
@@ -804,11 +813,13 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | Spec | Phase |
 |------|-------|
 | [Client state machine](specs/client-state-machine.md) | 1–2 |
+| [Model download UX](specs/model-download-ux.md) | 1–2 |
+| [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) | 1, 3, 5–6 prerequisite contract |
 | [Local live fallback](specs/local-live-fallback-sidecar.md) | 2 |
 | [Local LLM sidecar](specs/local-llm-sidecar.md) | polish/Scribe |
 | [Live dictation client](specs/live-dictation-client-ux.md) | 1–2 |
 | [Server tier MVP](specs/server-tier-mvp.md) | 3–4 |
-| [Source-aware diarization design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | 8 |
+| [Source-aware diarization design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Foundation slices in 1/3/5; anonymous evidence in 8 |
 | [Testing strategy](specs/testing-strategy.md) | all |
 
 ## Related documents

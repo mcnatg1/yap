@@ -1,12 +1,14 @@
 # ADR 0008: SpeechBrain LID language gate
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 4)
+**Status:** Accepted language-gate behavior (canonical Phase 6); exact SpeechBrain model/runtime requires revalidation
 **Builds on:** [ADR 0003](0003-long-term-voice-architecture.md) (resolves its open questions), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (Cohere needs explicit `-l`)
+
+> **Applicability:** Suggest and confirm language; never silently switch. SpeechBrain remains a candidate implementation and must pass current licensing, footprint, latency, and language-coverage gates before it is added.
 
 ## Context
 
-Cohere requires an explicit language code and does **not** auto-detect; a wrong `-l` produces badly garbled output. ADR 0003 established the **gate pattern** (suggest, never silently switch) but left four items open: checkpoint, probe duration, bundle-vs-download, and disagreement handling. This ADR closes them for **batch only** (Phase 4); live stays English-only.
+Cohere requires an explicit language code and does **not** auto-detect; a wrong `-l` produces badly garbled output. ADR 0003 established the **gate pattern** (suggest, never silently switch) but left four items open: checkpoint, probe duration, bundle-vs-download, and disagreement handling. This ADR closes the behavior for **batch only** in canonical Phase 6; live stays English-only until a separate multilingual-live decision.
 
 ## Decision
 
@@ -53,7 +55,7 @@ Remember last confirmed `-l` per source folder; pre-select it next time to cut r
 ## Consequences
 
 ### Positive
-- Closes ADR 0003 open questions; Phase 4 is buildable.
+- Closes the behavioral questions from ADR 0003; canonical Phase 6 still requires current model/runtime revalidation.
 - Adaptive probe balances cost vs accuracy; bounded at 30 s.
 - On-demand download keeps base installer small.
 

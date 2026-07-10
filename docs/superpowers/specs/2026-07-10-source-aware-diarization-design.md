@@ -1,6 +1,6 @@
 # Source-Aware Diarization Design
 
-**Status:** Draft for written review
+**Status:** Accepted design; client foundation prerequisites are next and model-specific diarization is not yet implemented
 **Date:** 2026-07-10
 **Scope:** Track-aware client audio contracts, local anonymous speaker evidence, and server-authoritative reconciliation for Yap meeting sessions.
 **Decision:** [ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md)
@@ -338,9 +338,9 @@ The values above are privacy-preserving product defaults, not legal advice. A de
 
 Enrollment, matching, and adaptation are distinct purposes. A durable grant records `(tenant_id, subject_id, grant_id, purpose, notice_text_version, legal_basis_code, basis_record_ref, consent_text_version?, granted_at, revoked_at, revocation_epoch)`. Every match and named-result publication transactionally rechecks current enrollment and matching grants and epochs. Every adaptation additionally rechecks a separate adaptation grant plus independent authorization; a model prediction cannot authorize its own update.
 
-Profile adaptation has its own logical key: `(tenant_id, subject_id, model_id, model_revision, source_session_id, source_result_revision, authorization_id)`, plus an evidence hash. Same key/same hash is idempotent; same key/different hash fails closed. The profile revision and current consent/revocation epochs are checked and committed in one transaction, so upload or result replay cannot apply the same evidence twice.
+Profile adaptation has its own logical key: `(tenant_id, subject_id, model_id, model_revision, source_session_id, source_result_revision, authorization_id)`, plus an evidence hash. Same key/same hash is idempotent; same key/different hash fails closed. The profile revision and current purpose-grant/revocation epochs are checked and committed in one transaction, so upload or result replay cannot apply the same evidence twice.
 
-The server derives `(tenant_id, owner_subject_id)` from the validated token and ignores client-supplied ownership claims. That namespace is part of every server job, chunk key, result revision, profile lookup, object-store key, and audit event. Named assertions require session, profile, consent, and identity provenance from the same tenant. Two tenants may use identical session IDs, hashes, and revision numbers without collision.
+The server derives `(tenant_id, owner_subject_id)` from the validated token and ignores client-supplied ownership claims. That namespace is part of every server job, chunk key, result revision, profile lookup, object-store key, and audit event. Named assertions require session, profile, active purpose grants, and identity provenance from the same tenant. Two tenants may use identical session IDs, hashes, and revision numbers without collision.
 
 Client transient embedding and exemplar types must not implement ordinary persistence serialization. Debug/log representations expose counts and model revisions, never vector values. Normal completion, cancellation, crash recovery, and restart tests scan sidecars, SQLite, temporary artifacts, and logs to prove that no derived guest biometric was persisted.
 
@@ -409,13 +409,13 @@ Client transient embedding and exemplar types must not implement ordinary persis
 
 ## Phased Delivery
 
-### Slice 8a: Contract and manifest correctness
+### Foundation slice F1: Contract and manifest correctness (canonical Phases 1 and 3)
 
 - Add track-aware session, frame, gap, chunk, evidence, and revision types.
 - Add strict builder validation, logical replay keys, and separate content identity.
 - Keep production microphone behavior unchanged.
 
-### Slice 8b: Independent capture sinks and durable recording
+### Foundation slice F2: Independent capture sinks and durable recording (canonical Phases 1 and 5)
 
 - Extract the current CPAL microphone adapter.
 - Add the monotonic timeline, revisioned track/clock events, and callback-safe explicit gaps.
@@ -424,22 +424,22 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - Remove the current ten-minute retained-PCM limitation for meeting sessions without allowing unbounded memory growth.
 - Persist an immutable single-track capture sidecar and separate result revisions while preserving current WAV/TXT playback.
 
-### Slice 8c: Local anonymous baseline
+### Phase 8 slice 8a: Local anonymous baseline
 
 - Add optional speaker-model download state.
 - Benchmark a commercially usable `sherpa-onnx` embedding model.
 - Implement unknown/candidate/stable-anonymous clustering and result revisions.
 - Persist only the anonymous timeline and provenance; discard embeddings.
 
-### Later plans
+### Subsequent plans
 
-- Rust-owned SQLite reconnect ledger and server transport.
+- Canonical Phases 3–5: Rust-owned SQLite reconnect ledger and server transport.
 - Server authoritative diarization and purpose-authorized identity.
 - OS contacts and roster suggestions without biometrics.
 - Windows system-loopback capture.
 - SphereVBx-PF and EEND/MS-SphereVBx benchmark challengers.
 
-## Acceptance For The First Implementation Plan
+## Acceptance For The Client Foundation Plan
 
 - Dictation behavior and existing serialized settings remain backward compatible.
 - Production microphone capture can record without constructing local ASR.
@@ -449,8 +449,14 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - Manifest builders reject cross-session and cross-track contamination.
 - Recording completion requires a valid commit manifest; crash states remain partial.
 - Logical idempotency keys and byte hashes obey the replay matrix.
-- Local attribution cannot produce a name or persist an embedding.
-- Candidate speaker state is hidden until stable, and the baseline passes the absolute release gates.
-- All queues and per-speaker state are bounded.
+- No speaker model or embedding runtime is added by the foundation plan.
+- Recording, ASR, evidence, and transport queues are independently bounded.
 - No new inference framework is added.
 - Existing Rust, frontend unit, Playwright, and WDIO checks remain green; new deterministic Rust tests cover the contracts before device tests.
+
+## Acceptance For The Phase 8 Local Baseline Plan
+
+- Local attribution cannot produce a name or persist an embedding.
+- Candidate speaker state is hidden until stable, and the baseline passes the absolute release gates.
+- All per-speaker state is bounded by the configured product and safety ceilings.
+- The licensed fixture manifest, RTTM annotations, and reference-hardware benchmark report exist before a model is promoted.
