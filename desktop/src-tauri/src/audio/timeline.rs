@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Mutex, TryLockError};
 
 use crate::audio::frame::{AudioFrame, AudioGap, GapCause, TrackConfigurationRevision};
 use crate::audio::session::{SessionId, TrackId};
@@ -386,6 +387,13 @@ pub struct LossSnapshot {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TryDrain {
+    Pending,
+    Empty,
+    Snapshot(LossSnapshot),
+}
+
 #[derive(Debug)]
 struct LossRunCell {
     source_position_frames: AtomicU64,
@@ -524,14 +532,17 @@ impl LossSlot {
     }
 }
 
-struct DrainGuard<'a> {
-    in_progress: &'a AtomicBool,
+#[derive(Debug)]
+struct PendingDrain {
+    generation: u64,
+    registration_floor: u64,
+    registration_target: u64,
+    registration_invalid: bool,
 }
 
-impl Drop for DrainGuard<'_> {
-    fn drop(&mut self) {
-        self.in_progress.store(false, Ordering::Release);
-    }
+#[derive(Debug, Default)]
+struct LossDrainCoordinator {
+    pending: Option<PendingDrain>,
 }
 
 #[derive(Debug)]
@@ -543,7 +554,7 @@ pub struct LossAccumulator {
     registration_completion_tickets: [AtomicU64; REGISTRATION_TICKET_CAPACITY],
     invalid: AtomicBool,
     registration_resetting: AtomicBool,
-    drain_in_progress: AtomicBool,
+    coordinator: Mutex<LossDrainCoordinator>,
     slots: [LossSlot; 2],
 }
 
@@ -557,7 +568,7 @@ impl LossAccumulator {
                 REGISTRATION_TICKET_CAPACITY],
             invalid: AtomicBool::new(false),
             registration_resetting: AtomicBool::new(false),
-            drain_in_progress: AtomicBool::new(false),
+            coordinator: Mutex::new(LossDrainCoordinator { pending: None }),
             slots: [LossSlot::new(), LossSlot::new()],
         }
     }
@@ -629,82 +640,107 @@ impl LossAccumulator {
         }
     }
 
-    pub fn drain(&self) -> Result<Option<LossSnapshot>, TimelineError> {
-        self.drain_inner(|| {}, || {}, || {})
-    }
+    pub fn try_drain(&self) -> Result<TryDrain, TimelineError> {
+        let mut coordinator = match self.coordinator.try_lock() {
+            Ok(coordinator) => coordinator,
+            Err(TryLockError::WouldBlock) => return Ok(TryDrain::Pending),
+            Err(TryLockError::Poisoned(poisoned)) => {
+                self.invalidate();
+                poisoned.into_inner()
+            }
+        };
 
-    fn drain_inner<F, G, H>(
-        &self,
-        after_flip: F,
-        after_registration_wait: G,
-        on_contention: H,
-    ) -> Result<Option<LossSnapshot>, TimelineError>
-    where
-        F: FnOnce(),
-        G: FnOnce(),
-        H: FnOnce(),
-    {
-        let _guard = self.acquire_drain(on_contention);
-        let generation = self.advance_generation();
-        let registration_floor = self.registration_drained.load(Ordering::SeqCst);
-        let registration_target = self.registration_started.load(Ordering::SeqCst);
-        let pending_registrations = registration_target.checked_sub(registration_floor);
-        let registration_invalid = pending_registrations
-            .is_none_or(|pending| pending > REGISTRATION_TICKET_CAPACITY as u64);
-        if registration_invalid {
-            self.invalidate();
+        if coordinator.pending.is_none() {
+            let generation = self.advance_generation();
+            let registration_floor = self.registration_drained.load(Ordering::SeqCst);
+            let registration_target = self.registration_started.load(Ordering::SeqCst);
+            let registration_invalid = registration_target
+                .checked_sub(registration_floor)
+                .is_none_or(|pending| pending > REGISTRATION_TICKET_CAPACITY as u64);
+            if registration_invalid {
+                self.invalidate();
+            }
+            coordinator.pending = Some(PendingDrain {
+                generation,
+                registration_floor,
+                registration_target,
+                registration_invalid,
+            });
         }
-        after_flip();
-        if registration_invalid {
+
+        let pending = coordinator
+            .pending
+            .as_ref()
+            .expect("pending drain is initialized before polling");
+        if !pending.registration_invalid && !self.registrations_are_ready(pending) {
+            return Ok(TryDrain::Pending);
+        }
+        let slot = &self.slots[(pending.generation & 1) as usize];
+        if slot.writers.load(Ordering::Acquire) != 0 {
+            return Ok(TryDrain::Pending);
+        }
+
+        let pending = coordinator
+            .pending
+            .take()
+            .expect("pending drain remains owned by the coordinator");
+        let snapshot = slot.take(pending.generation);
+        if pending.registration_invalid {
+            self.invalid.store(false, Ordering::SeqCst);
             self.reset_registration_counters();
-        } else {
-            for ticket in registration_floor..registration_target {
-                let expected = ticket + 1;
-                let completion = &self.registration_completion_tickets
-                    [ticket as usize % REGISTRATION_TICKET_CAPACITY];
-                while completion.load(Ordering::SeqCst) != expected {
-                    spin_loop();
-                }
-            }
-            self.registration_drained
-                .store(registration_target, Ordering::SeqCst);
-            if registration_target == u64::MAX {
-                self.reset_registration_counters();
-            }
+            return Err(TimelineError::InvalidTiming);
         }
-        after_registration_wait();
-        let slot = &self.slots[(generation & 1) as usize];
-        while slot.writers.load(Ordering::Acquire) != 0 {
-            spin_loop();
+
+        self.registration_drained
+            .store(pending.registration_target, Ordering::SeqCst);
+        if pending.registration_target == u64::MAX {
+            self.reset_registration_counters();
         }
-        let snapshot = slot.take(generation);
         if self.invalid.swap(false, Ordering::SeqCst) {
             Err(TimelineError::InvalidTiming)
         } else {
-            snapshot
+            match snapshot? {
+                Some(snapshot) => Ok(TryDrain::Snapshot(snapshot)),
+                None => Ok(TryDrain::Empty),
+            }
         }
     }
 
-    fn advance_generation(&self) -> u64 {
+    pub fn drain(&self) -> Result<Option<LossSnapshot>, TimelineError> {
         loop {
-            let generation = self.active_generation.load(Ordering::SeqCst);
-            let next_generation = generation.checked_add(1).unwrap_or_else(|| {
-                self.invalidate();
-                0
-            });
-            if self
-                .active_generation
-                .compare_exchange_weak(
-                    generation,
-                    next_generation,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                return generation;
+            match self.try_drain()? {
+                TryDrain::Pending => spin_loop(),
+                TryDrain::Empty => return Ok(None),
+                TryDrain::Snapshot(snapshot) => return Ok(Some(snapshot)),
             }
         }
+    }
+
+    fn registrations_are_ready(&self, pending: &PendingDrain) -> bool {
+        for ticket in pending.registration_floor..pending.registration_target {
+            let expected = ticket + 1;
+            let completion = &self.registration_completion_tickets
+                [ticket as usize % REGISTRATION_TICKET_CAPACITY];
+            if completion.load(Ordering::SeqCst) != expected {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn advance_generation(&self) -> u64 {
+        let generation = self.active_generation.load(Ordering::SeqCst);
+        match generation.checked_add(1) {
+            Some(next_generation) => {
+                self.active_generation
+                    .store(next_generation, Ordering::SeqCst);
+            }
+            None => {
+                self.invalidate();
+                self.active_generation.store(0, Ordering::SeqCst);
+            }
+        }
+        generation
     }
 
     fn reset_registration_counters(&self) {
@@ -717,50 +753,8 @@ impl LossAccumulator {
         self.registration_resetting.store(false, Ordering::SeqCst);
     }
 
-    fn acquire_drain<F>(&self, on_contention: F) -> DrainGuard<'_>
-    where
-        F: FnOnce(),
-    {
-        if self
-            .drain_in_progress
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            on_contention();
-            while self
-                .drain_in_progress
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
-                spin_loop();
-            }
-        }
-        DrainGuard {
-            in_progress: &self.drain_in_progress,
-        }
-    }
-
     #[cfg(test)]
-    fn record_with_hook<F>(
-        &self,
-        source_position_frames: u64,
-        dropped_frames: u64,
-        cause: GapCause,
-        after_writer_registered: F,
-    ) where
-        F: FnOnce(),
-    {
-        self.record_inner(
-            source_position_frames,
-            dropped_frames,
-            cause,
-            after_writer_registered,
-            || {},
-        );
-    }
-
-    #[cfg(test)]
-    fn record_with_registration_hooks<F, G>(
+    pub(crate) fn record_with_registration_hooks<F, G>(
         &self,
         source_position_frames: u64,
         dropped_frames: u64,
@@ -778,49 +772,6 @@ impl LossAccumulator {
             after_started,
             after_generation_read,
         );
-    }
-
-    #[cfg(test)]
-    fn registration_ticket_completed(&self, ticket: u64) -> bool {
-        self.registration_completion_tickets[ticket as usize % REGISTRATION_TICKET_CAPACITY]
-            .load(Ordering::SeqCst)
-            == ticket + 1
-    }
-
-    #[cfg(test)]
-    fn drain_with_hook<F>(&self, after_flip: F) -> Option<LossSnapshot>
-    where
-        F: FnOnce(),
-    {
-        self.drain_inner(after_flip, || {}, || {}).unwrap()
-    }
-
-    #[cfg(test)]
-    fn drain_with_hooks<F, G>(
-        &self,
-        after_flip: F,
-        on_contention: G,
-    ) -> Result<Option<LossSnapshot>, TimelineError>
-    where
-        F: FnOnce(),
-        G: FnOnce(),
-    {
-        self.drain_inner(after_flip, || {}, on_contention)
-    }
-
-    #[cfg(test)]
-    fn drain_with_registration_hooks<F, G, H>(
-        &self,
-        after_flip: F,
-        after_registration_wait: G,
-        on_contention: H,
-    ) -> Result<Option<LossSnapshot>, TimelineError>
-    where
-        F: FnOnce(),
-        G: FnOnce(),
-        H: FnOnce(),
-    {
-        self.drain_inner(after_flip, after_registration_wait, on_contention)
     }
 }
 
@@ -851,7 +802,7 @@ fn decode_cause(encoded: u8) -> Option<GapCause> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1360,215 +1311,6 @@ mod tests {
     }
 
     #[test]
-    fn callback_registers_once_when_a_drain_flips_during_registration() {
-        let losses = Arc::new(LossAccumulator::new());
-        let registration_reached = Arc::new(Barrier::new(2));
-        let release_registration = Arc::new(Barrier::new(2));
-        let drain_flipped = Arc::new(Barrier::new(2));
-        let registrations = Arc::new(AtomicUsize::new(0));
-
-        let callback = {
-            let losses = Arc::clone(&losses);
-            let registration_reached = Arc::clone(&registration_reached);
-            let release_registration = Arc::clone(&release_registration);
-            let registrations = Arc::clone(&registrations);
-            thread::spawn(move || {
-                losses.record_with_hook(640, 160, GapCause::CallbackPoolExhausted, || {
-                    if registrations.fetch_add(1, Ordering::SeqCst) == 0 {
-                        registration_reached.wait();
-                        release_registration.wait();
-                    }
-                });
-            })
-        };
-
-        registration_reached.wait();
-        let coordinator = {
-            let losses = Arc::clone(&losses);
-            let drain_flipped = Arc::clone(&drain_flipped);
-            thread::spawn(move || {
-                losses.drain_with_hook(|| {
-                    drain_flipped.wait();
-                })
-            })
-        };
-        drain_flipped.wait();
-        release_registration.wait();
-
-        callback.join().unwrap();
-        assert_eq!(coordinator.join().unwrap(), None);
-        assert_eq!(registrations.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            losses.drain(),
-            Ok(Some(LossSnapshot {
-                first_source_position_frames: 640,
-                dropped_frames: 160,
-                cause: GapCause::CallbackPoolExhausted,
-                generation: 1,
-            }))
-        );
-    }
-
-    #[test]
-    fn concurrent_drains_serialize_before_reusing_a_slot() {
-        let losses = Arc::new(LossAccumulator::new());
-        losses.record(320, 160, GapCause::CallbackPoolExhausted);
-        let first_flipped = Arc::new(Barrier::new(2));
-        let release_first = Arc::new(Barrier::new(2));
-        let contention_reached = Arc::new(Barrier::new(2));
-        let release_contender = Arc::new(Barrier::new(2));
-
-        let first = {
-            let losses = Arc::clone(&losses);
-            let first_flipped = Arc::clone(&first_flipped);
-            let release_first = Arc::clone(&release_first);
-            thread::spawn(move || {
-                losses.drain_with_hooks(
-                    || {
-                        first_flipped.wait();
-                        release_first.wait();
-                    },
-                    || {},
-                )
-            })
-        };
-        first_flipped.wait();
-
-        let second = {
-            let losses = Arc::clone(&losses);
-            let contention_reached = Arc::clone(&contention_reached);
-            let release_contender = Arc::clone(&release_contender);
-            thread::spawn(move || {
-                losses.drain_with_hooks(
-                    || {},
-                    || {
-                        contention_reached.wait();
-                        release_contender.wait();
-                    },
-                )
-            })
-        };
-        contention_reached.wait();
-        release_first.wait();
-        release_contender.wait();
-
-        assert_eq!(
-            first.join().unwrap(),
-            Ok(Some(LossSnapshot {
-                first_source_position_frames: 320,
-                dropped_frames: 160,
-                cause: GapCause::CallbackPoolExhausted,
-                generation: 0,
-            }))
-        );
-        assert_eq!(second.join().unwrap(), Ok(None));
-    }
-
-    #[test]
-    fn post_snapshot_callback_does_not_delay_the_old_slot_drain() {
-        let losses = Arc::new(LossAccumulator::new());
-        losses.record(0, 10, GapCause::CallbackPoolExhausted);
-        let registration_target_snapshotted = Arc::new(Barrier::new(2));
-        let release_coordinator = Arc::new(Barrier::new(2));
-        let post_snapshot_started = Arc::new(Barrier::new(2));
-        let release_post_snapshot = Arc::new(Barrier::new(2));
-        let registration_target_completed = Arc::new(Barrier::new(2));
-
-        let coordinator = {
-            let losses = Arc::clone(&losses);
-            let registration_target_snapshotted = Arc::clone(&registration_target_snapshotted);
-            let release_coordinator = Arc::clone(&release_coordinator);
-            let registration_target_completed = Arc::clone(&registration_target_completed);
-            thread::spawn(move || {
-                losses.drain_with_registration_hooks(
-                    || {
-                        registration_target_snapshotted.wait();
-                        release_coordinator.wait();
-                    },
-                    || {
-                        registration_target_completed.wait();
-                    },
-                    || {},
-                )
-            })
-        };
-        registration_target_snapshotted.wait();
-
-        let callback = {
-            let losses = Arc::clone(&losses);
-            let post_snapshot_started = Arc::clone(&post_snapshot_started);
-            let release_post_snapshot = Arc::clone(&release_post_snapshot);
-            thread::spawn(move || {
-                losses.record_with_hook(10, 10, GapCause::CallbackPoolExhausted, || {
-                    post_snapshot_started.wait();
-                    release_post_snapshot.wait();
-                });
-            })
-        };
-        post_snapshot_started.wait();
-        release_coordinator.wait();
-        registration_target_completed.wait();
-
-        assert_eq!(
-            coordinator.join().unwrap(),
-            Ok(Some(LossSnapshot {
-                first_source_position_frames: 0,
-                dropped_frames: 10,
-                cause: GapCause::CallbackPoolExhausted,
-                generation: 0,
-            }))
-        );
-        release_post_snapshot.wait();
-        callback.join().unwrap();
-        assert_eq!(
-            losses.drain(),
-            Ok(Some(LossSnapshot {
-                first_source_position_frames: 10,
-                dropped_frames: 10,
-                cause: GapCause::CallbackPoolExhausted,
-                generation: 1,
-            }))
-        );
-    }
-
-    #[test]
-    fn later_registration_completion_cannot_mask_an_earlier_ticket() {
-        let losses = Arc::new(LossAccumulator::new());
-        let old_generation_read = Arc::new(Barrier::new(2));
-        let release_old_registration = Arc::new(Barrier::new(2));
-
-        let old_callback = {
-            let losses = Arc::clone(&losses);
-            let old_generation_read = Arc::clone(&old_generation_read);
-            let release_old_registration = Arc::clone(&release_old_registration);
-            thread::spawn(move || {
-                losses.record_with_registration_hooks(
-                    0,
-                    10,
-                    GapCause::CallbackPoolExhausted,
-                    || {},
-                    || {
-                        old_generation_read.wait();
-                        release_old_registration.wait();
-                    },
-                );
-            })
-        };
-        old_generation_read.wait();
-        let registration_target = losses.registration_started.load(Ordering::SeqCst);
-        losses.active_generation.store(1, Ordering::SeqCst);
-
-        losses.record(10, 10, GapCause::CallbackPoolExhausted);
-
-        assert_eq!(registration_target, 1);
-        assert!(!losses.registration_ticket_completed(0));
-
-        release_old_registration.wait();
-        old_callback.join().unwrap();
-        assert!(losses.registration_ticket_completed(0));
-    }
-
-    #[test]
     fn registration_counter_exhaustion_is_invalid_and_recovers_after_drain() {
         let losses = LossAccumulator::new();
         losses
@@ -1613,54 +1355,149 @@ mod tests {
     }
 
     #[test]
-    fn callback_updates_racing_a_drain_survive_in_the_next_generation() {
+    fn try_drain_returns_pending_without_waiting_for_a_pre_target_registration() {
         let losses = Arc::new(LossAccumulator::new());
-        let writer_registered = Arc::new(Barrier::new(2));
-        let release_writer = Arc::new(Barrier::new(2));
-        let drain_flipped = Arc::new(Barrier::new(2));
+        losses.record(0, 10, GapCause::CallbackPoolExhausted);
+        let registration_started = Arc::new(Barrier::new(2));
+        let release_registration = Arc::new(Barrier::new(2));
 
         let callback = {
             let losses = Arc::clone(&losses);
-            let writer_registered = Arc::clone(&writer_registered);
-            let release_writer = Arc::clone(&release_writer);
+            let registration_started = Arc::clone(&registration_started);
+            let release_registration = Arc::clone(&release_registration);
             thread::spawn(move || {
-                let mut first_attempt = true;
-                losses.record_with_hook(640, 160, GapCause::CallbackPoolExhausted, || {
-                    if first_attempt {
-                        first_attempt = false;
-                        writer_registered.wait();
-                        release_writer.wait();
-                    }
-                });
+                losses.record_with_registration_hooks(
+                    10,
+                    10,
+                    GapCause::CallbackPoolExhausted,
+                    || {
+                        registration_started.wait();
+                        release_registration.wait();
+                    },
+                    || {},
+                );
             })
         };
+        registration_started.wait();
 
-        writer_registered.wait();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
         let coordinator = {
             let losses = Arc::clone(&losses);
-            let drain_flipped = Arc::clone(&drain_flipped);
-            thread::spawn(move || {
-                losses.drain_with_hook(|| {
-                    drain_flipped.wait();
-                })
-            })
+            thread::spawn(move || result_tx.send(losses.try_drain()).unwrap())
         };
+        let pending = result_rx.recv_timeout(std::time::Duration::from_secs(1));
 
-        drain_flipped.wait();
-        release_writer.wait();
-
+        release_registration.wait();
         callback.join().unwrap();
-        assert_eq!(coordinator.join().unwrap(), None);
+        coordinator.join().unwrap();
+
+        assert_eq!(pending.unwrap(), Ok(super::TryDrain::Pending));
         assert_eq!(
-            losses.drain(),
-            Ok(Some(LossSnapshot {
-                first_source_position_frames: 640,
-                dropped_frames: 160,
+            losses.try_drain(),
+            Ok(super::TryDrain::Snapshot(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 10,
                 cause: GapCause::CallbackPoolExhausted,
-                generation: 1,
+                generation: 0,
             }))
         );
-        assert_eq!(losses.drain(), Ok(None));
+    }
+
+    #[test]
+    fn held_post_flip_entrant_cannot_delay_the_fixed_pending_old_generation() {
+        let losses = Arc::new(LossAccumulator::new());
+        let pre_flip_generation_read = Arc::new(Barrier::new(2));
+        let release_pre_flip = Arc::new(Barrier::new(2));
+
+        let pre_flip = {
+            let losses = Arc::clone(&losses);
+            let pre_flip_generation_read = Arc::clone(&pre_flip_generation_read);
+            let release_pre_flip = Arc::clone(&release_pre_flip);
+            thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    0,
+                    10,
+                    GapCause::CallbackPoolExhausted,
+                    || {},
+                    || {
+                        pre_flip_generation_read.wait();
+                        release_pre_flip.wait();
+                    },
+                );
+            })
+        };
+        pre_flip_generation_read.wait();
+        assert_eq!(losses.try_drain(), Ok(super::TryDrain::Pending));
+
+        let post_flip_started = Arc::new(Barrier::new(2));
+        let release_post_flip = Arc::new(Barrier::new(2));
+        let post_flip = {
+            let losses = Arc::clone(&losses);
+            let post_flip_started = Arc::clone(&post_flip_started);
+            let release_post_flip = Arc::clone(&release_post_flip);
+            thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    10,
+                    10,
+                    GapCause::CallbackPoolExhausted,
+                    || {
+                        post_flip_started.wait();
+                        release_post_flip.wait();
+                    },
+                    || {},
+                );
+            })
+        };
+        post_flip_started.wait();
+        release_pre_flip.wait();
+        pre_flip.join().unwrap();
+
+        assert_eq!(
+            losses.try_drain(),
+            Ok(super::TryDrain::Snapshot(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 10,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 0,
+            }))
+        );
+
+        release_post_flip.wait();
+        post_flip.join().unwrap();
+    }
+
+    #[test]
+    fn try_drain_does_not_flip_a_second_generation_while_pending() {
+        let losses = Arc::new(LossAccumulator::new());
+        let registration_started = Arc::new(Barrier::new(2));
+        let release_registration = Arc::new(Barrier::new(2));
+        let callback = {
+            let losses = Arc::clone(&losses);
+            let registration_started = Arc::clone(&registration_started);
+            let release_registration = Arc::clone(&release_registration);
+            thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    0,
+                    10,
+                    GapCause::CallbackPoolExhausted,
+                    || {
+                        registration_started.wait();
+                        release_registration.wait();
+                    },
+                    || {},
+                );
+            })
+        };
+        registration_started.wait();
+
+        assert_eq!(losses.try_drain(), Ok(super::TryDrain::Pending));
+        assert_eq!(losses.active_generation.load(Ordering::SeqCst), 1);
+        assert_eq!(losses.try_drain(), Ok(super::TryDrain::Pending));
+        assert_eq!(losses.active_generation.load(Ordering::SeqCst), 1);
+
+        release_registration.wait();
+        callback.join().unwrap();
+        assert_eq!(losses.try_drain(), Ok(super::TryDrain::Empty));
     }
 
     #[test]

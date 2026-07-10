@@ -904,9 +904,11 @@ where
         Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
     ) -> bool,
 {
-    match losses.drain() {
-        Ok(Some(snapshot)) => process_loss(Ok(snapshot)),
-        Ok(None) => false,
+    match losses.try_drain() {
+        Ok(crate::audio::timeline::TryDrain::Snapshot(snapshot)) => process_loss(Ok(snapshot)),
+        Ok(crate::audio::timeline::TryDrain::Pending | crate::audio::timeline::TryDrain::Empty) => {
+            false
+        }
         Err(error) => process_loss(Err(error)),
     }
 }
@@ -1147,6 +1149,7 @@ mod tests {
     use super::*;
     use crate::audio::capture::{new_callback_boundary, CapturePacket, CapturePorts};
     use crate::audio::timeline::LossAccumulator;
+    use std::sync::Barrier;
 
     #[test]
     fn stream_crash_retires_runtime_handles() {
@@ -1236,6 +1239,61 @@ mod tests {
         drop(packet_tx);
         drop(error_tx);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn capture_packet_loop_disconnects_while_a_loss_drain_is_pending() {
+        let losses = Arc::new(LossAccumulator::new());
+        let registration_started = Arc::new(Barrier::new(2));
+        let release_registration = Arc::new(Barrier::new(2));
+        let callback = {
+            let losses = Arc::clone(&losses);
+            let registration_started = Arc::clone(&registration_started);
+            let release_registration = Arc::clone(&release_registration);
+            std::thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    0,
+                    1,
+                    crate::audio::frame::GapCause::SinkUnavailable,
+                    || {
+                        registration_started.wait();
+                        release_registration.wait();
+                    },
+                    || {},
+                );
+            })
+        };
+        registration_started.wait();
+
+        let (packet_tx, packet_rx) = mpsc::sync_channel(1);
+        let (returned_tx, _) = mpsc::sync_channel(8);
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let ports = CapturePorts {
+            packets: packet_rx,
+            returned_buffers: returned_tx,
+            losses,
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_capture_packet_loop_with_timeout(
+                ports,
+                error_rx,
+                Duration::from_secs(1),
+                |_| false,
+                |_| false,
+                |_| false,
+            );
+            done_tx.send(()).unwrap();
+        });
+
+        drop(packet_tx);
+        drop(error_tx);
+        let exited = done_rx.recv_timeout(Duration::from_secs(1));
+
+        release_registration.wait();
+        callback.join().unwrap();
+        worker.join().unwrap();
+        assert!(exited.is_ok());
     }
 
     #[test]
