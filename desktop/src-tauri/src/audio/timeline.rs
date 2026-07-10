@@ -555,6 +555,7 @@ pub struct LossAccumulator {
     registration_completion_tickets: [AtomicU64; REGISTRATION_TICKET_CAPACITY],
     invalid: AtomicBool,
     registration_counter_exhausted: AtomicBool,
+    generation_exhausted: AtomicBool,
     terminal_invalid_reported: AtomicBool,
     coordinator: Mutex<LossDrainCoordinator>,
     slots: [LossSlot; 2],
@@ -570,6 +571,7 @@ impl LossAccumulator {
                 REGISTRATION_TICKET_CAPACITY],
             invalid: AtomicBool::new(false),
             registration_counter_exhausted: AtomicBool::new(false),
+            generation_exhausted: AtomicBool::new(false),
             terminal_invalid_reported: AtomicBool::new(false),
             coordinator: Mutex::new(LossDrainCoordinator { pending: None }),
             slots: [LossSlot::new(), LossSlot::new()],
@@ -595,7 +597,7 @@ impl LossAccumulator {
         F: FnOnce(),
         G: FnOnce(),
     {
-        if dropped_frames == 0 {
+        if dropped_frames == 0 || self.generation_exhausted.load(Ordering::SeqCst) {
             return;
         }
         let Some(started) = self.reserve_registration_ticket() else {
@@ -643,6 +645,10 @@ impl LossAccumulator {
     }
 
     pub fn try_drain(&self) -> Result<TryDrain, TimelineError> {
+        if self.generation_exhausted.load(Ordering::SeqCst) {
+            return Err(TimelineError::InvalidTiming);
+        }
+
         let mut coordinator = match self.coordinator.try_lock() {
             Ok(coordinator) => coordinator,
             Err(TryLockError::WouldBlock) => return Ok(TryDrain::Pending),
@@ -652,12 +658,16 @@ impl LossAccumulator {
             }
         };
 
+        if self.generation_exhausted.load(Ordering::SeqCst) {
+            return Err(TimelineError::InvalidTiming);
+        }
+
         if self.terminal_invalid_reported.load(Ordering::SeqCst) && coordinator.pending.is_none() {
             return Err(TimelineError::InvalidTiming);
         }
 
         if coordinator.pending.is_none() {
-            let generation = self.advance_generation();
+            let generation = self.advance_generation()?;
             let registration_floor = self.registration_drained.load(Ordering::SeqCst);
             let registration_target = self.registration_started.load(Ordering::SeqCst);
             let registration_invalid = registration_target
@@ -739,19 +749,20 @@ impl LossAccumulator {
         true
     }
 
-    fn advance_generation(&self) -> u64 {
+    fn advance_generation(&self) -> Result<u64, TimelineError> {
         let generation = self.active_generation.load(Ordering::SeqCst);
         match generation.checked_add(1) {
             Some(next_generation) => {
                 self.active_generation
                     .store(next_generation, Ordering::SeqCst);
+                Ok(generation)
             }
             None => {
+                self.generation_exhausted.store(true, Ordering::SeqCst);
                 self.invalidate();
-                self.active_generation.store(0, Ordering::SeqCst);
+                Err(TimelineError::InvalidTiming)
             }
         }
-        generation
     }
 
     #[cfg(test)]
@@ -803,7 +814,7 @@ fn decode_cause(encoded: u8) -> Option<GapCause> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1323,6 +1334,58 @@ mod tests {
 
         losses.record(1, 1, GapCause::CallbackPoolExhausted);
         assert_eq!(losses.drain(), Err(TimelineError::InvalidTiming));
+    }
+
+    #[test]
+    fn generation_exhaustion_is_terminal_without_reusing_slots() {
+        let losses = LossAccumulator::new();
+        losses.active_generation.store(u64::MAX, Ordering::SeqCst);
+
+        assert_eq!(losses.try_drain(), Err(TimelineError::InvalidTiming));
+        assert_eq!(losses.active_generation.load(Ordering::SeqCst), u64::MAX);
+
+        let registration_hook_called = AtomicBool::new(false);
+        let generation_hook_called = AtomicBool::new(false);
+        losses.record_with_registration_hooks(
+            0,
+            1,
+            GapCause::CallbackPoolExhausted,
+            || registration_hook_called.store(true, Ordering::SeqCst),
+            || generation_hook_called.store(true, Ordering::SeqCst),
+        );
+
+        assert!(!registration_hook_called.load(Ordering::SeqCst));
+        assert!(!generation_hook_called.load(Ordering::SeqCst));
+        assert_eq!(losses.registration_started.load(Ordering::SeqCst), 0);
+        assert_eq!(losses.slots[0].claimed_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(losses.slots[1].claimed_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(losses.try_drain(), Err(TimelineError::InvalidTiming));
+        assert_eq!(losses.drain(), Err(TimelineError::InvalidTiming));
+        assert_eq!(losses.active_generation.load(Ordering::SeqCst), u64::MAX);
+    }
+
+    #[test]
+    fn generation_can_advance_to_max_once_before_becoming_terminal() {
+        let losses = LossAccumulator::new();
+        losses
+            .active_generation
+            .store(u64::MAX - 1, Ordering::SeqCst);
+        losses.record(0, 1, GapCause::CallbackPoolExhausted);
+
+        assert_eq!(
+            losses.drain(),
+            Ok(Some(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 1,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: u64::MAX - 1,
+            }))
+        );
+        assert_eq!(losses.active_generation.load(Ordering::SeqCst), u64::MAX);
+
+        losses.record(1, 1, GapCause::CallbackPoolExhausted);
+        assert_eq!(losses.try_drain(), Err(TimelineError::InvalidTiming));
+        assert_eq!(losses.active_generation.load(Ordering::SeqCst), u64::MAX);
     }
 
     #[test]

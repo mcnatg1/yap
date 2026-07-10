@@ -216,3 +216,60 @@ cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml
 ### Concerns
 
 - Hardware microphone behavior remains unexercised; focused capture and runtime lifecycle tests remain synthetic.
+
+---
+
+## Final Narrow Repair: Terminal Loss Generation Exhaustion
+
+### RED
+
+- Added direct `LossAccumulator` coverage with `active_generation` set to `u64::MAX`.
+- The named `generation_exhaustion` test failed before the repair: the first `try_drain()` returned `InvalidTiming` but changed the active generation from `u64::MAX` to `0`.
+
+### GREEN
+
+- Added a sticky `generation_exhausted` state. An attempted handoff from `u64::MAX` now returns `InvalidTiming` without changing `active_generation`.
+- `record()` checks that terminal state before ticket registration, generation reads, writer registration, or slot publication. Later records are fixed-operation no-ops and cannot use a wrapped/reused slot.
+- `try_drain()` checks terminal exhaustion before and after its non-blocking coordinator lock; `drain()` therefore returns `InvalidTiming` on the exhausting call and every later call without another flip or terminal-state clear.
+- Added a near-limit positive control: `u64::MAX - 1` advances once to `u64::MAX`, drains the old slot normally, then becomes terminal on the following advance attempt.
+- Existing pending handoff and monotonic-ticket tests remain green.
+
+### Verification
+
+```powershell
+cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml generation_exhaustion
+# RED before repair: failed because active_generation wrapped to 0
+
+cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml generation_
+# PASS: 3 passed
+
+cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml audio::timeline
+# PASS: 31 passed
+
+cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml audio::capture
+# PASS: 11 passed
+
+cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::runtime
+# PASS: 20 passed
+
+cargo fmt --manifest-path .\desktop\src-tauri\Cargo.toml
+cargo fmt --manifest-path .\desktop\src-tauri\Cargo.toml -- --check
+git diff --check
+# PASS
+
+cargo clippy --locked --all-targets --manifest-path .\desktop\src-tauri\Cargo.toml -- -D warnings
+# PASS
+
+cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml
+# PASS: 326 unit tests and 1 parity test passed
+```
+
+### Self-Review
+
+- The terminal flag is write-once for the accumulator lifetime and no code path clears it.
+- The overflow path never stores a replacement generation, so `active_generation` stays at `u64::MAX` and neither slot can be reused through wraparound.
+- The change is confined to `audio/timeline.rs` and this Task 4 report; focused capture/runtime behavior remains covered without product-scope changes.
+
+### Concerns
+
+- Hardware microphone behavior remains unexercised; capture and runtime lifecycle coverage is synthetic. No unresolved generation-exhaustion concern remains in the requested scope.
