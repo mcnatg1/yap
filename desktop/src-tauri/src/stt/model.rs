@@ -1,20 +1,31 @@
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
 use crate::stt::error::SttError;
 
+#[cfg(test)]
 const DOWNLOAD_BUFFER_BYTES: usize = 64 * 1024;
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const DOWNLOAD_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DownloadProgress {
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub elapsed_ms: u128,
+}
+
+#[derive(Debug)]
+enum DownloadEvent {
+    Chunk(Vec<u8>),
+    Complete,
+    Failed(SttError),
 }
 
 impl DownloadProgress {
@@ -86,16 +97,17 @@ where
     C: Fn() -> bool,
 {
     let client = download_client()?;
-    let mut response = client.get(url).send().map_err(reqwest_error_to_stt)?;
+    let response = tauri::async_runtime::block_on(async { client.get(url).send().await })
+        .map_err(reqwest_error_to_stt)?;
     if !response.status().is_success() {
         return Err(SttError::ModelMissing);
     }
     let total_bytes = response.content_length();
-    stream_to_destination(&mut response, total_bytes, dest, on_progress, is_cancelled)
+    stream_response_to_destination(response, total_bytes, dest, on_progress, is_cancelled)
 }
 
-fn download_client() -> Result<reqwest::blocking::Client, SttError> {
-    reqwest::blocking::Client::builder()
+fn download_client() -> Result<reqwest::Client, SttError> {
+    reqwest::Client::builder()
         .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
         .timeout(DOWNLOAD_TOTAL_TIMEOUT)
         .build()
@@ -133,6 +145,113 @@ fn progress_metrics(
     (percent, speed_mbps)
 }
 
+fn stream_response_to_destination<P, C>(
+    response: reqwest::Response,
+    total_bytes: Option<u64>,
+    dest: &Path,
+    mut on_progress: P,
+    is_cancelled: C,
+) -> Result<(), SttError>
+where
+    P: FnMut(DownloadProgress),
+    C: Fn() -> bool,
+{
+    let (tmp, mut file) = reserve_sibling_temp_file(dest)?;
+    let (events, download_task) = response_events(response);
+    let result = (|| {
+        let mut downloaded_bytes = 0u64;
+        let started_at = Instant::now();
+
+        loop {
+            match wait_for_download_event(&events, &is_cancelled, DOWNLOAD_NO_PROGRESS_TIMEOUT)? {
+                DownloadEvent::Chunk(chunk) => {
+                    file.write_all(&chunk).map_err(io_error_to_stt)?;
+                    downloaded_bytes += chunk.len() as u64;
+                    on_progress(DownloadProgress {
+                        downloaded_bytes,
+                        total_bytes,
+                        elapsed_ms: started_at.elapsed().as_millis(),
+                    });
+                }
+                DownloadEvent::Complete => break,
+                DownloadEvent::Failed(error) => return Err(error),
+            }
+        }
+
+        drop(file);
+
+        if is_cancelled() {
+            return Err(SttError::ModelInstallCancelled);
+        }
+
+        std::fs::rename(&tmp, dest).map_err(io_error_to_stt)?;
+        on_progress(DownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            elapsed_ms: started_at.elapsed().as_millis(),
+        });
+        Ok(())
+    })();
+
+    if result.is_err() {
+        download_task.abort();
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    result
+}
+
+fn response_events(
+    mut response: reqwest::Response,
+) -> (
+    Receiver<DownloadEvent>,
+    tauri::async_runtime::JoinHandle<()>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let task = tauri::async_runtime::spawn(async move {
+        loop {
+            let event = match response.chunk().await {
+                Ok(Some(bytes)) => DownloadEvent::Chunk(bytes.to_vec()),
+                Ok(None) => DownloadEvent::Complete,
+                Err(error) => DownloadEvent::Failed(reqwest_error_to_stt(error)),
+            };
+            let terminal = !matches!(event, DownloadEvent::Chunk(_));
+            if sender.send(event).is_err() || terminal {
+                return;
+            }
+        }
+    });
+    (receiver, task)
+}
+
+fn wait_for_download_event<C>(
+    events: &Receiver<DownloadEvent>,
+    is_cancelled: &C,
+    no_progress_timeout: Duration,
+) -> Result<DownloadEvent, SttError>
+where
+    C: Fn() -> bool,
+{
+    let started_at = Instant::now();
+    loop {
+        if is_cancelled() {
+            return Err(SttError::ModelInstallCancelled);
+        }
+
+        let elapsed = started_at.elapsed();
+        if elapsed >= no_progress_timeout {
+            return Err(SttError::Timeout);
+        }
+        let wait = DOWNLOAD_CANCEL_POLL_INTERVAL.min(no_progress_timeout - elapsed);
+        match events.recv_timeout(wait) {
+            Ok(event) => return Ok(event),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(SttError::SidecarCrash),
+        }
+    }
+}
+
+#[cfg(test)]
 fn stream_to_destination<R, P, C>(
     reader: &mut R,
     total_bytes: Option<u64>,
@@ -524,5 +643,18 @@ mod tests {
         assert_eq!(error, SttError::Timeout);
         assert!(!dest.exists());
         assert!(!dest.with_extension("part").exists());
+    }
+
+    #[test]
+    fn wait_for_download_event_times_out_when_no_progress_occurs() {
+        let (sender, events) = mpsc::sync_channel(1);
+        let started_at = Instant::now();
+
+        let error =
+            wait_for_download_event(&events, &|| false, Duration::from_millis(50)).unwrap_err();
+
+        drop(sender);
+        assert_eq!(error, SttError::Timeout);
+        assert!(started_at.elapsed() < Duration::from_millis(250));
     }
 }

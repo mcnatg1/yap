@@ -190,6 +190,10 @@ pub fn remove_model() -> Result<(), SttError> {
     Ok(())
 }
 
+pub(crate) fn remove_install_partials() -> Result<(), SttError> {
+    remove_install_partials_at(&root_dir())
+}
+
 fn paths_at(root: PathBuf) -> Result<NemotronPaths, SttError> {
     Ok(NemotronPaths {
         encoder: require(root.join("encoder.int8.onnx"))?,
@@ -458,6 +462,15 @@ fn remove_download_artifacts(path: &Path) -> Result<(), SttError> {
     remove_if_exists(path.with_extension("verified"))?;
     remove_if_exists(path.with_extension("part"))?;
     remove_unique_partial_artifacts(path)?;
+    Ok(())
+}
+
+fn remove_install_partials_at(root: &Path) -> Result<(), SttError> {
+    for artifact in ARTIFACTS {
+        let path = root.join(artifact.file);
+        remove_if_exists(path.with_extension("part"))?;
+        remove_unique_partial_artifacts(&path)?;
+    }
     Ok(())
 }
 
@@ -788,5 +801,27 @@ mod tests {
         assert!(path.is_dir());
         assert!(path.with_extension("verified").is_dir());
         assert!(path.with_extension("part").is_dir());
+    }
+
+    #[test]
+    fn remove_install_partials_preserves_model_and_verification_marker() {
+        let dir = TestDir::new();
+        let path = dir.path().join(ARTIFACTS[0].file);
+        let marker = path.with_extension("verified");
+        let unique_partial = path.with_file_name(format!(
+            "{}.123.456.0.part",
+            path.file_name().and_then(|name| name.to_str()).unwrap()
+        ));
+        std::fs::write(&path, b"model").unwrap();
+        std::fs::write(&marker, b"marker").unwrap();
+        std::fs::write(path.with_extension("part"), b"legacy partial").unwrap();
+        std::fs::write(&unique_partial, b"unique partial").unwrap();
+
+        remove_install_partials_at(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"model");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"marker");
+        assert!(!path.with_extension("part").exists());
+        assert!(!unique_partial.exists());
     }
 }

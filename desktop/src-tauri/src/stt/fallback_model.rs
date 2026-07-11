@@ -223,49 +223,52 @@ pub async fn install(
     };
     emit_fallback_progress(&app, &install_state, initial_view);
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let final_view = {
-            let mut progress = FallbackProgressEmitter::new(app.clone(), install_state.clone());
-            let result = (|| -> Result<nemotron::FallbackModelView, SttError> {
-                settings::set_local_fallback_enabled(true)?;
-                let cancellation = cancellation.clone();
-                let is_cancelled = || {
-                    cancellation
-                        .as_ref()
-                        .is_some_and(|token| token.load(Ordering::Relaxed))
-                };
-                nemotron::ensure_model_with_progress(
-                    force,
-                    |view| progress.publish(view),
-                    is_cancelled,
-                )?;
-                if is_cancelled() {
-                    let _ = nemotron::remove_model();
-                    return Err(SttError::ModelInstallCancelled);
-                }
-                Ok(nemotron::model_status(true))
-            })();
-
-            match result {
-                Ok(view) => sanitize_fallback_model_view(view),
-                Err(SttError::ModelInstallCancelled) => {
-                    let _ = nemotron::remove_model();
-                    install_state.set_error(SttCommandError::from(SttError::ModelInstallCancelled));
-                    persisted_fallback_model_view()
-                }
-                Err(error) => {
-                    install_state.set_error(SttCommandError::from(error));
-                    sanitize_fallback_model_view(fallback_model_terminal_view(error))
-                }
-            }
+    let progress_app = app.clone();
+    let progress_state = install_state.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let mut progress = FallbackProgressEmitter::new(progress_app, progress_state);
+        settings::set_local_fallback_enabled(true)?;
+        let is_cancelled = || {
+            cancellation
+                .as_ref()
+                .is_some_and(|token| token.load(Ordering::Relaxed))
         };
-
-        emit_fallback_status(&app, &install_state, final_view.clone());
-        install_state.clear();
-        Ok(final_view)
+        nemotron::ensure_model_with_progress(force, |view| progress.publish(view), is_cancelled)?;
+        if is_cancelled() {
+            return Err(SttError::ModelInstallCancelled);
+        }
+        Ok(nemotron::model_status(true))
     })
-    .await
-    .map_err(|_| SttCommandError::from(SttError::SidecarCrash))?
+    .await;
+
+    let worker_panicked = joined.is_err();
+    let result = joined.unwrap_or(Err(SttError::SidecarCrash));
+    let terminal_error = result.as_ref().err().copied();
+    let final_view = finish_install(
+        &install_state,
+        terminal_error.map(SttCommandError::from),
+        || match terminal_error {
+            Some(SttError::ModelInstallCancelled) => {
+                let _ = nemotron::remove_model();
+            }
+            Some(_) => {
+                let _ = nemotron::remove_install_partials();
+            }
+            None => {}
+        },
+        || match result {
+            Ok(view) => sanitize_fallback_model_view(view),
+            Err(SttError::ModelInstallCancelled) => persisted_fallback_model_view(),
+            Err(error) => sanitize_fallback_model_view(fallback_model_terminal_view(error)),
+        },
+        |view| emit_fallback_status(&app, &install_state, view.clone()),
+    );
+
+    if worker_panicked {
+        Err(SttCommandError::from(SttError::SidecarCrash))
+    } else {
+        Ok(final_view)
+    }
 }
 
 pub fn cancel_install(
@@ -295,22 +298,44 @@ pub async fn verify(
         Err(active) => return Ok(*active),
     }
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let final_view = {
-            let mut progress = FallbackProgressEmitter::new(app.clone(), install_state.clone());
-            sanitize_fallback_model_view(nemotron::verify_model_with_progress(
-                settings::local_fallback_enabled(),
-                |view| progress.publish(view),
-                || false,
-            ))
-        };
-
-        emit_fallback_status(&app, &install_state, final_view.clone());
-        install_state.clear();
-        Ok(final_view)
+    let progress_app = app.clone();
+    let progress_state = install_state.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let mut progress = FallbackProgressEmitter::new(progress_app, progress_state);
+        sanitize_fallback_model_view(nemotron::verify_model_with_progress(
+            settings::local_fallback_enabled(),
+            |view| progress.publish(view),
+            || false,
+        ))
     })
-    .await
-    .map_err(|_| SttCommandError::from(SttError::SidecarCrash))?
+    .await;
+
+    match joined {
+        Ok(view) => Ok(finish_install(
+            &install_state,
+            None,
+            || {},
+            || view,
+            |view| emit_fallback_status(&app, &install_state, view.clone()),
+        )),
+        Err(_) => {
+            let error = SttCommandError::from(SttError::SidecarCrash);
+            finish_install(
+                &install_state,
+                Some(error.clone()),
+                || {
+                    let _ = nemotron::remove_install_partials();
+                },
+                || {
+                    sanitize_fallback_model_view(fallback_model_terminal_view(
+                        SttError::SidecarCrash,
+                    ))
+                },
+                |view| emit_fallback_status(&app, &install_state, view.clone()),
+            );
+            Err(error)
+        }
+    }
 }
 
 pub fn remove(
@@ -463,9 +488,40 @@ fn ensure_model_mutation_idle(
     Ok(())
 }
 
+struct InstallPhaseRelease<'a>(&'a FallbackModelInstallState);
+
+impl Drop for InstallPhaseRelease<'_> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
+fn finish_install<C, V, P>(
+    install_state: &FallbackModelInstallState,
+    error: Option<SttCommandError>,
+    cleanup: C,
+    build_view: V,
+    publish: P,
+) -> nemotron::FallbackModelView
+where
+    C: FnOnce(),
+    V: FnOnce() -> nemotron::FallbackModelView,
+    P: FnOnce(&nemotron::FallbackModelView),
+{
+    let _release = InstallPhaseRelease(install_state);
+    if let Some(error) = error {
+        install_state.set_error(error);
+        cleanup();
+    }
+    let final_view = build_view();
+    publish(&final_view);
+    final_view
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
 
     fn fallback_test_view(status: nemotron::FallbackModelStatus) -> nemotron::FallbackModelView {
         nemotron::FallbackModelView {
@@ -598,5 +654,51 @@ mod tests {
         let error = ensure_model_mutation_idle(&state).unwrap_err();
 
         assert_eq!(error.code, SttError::Busy.code());
+    }
+
+    #[test]
+    fn install_terminal_owner_cleans_publishes_releases_and_permits_retry() {
+        let state = FallbackModelInstallState::new();
+        state
+            .begin(
+                FallbackModelInstallPhase::Installing,
+                fallback_test_view(nemotron::FallbackModelStatus::Downloading),
+                true,
+            )
+            .unwrap();
+        let cleaned = Cell::new(false);
+        let published = RefCell::new(None);
+        let order = RefCell::new(Vec::new());
+        let terminal = fallback_test_view(nemotron::FallbackModelStatus::Error);
+
+        let returned = finish_install(
+            &state,
+            Some(SttCommandError::from(SttError::SidecarCrash)),
+            || {
+                cleaned.set(true);
+                order.borrow_mut().push("cleanup");
+            },
+            || {
+                order.borrow_mut().push("view");
+                terminal.clone()
+            },
+            |view| {
+                order.borrow_mut().push("publish");
+                *published.borrow_mut() = Some(view.clone());
+            },
+        );
+
+        assert!(cleaned.get());
+        assert_eq!(*order.borrow(), ["cleanup", "view", "publish"]);
+        assert_eq!(published.borrow().as_ref().unwrap().status, terminal.status);
+        assert_eq!(returned.status, terminal.status);
+        assert!(state.snapshot().phase.is_none());
+        assert!(state
+            .begin(
+                FallbackModelInstallPhase::Installing,
+                fallback_test_view(nemotron::FallbackModelStatus::Downloading),
+                true,
+            )
+            .is_ok());
     }
 }
