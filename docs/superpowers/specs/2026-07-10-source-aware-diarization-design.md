@@ -7,7 +7,7 @@
 
 ## Problem
 
-Yap's implemented live path records one microphone stream through the source-aware coordinator. Track-aware prepared frames, atomic configuration/clock revisions, and exact gaps fan out to independent bounded recording, local-ASR, evidence, and transport sinks. The recording sink streams to disk and publishes an immutable capture sidecar and commit; recovery and deletion operate on that canonical lineage. System loopback, server transport, and speaker inference remain future consumers of the same contract.
+Yap's implemented live path records one microphone stream through the source-aware coordinator after Nemotron and its local-ASR adapter start successfully. Track-aware prepared frames, atomic configuration/clock revisions, and exact gaps fan out through independent bounded ports. Production wires recording and local ASR; the evidence and server-transport ports are implemented but their consumers are `None`. The recording sink streams to disk and publishes an immutable capture sidecar and commit; recovery and deletion operate on that canonical lineage. System loopback, server transport, speaker inference, and ASR-independent production capture remain future work on the same contract.
 
 The existing diarization ADRs also disagree about ownership and algorithms. This design establishes the contract before selecting or integrating a heavier diarization model.
 
@@ -35,7 +35,7 @@ The existing diarization ADRs also disagree about ownership and algorithms. This
 
 | File | Current role | Design implication |
 |------|--------------|--------------------|
-| `desktop/src-tauri/src/live/runtime.rs` | CPAL microphone adapter, source-aware coordinator, independent bounded sinks, local ASR, and streaming recording | Add future source/transport/evidence consumers without changing dictation behavior. |
+| `desktop/src-tauri/src/live/runtime.rs` | Nemotron-gated CPAL microphone adapter, source-aware coordinator, bounded recording/local-ASR consumers, bounded evidence/transport ports, and streaming recording | Add future source/transport/evidence consumers without changing dictation behavior. |
 | `desktop/src-tauri/src/audio/frame.rs` | Track-aware prepared-frame, exact-gap, chunk, replay-key, and content-identity contracts | Keep this as the canonical media contract. |
 | `desktop/src-tauri/src/audio/manifest.rs` | Strict session/chunk envelope builders with ownership, content identity, and timeline validation | Extend only through current schema decisions; do not add a compatibility adapter. |
 | `desktop/src-tauri/src/audio/preprocess.rs` | Deterministic mono conversion, resampling, RMS | Reuse per track. |
@@ -148,7 +148,7 @@ pub struct PreparedFrame {
 
 One capture coordinator owns the monotonic session clock and accepts input from capture adapters. The production CPAL microphone is the first adapter. A future WASAPI loopback adapter uses the same contract. A device, format, or source-clock change applies one atomic configuration/clock revision transition before subsequent frames; conversion metadata remains replayable instead of being inferred from callback counts.
 
-Preprocessing is per track. The coordinator fans prepared frames into independent bounded sinks:
+Preprocessing is per track. The coordinator exposes independent bounded sink ports. Current production supplies the recording and local-ASR consumers; speaker-evidence and server-transport consumers remain unwired:
 
 | Sink | Required behavior under pressure or failure |
 |------|---------------------------------------------|
@@ -157,7 +157,7 @@ Preprocessing is per track. The coordinator fans prepared frames into independen
 | Speaker evidence | May lag, skip low-priority analysis, or mark degraded without ending recording or ASR. |
 | Server transport | May spool/retry later; cannot own the only source copy. |
 
-The audio callback never blocks on inference or disk. A full bounded handoff cannot also be the only path used to report that it is full. Each track therefore owns a preallocated atomic loss accumulator: first dropped source position, dropped-frame count, and monotonic loss generation. The callback updates it without allocation or waiting. The coordinator drains it with atomic swap/compare-exchange before the next accepted frame and at finalization; updates racing the drain remain in the next generation. Drained snapshots become deterministic `Gap` events before later audio. Only contiguous losses with the same cause may coalesce. Stop/finalization closes each sink independently and composes their outcomes into one session result.
+The audio callback never blocks on inference or disk. A full bounded handoff cannot also be the only path used to report that it is full. Each track therefore owns a preallocated atomic loss accumulator: first dropped source position, dropped-frame count, and monotonic loss generation. The callback updates it without allocation or waiting. The coordinator drains it with atomic swap/compare-exchange before the next accepted frame and at finalization; updates racing the drain remain in the next generation. Drained snapshots become deterministic `Gap` events before later audio. Only contiguous losses with the same cause may coalesce. Stop/finalization closes each configured sink independently and composes their outcomes into one session result.
 
 ## Speaker Evidence And Attribution
 
@@ -382,7 +382,7 @@ Client transient embedding and exemplar types must not implement ordinary persis
 
 ### Runtime tests
 
-- Recording continues with ASR absent, stalled, or crashed.
+- Coordinator/port tests prove recording continues with ASR absent, stalled, or crashed; current production startup does not yet exercise ASR-absent capture.
 - Speaker evidence continues with transcript text absent.
 - Evidence backpressure does not block callback or recording.
 - Stop finalizes each sink once and reports composed degradation.
@@ -427,7 +427,7 @@ Client transient embedding and exemplar types must not implement ordinary persis
 
 - Extract the current CPAL microphone adapter.
 - Add the monotonic timeline, revisioned track/clock events, and callback-safe explicit gaps.
-- Separate recording, local ASR, and speaker-evidence lifecycle ownership.
+- Separate recording and local-ASR lifecycle ownership, and add bounded speaker-evidence/server-transport ports; their production consumers remain deferred.
 - Stream microphone audio to a crash-recoverable temporary artifact with bounded memory, then finalize through the commit-manifest protocol.
 - Remove the retained-PCM duration limitation for meeting sessions without allowing unbounded memory growth.
 - Persist an immutable single-track capture sidecar and separate result revisions while preserving current WAV/TXT playback.
@@ -450,7 +450,7 @@ Client transient embedding and exemplar types must not implement ordinary persis
 ## Acceptance For The Client Foundation Plan
 
 - [x] Dictation behavior and existing serialized settings remain backward compatible.
-- [x] Production microphone capture can record without constructing local ASR.
+- [ ] Production microphone capture can record without constructing local ASR. Current production still requires Nemotron stream and local-ASR adapter construction before CPAL capture.
 - [x] Long capture streams to disk with bounded memory and recoverable partial state; there is no retained-PCM duration cap.
 - [x] Audio drops are explicit timeline gaps.
 - [x] Gap reporting still works when the ordinary callback queue is saturated.
@@ -458,7 +458,7 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - [x] Recording completion requires a valid commit manifest; crash states remain partial.
 - [x] Logical idempotency keys and byte hashes obey the replay matrix.
 - [x] No speaker model or embedding runtime was added by the foundation plan.
-- [x] Recording, ASR, evidence, and transport queues are independently bounded.
+- [x] Recording/local-ASR queues and evidence/transport port contracts are independently bounded; production evidence/transport consumers remain `None`.
 - [x] No new inference framework was added.
 - [x] Rust, frontend unit, Playwright, and native WDIO checks are green; deterministic Rust contracts precede real-device evidence.
 

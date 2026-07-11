@@ -385,7 +385,7 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **16 GB RAM budget** | ✅ Reconciled | ADR 0020 | No diarization model is promoted without measured CPU, RSS, and latency evidence |
 | **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server batch only; queue/block during disconnects; never use local Nemotron |
 
-Rows marked as future remain architecture-only. The Windows hotkey/injection path, local live fallback, source-aware microphone capture, bounded sink fan-out, and durable recording/recovery path are implemented client behavior.
+Rows marked as future remain architecture-only. The Windows hotkey/injection path, local live fallback, Nemotron-gated source-aware microphone capture, bounded recording/local-ASR fan-out, and durable recording/recovery path are implemented client behavior. Bounded evidence and transport ports exist, but their production consumers are not wired.
 
 ---
 
@@ -406,12 +406,14 @@ Rows marked as future remain architecture-only. The Windows hotkey/injection pat
 ## Real-time path (L2) — implemented baseline
 
 ```
+Nemotron INT8 startup (required before current production capture)
 Mic → bounded capture/preprocess → Nemotron INT8 (sherpa-onnx)
   → partial/final state → overlay
   → stop-time target revalidation → Windows Unicode injection
   → clipboard fallback when target/input validation fails
   → track-aware prepared frames + exact gaps
-      → independent bounded recording/local-ASR/evidence/transport sinks
+      → independent bounded recording + local-ASR consumers
+      → bounded evidence + transport ports (production consumers not wired)
       → streaming WAV + immutable capture sidecar/commit
       → hash-validated history, partial recovery, and deletion
 ```
@@ -430,6 +432,8 @@ Parallel (never blocks above):
     → optional anonymous speaker-evidence sink
     → future retryable server-transport sink
 ```
+
+The production coordinator currently supplies recording and local-ASR consumers; `speaker_evidence` and `server_transport` are `None`. The coordinator contract lets recording fail or finalize independently of ASR, but the user-facing production start path does not yet capture without first constructing the Nemotron stream and local-ASR adapter.
 
 **Not on the L2 hot thread:** official server ASR, language ID, speaker inference, alignment, reconciliation, identity matching, and OKF.
 

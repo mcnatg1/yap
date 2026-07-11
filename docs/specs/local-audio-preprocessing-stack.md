@@ -42,22 +42,24 @@ Do not copy Meetily's local Whisper/Parakeet transcription router, old backend, 
 
 | Yap file | Current responsibility | Next boundary |
 |----------|------------------------|---------------|
-| `desktop/src-tauri/src/live/runtime.rs` | CPAL mic capture, track-aware coordinator input, independent bounded sinks, level, resampling, local ASR, and streaming recording. | Add server transport only after its contract exists. |
+| `desktop/src-tauri/src/live/runtime.rs` | Nemotron-gated CPAL mic capture, track-aware coordinator input, bounded recording/local-ASR consumers, bounded evidence/transport ports, level, resampling, local ASR, and streaming recording. | Wire evidence and server-transport consumers only after their implementations exist. |
 | `desktop/src-tauri/src/live/devices.rs` | Input device listing/resolution. | Remain the device source for live and server capture. |
 | `desktop/src-tauri/src/live/stream.rs` | Nemotron stream chunk constants and recognizer wrapper. | Keep ASR-specific chunking here; move transport-neutral chunk metadata elsewhere. |
 | `desktop/src-tauri/src/live/recordings.rs` | Validates committed capture manifests, projects canonical history, and owns recovery/deletion of partial and committed artifacts. | Add server-job linkage without changing capture identity. |
-| `desktop/src-tauri/src/audio/` | Track-aware frames, preprocessing, exact timeline gaps, independent bounded sink coordination, streaming recording, immutable sidecars/commits, and tested manifest contracts. | Add optional speaker inference and transport consumers without another recording contract. |
+| `desktop/src-tauri/src/audio/` | Track-aware frames, preprocessing, exact timeline gaps, independent bounded sink-port coordination, streaming recording, immutable sidecars/commits, and tested manifest contracts. | Add optional speaker inference and transport consumers without another recording contract. |
 | `desktop/src-tauri/src/runtime/` | Rust `RuntimeOrchestrator` state and route ownership. | Add the durable server-job lifecycle and connector states. |
 | `server/` | Server contract staging and route tests. | Receive the documented chunk/session format when connector work starts. |
 
 ## Verified Implementation Status
 
-Implemented in the production microphone path:
+Implemented and connected in the production microphone path after required Nemotron/local-ASR startup:
 
 - Track-aware prepared frames and one ordered recording input contract: `PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`.
-- Callback-safe source positions, clock/configuration revisions, explicit loss gaps, and independent bounded recording, local-ASR, evidence, and transport sinks.
+- Callback-safe source positions, clock/configuration revisions, explicit loss gaps, and independent bounded recording and local-ASR consumers.
 - Bounded-memory streaming WAV persistence with no retained-PCM duration cap.
 - Immutable capture sidecar and commit publication, hash-validated catalog projection, and recover/delete handling for partial and committed recordings.
+
+The evidence and server-transport ports are implemented and independently bounded, but their production consumers are currently `None`. Production capture does not yet run recording-only: `start_local` must construct the Nemotron stream and local-ASR adapter before it opens CPAL capture.
 
 Deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; release packaging; and native hardware CI smoke.
 

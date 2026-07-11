@@ -269,9 +269,7 @@ fn list_input_devices(
 ) -> Result<Vec<live::state::LiveInputDeviceView>, String> {
     ensure_main_command(&window)?;
     let view = state.snapshot();
-    Ok(live::devices::list_input_devices(
-        view.input_device_id.as_deref(),
-    ))
+    live::devices::list_input_devices(view.input_device_id.as_deref())
 }
 
 #[tauri::command]

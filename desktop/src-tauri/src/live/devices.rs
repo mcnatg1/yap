@@ -10,6 +10,50 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::state::LiveInputDeviceView;
 
+const MICROPHONE_PERMISSION_DENIED_PREFIX: &str = "Microphone permission denied:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MicrophoneOperation {
+    DeviceEnumeration,
+    DeviceMetadata,
+    DefaultInputConfiguration,
+    InputStreamBuild,
+    InputStreamPlayback,
+}
+
+fn microphone_error(operation: MicrophoneOperation, error: impl std::fmt::Display) -> String {
+    let detail = error.to_string();
+    if is_permission_denied_detail(&detail) {
+        return format!("{MICROPHONE_PERMISSION_DENIED_PREFIX} {detail}");
+    }
+    let operation = match operation {
+        MicrophoneOperation::DeviceEnumeration => "device enumeration",
+        MicrophoneOperation::DeviceMetadata => "device metadata",
+        MicrophoneOperation::DefaultInputConfiguration => "default input configuration",
+        MicrophoneOperation::InputStreamBuild => "input stream build",
+        MicrophoneOperation::InputStreamPlayback => "input stream playback",
+    };
+    format!("Microphone {operation} failed: {detail}")
+}
+
+fn is_permission_denied_detail(detail: &str) -> bool {
+    let normalized = detail.to_ascii_lowercase();
+    normalized.contains("0x80070005")
+        || normalized.contains("e_accessdenied")
+        || normalized.contains("access is denied")
+        || normalized.contains("permission denied")
+}
+
+fn microphone_result<T, E>(
+    operation: MicrophoneOperation,
+    result: Result<T, E>,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+{
+    result.map_err(|error| microphone_error(operation, error))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeviceInfo {
     id: String,
@@ -30,12 +74,15 @@ pub(crate) struct ResolvedCaptureDevice {
     pub(crate) config: cpal::SupportedStreamConfig,
 }
 
-pub fn list_input_devices(selected_id: Option<&str>) -> Vec<LiveInputDeviceView> {
+pub fn list_input_devices(selected_id: Option<&str>) -> Result<Vec<LiveInputDeviceView>, String> {
     let host = cpal::default_host();
-    let devices = input_device_infos(&host);
+    let devices = strict_input_devices(&host)?
+        .into_iter()
+        .map(|(info, _)| info)
+        .collect::<Vec<_>>();
     let selected = select_input_device(&devices, selected_id);
 
-    devices
+    Ok(devices
         .into_iter()
         .map(|device| LiveInputDeviceView {
             id: device.id.clone(),
@@ -45,7 +92,7 @@ pub fn list_input_devices(selected_id: Option<&str>) -> Vec<LiveInputDeviceView>
                 .as_ref()
                 .is_some_and(|selected| selected.id == device.id),
         })
-        .collect()
+        .collect())
 }
 
 pub fn resolve_input_device(selected_id: Option<&str>) -> ResolvedInputDevice {
@@ -85,10 +132,8 @@ pub fn preflight_input_device(selected_id: Option<&str>) -> Result<ResolvedInput
             |_| {},
             Some(Duration::from_millis(250)),
         )
-        .map_err(|err| format!("Microphone access failed: {err}"))?;
-    stream
-        .play()
-        .map_err(|err| format!("Microphone access failed: {err}"))?;
+        .map_err(|error| microphone_error(MicrophoneOperation::InputStreamBuild, error))?;
+    microphone_result(MicrophoneOperation::InputStreamPlayback, stream.play())?;
     std::thread::sleep(Duration::from_millis(160));
     drop(stream);
     if !heard_input.load(Ordering::Relaxed) {
@@ -101,25 +146,7 @@ pub(crate) fn resolve_capture_device(
     selected_id: Option<&str>,
 ) -> Result<ResolvedCaptureDevice, String> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_input_device()
-        .and_then(|device| device.name().ok());
-    let devices = host
-        .input_devices()
-        .map_err(|error| format!("Microphone access failed: {error}"))?
-        .enumerate()
-        .filter_map(|(index, device)| {
-            let label = device.name().ok()?;
-            Some((
-                DeviceInfo {
-                    id: device_id(index, &label),
-                    is_default: default_name.as_deref() == Some(label.as_str()),
-                    label,
-                },
-                device,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let devices = strict_input_devices(&host)?;
     let infos = devices
         .iter()
         .map(|(info, _)| info.clone())
@@ -133,7 +160,7 @@ pub(crate) fn resolve_capture_device(
         .ok_or_else(|| "Selected microphone is unavailable.".to_string())?;
     let config = device
         .default_input_config()
-        .map_err(|error| format!("Microphone access failed: {error}"))?;
+        .map_err(|error| microphone_error(MicrophoneOperation::DefaultInputConfiguration, error))?;
     Ok(ResolvedCaptureDevice {
         selection: ResolvedInputDevice {
             id: Some(selected.id),
@@ -146,21 +173,30 @@ pub(crate) fn resolve_capture_device(
 }
 
 fn input_device_infos(host: &cpal::Host) -> Vec<DeviceInfo> {
+    strict_input_devices(host)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(info, _)| info)
+        .collect()
+}
+
+fn strict_input_devices(host: &cpal::Host) -> Result<Vec<(DeviceInfo, cpal::Device)>, String> {
     let default_name = host
         .default_input_device()
-        .and_then(|device| device.name().ok());
-    host.input_devices()
-        .ok()
-        .into_iter()
-        .flatten()
+        .map(|device| microphone_result(MicrophoneOperation::DeviceMetadata, device.name()))
+        .transpose()?;
+    microphone_result(MicrophoneOperation::DeviceEnumeration, host.input_devices())?
         .enumerate()
-        .filter_map(|(index, device)| {
-            let label = device.name().ok()?;
-            Some(DeviceInfo {
-                id: device_id(index, &label),
-                is_default: default_name.as_deref() == Some(label.as_str()),
-                label,
-            })
+        .map(|(index, device)| {
+            let label = microphone_result(MicrophoneOperation::DeviceMetadata, device.name())?;
+            Ok((
+                DeviceInfo {
+                    id: device_id(index, &label),
+                    is_default: default_name.as_deref() == Some(label.as_str()),
+                    label,
+                },
+                device,
+            ))
         })
         .collect()
 }
@@ -184,6 +220,78 @@ fn select_input_device(devices: &[DeviceInfo], selected_id: Option<&str>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_microphone_failures_name_the_exact_operation() {
+        let cases = [
+            (
+                MicrophoneOperation::DeviceEnumeration,
+                "Microphone device enumeration failed: backend unavailable",
+            ),
+            (
+                MicrophoneOperation::DeviceMetadata,
+                "Microphone device metadata failed: name unavailable",
+            ),
+            (
+                MicrophoneOperation::DefaultInputConfiguration,
+                "Microphone default input configuration failed: unsupported format",
+            ),
+            (
+                MicrophoneOperation::InputStreamBuild,
+                "Microphone input stream build failed: backend regression",
+            ),
+            (
+                MicrophoneOperation::InputStreamPlayback,
+                "Microphone input stream playback failed: device invalidated",
+            ),
+        ];
+
+        for (operation, expected) in cases {
+            let detail = expected.split_once(": ").unwrap().1;
+            assert_eq!(microphone_error(operation, detail), expected);
+            assert!(!microphone_error(operation, detail)
+                .starts_with(MICROPHONE_PERMISSION_DENIED_PREFIX));
+        }
+    }
+
+    #[test]
+    fn only_narrow_permission_signatures_receive_the_skip_marker() {
+        for detail in [
+            "Access is denied. (0x80070005)",
+            "E_ACCESSDENIED",
+            "permission denied by operating system",
+        ] {
+            assert!(
+                microphone_error(MicrophoneOperation::InputStreamBuild, detail)
+                    .starts_with(MICROPHONE_PERMISSION_DENIED_PREFIX)
+            );
+        }
+
+        for detail in [
+            "backend unavailable",
+            "device invalidated",
+            "unsupported stream configuration",
+            "No input detected.",
+        ] {
+            assert!(
+                !microphone_error(MicrophoneOperation::InputStreamBuild, detail)
+                    .starts_with(MICROPHONE_PERMISSION_DENIED_PREFIX)
+            );
+        }
+    }
+
+    #[test]
+    fn device_enumeration_result_propagates_backend_failure() {
+        let result = microphone_result::<Vec<DeviceInfo>, _>(
+            MicrophoneOperation::DeviceEnumeration,
+            Err("backend unavailable"),
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Microphone device enumeration failed: backend unavailable"
+        );
+    }
 
     #[test]
     fn missing_selected_device_recovers_to_default() {

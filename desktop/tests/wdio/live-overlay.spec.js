@@ -1,4 +1,10 @@
-import { existsSync, statSync } from "node:fs";
+import {
+  assertOwnedSavedSession,
+  assertRecordingRootEmpty,
+  classifyNativeReadiness,
+  listRecordingArtifacts,
+  registerTask8bLifecycleListeners,
+} from "./task-8b-helpers.js";
 
 const lifecycleAssertions = [
   "overlay-context start and stop without main-window UI interaction",
@@ -9,71 +15,177 @@ const lifecycleAssertions = [
   "idempotent listener cleanup and unregistration",
 ];
 
-describe("Yap live overlay window", () => {
-  it("captures and saves one session entirely from the overlay context", async function () {
-    const environment = await browser.tauri.execute(async ({ core }) => {
-      const model = await core.invoke("fallback_model_status");
-      const devices = await core.invoke("list_input_devices");
-      const preflight = devices.length
-        ? await core.invoke("preflight_input_device")
-        : null;
-      return { devices, model, preflight };
-    });
+const recordingRoot = process.env.YAP_LIVE_RECORDINGS_DIR;
+if (!recordingRoot) throw new Error("WDIO requires an isolated YAP_LIVE_RECORDINGS_DIR.");
 
-    const modelSkipStatuses = new Set(["missing", "disabled", "corrupted"]);
-    let skipReason;
-    if (modelSkipStatuses.has(environment.model.status)) {
-      skipReason = `Nemotron model is ${environment.model.status}`;
-    } else if (environment.devices.length === 0) {
-      skipReason = "no input device was enumerated";
-    } else if (environment.preflight?.status === "blocked") {
-      const error = environment.preflight.error ?? "";
-      if (error === "No input detected." || error.startsWith("Microphone access failed:")) {
-        skipReason = `microphone preflight was unavailable: ${error}`;
-      } else {
-        throw new Error(`Unexpected microphone preflight failure: ${error || "unknown error"}`);
-      }
+async function switchToWindow(label) {
+  const windows = await browser.tauri.listWindows();
+  if (!windows.includes(label)) return false;
+  await browser.tauri.switchWindow(label);
+  return true;
+}
+
+async function showIdleOverlay() {
+  await browser.tauri.switchWindow("main");
+  const status = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+  if (status.status !== "idle") {
+    throw new Error(`Idle overlay test started from unexpected live status: ${status.status}`);
+  }
+  await browser.tauri.execute(({ core }) => core.invoke("show_live_overlay"));
+  await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+}
+
+async function nativeReadiness() {
+  return browser.tauri.execute(async ({ core }) => {
+    const model = await core.invoke("fallback_model_status");
+    let deviceError = null;
+    let devices = null;
+    let preflight = null;
+    try {
+      devices = await core.invoke("list_input_devices");
+    } catch (error) {
+      deviceError = String(error);
     }
+    if (devices?.length) preflight = await core.invoke("preflight_input_device");
+    return { deviceError, devices, model, preflight };
+  });
+}
 
-    if (skipReason) {
+async function readLifecycleEvidence() {
+  if (!(await switchToWindow("live-overlay"))) return { levels: [], saved: [], sessions: [] };
+  return browser.tauri.execute(() => {
+    const state = globalThis.__yapTask8bLifecycle;
+    return state
+      ? { levels: state.levels, saved: state.saved, sessions: state.sessions }
+      : { levels: [], saved: [], sessions: [] };
+  });
+}
+
+async function cleanupLifecycle(runStartedAtMs) {
+  const errors = [];
+  const listenerCleanupCounts = [];
+  let saved = [];
+
+  const attempt = async (label, operation) => {
+    try {
+      return await operation();
+    } catch (error) {
+      errors.push(new Error(`${label}: ${String(error)}`));
+      return undefined;
+    }
+  };
+
+  await attempt("final stop failed", async () => {
+    const target = (await switchToWindow("live-overlay")) ? "live-overlay" : "main";
+    if (target === "main") await browser.tauri.switchWindow("main");
+    await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
+  });
+
+  await attempt("saved-event capture failed", async () => {
+    saved = (await readLifecycleEvidence()).saved;
+  });
+
+  await attempt("first listener cleanup failed", async () => {
+    if (!(await switchToWindow("live-overlay"))) {
+      listenerCleanupCounts.push(0);
+      return;
+    }
+    listenerCleanupCounts.push(await browser.tauri.execute(() =>
+      globalThis.__yapTask8bLifecycle?.cleanup?.() ?? 0));
+  });
+  await attempt("second listener cleanup failed", async () => {
+    if (!(await switchToWindow("live-overlay"))) {
+      listenerCleanupCounts.push(0);
+      return;
+    }
+    listenerCleanupCounts.push(await browser.tauri.execute(() =>
+      globalThis.__yapTask8bLifecycle?.cleanup?.() ?? 0));
+  });
+
+  await attempt("owned recording deletion failed", async () => {
+    if (saved.length === 0) return;
+    const uniqueNames = new Set(saved.map(({ name }) => name));
+    if (saved.length !== 1 || uniqueNames.size !== 1) {
+      errors.push(new Error(`Expected one saved event during cleanup, received ${saved.length}.`));
+    }
+    const candidate = saved[0];
+    const owned = assertOwnedSavedSession(candidate, recordingRoot, {
+      runStartedAtMs,
+    });
+    await browser.tauri.switchWindow("main");
+    await browser.tauri.execute(
+      ({ core }, sessionId) => core.invoke("delete_saved_live_session", { sessionId }),
+      owned.sessionId,
+    );
+  });
+
+  await attempt("isolated recording root was not empty after cleanup", async () => {
+    assertRecordingRootEmpty(recordingRoot);
+  });
+  return { errors, listenerCleanupCounts, saved };
+}
+
+describe("Yap live overlay window", () => {
+  let overlayWasEnabled;
+
+  beforeEach(async () => {
+    assertRecordingRootEmpty(recordingRoot);
+    await browser.tauri.switchWindow("main");
+    const view = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+    if (view.status !== "idle") {
+      throw new Error(`WDIO test began with a non-idle live session: ${view.status}`);
+    }
+    overlayWasEnabled = view.visibility === "enabled";
+  });
+
+  afterEach(async () => {
+    const errors = [];
+    try {
+      await browser.tauri.switchWindow("main");
+      const view = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+      if (view.status !== "idle") {
+        await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
+        errors.push(new Error(`Test cleanup found and stopped live status ${view.status}.`));
+      }
+    } catch (error) {
+      errors.push(new Error(`Live-state restoration failed: ${String(error)}`));
+    }
+    try {
+      await browser.tauri.switchWindow("main");
+      await browser.tauri.execute(
+        ({ core }, enabled) => core.invoke("set_live_overlay_enabled", { enabled }),
+        overlayWasEnabled,
+      );
+    } catch (error) {
+      errors.push(new Error(`Overlay preference restoration failed: ${String(error)}`));
+    }
+    try {
+      assertRecordingRootEmpty(recordingRoot);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) throw new AggregateError(errors, "Task 8b afterEach cleanup failed");
+  });
+
+  it("captures and saves one session entirely from the overlay context", async function () {
+    const readiness = classifyNativeReadiness(await nativeReadiness());
+    if (readiness.action === "skip") {
       console.warn(
-        `[Task 8b native skip] ${skipReason}. Unproven assertions: ${lifecycleAssertions.join("; ")}`,
+        `[Task 8b native skip] ${readiness.reason}. Unproven assertions: ${lifecycleAssertions.join("; ")}`,
       );
       this.skip();
     }
-    expect(environment.model.status).toBe("ready");
-    expect(environment.preflight.status).toBe("idle");
 
-    await browser.tauri.execute(({ core }) => core.invoke("show_live_overlay"));
-    await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
-    await browser.tauri.switchWindow("live-overlay");
-
-    let savedSession;
-    let listenersRegistered = false;
+    let primaryError;
+    let runStartedAtMs;
+    let teardown;
     try {
-      const listenerCount = await browser.tauri.execute(async () => {
-        const event = globalThis.__TAURI__.event;
-        const state = {
-          levels: [],
-          saved: [],
-          sessions: [],
-          unlisteners: [],
-        };
-        globalThis.__yapTask8bLifecycle = state;
-        state.unlisteners.push(
-          await event.listen("live-session", ({ payload }) => state.sessions.push(payload)),
-          await event.listen("live-level", ({ payload }) => state.levels.push(payload)),
-          await event.listen("live-session-saved", ({ payload }) => state.saved.push(payload)),
-        );
-        state.cleanup = async () => {
-          const unlisteners = state.unlisteners.splice(0);
-          for (const unlisten of unlisteners) await unlisten();
-          return unlisteners.length;
-        };
-        return state.unlisteners.length;
-      });
-      expect(listenerCount).toBe(3);
-      listenersRegistered = true;
+      await showIdleOverlay();
+      await browser.tauri.switchWindow("live-overlay");
+      expect(await browser.tauri.execute(registerTask8bLifecycleListeners)).toBe(3);
+      expect(await browser.tauri.execute(() =>
+        globalThis.__yapTask8bLifecycle.saved.length)).toBe(0);
+      assertRecordingRootEmpty(recordingRoot);
 
       expect(await browser.getWindowHandle()).toBe("live-overlay");
       await browser.tauri.execute(() => {
@@ -88,6 +200,7 @@ describe("Yap live overlay window", () => {
         document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface") === "peek"));
       const startButton = await browser.$('[aria-label="Start dictating"]');
       await startButton.waitForDisplayed();
+      runStartedAtMs = Date.now();
       await startButton.click();
 
       await browser.waitUntil(async () => browser.tauri.execute(() => {
@@ -115,14 +228,7 @@ describe("Yap live overlay window", () => {
         timeoutMsg: "live session did not save and return to idle",
       });
 
-      const evidence = await browser.tauri.execute(() => {
-        const state = globalThis.__yapTask8bLifecycle;
-        return {
-          levels: state.levels,
-          saved: state.saved,
-          sessions: state.sessions,
-        };
-      });
+      const evidence = await readLifecycleEvidence();
       const statuses = evidence.sessions.map(({ status }) => status);
       const activeIndex = statuses.findIndex((status) => ["armed", "listening", "speaking"].includes(status));
       const savingIndex = statuses.indexOf("saving", activeIndex + 1);
@@ -134,20 +240,10 @@ describe("Yap live overlay window", () => {
       expect(evidence.levels.length).toBeGreaterThan(0);
       expect(evidence.levels.some(({ status }) => ["listening", "speaking"].includes(status))).toBe(true);
       expect(evidence.saved).toHaveLength(1);
-
-      savedSession = evidence.saved[0];
-      const sessionId = savedSession.name.slice("live-".length);
-      const normalizedSource = savedSession.sourcePath.replaceAll("\\", "/");
-      const normalizedOutput = savedSession.outputPath.replaceAll("\\", "/");
-      const normalizedCommit = savedSession.captureCommitPath?.replaceAll("\\", "/");
-      expect(savedSession.name).toMatch(/^live-s-[0-9a-f]+-[0-9a-f]+-[0-9a-f]+$/);
-      expect(normalizedSource).toMatch(new RegExp(`/live-${sessionId}\\.wav$`));
-      expect(normalizedOutput).toMatch(new RegExp(`/live-${sessionId}\\.txt$`));
-      expect(normalizedCommit).toMatch(new RegExp(`/live-${sessionId}\\.commit\\.json$`));
-      expect(existsSync(savedSession.sourcePath)).toBe(true);
-      expect(existsSync(savedSession.outputPath)).toBe(true);
-      expect(existsSync(savedSession.captureCommitPath)).toBe(true);
-      expect(statSync(savedSession.sourcePath).size).toBeGreaterThan(44);
+      const owned = assertOwnedSavedSession(evidence.saved[0], recordingRoot, {
+        runStartedAtMs,
+      });
+      expect(owned.artifactNames).toHaveLength(5);
 
       await browser.pause(2_750);
       const surface = await browser.tauri.execute(() =>
@@ -155,47 +251,30 @@ describe("Yap live overlay window", () => {
       expect(surface).toBe("sensor");
       const compact = await browser.tauri.execute(() => {
         const bounds = document.querySelector('[data-overlay-surface="sensor"]').getBoundingClientRect();
-        return {
-          height: bounds.height,
-          width: bounds.width,
-        };
+        return { height: bounds.height, width: bounds.width };
       });
       expect(compact.width).toBeLessThanOrEqual(260);
       expect(compact.height).toBeLessThanOrEqual(8);
       expect(await browser.tauri.execute(() =>
         globalThis.__yapTask8bLifecycle.saved.length)).toBe(1);
-
-      const firstCleanup = await browser.tauri.execute(() =>
-        globalThis.__yapTask8bLifecycle.cleanup());
-      const secondCleanup = await browser.tauri.execute(() =>
-        globalThis.__yapTask8bLifecycle.cleanup());
-      expect(firstCleanup).toBe(3);
-      expect(secondCleanup).toBe(0);
-      listenersRegistered = false;
+    } catch (error) {
+      primaryError = error;
     } finally {
-      if (!savedSession && listenersRegistered) {
-        savedSession = await browser.tauri.execute(() =>
-          globalThis.__yapTask8bLifecycle.saved[0] ?? null);
-      }
-      if (listenersRegistered) {
-        await browser.tauri.execute(() => globalThis.__yapTask8bLifecycle.cleanup());
-        await browser.tauri.execute(() => globalThis.__yapTask8bLifecycle.cleanup());
-      }
-      await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
-      await browser.tauri.switchWindow("main");
-      if (savedSession?.name.startsWith("live-")) {
-        await browser.tauri.execute(({ core }, sessionId) =>
-          core.invoke("delete_saved_live_session", { sessionId }), savedSession.name.slice("live-".length));
-      }
+      teardown = await cleanupLifecycle(runStartedAtMs);
     }
+
+    const errors = [primaryError, ...teardown.errors].filter(Boolean);
+    if (errors.length > 0) throw new AggregateError(errors, "Task 8b lifecycle evidence failed");
+    expect(teardown.saved).toHaveLength(1);
+    expect(teardown.listenerCleanupCounts).toEqual([3, 0]);
+    assertRecordingRootEmpty(recordingRoot);
   });
 
   // Tauri does not expose a cross-platform skip-taskbar/Alt-Tab readback command here.
   // These probes cover the enforceable surface: compact size, unfocused/non-closable state,
   // close-request survival, and command denial from the overlay webview.
   it("opens as a compact system overlay and refuses direct close", async () => {
-    await browser.tauri.execute(({ core }) => core.invoke("start_live_session", { activeCaptureMode: "toggle" }));
-    await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+    await showIdleOverlay();
 
     const overlay = await browser.tauri.execute(async ({ core }) => {
       const label = "live-overlay";
@@ -225,15 +304,13 @@ describe("Yap live overlay window", () => {
     expect(logicalInner.height).toBeLessThanOrEqual(60);
     expect(logicalOuter.width).toBeLessThanOrEqual(300);
     expect(logicalOuter.height).toBeLessThanOrEqual(80);
-
-    await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
+    expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
   });
 
   it("rejects main-window file actions from the overlay and survives close attempts", async () => {
-    await browser.tauri.execute(({ core }) => core.invoke("start_live_session", { activeCaptureMode: "toggle" }));
-    await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
-
+    await showIdleOverlay();
     await browser.tauri.switchWindow("live-overlay");
+
     const denied = await browser.tauri.execute(async ({ core }) => {
       try {
         await core.invoke("open_app_path", { path: "C:\\not-a-yap-file.txt" });
@@ -259,11 +336,8 @@ describe("Yap live overlay window", () => {
     const windows = await browser.tauri.listWindows();
     expect(windows).toContain("main");
     expect(windows).toContain("live-overlay");
-
-    const overlay = await browser.tauri.execute(({ core }) => core.invoke("plugin:window|is_visible", { label: "live-overlay" }));
-    expect(overlay).toBe(true);
-
-    await browser.tauri.switchWindow("main");
-    await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
+    expect(await browser.tauri.execute(({ core }) =>
+      core.invoke("plugin:window|is_visible", { label: "live-overlay" }))).toBe(true);
+    expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
   });
 });
