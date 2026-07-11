@@ -192,7 +192,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             SavedLiveSession {
                 name,
                 source_path: stable_existing_path_string(&audio),
-                output_path: if transcript.is_file() {
+                output_path: if recording::is_regular_artifact(&transcript) {
                     stable_existing_path_string(&transcript)
                 } else {
                     stable_existing_path_string(&audio)
@@ -207,7 +207,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
     {
         let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
         let path = entry.path();
-        if !path.is_file() || !is_primary_live_transcript_path(&path) {
+        if !recording::is_regular_artifact(&path) || !is_primary_live_transcript_path(&path) {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -224,7 +224,7 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             .expect("primary live transcript predicate validates the stem");
 
         let audio_path = path.with_extension("wav");
-        let source_path = if audio_path.is_file() {
+        let source_path = if recording::is_regular_artifact(&audio_path) {
             audio_path
         } else {
             path.clone()
@@ -278,6 +278,9 @@ fn write_transcript_revision(
         )
     } else {
         let previous_path = transcript_revision_path(dir, session_id, revision - 1);
+        if !recording::is_regular_artifact(&previous_path) {
+            return Err("Prior transcript revision is not a regular same-directory file".into());
+        }
         let previous_text = std::fs::read_to_string(&previous_path)
             .map_err(|error| format!("Failed to read prior transcript revision: {error}"))?;
         let previous: TranscriptResultRevision = serde_json::from_str(&previous_text)
@@ -314,6 +317,9 @@ fn transcript_result_value(
     capture_sidecar_sha256: &str,
     transcript_path: &std::path::Path,
 ) -> Result<serde_json::Value, String> {
+    if !recording::is_regular_artifact(transcript_path) {
+        return Err("Transcript is not a regular same-directory file".into());
+    }
     let text_file = transcript_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -495,6 +501,7 @@ fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()
         |file| file.sync_all(),
         |from, to| {
             recording::publish_no_replace(from, to, "publish live transcript")
+                .map(|_| ())
                 .map_err(std::io::Error::other)
         },
     )
@@ -669,6 +676,147 @@ mod tests {
         assert_eq!(sessions[0].name, format!("live-{session}"));
         assert!(sessions[0].source_path.ends_with(".wav"));
         assert!(sessions[0].created_at_ms > 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn history_rejects_linked_legacy_transcripts_inside_or_outside_the_directory_when_supported() {
+        let dir = test_dir("history-linked-legacy-transcript");
+        let outside = std::env::temp_dir().join(format!(
+            "yap-linked-transcript-target-{}",
+            std::process::id()
+        ));
+        std::fs::remove_file(&outside).ok();
+        std::fs::write(&outside, "outside\n").unwrap();
+        let legacy = dir.join("live-401.txt");
+        if let Err(error) = create_file_symlink_for_test(&outside, &legacy) {
+            skip_link_test_or_panic(error);
+            std::fs::remove_file(&outside).ok();
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+
+        assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
+        std::fs::remove_file(&legacy).ok();
+        std::fs::remove_file(&outside).ok();
+
+        let inside = dir.join("ordinary-transcript.txt");
+        std::fs::write(&inside, "inside\n").unwrap();
+        let internal_link = dir.join("live-402.txt");
+        create_file_symlink_for_test(&inside, &internal_link).unwrap();
+        assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
+        std::fs::remove_file(&internal_link).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn history_ignores_linked_legacy_audio_and_keeps_the_safe_transcript_path() {
+        let dir = test_dir("history-linked-legacy-audio");
+        let outside =
+            std::env::temp_dir().join(format!("yap-linked-audio-target-{}", std::process::id()));
+        std::fs::remove_file(&outside).ok();
+        std::fs::write(&outside, b"RIFF").unwrap();
+        let transcript = dir.join("live-402.txt");
+        let audio = dir.join("live-402.wav");
+        std::fs::write(&transcript, "safe\n").unwrap();
+        if let Err(error) = create_file_symlink_for_test(&outside, &audio) {
+            skip_link_test_or_panic(error);
+            std::fs::remove_file(&outside).ok();
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].source_path, transcript.display().to_string());
+        assert_eq!(sessions[0].output_path, transcript.display().to_string());
+        std::fs::remove_file(&audio).ok();
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn committed_history_falls_back_to_audio_when_its_transcript_is_linked() {
+        let dir = test_dir("history-linked-committed-transcript");
+        let session = SessionId::new("s-linked-committed-transcript").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        save_finalized_capture_to_dir(&dir, &live_view(Some("hello"), None), Some(capture))
+            .unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "yap-linked-committed-transcript-target-{}",
+            std::process::id()
+        ));
+        std::fs::remove_file(&outside).ok();
+        std::fs::write(&outside, "outside\n").unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+        std::fs::remove_file(&transcript).unwrap();
+        if let Err(error) = create_file_symlink_for_test(&outside, &transcript) {
+            skip_link_test_or_panic(error);
+            std::fs::remove_file(&outside).ok();
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].source_path.ends_with(".wav"));
+        assert_eq!(sessions[0].output_path, sessions[0].source_path);
+        std::fs::remove_file(&transcript).ok();
+        std::fs::remove_file(&outside).ok();
+
+        let inside = dir.join("ordinary-committed-transcript.txt");
+        std::fs::write(&inside, "inside\n").unwrap();
+        create_file_symlink_for_test(&inside, &transcript).unwrap();
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].source_path.ends_with(".wav"));
+        assert_eq!(sessions[0].output_path, sessions[0].source_path);
+        std::fs::remove_file(&transcript).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_revision_rejects_a_linked_prior_revision_when_supported() {
+        let dir = test_dir("linked-transcript-revision");
+        let session = SessionId::new("s-linked-transcript-revision").unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+        std::fs::write(&transcript, "first\n").unwrap();
+        write_transcript_revision(
+            &dir,
+            &session,
+            &"a".repeat(64),
+            &transcript,
+            "first",
+            ResultStatus::Complete,
+        )
+        .unwrap();
+        let outside =
+            std::env::temp_dir().join(format!("yap-linked-revision-target-{}", std::process::id()));
+        std::fs::remove_file(&outside).ok();
+        std::fs::write(&outside, "outside revision\n").unwrap();
+        let first = transcript_revision_path(&dir, &session, 1);
+        std::fs::remove_file(&first).unwrap();
+        if let Err(error) = create_file_symlink_for_test(&outside, &first) {
+            skip_link_test_or_panic(error);
+            std::fs::remove_file(&outside).ok();
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+
+        assert!(write_transcript_revision(
+            &dir,
+            &session,
+            &"a".repeat(64),
+            &transcript,
+            "second",
+            ResultStatus::Complete,
+        )
+        .is_err());
+        assert!(!transcript_revision_path(&dir, &session, 2).exists());
+        std::fs::remove_file(&first).ok();
+        std::fs::remove_file(&outside).ok();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -891,6 +1039,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn skip_link_test_or_panic(error: std::io::Error) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied
+            || error.raw_os_error() == Some(1314)
+        {
+            return;
+        }
+        panic!("failed to create test symlink: {error}");
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink_for_test(
+        original: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(original, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink_for_test(
+        original: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(original, link)
     }
 
     fn assert_partial_capture_transcript(fault: CommitFaultPoint) {

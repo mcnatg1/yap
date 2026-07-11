@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -21,6 +22,7 @@ const WAV_HEADER_BYTES: u64 = 44;
 const PCM16_BYTES_PER_SAMPLE: u64 = 2;
 const DEFAULT_SYNC_INTERVAL_SAMPLES: u64 = 16_000;
 const MAX_SEQUENCE_GAP_DETAILS: usize = 1_024;
+static JOURNAL_PRIVATE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -618,14 +620,18 @@ pub(crate) fn allocate_recording_session(directory: &Path) -> Result<SessionId, 
 }
 
 fn reserve_wav_part(directory: &Path, session_id: &SessionId) -> std::io::Result<()> {
-    let paths = RecordingPaths::new(directory, session_id.clone());
-    let file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&paths.wav_part)?;
-    file.sync_all()?;
-    drop(file);
+    reserve_wav_part_with_before_claim(directory, session_id, || {})
+}
 
+fn reserve_wav_part_with_before_claim<F>(
+    directory: &Path,
+    session_id: &SessionId,
+    before_claim: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(),
+{
+    let paths = RecordingPaths::new(directory, session_id.clone());
     let prefix = format!("live-{session_id}.");
     let conflicting_artifact = fs::read_dir(directory)?.any(|entry| {
         let Ok(entry) = entry else {
@@ -633,15 +639,20 @@ fn reserve_wav_part(directory: &Path, session_id: &SessionId) -> std::io::Result
         };
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        name.starts_with(&prefix) && entry.path() != paths.wav_part
+        name.starts_with(&prefix)
     });
     if conflicting_artifact {
-        fs::remove_file(&paths.wav_part)?;
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "recording artifact prefix already exists",
         ));
     }
+    before_claim();
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&paths.wav_part)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -832,7 +843,12 @@ impl StreamingRecording {
         drop(self.journal_file.take());
 
         self.hit_fault(CommitFaultPoint::FinalArtifactRename)?;
-        publish_no_replace(&self.paths.wav_part, &self.paths.wav, "finalize live audio")?;
+        self.publish(
+            &self.paths.wav_part,
+            &self.paths.wav,
+            "finalize live audio",
+            CommitFaultPoint::AudioStagingCleanup,
+        )?;
 
         let audio_sha256 = sha256_file(&self.paths.wav)?;
         let audio_bytes = fs::metadata(&self.paths.wav)
@@ -855,10 +871,11 @@ impl StreamingRecording {
         write_json_file(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
         self.hit_fault(CommitFaultPoint::SidecarSync)?;
         sync_file(&self.paths.sidecar_part, "capture sidecar")?;
-        publish_no_replace(
+        self.publish(
             &self.paths.sidecar_part,
             &self.paths.sidecar,
             "publish capture sidecar",
+            CommitFaultPoint::SidecarStagingCleanup,
         )?;
         let sidecar_sha256 = sha256_file(&self.paths.sidecar)?;
 
@@ -878,13 +895,13 @@ impl StreamingRecording {
         self.hit_fault(CommitFaultPoint::CommitSync)?;
         sync_file(&self.paths.commit_part, "capture commit")?;
         self.hit_fault(CommitFaultPoint::CommitRename)?;
-        publish_no_replace(
+        self.publish(
             &self.paths.commit_part,
             &self.paths.commit,
             "publish capture commit",
+            CommitFaultPoint::CommitStagingCleanup,
         )?;
         let _ = sync_parent_directory(&self.paths.directory);
-        fs::remove_file(&self.paths.journal_part).ok();
         Ok(())
     }
 
@@ -986,6 +1003,29 @@ impl StreamingRecording {
         Ok(())
     }
 
+    fn publish(
+        &self,
+        source: &Path,
+        destination: &Path,
+        label: &str,
+        cleanup_fault: CommitFaultPoint,
+    ) -> Result<(), String> {
+        let publication = publish_no_replace_with_cleanup(source, destination, label, |staging| {
+            #[cfg(test)]
+            if self.fault == Some(cleanup_fault) {
+                return Err(std::io::Error::other(format!(
+                    "injected post-link cleanup failure at {cleanup_fault:?}"
+                )));
+            }
+            let _ = cleanup_fault;
+            fs::remove_file(staging)
+        })?;
+        if let Some(warning) = publication.cleanup_warning {
+            crate::stt::log_yap(&warning);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_data_limit_for_test(&mut self, data_limit: u64) {
         self.data_limit = data_limit;
@@ -1014,14 +1054,34 @@ fn create_new(path: &Path, label: &str) -> Result<File, String> {
 /// Publishes a fully synced same-directory artifact without ever replacing an
 /// existing path. Hard-link creation is atomic and refuses collisions on the
 /// supported local filesystems used for recordings.
+pub(crate) struct PublishedArtifact {
+    cleanup_warning: Option<String>,
+}
+
 pub(crate) fn publish_no_replace(
     source: &Path,
     destination: &Path,
     label: &str,
-) -> Result<(), String> {
+) -> Result<PublishedArtifact, String> {
+    publish_no_replace_with_cleanup(source, destination, label, |staging| {
+        fs::remove_file(staging)
+    })
+}
+
+fn publish_no_replace_with_cleanup<F>(
+    source: &Path,
+    destination: &Path,
+    label: &str,
+    cleanup: F,
+) -> Result<PublishedArtifact, String>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
     fs::hard_link(source, destination).map_err(|error| format!("Failed to {label}: {error}"))?;
-    fs::remove_file(source)
-        .map_err(|error| format!("Failed to remove published {label} staging file: {error}"))
+    let cleanup_warning = cleanup(source)
+        .err()
+        .map(|error| format!("Published {label}, but staging cleanup is pending: {error}"));
+    Ok(PublishedArtifact { cleanup_warning })
 }
 
 fn write_wav_header(file: &mut File, data_bytes: u64) -> Result<(), String> {
@@ -1058,24 +1118,58 @@ fn write_journal_snapshot(file: &mut File, journal: &CaptureJournal) -> Result<(
 }
 
 fn replace_journal_snapshot(path: &Path, journal: &CaptureJournal) -> Result<File, String> {
+    replace_journal_snapshot_with_private_names(
+        path,
+        journal,
+        std::iter::from_fn(|| {
+            let counter = JOURNAL_PRIVATE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            Some(format!("private-{}-{counter}", std::process::id()))
+        }),
+    )
+}
+
+fn replace_journal_snapshot_with_private_names<I, S>(
+    path: &Path,
+    journal: &CaptureJournal,
+    private_names: I,
+) -> Result<File, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "recording journal has no file name".to_string())?;
-    let replacement = path.with_file_name(format!("{file_name}.next"));
-    fs::remove_file(&replacement).ok();
-    let mut file = create_new(&replacement, "recording journal replacement")?;
-    write_journal_snapshot(&mut file, journal)?;
-    file.sync_all()
-        .map_err(|error| format!("Failed to sync recording journal: {error}"))?;
-    drop(file);
-    fs::rename(&replacement, path)
-        .map_err(|error| format!("Failed to replace recording journal: {error}"))?;
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| format!("Failed to reopen recording journal: {error}"))
+    for private_name in private_names {
+        let replacement = path.with_file_name(format!("{file_name}.{}", private_name.as_ref()));
+        let mut file = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .read(true)
+            .open(&replacement)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create recording journal replacement: {error}"
+                ))
+            }
+        };
+        write_journal_snapshot(&mut file, journal)?;
+        file.sync_all()
+            .map_err(|error| format!("Failed to sync recording journal: {error}"))?;
+        drop(file);
+        fs::rename(&replacement, path)
+            .map_err(|error| format!("Failed to replace recording journal: {error}"))?;
+        return OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("Failed to reopen recording journal: {error}"));
+    }
+    Err("Failed to allocate a private recording journal replacement".into())
 }
 
 #[cfg(test)]
@@ -1266,7 +1360,7 @@ fn resolve_artifact(directory: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(directory.join(name))
 }
 
-fn is_regular_artifact(path: &Path) -> bool {
+pub(crate) fn is_regular_artifact(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -1285,8 +1379,10 @@ fn session_from_private_artifact(name: &str) -> Option<SessionId> {
     [
         ".wav.part",
         ".capture.journal.part",
+        ".capture.json.part",
         ".capture.partial.json",
         ".capture.partial.json.part",
+        ".commit.json.part",
     ]
     .into_iter()
     .find_map(|suffix| session.strip_suffix(suffix))
@@ -1308,6 +1404,9 @@ pub(crate) enum CommitFaultPoint {
     FinalArtifactRename,
     CommitSync,
     CommitRename,
+    AudioStagingCleanup,
+    SidecarStagingCleanup,
+    CommitStagingCleanup,
 }
 
 impl CommitFaultPoint {
@@ -1540,6 +1639,46 @@ mod tests {
     }
 
     #[test]
+    fn journal_snapshots_keep_stale_fixed_next_files_and_ignore_private_leftovers() {
+        let dir = tempfile_dir("journal-private-temp");
+        let session = SessionId::new("s-journal-private-temp").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        let stale = dir.join(format!("live-{session}.capture.journal.part.next"));
+        std::fs::write(&stale, b"stale private snapshot").unwrap();
+
+        recording.persist_journal_for_test().unwrap();
+
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale private snapshot");
+        drop(recording);
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn journal_snapshot_retries_a_colliding_private_temp_without_touching_it() {
+        let dir = tempfile_dir("journal-temp-collision");
+        let path = dir.join("live-s-journal-temp-collision.capture.journal.part");
+        let journal = CaptureJournal::new(SessionId::new("s-journal-temp-collision").unwrap());
+        let stale =
+            path.with_file_name("live-s-journal-temp-collision.capture.journal.part.private-a");
+        std::fs::write(&stale, b"do not remove").unwrap();
+
+        let file = replace_journal_snapshot_with_private_names(
+            &path,
+            &journal,
+            ["private-a", "private-b"],
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(std::fs::read(&stale).unwrap(), b"do not remove");
+        assert!(path.is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn persistent_allocation_survives_runtime_restarts_without_reusing_numeric_names() {
         let dir = tempfile_dir("persistent-allocation-restart");
         let first = allocate_recording_session(&dir).unwrap();
@@ -1574,6 +1713,38 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{suffix}");
             assert!(!dir.join(format!("live-{session}.wav.part")).exists());
         }
+    }
+
+    #[test]
+    fn reservation_collision_after_preflight_never_removes_the_competing_claim() {
+        let dir = tempfile_dir("reservation-race");
+        let session = SessionId::new("s-reservation-race").unwrap();
+        let claimed = RecordingPaths::new(&dir, session.clone()).wav_part;
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
+        let racer_dir = dir.clone();
+        let racer_session = session.clone();
+        let racer_barrier = Arc::clone(&barrier);
+        let racer = std::thread::spawn(move || {
+            racer_barrier.wait();
+            std::fs::write(
+                RecordingPaths::new(&racer_dir, racer_session).wav_part,
+                b"racer reservation",
+            )
+            .unwrap();
+            claimed_tx.send(()).unwrap();
+        });
+
+        let error = reserve_wav_part_with_before_claim(&dir, &session, || {
+            barrier.wait();
+            claimed_rx.recv().unwrap();
+        })
+        .unwrap_err();
+        racer.join().unwrap();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(claimed).unwrap(), b"racer reservation");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1620,6 +1791,39 @@ mod tests {
             assert!(publish_no_replace(&source, &destination, "test publish").is_err());
             assert_eq!(std::fs::read(&destination).unwrap(), b"old");
             assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        }
+    }
+
+    #[test]
+    fn hard_link_cleanup_debt_keeps_publication_complete_and_staging_private() {
+        for (fault, staging_suffix) in [
+            (CommitFaultPoint::AudioStagingCleanup, ".wav.part"),
+            (CommitFaultPoint::CommitStagingCleanup, ".commit.json.part"),
+        ] {
+            let dir = tempfile_dir(&format!("post-link-cleanup-{fault:?}"));
+            let session = SessionId::new("s-post-link-cleanup").unwrap();
+            let mut recording =
+                StreamingRecording::create_with_fault(&dir, session.clone(), fault).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+
+            let result = recording.finalize().unwrap();
+            assert_eq!(result.status, CaptureStatus::Complete, "{fault:?}");
+            assert!(result.committed.is_some(), "{fault:?}");
+            let scan = scan_recordings(&dir).unwrap();
+            assert_eq!(scan.complete.len(), 1, "{fault:?}");
+            assert!(scan.partial.is_empty(), "{fault:?}");
+            let staging = dir.join(format!("live-{session}{staging_suffix}"));
+            assert!(staging.is_file(), "{fault:?}");
+            assert!(
+                publish_no_replace(
+                    &staging,
+                    &dir.join(format!("live-{session}.commit.json")),
+                    "retry"
+                )
+                .is_err(),
+                "{fault:?} must never overwrite the published destination"
+            );
+            std::fs::remove_dir_all(dir).ok();
         }
     }
 
