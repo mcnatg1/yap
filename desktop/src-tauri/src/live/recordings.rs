@@ -220,7 +220,12 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             SavedLiveSession {
                 name,
                 source_path: stable_existing_path_string(&audio),
-                output_path: if recording::is_regular_artifact(&transcript) {
+                output_path: if has_valid_transcript_revision(
+                    dir,
+                    &committed.manifest.session_id,
+                    &committed.manifest.capture_sidecar_sha256,
+                ) && recording::is_regular_artifact(&transcript)
+                {
                     stable_existing_path_string(&transcript)
                 } else {
                     stable_existing_path_string(&audio)
@@ -297,6 +302,35 @@ fn write_transcript_revision(
     transcript: &str,
     status: ResultStatus,
 ) -> Result<(), String> {
+    write_transcript_revision_with_barrier(
+        dir,
+        session_id,
+        capture_sidecar_sha256,
+        transcript_receipt,
+        transcript,
+        status,
+        |_| {},
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptRevisionPublicationBarrier {
+    BeforePublication,
+    AfterPublication,
+}
+
+fn write_transcript_revision_with_barrier<F>(
+    dir: &std::path::Path,
+    session_id: &crate::audio::session::SessionId,
+    capture_sidecar_sha256: &str,
+    transcript_receipt: &PublishedTranscriptReceipt,
+    transcript: &str,
+    status: ResultStatus,
+    mut publication_barrier: F,
+) -> Result<(), String>
+where
+    F: FnMut(TranscriptRevisionPublicationBarrier),
+{
     let revision = next_transcript_revision(dir, session_id)?;
     let model = ModelRevision::new(crate::stt::nemotron::MODEL_ID, "local", "local")
         .map_err(|error| format!("Failed to describe local transcript model: {error}"))?;
@@ -333,18 +367,141 @@ fn write_transcript_revision(
     .map_err(|error| format!("Failed to build transcript revision: {error}"))?;
     let path = transcript_revision_path(dir, session_id, revision);
     let serialized = transcript_result_value(&result, capture_sidecar_sha256, transcript_receipt)?;
-    transcript_receipt.revalidate()?;
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| format!("Failed to create transcript revision: {error}"))?;
-    serde_json::to_writer(&mut file, &serialized)
-        .map_err(|error| format!("Failed to write transcript revision: {error}"))?;
-    file.write_all(b"\n")
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Failed to finalize transcript revision: {error}"))?;
-    Ok(())
+    let (staging, mut file) = create_unique_transcript_revision_staging(dir, session_id, revision)?;
+    let result = (|| {
+        serde_json::to_writer(&mut file, &serialized)
+            .map_err(|error| format!("Failed to write transcript revision: {error}"))?;
+        file.write_all(b"\n")
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("Failed to finalize transcript revision staging: {error}"))?;
+
+        publication_barrier(TranscriptRevisionPublicationBarrier::BeforePublication);
+        transcript_receipt.revalidate()?;
+        let published =
+            recording::publish_no_replace(&staging, &path, &file, "publish transcript revision")?;
+        drop(published);
+
+        publication_barrier(TranscriptRevisionPublicationBarrier::AfterPublication);
+        // A replacement after this check is external post-completion tamper; consumers still
+        // hash-check the transcript against this immutable revision before selecting it.
+        transcript_receipt.revalidate()
+    })();
+    if result.is_err() {
+        recording::remove_owned_staging(&staging, &file, "publish transcript revision");
+    }
+    drop(file);
+    result
+}
+
+fn create_unique_transcript_revision_staging(
+    dir: &std::path::Path,
+    session_id: &crate::audio::session::SessionId,
+    revision: u64,
+) -> Result<(std::path::PathBuf, std::fs::File), String> {
+    for nonce in 0..128_u64 {
+        let path = dir.join(format!(
+            "live-{session_id}.transcript.r{revision}.json.part-{}-{nonce}",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create transcript revision staging file: {error}"
+                ));
+            }
+        }
+    }
+    Err("Failed to allocate a unique transcript revision staging file".into())
+}
+
+fn has_valid_transcript_revision(
+    dir: &std::path::Path,
+    session_id: &crate::audio::session::SessionId,
+    capture_sidecar_sha256: &str,
+) -> bool {
+    let text_name = format!("live-{session_id}.txt");
+    let revision_prefix = format!("live-{session_id}.transcript.r");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return false;
+        };
+        let Some(revision) = name
+            .strip_prefix(&revision_prefix)
+            .and_then(|value| value.strip_suffix(".json"))
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        revision > 0
+            && transcript_revision_matches_receipt(
+                dir,
+                &name,
+                session_id,
+                revision,
+                &text_name,
+                capture_sidecar_sha256,
+            )
+    })
+}
+
+fn transcript_revision_matches_receipt(
+    dir: &std::path::Path,
+    revision_name: &str,
+    session_id: &crate::audio::session::SessionId,
+    revision: u64,
+    text_name: &str,
+    capture_sidecar_sha256: &str,
+) -> bool {
+    let Ok((revision_text, _)) = recording::read_and_hash_regular_artifact(dir, revision_name)
+    else {
+        return false;
+    };
+    let Ok(_revision) = serde_json::from_str::<TranscriptResultRevision>(&revision_text) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&revision_text) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let Some(revision_text_name) = object.get("textFile").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    let Some(revision_text_sha256) = object.get("textSha256").and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+    let Some(revision_sidecar_sha256) = object
+        .get("captureSidecarSha256")
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+    let Some(revision_session_id) = object.get("sessionId").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    let Some(revision_number) = object.get("revision").and_then(|value| value.as_u64()) else {
+        return false;
+    };
+    let Ok((_, current_text_sha256)) = recording::read_and_hash_regular_artifact(dir, text_name)
+    else {
+        return false;
+    };
+    revision_text_name == text_name
+        && revision_sidecar_sha256 == capture_sidecar_sha256
+        && revision_session_id == session_id.as_str()
+        && revision_number == revision
+        && revision_text_sha256 == current_text_sha256
 }
 
 fn transcript_result_value(
@@ -1006,6 +1163,108 @@ mod tests {
     }
 
     #[test]
+    fn transcript_receipt_drops_its_destination_handle_after_save() {
+        let dir = test_dir("transcript-receipt-handle-lifetime");
+        let session = SessionId::new("s-transcript-receipt-handle-lifetime").unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+
+        let receipt = write_new_text_file(&transcript, "owned transcript\n").unwrap();
+
+        assert_eq!(recording::receipt_handle_count_for_test(), 0);
+        receipt.revalidate().unwrap();
+        assert_eq!(recording::receipt_handle_count_for_test(), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_replacement_before_revision_publication_writes_no_revision() {
+        let dir = test_dir("transcript-revision-pre-publication-replacement");
+        let session = SessionId::new("s-transcript-revision-pre-publication").unwrap();
+        let mut recording_capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording_capture.append_pcm16(&[1, 0]).unwrap();
+        let manifest = recording_capture
+            .finalize()
+            .unwrap()
+            .committed
+            .unwrap()
+            .manifest;
+        let transcript = dir.join(format!("live-{session}.txt"));
+        let receipt = write_new_text_file(&transcript, "owned transcript\n").unwrap();
+
+        let error = write_transcript_revision_with_barrier(
+            &dir,
+            &session,
+            &manifest.capture_sidecar_sha256,
+            &receipt,
+            "owned transcript",
+            ResultStatus::Complete,
+            |barrier| {
+                if barrier == TranscriptRevisionPublicationBarrier::BeforePublication {
+                    let displaced = transcript.with_extension("displaced");
+                    std::fs::rename(&transcript, displaced).unwrap();
+                    std::fs::write(&transcript, "replacement transcript\n").unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("transcript path no longer names"));
+        assert!(!transcript_revision_path(&dir, &session, 1).exists());
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "replacement transcript\n"
+        );
+        assert_eq!(recording::receipt_handle_count_for_test(), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_replacement_after_revision_publication_is_not_selected_by_history() {
+        let dir = test_dir("transcript-revision-post-publication-replacement");
+        let session = SessionId::new("s-transcript-revision-post-publication").unwrap();
+        let mut recording_capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording_capture.append_pcm16(&[1, 0]).unwrap();
+        let manifest = recording_capture
+            .finalize()
+            .unwrap()
+            .committed
+            .unwrap()
+            .manifest;
+        let transcript = dir.join(format!("live-{session}.txt"));
+        let receipt = write_new_text_file(&transcript, "owned transcript\n").unwrap();
+
+        let error = write_transcript_revision_with_barrier(
+            &dir,
+            &session,
+            &manifest.capture_sidecar_sha256,
+            &receipt,
+            "owned transcript",
+            ResultStatus::Complete,
+            |barrier| {
+                if barrier == TranscriptRevisionPublicationBarrier::AfterPublication {
+                    let displaced = transcript.with_extension("displaced");
+                    std::fs::rename(&transcript, displaced).unwrap();
+                    std::fs::write(&transcript, "replacement transcript\n").unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("transcript path no longer names"));
+        assert!(transcript_revision_path(&dir, &session, 1).is_file());
+        assert!(!has_valid_transcript_revision(
+            &dir,
+            &session,
+            &manifest.capture_sidecar_sha256,
+        ));
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].output_path, sessions[0].source_path);
+        assert_eq!(recording::receipt_handle_count_for_test(), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn replaced_capture_sidecar_preserves_text_but_blocks_transcript_revision() {
         let dir = test_dir("transcript-sidecar-revalidation");
         let session = SessionId::new("s-transcript-sidecar-revalidation").unwrap();
@@ -1075,6 +1334,9 @@ mod tests {
         assert_eq!(revision["textFile"], format!("live-{session}.txt"));
         assert_eq!(revision["textSha256"], transcript_receipt.sha256());
         assert_eq!(revision["modelId"], crate::stt::nemotron::MODEL_ID);
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].output_path, text_path.display().to_string());
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -34,6 +34,33 @@ const MAX_JOURNAL_RECORD_BYTES: u64 = 8 * 1024;
 const MAX_JOURNAL_TERMINAL_BYTES: u64 = 256;
 
 #[cfg(test)]
+static RECEIPT_HANDLE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+struct ReceiptHandleProbe;
+
+#[cfg(test)]
+impl ReceiptHandleProbe {
+    fn new() -> Self {
+        RECEIPT_HANDLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReceiptHandleProbe {
+    fn drop(&mut self) {
+        RECEIPT_HANDLE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn receipt_handle_count_for_test() -> usize {
+    RECEIPT_HANDLE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
 type SidecarPublishHook = Box<dyn FnOnce(&RecordingPaths) + Send>;
 #[cfg(test)]
 type PublicationHook =
@@ -135,7 +162,7 @@ pub(crate) struct PublishedTranscriptReceipt {
     file_name: String,
     sha256: String,
     path: PathBuf,
-    file: Arc<File>,
+    identity: FileIdentity,
 }
 
 impl PublishedTranscriptReceipt {
@@ -143,6 +170,8 @@ impl PublishedTranscriptReceipt {
         destination: &Path,
         mut file: File,
     ) -> Result<Self, String> {
+        #[cfg(test)]
+        let _handle_probe = ReceiptHandleProbe::new();
         let file_name = destination
             .file_name()
             .and_then(|name| name.to_str())
@@ -150,11 +179,13 @@ impl PublishedTranscriptReceipt {
             .to_string();
         validate_artifact_name(&file_name)?;
         let sha256 = sha256_open_file(&mut file)?;
+        let identity = file_identity(&file)?;
+        drop(file);
         Ok(Self {
             file_name,
             sha256,
             path: destination.to_path_buf(),
-            file: Arc::new(file),
+            identity,
         })
     }
 
@@ -168,7 +199,7 @@ impl PublishedTranscriptReceipt {
 
     pub(crate) fn revalidate(&self) -> Result<(), String> {
         let mut current = open_regular_path(&self.path)?;
-        if !same_file_identity(&self.file, &current)? {
+        if self.identity != file_identity(&current)? {
             return Err("transcript path no longer names the verified destination".into());
         }
         if sha256_open_file(&mut current)? != self.sha256 {
@@ -827,7 +858,7 @@ struct PublicationReceipt {
     sha256: String,
     status: CaptureStatus,
     path: PathBuf,
-    file: Arc<File>,
+    identity: FileIdentity,
 }
 
 impl PublicationReceipt {
@@ -843,7 +874,7 @@ impl PublicationReceipt {
 
     fn revalidate(&self) -> Result<(), String> {
         let mut current = open_regular_path(&self.path)?;
-        if !same_file_identity(&self.file, &current)? {
+        if self.identity != file_identity(&current)? {
             return Err("capture sidecar path no longer names the verified destination".into());
         }
         if sha256_open_file(&mut current)? != self.sha256 {
@@ -854,6 +885,24 @@ impl PublicationReceipt {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(unix)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(windows)]
+struct FileIdentity {
+    volume_serial: u32,
+    file_index: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(any(unix, windows)))]
+struct FileIdentity;
 
 #[derive(Debug, Clone)]
 struct RecordingPaths {
@@ -1871,6 +1920,8 @@ fn receipt_from_published_sidecar(
     path: PathBuf,
     expected: &CaptureSidecar,
 ) -> Result<PublicationReceipt, String> {
+    #[cfg(test)]
+    let _handle_probe = ReceiptHandleProbe::new();
     validate_artifact_name(&file_name)?;
     let sha256 = sha256_open_file(&mut file)?;
     let text = read_open_file(&mut file)?;
@@ -1884,7 +1935,7 @@ fn receipt_from_published_sidecar(
         sha256,
         status: CaptureStatus::Complete,
         path,
-        file: Arc::new(file),
+        identity: file_identity(&file)?,
     })
 }
 
@@ -1894,6 +1945,8 @@ fn receipt_from_published_partial_sidecar(
     path: PathBuf,
     expected: &PartialCaptureSidecar,
 ) -> Result<PublicationReceipt, String> {
+    #[cfg(test)]
+    let _handle_probe = ReceiptHandleProbe::new();
     validate_artifact_name(&file_name)?;
     let sha256 = sha256_open_file(&mut file)?;
     let text = read_open_file(&mut file)?;
@@ -1907,7 +1960,7 @@ fn receipt_from_published_partial_sidecar(
         sha256,
         status: CaptureStatus::Partial,
         path,
-        file: Arc::new(file),
+        identity: file_identity(&file)?,
     })
 }
 
@@ -2105,38 +2158,51 @@ fn open_regular_path(path: &Path) -> Result<File, String> {
 
 #[cfg(unix)]
 fn same_file_identity(left: &File, right: &File) -> Result<bool, String> {
-    use std::os::unix::fs::MetadataExt;
-
-    let left = left
-        .metadata()
-        .map_err(|error| format!("Failed to inspect owned recording artifact: {error}"))?;
-    let right = right
-        .metadata()
-        .map_err(|error| format!("Failed to inspect published recording artifact: {error}"))?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    Ok(file_identity(left)? == file_identity(right)?)
 }
 
 #[cfg(windows)]
 fn same_file_identity(left: &File, right: &File) -> Result<bool, String> {
-    fn identity(file: &File) -> Result<(u32, u64), String> {
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        unsafe {
-            GetFileInformationByHandle(
-                HANDLE(file.as_raw_handle()),
-                &mut information as *mut BY_HANDLE_FILE_INFORMATION,
-            )
-        }
-        .map_err(|error| format!("Failed to inspect recording file identity: {error}"))?;
-        let file_index =
-            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-        Ok((information.dwVolumeSerialNumber, file_index))
-    }
-
-    Ok(identity(left)? == identity(right)?)
+    Ok(file_identity(left)? == file_identity(right)?)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn same_file_identity(_left: &File, _right: &File) -> Result<bool, String> {
+    Err("recording publication ownership is unsupported on this platform".into())
+}
+
+#[cfg(unix)]
+fn file_identity(file: &File) -> Result<FileIdentity, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Failed to inspect recording file identity: {error}"))?;
+    Ok(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn file_identity(file: &File) -> Result<FileIdentity, String> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            &mut information as *mut BY_HANDLE_FILE_INFORMATION,
+        )
+    }
+    .map_err(|error| format!("Failed to inspect recording file identity: {error}"))?;
+    Ok(FileIdentity {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_file: &File) -> Result<FileIdentity, String> {
     Err("recording publication ownership is unsupported on this platform".into())
 }
 
@@ -2328,6 +2394,32 @@ mod tests {
         let scanned = scan_recordings(&dir).unwrap();
         assert!(scanned.complete.is_empty());
         assert_eq!(scanned.partial.len(), 1);
+    }
+
+    #[test]
+    fn cached_finalization_receipts_drop_handles_and_revalidate_current_identity() {
+        let dir = tempfile_dir("receipt-handle-lifetime");
+        let session = SessionId::new("s-receipt-handle-lifetime").unwrap();
+        let paths = RecordingPaths::new(&dir, session.clone());
+        let mut recording = StreamingRecording::create(&dir, session).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+
+        let first = recording.finalize().unwrap();
+        let second = recording.finalize().unwrap();
+
+        assert_eq!(receipt_handle_count_for_test(), 0);
+        first.revalidate_capture_sidecar().unwrap();
+        second.revalidate_capture_sidecar().unwrap();
+        let displaced = paths.sidecar.with_extension("displaced");
+        fs::rename(&paths.sidecar, displaced).unwrap();
+        fs::write(&paths.sidecar, b"replacement sidecar").unwrap();
+        assert!(first.revalidate_capture_sidecar().is_err());
+        assert!(recording
+            .finalize()
+            .unwrap()
+            .revalidate_capture_sidecar()
+            .is_err());
+        assert_eq!(receipt_handle_count_for_test(), 0);
     }
 
     #[test]
