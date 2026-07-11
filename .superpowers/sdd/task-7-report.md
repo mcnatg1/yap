@@ -184,6 +184,33 @@ DONE
 
 ---
 
+## Final Bounded Cleanup-Lifecycle Fix (2026-07-11)
+
+### Implementation
+
+- Reconciliation now recognizes the generic private delete quarantine emitted by `recording::quarantine_open_regular_artifact`: `.<exact-yap-artifact>.delete-<pid>-<nonce>`. The strict grammar accepts only known session-bound Yap artifact basenames and keeps nested, malformed, active, too-new, nonregular, reparse, and unknown entries as evidence.
+- Candidate selection occurs only after strict foreign, old, regular filtering. A fixed-size ordered set keeps memory bounded, scans beyond unrelated directory entries, and makes later catalog passes deterministic progress for overflow batches.
+- Corrupt-intent replacement first reconciles strict prior intent quarantines. A missing final restores the newest verified evidence; an extant final retires verified superseded evidence before another replacement can create new evidence.
+- Maintenance-warning assembly reserves the cap's leading slots for damaged committed sessions, followed by pending deletion and stale-cleanup warnings. No frontend contract changed.
+
+### Focused Coverage
+
+- Generic stale quarantines for audio, sidecar, transcript, immutable transcript revision, commit, journal, and intent are collected; nested, malformed, active, recent, and nonregular entries remain untouched.
+- A directory with 256 unrelated entries before 129 eligible leftovers cleans 128 in the first pass and the remainder in the next pass.
+- A missing final intent restores the newest verified quarantine, and three post-publication corrupt-intent retries retain exactly one evidence quarantine.
+- A cap-full warning set still emits damaged committed-session evidence first.
+
+### Verification
+
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml audio::recording` - pass three times, 44 tests per default-parallel run.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::recordings` - pass three times, 61 tests per default-parallel run.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass, 431 library tests plus 1 parity integration test.
+- `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` - pass.
+- `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.
+- `git diff --check` - pass.
+
+---
+
 ## Final Deletion And Authorization Repair
 
 ### Status

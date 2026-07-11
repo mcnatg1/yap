@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -595,6 +595,7 @@ where
     if name != deletion_intent_name(&intent.session_id) {
         return Err("recording deletion intent name does not match its session".into());
     }
+    reconcile_intent_evidence_quarantines(dir, name)?;
     let replace_corrupt_final = if physical_entry_exists(dir, name)? {
         let existing = recording::read_regular_artifact(dir, name)
             .ok()
@@ -706,33 +707,63 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return warnings;
     };
-    let mut names = Vec::new();
+    let mut private_candidates = BTreeSet::new();
+    let mut intent_names = BTreeSet::new();
+    let mut private_candidate_overflow = false;
     for entry in entries {
-        if names.len() == MAX_PRIVATE_DELETION_LEFTOVERS {
-            push_maintenance_warning(
-                &mut warnings.maintenance_warnings,
-                "Private recording deletion cleanup scan reached its fixed budget.".into(),
-            );
-            break;
-        }
         let Ok(entry) = entry else {
             continue;
         };
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        names.push(name);
-    }
-    reconcile_private_deletion_leftovers(dir, &names, &mut warnings.maintenance_warnings);
-    for name in names {
-        if !name.starts_with("live-") || !name.ends_with(".deletion.v1.json") {
-            continue;
+        if let Some(leftover) = private_deletion_leftover(&name) {
+            let active = matches!(
+                leftover,
+                PrivateDeletionLeftover::Staging { process_id }
+                    | PrivateDeletionLeftover::Quarantine { process_id }
+                    if process_id == std::process::id()
+            );
+            if !active {
+                match private_deletion_leftover_is_old(dir, &name) {
+                    Ok(true) => {
+                        private_candidate_overflow |= push_bounded_candidate(
+                            &mut private_candidates,
+                            name.clone(),
+                            MAX_PRIVATE_DELETION_LEFTOVERS,
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => push_maintenance_warning(
+                        &mut warnings.maintenance_warnings,
+                        format!("Private recording deletion cleanup was retained: {name}: {error}"),
+                    ),
+                }
+            }
+        } else if looks_like_private_deletion_artifact(&name) {
+            push_maintenance_warning(
+                &mut warnings.maintenance_warnings,
+                format!("Unknown private deletion artifact was retained: {name}"),
+            );
         }
+        if deletion_intent_session(&name).is_some() {
+            let _ = push_bounded_candidate(&mut intent_names, name, MAX_PRIVATE_DELETION_LEFTOVERS);
+        }
+    }
+    if private_candidate_overflow {
+        push_maintenance_warning(
+            &mut warnings.maintenance_warnings,
+            "Private recording deletion cleanup scan reached its fixed budget.".into(),
+        );
+    }
+    reconcile_private_deletion_leftovers(
+        dir,
+        private_candidates.iter().map(String::as_str),
+        &mut warnings.maintenance_warnings,
+    );
+    for name in intent_names {
         if let Err(error) = resume_deletion_intent(dir, &name) {
-            let session = name
-                .trim_start_matches("live-")
-                .trim_end_matches(".deletion.v1.json");
-            if crate::audio::session::SessionId::new(session.to_string()).is_ok() {
+            if let Some(session) = deletion_intent_session(&name) {
                 let warning = format!("Recording deletion is pending: {error}");
                 warnings
                     .session_warnings
@@ -752,13 +783,18 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
 #[derive(Clone, Copy)]
 enum PrivateDeletionLeftover {
     Staging { process_id: u32 },
-    Quarantine,
+    Quarantine { process_id: u32 },
 }
 
-fn reconcile_private_deletion_leftovers(dir: &Path, names: &[String], warnings: &mut Vec<String>) {
+fn reconcile_private_deletion_leftovers<'a>(
+    dir: &Path,
+    names: impl IntoIterator<Item = &'a str>,
+    warnings: &mut Vec<String>,
+) {
     for name in names {
         match private_deletion_leftover(name) {
             Some(PrivateDeletionLeftover::Staging { process_id })
+            | Some(PrivateDeletionLeftover::Quarantine { process_id })
                 if process_id == std::process::id() => {}
             Some(_) => {
                 match private_deletion_leftover_is_old(dir, name) {
@@ -787,29 +823,140 @@ fn reconcile_private_deletion_leftovers(dir: &Path, names: &[String], warnings: 
 }
 
 fn private_deletion_leftover(name: &str) -> Option<PrivateDeletionLeftover> {
+    if let Some((_, process_id)) = generic_delete_quarantine(name) {
+        return Some(PrivateDeletionLeftover::Quarantine { process_id });
+    }
     let stem = name.strip_prefix(".live-")?;
     if let Some((session, suffix)) = stem
         .strip_suffix(".part")
         .and_then(|value| value.split_once(".deletion.v1."))
     {
         crate::audio::session::SessionId::new(session.to_string()).ok()?;
-        let (process_id, nonce) = suffix.split_once('-')?;
-        process_id.parse::<u32>().ok()?;
-        nonce.parse::<u64>().ok()?;
         return Some(PrivateDeletionLeftover::Staging {
-            process_id: process_id.parse().ok()?,
+            process_id: private_process_id(suffix)?,
         });
     }
-    let (session, suffix) = stem.split_once(".deletion.v1.json.delete-")?;
-    crate::audio::session::SessionId::new(session.to_string()).ok()?;
-    let (process_id, nonce) = suffix.split_once('-')?;
-    process_id.parse::<u32>().ok()?;
-    nonce.parse::<u64>().ok()?;
-    Some(PrivateDeletionLeftover::Quarantine)
+    None
+}
+
+fn generic_delete_quarantine(name: &str) -> Option<(&str, u32)> {
+    let (artifact, suffix) = name.strip_prefix('.')?.rsplit_once(".delete-")?;
+    session_from_yap_artifact(artifact)?;
+    Some((artifact, private_process_id(suffix)?))
 }
 
 fn looks_like_private_deletion_artifact(name: &str) -> bool {
-    name.starts_with(".live-") && name.contains(".deletion.v1.")
+    name.starts_with(".live-") && (name.contains(".deletion.v1.") || name.contains(".delete-"))
+}
+
+fn private_process_id(value: &str) -> Option<u32> {
+    let (process_id, nonce) = value.split_once('-')?;
+    if nonce.contains('-') {
+        return None;
+    }
+    nonce.parse::<u64>().ok()?;
+    process_id.parse::<u32>().ok()
+}
+
+fn session_from_yap_artifact(name: &str) -> Option<crate::audio::session::SessionId> {
+    let session = name.strip_prefix("live-")?;
+    [
+        ".wav.part",
+        ".capture.journal.part",
+        ".capture.json.part",
+        ".capture.partial.json.part",
+        ".capture.partial.json",
+        ".commit.json.part",
+        ".deletion.v1.json",
+        ".commit.json",
+        ".capture.json",
+        ".polished.txt",
+        ".wav",
+        ".txt",
+    ]
+    .into_iter()
+    .find_map(|suffix| session.strip_suffix(suffix))
+    .and_then(|session| crate::audio::session::SessionId::new(session.to_string()).ok())
+    .or_else(|| {
+        let (session, revision) = session.rsplit_once(".transcript.r")?;
+        revision
+            .strip_suffix(".json")?
+            .parse::<u64>()
+            .ok()
+            .filter(|revision| *revision > 0)?;
+        crate::audio::session::SessionId::new(session.to_string()).ok()
+    })
+}
+
+fn deletion_intent_session(name: &str) -> Option<crate::audio::session::SessionId> {
+    name.strip_prefix("live-")
+        .and_then(|session| session.strip_suffix(".deletion.v1.json"))
+        .and_then(|session| crate::audio::session::SessionId::new(session.to_string()).ok())
+}
+
+fn push_bounded_candidate(candidates: &mut BTreeSet<String>, name: String, limit: usize) -> bool {
+    if candidates.len() < limit {
+        candidates.insert(name);
+        return false;
+    }
+    let Some(last) = candidates.last().cloned() else {
+        return false;
+    };
+    if name < last {
+        candidates.remove(&last);
+        candidates.insert(name);
+    }
+    true
+}
+
+fn reconcile_intent_evidence_quarantines(dir: &Path, intent_name: &str) -> Result<(), String> {
+    let mut newest = None;
+    for entry in std::fs::read_dir(dir)
+        .map_err(|error| format!("Failed to scan recording deletion evidence: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("Failed to inspect recording deletion evidence: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if generic_delete_quarantine(&name).map(|(artifact, _)| artifact) != Some(intent_name) {
+            continue;
+        }
+        let file = recording::open_regular_artifact(dir, &name)?;
+        let modified = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| format!("Failed to inspect recording deletion evidence: {error}"))?;
+        if newest.as_ref().is_none_or(
+            |(current, current_modified): &(String, std::time::SystemTime)| {
+                modified > *current_modified || (modified == *current_modified && name > *current)
+            },
+        ) {
+            newest = Some((name, modified));
+        }
+    }
+    let Some((newest, _)) = newest else {
+        return Ok(());
+    };
+    if !physical_entry_exists(dir, intent_name)? {
+        let artifact = recording::verified_regular_artifact(dir, &newest)?;
+        recording::restore_verified_quarantined_artifact(&artifact, &dir.join(intent_name))?;
+        return reconcile_intent_evidence_quarantines(dir, intent_name);
+    }
+    for entry in std::fs::read_dir(dir)
+        .map_err(|error| format!("Failed to scan recording deletion evidence: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("Failed to inspect recording deletion evidence: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if generic_delete_quarantine(&name).map(|(artifact, _)| artifact) == Some(intent_name) {
+            let artifact = recording::verified_regular_artifact(dir, &name)?;
+            recording::remove_verified_quarantined_artifact(&artifact)?;
+        }
+    }
+    Ok(())
 }
 
 fn private_deletion_leftover_is_old(dir: &Path, name: &str) -> Result<bool, String> {
@@ -1148,20 +1295,21 @@ fn list_recoverable_live_sessions_from_scan(
     Ok(sessions)
 }
 
-fn damaged_commit_warnings(
-    scan: &recording::RecordingScan,
-    mut warnings: Vec<String>,
-) -> Vec<String> {
+fn damaged_commit_warnings(scan: &recording::RecordingScan, warnings: Vec<String>) -> Vec<String> {
+    let mut prioritized = Vec::new();
     for damaged in &scan.damaged {
         push_maintenance_warning(
-            &mut warnings,
+            &mut prioritized,
             format!(
                 "Damaged live recording {} was preserved: {}",
                 damaged.session_id, damaged.reason
             ),
         );
     }
-    warnings
+    for warning in warnings {
+        push_maintenance_warning(&mut prioritized, warning);
+    }
+    prioritized
 }
 
 fn recoverable_session_from_dir(
@@ -3020,6 +3168,91 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_collects_old_generic_artifact_quarantines_and_retains_invalid_evidence() {
+        let dir = test_dir("generic-private-deletion-leftovers");
+        let stale = [
+            ".live-s-generic-cleanup.wav.delete-999999-0",
+            ".live-s-generic-cleanup.capture.json.delete-999999-1",
+            ".live-s-generic-cleanup.txt.delete-999999-2",
+            ".live-s-generic-cleanup.transcript.r1.json.delete-999999-3",
+            ".live-s-generic-cleanup.commit.json.delete-999999-4",
+            ".live-s-generic-cleanup.capture.journal.part.delete-999999-5",
+            ".live-s-generic-cleanup.deletion.v1.json.delete-999999-6",
+        ];
+        for name in stale {
+            let path = dir.join(name);
+            std::fs::write(&path, b"leftover").unwrap();
+            set_old_modified_time(&path);
+        }
+        let nested = dir.join("..live-s-generic-cleanup.wav.delete-999999-0.delete-999999-7");
+        let malformed = dir.join(".live-s-generic-cleanup.wav.delete-999999-extra-8");
+        let active = dir.join(format!(
+            ".live-s-generic-cleanup.wav.delete-{}-9",
+            std::process::id()
+        ));
+        let recent = dir.join(".live-s-generic-cleanup.capture.json.delete-999999-10");
+        let nonregular = dir.join(".live-s-generic-cleanup.txt.delete-999999-11");
+        for path in [&nested, &malformed] {
+            std::fs::write(path, b"evidence").unwrap();
+            set_old_modified_time(path);
+        }
+        std::fs::write(&active, b"active evidence").unwrap();
+        set_old_modified_time(&active);
+        std::fs::write(&recent, b"recent evidence").unwrap();
+        std::fs::create_dir(&nonregular).unwrap();
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        for name in stale {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        assert!(nested.is_file());
+        assert!(malformed.is_file());
+        assert!(active.is_file());
+        assert!(recent.is_file());
+        assert!(nonregular.is_dir());
+        assert!(catalog
+            .maintenance_warnings
+            .iter()
+            .any(|warning| warning.contains("Unknown private deletion artifact")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn private_cleanup_filters_before_its_budget_and_progresses_across_batches() {
+        let dir = test_dir("private-deletion-cleanup-budget");
+        for index in 0..256 {
+            std::fs::write(dir.join(format!("unrelated-{index:03}.tmp")), b"keep").unwrap();
+        }
+        let leftovers = (1..=129)
+            .map(|revision| {
+                format!(
+                    ".live-s-cleanup-budget.transcript.r{revision}.json.delete-999999-{revision}"
+                )
+            })
+            .collect::<Vec<_>>();
+        for name in &leftovers {
+            let path = dir.join(name);
+            std::fs::write(&path, b"leftover").unwrap();
+            set_old_modified_time(&path);
+        }
+
+        list_session_catalog_from_dir(&dir).unwrap();
+        assert_eq!(
+            leftovers
+                .iter()
+                .filter(|name| dir.join(name).exists())
+                .count(),
+            1
+        );
+        assert!(dir.join("unrelated-000.tmp").is_file());
+
+        list_session_catalog_from_dir(&dir).unwrap();
+        assert!(leftovers.iter().all(|name| !dir.join(name).exists()));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn corrupt_intent_retries_remove_each_verified_quarantine() {
         let dir = test_dir("corrupt-intent-retry-cleanup");
         let session = SessionId::new("s-corrupt-intent-retry-cleanup").unwrap();
@@ -3046,6 +3279,95 @@ mod tests {
                     .contains("deletion.v1.json.delete-")));
             std::fs::remove_file(&intent_path).unwrap();
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn repeated_post_publication_failures_keep_one_intent_evidence_quarantine() {
+        let dir = test_dir("corrupt-intent-post-publication-retries");
+        let session = SessionId::new("s-corrupt-intent-post-publication-retries").unwrap();
+        let mut capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+        capture.append_pcm16(&[1, 0]).unwrap();
+        capture.finalize().unwrap();
+        let committed = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &committed, "manual").unwrap();
+        let intent_path = dir.join(deletion_intent_name(&session));
+
+        for _ in 0..3 {
+            std::fs::write(&intent_path, b"{corrupt").unwrap();
+            let replacement = intent_path.clone();
+            assert!(write_deletion_intent_with_publication_barrier(
+                &intent_path,
+                &intent,
+                move |published| {
+                    if published {
+                        std::fs::remove_file(&replacement).unwrap();
+                        std::fs::write(&replacement, b"replacement intent").unwrap();
+                    }
+                }
+            )
+            .is_err());
+            assert_eq!(
+                std::fs::read_dir(&dir)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .contains("deletion.v1.json.delete-")
+                    })
+                    .count(),
+                1
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn missing_intent_restores_the_newest_verified_quarantine_before_replacement() {
+        let dir = test_dir("missing-intent-quarantine-recovery");
+        let session = SessionId::new("s-missing-intent-quarantine-recovery").unwrap();
+        let intent_name = deletion_intent_name(&session);
+        let older = format!(".{intent_name}.delete-999999-1");
+        let newer = format!(".{intent_name}.delete-999999-2");
+        std::fs::write(dir.join(&older), b"{older").unwrap();
+        std::fs::write(dir.join(&newer), b"{newer").unwrap();
+        set_old_modified_time(&dir.join(&older));
+        set_old_modified_time(&dir.join(&newer));
+
+        reconcile_intent_evidence_quarantines(&dir, &intent_name).unwrap();
+
+        assert_eq!(std::fs::read(dir.join(&intent_name)).unwrap(), b"{newer");
+        assert!(!dir.join(&older).exists());
+        assert!(!dir.join(&newer).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn damaged_commit_warnings_take_priority_when_maintenance_warning_cap_is_full() {
+        let dir = test_dir("damaged-warning-priority");
+        let session = SessionId::new("s-damaged-warning-priority").unwrap();
+        let mut capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+        capture.append_pcm16(&[1, 0]).unwrap();
+        capture.finalize().unwrap();
+        std::fs::write(dir.join(format!("live-{session}.commit.json")), b"{damaged").unwrap();
+        for index in 0..MAX_MAINTENANCE_WARNINGS {
+            std::fs::write(
+                dir.join(format!(".live-s-warning-{index}.deletion.v1.invalid.part")),
+                b"evidence",
+            )
+            .unwrap();
+        }
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        assert_eq!(catalog.maintenance_warnings.len(), MAX_MAINTENANCE_WARNINGS);
+        assert!(catalog.maintenance_warnings[0].contains("Damaged live recording"));
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -971,3 +971,10 @@ git commit -m "Verify the client audio foundation"
 - [x] Bound private deletion staging and quarantine reconciliation to the strict app-owned grammar and fixed scan budget. Only old foreign-process regular artifacts are collected with no-follow and identity-aware removal; active, too-new, malformed, unknown, and reparse entries remain untouched with bounded warnings.
 - [x] Stage a replacement deletion intent before quarantining a corrupt final. After publish and verification, remove the exact quarantined artifact with receipt hash and identity checks; failed publication restores verified evidence when possible or retains it for catalog evidence.
 - [x] Remove receipt-handle-count instrumentation. Filesystem behavior tests prove receipt-created transcript and sidecar paths can be moved/replaced and that receipt revalidation fails closed afterward.
+
+### Final Bounded Cleanup-Lifecycle Review (2026-07-11)
+
+- [x] Recognize only strict app-owned private deletion forms. Generic delete quarantines use `.<exact-yap-artifact>.delete-<pid>-<nonce>` and recover the exact session-bearing audio, sidecar, transcript, commit, journal, or intent basename; nested, malformed, active, too-new, nonregular, reparse, and unknown entries remain evidence.
+- [x] Reconciliation filters to old foreign regular candidates before a deterministic bounded selection. It scans past unrelated files without building an unbounded entry list and continues in later catalog passes when more than one batch is present.
+- [x] Before replacing a corrupt intent, reconcile verified strict intent quarantines: restore the newest evidence if the final is missing, or safely retire superseded evidence when the final exists. A failed replacement/retry sequence retains no growing collection of verified intent quarantines.
+- [x] Compose catalog maintenance warnings with damaged committed-session evidence first, then bounded pending and stale-cleanup warnings. The serialized one-toast contract remains unchanged.

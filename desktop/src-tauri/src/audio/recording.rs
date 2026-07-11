@@ -2519,6 +2519,20 @@ pub(crate) fn quarantine_regular_artifact(
     })
 }
 
+pub(crate) fn verified_regular_artifact(
+    directory: &Path,
+    name: &str,
+) -> Result<QuarantinedArtifact, String> {
+    let mut owned = open_regular_artifact(directory, name)?;
+    let sha256 = sha256_open_file(&mut owned)?;
+    let identity = file_identity(&owned)?;
+    Ok(QuarantinedArtifact {
+        path: directory.join(name),
+        sha256,
+        identity,
+    })
+}
+
 pub(crate) fn remove_verified_quarantined_artifact(
     artifact: &QuarantinedArtifact,
 ) -> Result<(), String> {
