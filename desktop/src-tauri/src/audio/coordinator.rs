@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc, Arc, Mutex,
@@ -10,7 +11,7 @@ use crate::audio::preprocess::{downmix_to_mono, rms_level, AudioLevelNormalizer,
 use crate::audio::session::{SessionId, TrackId};
 use crate::audio::timeline::{
     ClockMappingRevision, LossAccumulator, RecordingInput, RecordingRevisionTransition, Timeline,
-    TimelineEvent, TryDrain,
+    TryDrain,
 };
 
 pub const RECORDING_QUEUE_CAPACITY: usize = 128;
@@ -42,6 +43,34 @@ pub enum SinkSendError {
     Closed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SinkGatePhase {
+    Accepting,
+    Completing,
+    Published,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SinkDegradeResult {
+    Accepted,
+    CompletionInProgress,
+    Published,
+}
+
+struct SinkCompletionGate {
+    phase: SinkGatePhase,
+    degradation: Option<String>,
+}
+
+impl Default for SinkCompletionGate {
+    fn default() -> Self {
+        Self {
+            phase: SinkGatePhase::Accepting,
+            degradation: None,
+        }
+    }
+}
+
 struct BoundedSinkState<T> {
     sender: Mutex<Option<mpsc::SyncSender<T>>>,
     queue_capacity: usize,
@@ -52,11 +81,13 @@ struct BoundedSinkState<T> {
     high_water_mark: AtomicUsize,
     closed: AtomicBool,
     close_count: AtomicUsize,
-    error: Mutex<Option<String>>,
+    completion: Mutex<SinkCompletionGate>,
     #[cfg(test)]
     after_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     after_receive_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    before_completion_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Clone)]
@@ -89,11 +120,13 @@ pub fn bounded_sink<T>(kind: SinkKind, capacity: usize) -> (BoundedSink<T>, Boun
         high_water_mark: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
         close_count: AtomicUsize::new(0),
-        error: Mutex::new(None),
+        completion: Mutex::new(SinkCompletionGate::default()),
         #[cfg(test)]
         after_publish_hook: Mutex::new(None),
         #[cfg(test)]
         after_receive_hook: Mutex::new(None),
+        #[cfg(test)]
+        before_completion_hook: Mutex::new(None),
     });
     (
         BoundedSink {
@@ -106,23 +139,32 @@ pub fn bounded_sink<T>(kind: SinkKind, capacity: usize) -> (BoundedSink<T>, Boun
 
 impl<T> BoundedSink<T> {
     pub fn try_send(&self, frame: T) -> Result<(), SinkSendError> {
+        let mut completion = self
+            .state
+            .completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if completion.phase != SinkGatePhase::Accepting {
+            self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
+            return Err(SinkSendError::Closed);
+        }
         let sender = match self.state.sender.lock() {
             Ok(sender) => sender,
             Err(_) => {
-                self.record_drop("sink state became unavailable");
+                self.record_drop_locked(&mut completion, "sink state became unavailable");
                 return Err(SinkSendError::Closed);
             }
         };
         let Some(sender) = sender.as_ref() else {
-            self.record_drop("sink closed");
+            self.record_drop_locked(&mut completion, "sink closed");
             return Err(SinkSendError::Closed);
         };
         if self.state.closed.load(Ordering::Acquire) {
-            self.record_drop("sink closed");
+            self.record_drop_locked(&mut completion, "sink closed");
             return Err(SinkSendError::Closed);
         }
         let Some(reserved_queued) = self.reserve_queue_slot() else {
-            self.record_drop("sink queue is full");
+            self.record_drop_locked(&mut completion, "sink queue is full");
             return Err(SinkSendError::Full);
         };
         match sender.try_send(frame) {
@@ -136,14 +178,14 @@ impl<T> BoundedSink<T> {
             }
             Err(mpsc::TrySendError::Full(_)) => {
                 self.rollback_reservation();
-                self.record_drop("sink queue is full");
+                self.record_drop_locked(&mut completion, "sink queue is full");
                 Err(SinkSendError::Full)
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 self.state.queued_frames.store(0, Ordering::Release);
                 self.state.published_frames.store(0, Ordering::Release);
                 self.state.closed.store(true, Ordering::Release);
-                self.record_drop("sink receiver disconnected");
+                self.record_drop_locked(&mut completion, "sink receiver disconnected");
                 Err(SinkSendError::Closed)
             }
         }
@@ -165,19 +207,59 @@ impl<T> BoundedSink<T> {
         self.close();
     }
 
-    pub(crate) fn degrade(&self, error: &str) {
-        if let Ok(mut current) = self.state.error.lock() {
-            current.get_or_insert_with(|| error.to_string());
+    pub(crate) fn degrade(&self, error: &str) -> SinkDegradeResult {
+        let mut completion = self
+            .state
+            .completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match completion.phase {
+            SinkGatePhase::Accepting => {
+                completion
+                    .degradation
+                    .get_or_insert_with(|| error.to_string());
+                SinkDegradeResult::Accepted
+            }
+            SinkGatePhase::Completing => SinkDegradeResult::CompletionInProgress,
+            SinkGatePhase::Published => SinkDegradeResult::Published,
         }
     }
 
+    pub(crate) fn begin_completion(&self) -> Option<String> {
+        #[cfg(test)]
+        self.run_before_completion_hook_for_test();
+        let mut completion = self
+            .state
+            .completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert_eq!(completion.phase, SinkGatePhase::Accepting);
+        completion.phase = SinkGatePhase::Completing;
+        completion.degradation.clone()
+    }
+
+    pub(crate) fn mark_published(&self) {
+        self.state
+            .completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .phase = SinkGatePhase::Published;
+    }
+
     pub fn outcome(&self) -> SinkOutcome {
+        let error = self
+            .state
+            .completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .degradation
+            .clone();
         SinkOutcome {
             kind: self.kind,
             accepted_frames: self.state.accepted_frames.load(Ordering::Acquire),
             dropped_frames: self.state.dropped_frames.load(Ordering::Acquire),
             closed: self.state.closed.load(Ordering::Acquire),
-            error: self.state.error.lock().ok().and_then(|error| error.clone()),
+            error,
         }
     }
 
@@ -192,6 +274,11 @@ impl<T> BoundedSink<T> {
     #[cfg(test)]
     fn set_after_publish_hook_for_test(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.state.after_publish_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_completion_hook_for_test(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.state.before_completion_hook.lock().unwrap() = Some(hook);
     }
 
     #[cfg(test)]
@@ -234,9 +321,20 @@ impl<T> BoundedSink<T> {
         }
     }
 
-    fn record_drop(&self, error: &str) {
+    #[cfg(test)]
+    fn run_before_completion_hook_for_test(&self) {
+        if let Some(hook) = self.state.before_completion_hook.lock().unwrap().as_ref() {
+            hook();
+        }
+    }
+
+    fn record_drop_locked(&self, completion: &mut SinkCompletionGate, error: &str) {
         self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
-        self.degrade(error);
+        if completion.phase == SinkGatePhase::Accepting {
+            completion
+                .degradation
+                .get_or_insert_with(|| error.to_string());
+        }
     }
 
     fn observe_high_water_mark(&self, queued: usize) {
@@ -344,6 +442,7 @@ impl<T> Drop for BoundedReceiver<T> {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevisionEvent {
     TrackConfigured(u32),
@@ -355,24 +454,25 @@ pub enum RevisionEvent {
 }
 
 const PENDING_LOSS_CAPACITY: usize = 64;
+const LOSS_DRAIN_ATTEMPT_LIMIT: usize = PENDING_LOSS_CAPACITY;
 
 struct PendingLosses {
-    snapshots: Vec<crate::audio::timeline::LossSnapshot>,
+    snapshots: VecDeque<crate::audio::timeline::LossSnapshot>,
 }
 
 impl PendingLosses {
     fn new() -> Self {
         Self {
-            snapshots: Vec::with_capacity(PENDING_LOSS_CAPACITY),
+            snapshots: VecDeque::with_capacity(PENDING_LOSS_CAPACITY),
         }
     }
 
     fn push(&mut self, loss: crate::audio::timeline::LossSnapshot) -> bool {
         if self.snapshots.len() < PENDING_LOSS_CAPACITY {
-            self.snapshots.push(loss);
+            self.snapshots.push_back(loss);
             return true;
         }
-        let Some(previous) = self.snapshots.last_mut() else {
+        let Some(previous) = self.snapshots.back_mut() else {
             return false;
         };
         let Some(previous_end) = previous
@@ -395,8 +495,12 @@ impl PendingLosses {
         true
     }
 
-    fn drain_into(&mut self, drained: &mut Vec<crate::audio::timeline::LossSnapshot>) {
-        drained.append(&mut self.snapshots);
+    fn front(&self) -> Option<&crate::audio::timeline::LossSnapshot> {
+        self.snapshots.front()
+    }
+
+    fn pop_front(&mut self) -> Option<crate::audio::timeline::LossSnapshot> {
+        self.snapshots.pop_front()
     }
 
     fn is_empty(&self) -> bool {
@@ -424,6 +528,7 @@ pub struct Coordinator {
     resampler: Option<LinearResampler>,
     level_normalizer: AudioLevelNormalizer,
     pending_losses: PendingLosses,
+    #[cfg(test)]
     revision_events: Vec<RevisionEvent>,
     #[cfg(test)]
     loss_pending_hook: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -442,6 +547,7 @@ impl Coordinator {
             resampler: None,
             level_normalizer: AudioLevelNormalizer::new(),
             pending_losses: PendingLosses::new(),
+            #[cfg(test)]
             revision_events: Vec::new(),
             #[cfg(test)]
             loss_pending_hook: None,
@@ -453,27 +559,33 @@ impl Coordinator {
         packet: &CapturePacket,
         losses: &LossAccumulator,
     ) -> Result<f32, String> {
-        let pending_losses = self.drain_losses(losses).inspect_err(|error| {
+        let result = self.consume_inner(packet, losses);
+        if let Err(error) = &result {
             self.ports.recording.degrade(error);
-        })?;
+        }
+        result
+    }
+
+    fn consume_inner(
+        &mut self,
+        packet: &CapturePacket,
+        losses: &LossAccumulator,
+    ) -> Result<f32, String> {
+        self.drain_losses(losses)?;
         if self.capture_config.is_none() {
-            let first_source_position_frames = pending_losses
-                .first()
+            let first_source_position_frames = self
+                .pending_losses
+                .front()
                 .map_or(packet.source_position_frames, |loss| {
                     loss.first_source_position_frames
                 });
-            if let Err(error) = self.ensure_configuration(packet, first_source_position_frames, 0) {
-                if !pending_losses.is_empty() {
-                    self.ports.recording.degrade(&error);
-                }
-                return Err(error);
-            }
-            for loss in pending_losses {
+            self.ensure_configuration(packet, first_source_position_frames, 0)?;
+            while let Some(loss) = self.pending_losses.pop_front() {
                 self.apply_loss(loss)?;
             }
         } else {
-            for loss in &pending_losses {
-                self.apply_loss(*loss)?;
+            while let Some(loss) = self.pending_losses.pop_front() {
+                self.apply_loss(loss)?;
             }
             self.ensure_configuration(
                 packet,
@@ -540,16 +652,35 @@ impl Coordinator {
     }
 
     pub fn poll_losses(&mut self, losses: &LossAccumulator) -> Result<(), String> {
-        let drained = self.drain_losses(losses).inspect_err(|error| {
+        let result = self.poll_losses_inner(losses);
+        if let Err(error) = &result {
             self.ports.recording.degrade(error);
-        })?;
-        for loss in drained {
-            self.consume_loss(loss)?;
+        }
+        result
+    }
+
+    fn poll_losses_inner(&mut self, losses: &LossAccumulator) -> Result<(), String> {
+        self.drain_losses(losses)?;
+        if self.capture_config.is_some() {
+            while let Some(loss) = self.pending_losses.pop_front() {
+                self.apply_loss(loss)?;
+            }
         }
         Ok(())
     }
 
     pub fn consume_loss(
+        &mut self,
+        loss: crate::audio::timeline::LossSnapshot,
+    ) -> Result<(), String> {
+        let result = self.consume_loss_inner(loss);
+        if let Err(error) = &result {
+            self.ports.recording.degrade(error);
+        }
+        result
+    }
+
+    fn consume_loss_inner(
         &mut self,
         loss: crate::audio::timeline::LossSnapshot,
     ) -> Result<(), String> {
@@ -565,19 +696,14 @@ impl Coordinator {
     }
 
     fn apply_loss(&mut self, loss: crate::audio::timeline::LossSnapshot) -> Result<(), String> {
-        let gap = self.timeline.gap(&self.track_id, loss).map_err(|error| {
-            let error = format!("Capture timeline gap failed: {error}");
-            self.ports.recording.degrade(&error);
-            error
-        })?;
+        let gap = self
+            .timeline
+            .gap(&self.track_id, loss)
+            .map_err(|error| format!("Capture timeline gap failed: {error}"))?;
         self.last_session_end_ms = gap
             .start_ms
             .checked_add(u64::from(gap.duration_ms))
-            .ok_or_else(|| {
-                let error = "Capture timeline gap overflowed.".to_string();
-                self.ports.recording.degrade(&error);
-                error
-            })?;
+            .ok_or_else(|| "Capture timeline gap overflowed.".to_string())?;
         let _ = self.ports.recording.try_send(RecordingInput::Gap(gap));
         Ok(())
     }
@@ -621,6 +747,10 @@ impl Coordinator {
         }
     }
 
+    pub(crate) fn degrade_recording(&self, error: &str) {
+        self.ports.recording.degrade(error);
+    }
+
     pub fn outcomes(&self) -> Vec<SinkOutcome> {
         [
             SinkKind::Recording,
@@ -647,10 +777,7 @@ impl Coordinator {
         }
     }
 
-    pub fn timeline_events(&self) -> &[TimelineEvent] {
-        self.timeline.events()
-    }
-
+    #[cfg(test)]
     pub fn revision_events(&self) -> &[RevisionEvent] {
         &self.revision_events
     }
@@ -669,15 +796,16 @@ impl Coordinator {
         }
     }
 
-    fn drain_losses(
-        &mut self,
-        losses: &LossAccumulator,
-    ) -> Result<Vec<crate::audio::timeline::LossSnapshot>, String> {
-        let mut drained = Vec::with_capacity(PENDING_LOSS_CAPACITY * 2);
-        self.pending_losses.drain_into(&mut drained);
-        loop {
+    fn drain_losses(&mut self, losses: &LossAccumulator) -> Result<(), String> {
+        for _ in 0..LOSS_DRAIN_ATTEMPT_LIMIT {
             match losses.try_drain() {
-                Ok(TryDrain::Snapshot(loss)) => drained.push(loss),
+                Ok(TryDrain::Snapshot(loss)) => {
+                    if !self.pending_losses.push(loss) {
+                        self.ports
+                            .recording
+                            .degrade("recording pending-loss capacity exhausted");
+                    }
+                }
                 Ok(TryDrain::Pending) => {
                     #[cfg(test)]
                     if let Some(hook) = self.loss_pending_hook.take() {
@@ -685,10 +813,11 @@ impl Coordinator {
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Ok(TryDrain::Empty) => return Ok(drained),
+                Ok(TryDrain::Empty) => return Ok(()),
                 Err(error) => return Err(format!("Capture loss timing failed: {error}")),
             }
         }
+        Err("Capture loss drain did not quiesce.".into())
     }
 
     fn ensure_configuration(
@@ -739,15 +868,19 @@ impl Coordinator {
             .ports
             .recording
             .try_send(RecordingInput::RevisionTransition(recording_transition));
-        self.revision_events
-            .push(RevisionEvent::TrackConfigured(self.track_revision));
-        self.revision_events
-            .push(RevisionEvent::ClockMapped(self.clock_revision));
+        #[cfg(test)]
+        {
+            self.revision_events
+                .push(RevisionEvent::TrackConfigured(self.track_revision));
+            self.revision_events
+                .push(RevisionEvent::ClockMapped(self.clock_revision));
+        }
         self.capture_config = Some(configuration);
         self.resampler = Some(LinearResampler::new(
             packet.sample_rate_hz,
             TARGET_SAMPLE_RATE_HZ,
         ));
+        #[cfg(test)]
         self.revision_events.push(RevisionEvent::ResamplerReset {
             track_revision: self.track_revision,
             clock_revision: self.clock_revision,
@@ -771,7 +904,7 @@ mod tests {
     use crate::audio::frame::{GapCause, PreparedFrame};
     use crate::audio::recording::{CaptureStatus, RecordingSinkHandle};
     use crate::audio::session::{SessionId, TrackId};
-    use crate::audio::timeline::{LossAccumulator, LossSnapshot, RecordingInput, TimelineEvent};
+    use crate::audio::timeline::{LossAccumulator, LossSnapshot, RecordingInput};
 
     use super::{
         bounded_sink, Coordinator, CoordinatorPorts, RevisionEvent, SinkKind,
@@ -829,6 +962,69 @@ mod tests {
                 RecordingInput::RevisionTransition(_) | RecordingInput::Gap(_) => {}
             }
         }
+    }
+
+    fn recv_recording_gap(
+        receiver: &super::BoundedReceiver<RecordingInput>,
+    ) -> crate::audio::frame::AudioGap {
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
+                RecordingInput::Gap(gap) => return gap,
+                RecordingInput::RevisionTransition(_) | RecordingInput::PreparedFrame(_) => {}
+            }
+        }
+    }
+
+    fn recv_recording_inputs(
+        receiver: &super::BoundedReceiver<RecordingInput>,
+        count: usize,
+    ) -> Vec<RecordingInput> {
+        (0..count)
+            .map(|_| receiver.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect()
+    }
+
+    fn persistent_coordinator(
+        label: &str,
+    ) -> (std::path::PathBuf, Coordinator, RecordingSinkHandle) {
+        let directory = std::env::temp_dir().join(format!("yap-{label}-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = SessionId::new(label).unwrap();
+        let (ports, recording_rx, _) = ports(RECORDING_QUEUE_CAPACITY, None);
+        let recording = RecordingSinkHandle::spawn(
+            directory.clone(),
+            session.clone(),
+            ports.recording.clone(),
+            recording_rx,
+        );
+        (
+            directory,
+            Coordinator::new(session, track(), ports),
+            recording,
+        )
+    }
+
+    fn assert_rejection_is_recording_terminal(
+        directory: std::path::PathBuf,
+        mut coordinator: Coordinator,
+        recording: RecordingSinkHandle,
+        rejection: String,
+        expected: &str,
+    ) {
+        let degradation = coordinator.outcome(SinkKind::Recording).unwrap().error;
+        coordinator.close();
+        let result = recording.finalize().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+
+        assert_eq!(rejection, expected);
+        assert_eq!(degradation.as_deref(), Some(expected));
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+    }
+
+    fn retained_timeline_metadata(coordinator: &Coordinator) -> usize {
+        coordinator.timeline.retained_metadata_count()
     }
 
     #[test]
@@ -1087,9 +1283,10 @@ mod tests {
 
         coordinator.consume(&packet(480), &losses).unwrap();
 
+        let gap = recv_recording_gap(&recording_rx);
         let frame = recv_recording_frame(&recording_rx);
         assert_eq!(frame.metadata.start_ms, 10);
-        assert!(coordinator.timeline_events().iter().any(|event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 0 && gap.duration_ms == 10)));
+        assert_eq!((gap.start_ms, gap.duration_ms), (0, 10));
     }
 
     #[test]
@@ -1101,11 +1298,99 @@ mod tests {
 
         coordinator.consume(&packet(1_480), &losses).unwrap();
 
+        let gap = recv_recording_gap(&recording_rx);
         let frame = recv_recording_frame(&recording_rx);
         assert_eq!(frame.metadata.start_ms, 10);
-        assert!(coordinator.timeline_events().iter().any(
-            |event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 0 && gap.duration_ms == 10 && gap.source_position_frames == 1_000)
-        ));
+        assert_eq!((gap.start_ms, gap.duration_ms), (0, 10));
+        assert_eq!(gap.source_position_frames, 1_000);
+    }
+
+    #[test]
+    fn configuration_rejection_without_pending_loss_degrades_recording() {
+        let (directory, mut coordinator, recording) =
+            persistent_coordinator("configuration-rejection-no-loss");
+        let rejection = coordinator
+            .consume(
+                &CapturePacket {
+                    sample_rate_hz: 0,
+                    ..packet(0)
+                },
+                &LossAccumulator::new(),
+            )
+            .unwrap_err();
+
+        assert_rejection_is_recording_terminal(
+            directory,
+            coordinator,
+            recording,
+            rejection,
+            "Invalid microphone configuration.",
+        );
+    }
+
+    #[test]
+    fn malformed_packet_rejection_degrades_recording() {
+        let (directory, mut coordinator, recording) =
+            persistent_coordinator("malformed-packet-rejection");
+        let rejection = coordinator
+            .consume(
+                &CapturePacket {
+                    source_position_frames: 0,
+                    channels: 2,
+                    sample_rate_hz: 48_000,
+                    samples: vec![0.0; 3],
+                },
+                &LossAccumulator::new(),
+            )
+            .unwrap_err();
+
+        assert_rejection_is_recording_terminal(
+            directory,
+            coordinator,
+            recording,
+            rejection,
+            "Invalid captured audio packet.",
+        );
+    }
+
+    #[test]
+    fn timeline_frame_rejection_degrades_recording() {
+        let (directory, mut coordinator, recording) =
+            persistent_coordinator("timeline-frame-rejection");
+        coordinator
+            .consume(&packet(0), &LossAccumulator::new())
+            .unwrap();
+        let rejection = coordinator
+            .consume(&packet(0), &LossAccumulator::new())
+            .unwrap_err();
+
+        assert_rejection_is_recording_terminal(
+            directory,
+            coordinator,
+            recording,
+            rejection,
+            "Capture timeline frame failed: InvalidTiming",
+        );
+    }
+
+    #[test]
+    fn timeline_frame_end_overflow_degrades_recording() {
+        let (directory, mut coordinator, recording) =
+            persistent_coordinator("timeline-frame-end-overflow");
+        coordinator
+            .ensure_configuration(&packet(0), 0, u64::MAX - 1)
+            .unwrap();
+        let rejection = coordinator
+            .consume(&packet(0), &LossAccumulator::new())
+            .unwrap_err();
+
+        assert_rejection_is_recording_terminal(
+            directory,
+            coordinator,
+            recording,
+            rejection,
+            "Capture timeline frame failed: InvalidTiming",
+        );
     }
 
     #[test]
@@ -1282,8 +1567,112 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_loss_drain_has_a_fixed_pending_retry_bound() {
+        let losses = Arc::new(LossAccumulator::new());
+        let registration_started = Arc::new(Barrier::new(2));
+        let release_registration = Arc::new(Barrier::new(2));
+        let loss_writer = {
+            let losses = Arc::clone(&losses);
+            let registration_started = Arc::clone(&registration_started);
+            let release_registration = Arc::clone(&release_registration);
+            std::thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    0,
+                    480,
+                    GapCause::SinkUnavailable,
+                    || {
+                        registration_started.wait();
+                        release_registration.wait();
+                    },
+                    || {},
+                );
+            })
+        };
+        registration_started.wait();
+        let (ports, _recording_rx, _) = ports(4, None);
+        let coordinator = Coordinator::new(session(), track(), ports);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let losses = Arc::clone(&losses);
+            std::thread::spawn(move || {
+                let mut coordinator = coordinator;
+                let result = coordinator.consume(&packet(480), &losses);
+                result_tx.send(result).unwrap();
+                coordinator
+            })
+        };
+
+        let observed = result_rx.recv_timeout(Duration::from_millis(250));
+        release_registration.wait();
+        loss_writer.join().unwrap();
+        let coordinator = worker.join().unwrap();
+
+        let error = observed
+            .expect("coordinator loss drain must stop at its retry bound")
+            .unwrap_err();
+        assert_eq!(error, "Capture loss drain did not quiesce.");
+        assert_eq!(
+            coordinator
+                .outcome(SinkKind::Recording)
+                .unwrap()
+                .error
+                .as_deref(),
+            Some(error.as_str())
+        );
+    }
+
+    #[test]
+    fn sustained_frames_stream_to_disk_with_constant_timeline_retention() {
+        const FRAME_COUNT: usize = 1_024;
+
+        let directory = std::env::temp_dir().join(format!(
+            "yap-constant-timeline-retention-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = SessionId::new("constant-timeline-retention").unwrap();
+        let (recording_sink, recording_rx) = bounded_sink(SinkKind::Recording, FRAME_COUNT + 2);
+        let recording = RecordingSinkHandle::spawn(
+            directory.clone(),
+            session.clone(),
+            recording_sink.clone(),
+            recording_rx,
+        );
+        let mut coordinator = Coordinator::new(
+            session.clone(),
+            track(),
+            CoordinatorPorts {
+                recording: recording_sink,
+                local_asr: None,
+                speaker_evidence: None,
+                server_transport: None,
+            },
+        );
+
+        for index in 0..FRAME_COUNT {
+            coordinator
+                .consume(&packet(index as u64 * 480), &LossAccumulator::new())
+                .unwrap();
+        }
+        let retained = retained_timeline_metadata(&coordinator);
+        let outcome = coordinator.outcome(SinkKind::Recording).unwrap();
+        coordinator.close();
+        let result = recording.finalize().unwrap();
+        let audio_bytes = std::fs::metadata(directory.join(format!("live-{session}.wav")))
+            .unwrap()
+            .len();
+        std::fs::remove_dir_all(directory).unwrap();
+
+        assert!(retained <= 1, "retained timeline metadata={retained}");
+        assert_eq!(outcome.dropped_frames, 0);
+        assert_eq!(result.status, CaptureStatus::Complete);
+        assert!(audio_bytes > 44);
+    }
+
+    #[test]
     fn losses_before_a_rate_change_use_the_old_clock_before_new_revisions() {
-        let (ports, _recording_rx, _) = ports(2, None);
+        let (ports, recording_rx, _) = ports(8, None);
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = LossAccumulator::new();
 
@@ -1299,29 +1688,24 @@ mod tests {
             )
             .unwrap();
 
-        let events = coordinator.timeline_events();
-        let gap_index = events
+        let inputs = recv_recording_inputs(&recording_rx, 5);
+        let gap_index = inputs
             .iter()
-            .position(|event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 10 && gap.duration_ms == 10))
+            .position(|input| matches!(input, RecordingInput::Gap(gap) if gap.start_ms == 10 && gap.duration_ms == 10))
             .unwrap();
-        let new_configuration_index = events
+        let new_revision_index = inputs
             .iter()
-            .position(|event| matches!(event, TimelineEvent::TrackConfigured(configuration) if configuration.revision == 2 && configuration.effective_at_ms == 20 && configuration.sample_rate_hz == 44_100))
+            .position(|input| matches!(input, RecordingInput::RevisionTransition(transition) if transition.configuration.revision == 2 && transition.configuration.effective_at_ms == 20 && transition.configuration.sample_rate_hz == 44_100 && transition.clock_mapping.source_position_frames == 960 && transition.clock_mapping.session_time_ms == 20))
             .unwrap();
-        let new_clock_index = events
-            .iter()
-            .position(|event| matches!(event, TimelineEvent::ClockMapped(clock) if clock.revision == 2 && clock.source_position_frames == 960 && clock.session_time_ms == 20))
-            .unwrap();
-        assert!(gap_index < new_configuration_index);
-        assert!(new_configuration_index < new_clock_index);
-        assert!(events.iter().any(
-            |event| matches!(event, TimelineEvent::Frame(frame) if frame.sequence == 1 && frame.start_ms == 20)
+        assert!(gap_index < new_revision_index);
+        assert!(inputs.iter().any(
+            |input| matches!(input, RecordingInput::PreparedFrame(frame) if frame.metadata.sequence == 1 && frame.metadata.start_ms == 20)
         ));
     }
 
     #[test]
     fn pending_loss_registration_blocks_rate_change_until_the_old_clock_applies_it() {
-        let (ports, _recording_rx, _) = ports(2, None);
+        let (ports, recording_rx, _) = ports(8, None);
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = Arc::new(LossAccumulator::new());
         coordinator.consume(&packet(0), &losses).unwrap();
@@ -1371,16 +1755,16 @@ mod tests {
         });
         loss_writer.join().unwrap();
 
-        let events = coordinator.timeline_events();
-        let gap_index = events
+        let inputs = recv_recording_inputs(&recording_rx, 5);
+        let gap_index = inputs
             .iter()
-            .position(|event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 10 && gap.duration_ms == 10))
+            .position(|input| matches!(input, RecordingInput::Gap(gap) if gap.start_ms == 10 && gap.duration_ms == 10))
             .unwrap();
-        let new_configuration_index = events
+        let new_revision_index = inputs
             .iter()
-            .position(|event| matches!(event, TimelineEvent::TrackConfigured(configuration) if configuration.revision == 2))
+            .position(|input| matches!(input, RecordingInput::RevisionTransition(transition) if transition.configuration.revision == 2))
             .unwrap();
-        assert!(gap_index < new_configuration_index);
+        assert!(gap_index < new_revision_index);
     }
 
     #[test]

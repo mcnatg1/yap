@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
@@ -101,14 +102,6 @@ pub enum RecordingInput {
     Gap(AudioGap),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum TimelineEvent {
-    TrackConfigured(TrackConfigurationRevision),
-    ClockMapped(ClockMappingRevision),
-    Frame(AudioFrame),
-    Gap(AudioGap),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineError {
     InvalidRevision,
@@ -118,6 +111,7 @@ pub enum TimelineError {
     InvalidTiming,
     SequenceOverflow,
     GenerationRegression,
+    DrainIncomplete,
 }
 
 impl std::fmt::Display for TimelineError {
@@ -189,14 +183,13 @@ struct TrackTimeline {
     last_end_ms: Option<u64>,
     last_end_source_position_frames: Option<u64>,
     last_gap_generation: Option<u64>,
-    coalescible_gap_event_index: Option<usize>,
+    coalescible_gap: Option<AudioGap>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Timeline {
     session_id: SessionId,
     tracks: HashMap<TrackId, TrackTimeline>,
-    events: Vec<TimelineEvent>,
 }
 
 impl Timeline {
@@ -204,12 +197,12 @@ impl Timeline {
         Self {
             session_id,
             tracks: HashMap::new(),
-            events: Vec::new(),
         }
     }
 
-    pub fn events(&self) -> &[TimelineEvent] {
-        &self.events
+    #[cfg(test)]
+    pub(crate) fn retained_metadata_count(&self) -> usize {
+        self.tracks.len()
     }
 
     pub fn configure_track(
@@ -233,13 +226,11 @@ impl Timeline {
                 .as_ref()
                 .and_then(|state| state.last_end_source_position_frames),
             last_gap_generation: prior.and_then(|state| state.last_gap_generation),
-            coalescible_gap_event_index: None,
+            coalescible_gap: None,
             configuration: configuration.clone(),
             clock: None,
         };
         self.tracks.insert(track_id, track);
-        self.events
-            .push(TimelineEvent::TrackConfigured(configuration));
         Ok(())
     }
 
@@ -268,8 +259,7 @@ impl Timeline {
             mapping.clone(),
             state.configuration.sample_rate_hz,
         )?);
-        state.coalescible_gap_event_index = None;
-        self.events.push(TimelineEvent::ClockMapped(mapping));
+        state.coalescible_gap = None;
         Ok(())
     }
 
@@ -320,7 +310,7 @@ impl Timeline {
             .ok_or(TimelineError::SequenceOverflow)?;
         state.last_end_ms = Some(end_ms);
         state.last_end_source_position_frames = Some(end_source_position_frames);
-        state.coalescible_gap_event_index = None;
+        state.coalescible_gap = None;
 
         let frame = AudioFrame {
             session_id: self.session_id.clone(),
@@ -332,7 +322,6 @@ impl Timeline {
             duration_ms,
             sample_count,
         };
-        self.events.push(TimelineEvent::Frame(frame.clone()));
         Ok(frame)
     }
 
@@ -390,21 +379,15 @@ impl Timeline {
             cause: loss.cause,
             generation: loss.generation,
         };
-        let coalescible_index = state.coalescible_gap_event_index.filter(|index| {
-            matches!(
-                self.events.get(*index),
-                Some(TimelineEvent::Gap(previous)) if gaps_are_contiguous(previous, &gap)
-            )
-        });
-        let emitted = if let Some(index) = coalescible_index {
-            let Some(TimelineEvent::Gap(previous)) = self.events.get_mut(index) else {
-                unreachable!("coalescible gap index must reference a gap event");
-            };
+        let emitted = if let Some(previous) = state
+            .coalescible_gap
+            .as_mut()
+            .filter(|previous| gaps_are_contiguous(previous, &gap))
+        {
             merge_gap(previous, &gap)?;
             previous.clone()
         } else {
-            state.coalescible_gap_event_index = Some(self.events.len());
-            self.events.push(TimelineEvent::Gap(gap.clone()));
+            state.coalescible_gap = Some(gap.clone());
             gap
         };
         state.last_gap_generation = Some(loss.generation);
@@ -807,6 +790,7 @@ impl LossAccumulator {
         }
     }
 
+    #[cfg(test)]
     pub fn drain(&self) -> Result<Option<LossSnapshot>, TimelineError> {
         loop {
             match self.try_drain()? {
@@ -956,9 +940,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use super::{
-        ClockMappingRevision, LossAccumulator, LossSnapshot, Timeline, TimelineError, TimelineEvent,
-    };
+    use super::{ClockMappingRevision, LossAccumulator, LossSnapshot, Timeline, TimelineError};
     use crate::audio::frame::{AudioGap, GapCause, TrackConfigurationRevision};
     use crate::audio::session::{SessionId, TrackId};
 
@@ -1035,15 +1017,6 @@ mod tests {
         assert_eq!((first.start_ms, first.duration_ms), (250, 10));
         assert_eq!((second.start_ms, second.duration_ms), (260, 10));
         assert_eq!(first.end_ms(), second.start_ms);
-        assert!(matches!(
-            timeline.events()[0],
-            TimelineEvent::TrackConfigured(_)
-        ));
-        assert!(matches!(
-            timeline.events()[1],
-            TimelineEvent::ClockMapped(_)
-        ));
-        assert!(matches!(timeline.events()[2], TimelineEvent::Frame(_)));
     }
 
     #[test]
@@ -1142,14 +1115,6 @@ mod tests {
         assert_eq!(merged.dropped_frames, 480);
         assert_eq!(merged.duration_ms, 30);
         assert_eq!(merged.generation, 1);
-        assert_eq!(
-            timeline
-                .events()
-                .iter()
-                .filter(|event| matches!(event, TimelineEvent::Gap(_)))
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -1204,21 +1169,13 @@ mod tests {
 
         assert_eq!(merged.dropped_frames, 320);
         assert_eq!(merged.generation, 2);
-        assert_eq!(
-            timeline
-                .events()
-                .iter()
-                .filter(|event| matches!(event, TimelineEvent::Gap(gap) if gap.track_id == mic))
-                .count(),
-            1
-        );
     }
 
     #[test]
     fn same_track_configuration_breaks_gap_coalescing() {
         let track = track_id("mic-1");
         let mut timeline = configured_timeline(&track, 16_000);
-        timeline
+        let first = timeline
             .gap(
                 &track,
                 LossSnapshot {
@@ -1236,7 +1193,7 @@ mod tests {
             .map_clock(ClockMappingRevision::new(track.clone(), 2, 160, 10).unwrap())
             .unwrap();
 
-        timeline
+        let second = timeline
             .gap(
                 &track,
                 LossSnapshot {
@@ -1248,14 +1205,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            timeline
-                .events()
-                .iter()
-                .filter(|event| matches!(event, TimelineEvent::Gap(_)))
-                .count(),
-            2
-        );
+        assert_eq!(first.dropped_frames, 160);
+        assert_eq!(second.source_position_frames, 160);
+        assert_eq!(second.dropped_frames, 160);
     }
 
     #[test]
@@ -1294,7 +1246,7 @@ mod tests {
     fn non_contiguous_or_different_cause_gaps_do_not_coalesce() {
         let track = track_id("mic-1");
         let mut timeline = configured_timeline(&track, 16_000);
-        for snapshot in [
+        let gaps = [
             LossSnapshot {
                 first_source_position_frames: 0,
                 dropped_frames: 160,
@@ -1313,18 +1265,10 @@ mod tests {
                 cause: GapCause::OversizedCallback,
                 generation: 2,
             },
-        ] {
-            timeline.gap(&track, snapshot).unwrap();
-        }
-
-        let gaps = timeline
-            .events()
-            .iter()
-            .filter_map(|event| match event {
-                TimelineEvent::Gap(gap) => Some(gap),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        ]
+        .into_iter()
+        .map(|snapshot| timeline.gap(&track, snapshot).unwrap())
+        .collect::<Vec<_>>();
         assert_eq!(gaps.len(), 3);
         assert_eq!(gaps[0].dropped_frames, 160);
         assert_eq!(gaps[1].source_position_frames, 320);

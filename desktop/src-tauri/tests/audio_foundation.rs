@@ -10,7 +10,7 @@ use yap_desktop_lib::audio::coordinator::{
 use yap_desktop_lib::audio::frame::GapCause;
 use yap_desktop_lib::audio::recording::{scan_recordings, CaptureStatus, RecordingSinkHandle};
 use yap_desktop_lib::audio::session::{SessionId, TrackId};
-use yap_desktop_lib::audio::timeline::{LossSnapshot, RecordingInput, TimelineEvent};
+use yap_desktop_lib::audio::timeline::{LossSnapshot, RecordingInput};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -266,23 +266,6 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
     }
 
     assert_eq!(source_position, 16 + FOUR_HOURS_FRAMES);
-    let gaps = coordinator
-        .timeline_events()
-        .iter()
-        .filter_map(|event| match event {
-            TimelineEvent::Gap(gap) => Some(gap),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(gaps.len(), 1 + (LOSS_EVENTS - COALESCED_PREFIX) as usize);
-    assert_eq!(gaps[0].generation, COALESCED_PREFIX);
-    assert_eq!(gaps[0].dropped_frames, frames_per_loss * COALESCED_PREFIX);
-    assert!(gaps.windows(2).all(|pair| {
-        pair[0].generation < pair[1].generation
-            && pair[0].end_ms().unwrap() <= pair[1].start_ms
-            && pair[0].source_position_frames + pair[0].dropped_frames
-                <= pair[1].source_position_frames
-    }));
     let outcome = coordinator.outcome(SinkKind::Recording).unwrap();
     assert_eq!(outcome.dropped_frames, 0);
     assert_eq!(outcome.accepted_frames, LOSS_EVENTS + 2);
@@ -297,6 +280,12 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
             .unwrap()
             .len(),
         76
+    );
+    assert!(
+        fs::metadata(directory.join(format!("live-{session_id}.capture.journal.part")))
+            .unwrap()
+            .len()
+            <= 512 * 1024
     );
     let scan = scan_recordings(&directory).unwrap();
     assert!(scan.complete.is_empty());

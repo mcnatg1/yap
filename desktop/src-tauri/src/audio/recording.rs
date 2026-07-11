@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::{mpsc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 #[cfg(unix)]
@@ -19,13 +21,15 @@ use windows::Win32::Foundation::HANDLE;
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
 
-use crate::audio::coordinator::{BoundedReceiver, BoundedSink};
+use crate::audio::coordinator::{BoundedReceiver, BoundedSink, SinkDegradeResult};
 use crate::audio::frame::{AudioGap, GapCause, PreparedFrame, TrackConfigurationRevision};
 use crate::audio::preprocess::f32_to_i16_le_bytes;
 use crate::audio::session::{
     self, SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode,
 };
-use crate::audio::timeline::{ClockMappingRevision, RecordingInput, RecordingRevisionTransition};
+use crate::audio::timeline::{
+    ClockMappingRevision, RecordingInput, RecordingRevisionTransition, SessionClock,
+};
 
 const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const WAV_HEADER_BYTES: u64 = 44;
@@ -281,7 +285,6 @@ impl RecordingFinalizeResult {
 pub struct RecordingSinkHandle {
     sink: BoundedSink<RecordingInput>,
     session_id: SessionId,
-    terminal: Arc<Mutex<RecordingTerminalState>>,
     state: Mutex<RecordingSinkState>,
     completed: Condvar,
     #[cfg(test)]
@@ -292,27 +295,6 @@ struct RecordingSinkState {
     worker: Option<JoinHandle<RecordingFinalizeResult>>,
     result: Option<Result<RecordingFinalizeResult, String>>,
     finalizing: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecordingTerminalPhase {
-    Accepting,
-    Completing,
-    Published,
-}
-
-struct RecordingTerminalState {
-    phase: RecordingTerminalPhase,
-    degradation: Option<String>,
-}
-
-impl Default for RecordingTerminalState {
-    fn default() -> Self {
-        Self {
-            phase: RecordingTerminalPhase::Accepting,
-            degradation: None,
-        }
-    }
 }
 
 impl RecordingSinkHandle {
@@ -343,8 +325,6 @@ impl RecordingSinkHandle {
         reservation: Option<RecordingReservation>,
     ) -> Self {
         let worker_session_id = session_id.clone();
-        let terminal = Arc::new(Mutex::new(RecordingTerminalState::default()));
-        let worker_terminal = Arc::clone(&terminal);
         let worker_sink = sink.clone();
         let worker = std::thread::spawn(move || {
             run_recording_worker(
@@ -352,23 +332,20 @@ impl RecordingSinkHandle {
                 worker_session_id,
                 receiver,
                 reservation,
-                worker_terminal,
                 worker_sink,
             )
         });
-        Self::with_worker(sink, session_id, worker, terminal)
+        Self::with_worker(sink, session_id, worker)
     }
 
     fn with_worker(
         sink: BoundedSink<RecordingInput>,
         session_id: SessionId,
         worker: JoinHandle<RecordingFinalizeResult>,
-        terminal: Arc<Mutex<RecordingTerminalState>>,
     ) -> Self {
         Self {
             sink,
             session_id,
-            terminal,
             state: Mutex::new(RecordingSinkState {
                 worker: Some(worker),
                 result: None,
@@ -391,8 +368,6 @@ impl RecordingSinkHandle {
         journal_write_attempts: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         let worker_session_id = session_id.clone();
-        let terminal = Arc::new(Mutex::new(RecordingTerminalState::default()));
-        let worker_terminal = Arc::clone(&terminal);
         let worker_sink = sink.clone();
         let worker = std::thread::spawn(move || {
             let mut recording = match StreamingRecording::create_with_fault(
@@ -406,15 +381,9 @@ impl RecordingSinkHandle {
             recording.append_write_attempts = Some(append_write_attempts);
             recording.journal_write_attempts = Some(journal_write_attempts);
             recording.sync_interval_samples = 1;
-            drain_recording_worker(
-                recording,
-                worker_session_id,
-                receiver,
-                worker_terminal,
-                worker_sink,
-            )
+            drain_recording_worker(recording, worker_session_id, receiver, worker_sink)
         });
-        Self::with_worker(sink, session_id, worker, terminal)
+        Self::with_worker(sink, session_id, worker)
     }
 
     #[cfg(test)]
@@ -429,7 +398,6 @@ impl RecordingSinkHandle {
             std::thread::spawn(|| -> RecordingFinalizeResult {
                 panic!("injected recording worker panic")
             }),
-            Arc::new(Mutex::new(RecordingTerminalState::default())),
         )
     }
 
@@ -441,7 +409,6 @@ impl RecordingSinkHandle {
         Self {
             sink,
             session_id,
-            terminal: Arc::new(Mutex::new(RecordingTerminalState::default())),
             state: Mutex::new(RecordingSinkState {
                 worker: None,
                 result: None,
@@ -505,10 +472,7 @@ impl RecordingSinkHandle {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.terminal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .phase = RecordingTerminalPhase::Published;
+        self.sink.mark_published();
         state.finalizing = false;
         state.result = Some(result.clone());
         self.completed.notify_all();
@@ -516,24 +480,13 @@ impl RecordingSinkHandle {
     }
 
     pub fn abort(&self, reason: impl Into<String>) -> Result<RecordingFinalizeResult, String> {
-        let mut terminal = self
-            .terminal
-            .lock()
-            .map_err(|_| "recording abort state became unavailable")?;
-        match terminal.phase {
-            RecordingTerminalPhase::Accepting => {
-                terminal.degradation.get_or_insert_with(|| reason.into());
+        match self.sink.degrade(&reason.into()) {
+            SinkDegradeResult::Accepted => self.finalize(),
+            SinkDegradeResult::CompletionInProgress => {
+                Err("recording completion is already in progress".into())
             }
-            RecordingTerminalPhase::Completing => {
-                return Err("recording completion is already in progress".into());
-            }
-            RecordingTerminalPhase::Published => {
-                drop(terminal);
-                return self.finalize();
-            }
+            SinkDegradeResult::Published => self.finalize(),
         }
-        drop(terminal);
-        self.finalize()
     }
 }
 
@@ -542,7 +495,6 @@ fn run_recording_worker(
     session_id: SessionId,
     receiver: BoundedReceiver<RecordingInput>,
     reservation: Option<RecordingReservation>,
-    terminal: Arc<Mutex<RecordingTerminalState>>,
     sink: BoundedSink<RecordingInput>,
 ) -> RecordingFinalizeResult {
     let recording = match reservation {
@@ -553,7 +505,7 @@ fn run_recording_worker(
         Ok(recording) => recording,
         Err(error) => return worker_creation_failure(session_id, error),
     };
-    drain_recording_worker(recording, session_id, receiver, terminal, sink)
+    drain_recording_worker(recording, session_id, receiver, sink)
 }
 
 fn worker_creation_failure(session_id: SessionId, error: String) -> RecordingFinalizeResult {
@@ -571,7 +523,6 @@ fn drain_recording_worker(
     mut recording: StreamingRecording,
     session_id: SessionId,
     receiver: BoundedReceiver<RecordingInput>,
-    terminal: Arc<Mutex<RecordingTerminalState>>,
     sink: BoundedSink<RecordingInput>,
 ) -> RecordingFinalizeResult {
     let mut input_failed = false;
@@ -580,6 +531,7 @@ fn drain_recording_worker(
             Ok(input) => {
                 if !input_failed {
                     if let Err(error) = recording.append_input(input) {
+                        sink.degrade(&error);
                         recording.abort(error);
                         input_failed = true;
                     }
@@ -592,21 +544,9 @@ fn drain_recording_worker(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    let outcome = sink.outcome();
-    if outcome.dropped_frames > 0 || outcome.error.is_some() {
-        recording.abort(format!(
-            "recording sink degraded: {}",
-            outcome.error.unwrap_or_else(|| "input was dropped".into())
-        ));
-    }
-    let mut terminal = terminal
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(reason) = terminal.degradation.clone() {
+    if let Some(reason) = sink.begin_completion() {
         recording.abort(reason);
     }
-    terminal.phase = RecordingTerminalPhase::Completing;
-    drop(terminal);
     recording
         .finalize()
         .unwrap_or_else(|error| RecordingFinalizeResult {
@@ -665,6 +605,7 @@ impl CaptureSidecar {
         if let Some(metadata) = &self.session_metadata {
             validate_capture_metadata(metadata, &self.session_id)?;
         }
+        validate_audio_metadata_presence(self.audio_bytes, &self.tracks)?;
         validate_timeline_control_metadata(
             &self.session_id,
             &self.tracks,
@@ -682,6 +623,16 @@ impl CaptureSidecar {
         validate_artifact_name(&self.audio_file)?;
         validate_sha256(&self.audio_sha256)
     }
+}
+
+fn validate_audio_metadata_presence(
+    audio_bytes: u64,
+    tracks: &[JournalTrack],
+) -> Result<(), String> {
+    if audio_bytes > WAV_HEADER_BYTES && tracks.is_empty() {
+        return Err("nonempty recording audio has no frame metadata".into());
+    }
+    Ok(())
 }
 
 fn validate_timeline_control_metadata<'a>(
@@ -709,7 +660,7 @@ fn validate_timeline_control_metadata<'a>(
     }
 
     let mut configurations = BTreeMap::<String, (u32, u64)>::new();
-    let mut configuration_times = BTreeMap::<(String, u32), u64>::new();
+    let mut configuration_revisions = BTreeMap::<(String, u32), (u64, u32)>::new();
     for configuration in track_configurations {
         let track = configuration.track_id.as_str().to_string();
         if configuration.revision == 0 || configuration.sample_rate_hz == 0 {
@@ -726,21 +677,25 @@ fn validate_timeline_control_metadata<'a>(
             track.clone(),
             (configuration.revision, configuration.effective_at_ms),
         );
-        configuration_times.insert(
+        configuration_revisions.insert(
             (track, configuration.revision),
-            configuration.effective_at_ms,
+            (configuration.effective_at_ms, configuration.sample_rate_hz),
         );
     }
 
     let mut mappings = BTreeMap::<String, (u32, u64, u64)>::new();
+    let mut revision_clocks = BTreeMap::<String, Vec<(ClockMappingRevision, u32)>>::new();
     for mapping in clock_mappings {
         let track = mapping.track_id.as_str().to_string();
         if !configurations.contains_key(&track) || mapping.revision == 0 {
             return Err("recording clock mapping has no valid track configuration".into());
         }
-        if configuration_times.get(&(track.clone(), mapping.revision))
-            != Some(&mapping.session_time_ms)
-        {
+        let Some((effective_at_ms, sample_rate_hz)) =
+            configuration_revisions.get(&(track.clone(), mapping.revision))
+        else {
+            return Err("recording clock mapping has no matching configuration revision".into());
+        };
+        if *effective_at_ms != mapping.session_time_ms {
             return Err("recording revision transition timestamp does not match".into());
         }
         match mappings.get(&track) {
@@ -752,13 +707,17 @@ fn validate_timeline_control_metadata<'a>(
             _ => return Err("recording clock mapping revisions are not contiguous".into()),
         }
         mappings.insert(
-            track,
+            track.clone(),
             (
                 mapping.revision,
                 mapping.source_position_frames,
                 mapping.session_time_ms,
             ),
         );
+        revision_clocks
+            .entry(track)
+            .or_default()
+            .push((mapping.clone(), *sample_rate_hz));
     }
 
     for track in &recorded_tracks {
@@ -790,6 +749,28 @@ fn validate_timeline_control_metadata<'a>(
             .source_position_frames
             .checked_add(gap.dropped_frames)
             .ok_or_else(|| "recording timeline gap source range overflowed".to_string())?;
+        let revisions = revision_clocks
+            .get(&track)
+            .ok_or_else(|| "recording timeline gap has no clock revisions".to_string())?;
+        let revision_index = revisions
+            .iter()
+            .rposition(|(mapping, _)| mapping.source_position_frames <= gap.source_position_frames)
+            .ok_or_else(|| {
+                "recording timeline gap precedes its first clock revision".to_string()
+            })?;
+        let (mapping, sample_rate_hz) = &revisions[revision_index];
+        let (expected_start_ms, expected_duration_ms) =
+            SessionClock::new(mapping.clone(), *sample_rate_hz)
+                .and_then(|clock| clock.interval_ms(gap.source_position_frames, gap.dropped_frames))
+                .map_err(|_| "recording timeline gap clock conversion failed".to_string())?;
+        if gap.start_ms != expected_start_ms || gap.duration_ms != expected_duration_ms {
+            return Err("recording timeline gap does not match its clock revision".into());
+        }
+        if revisions.get(revision_index + 1).is_some_and(|(next, _)| {
+            end_source > next.source_position_frames || end_ms > next.session_time_ms
+        }) {
+            return Err("recording timeline gap crosses a clock revision".into());
+        }
         if let Some((generation, previous_end_ms, previous_end_source, previous_cause)) =
             gaps.get(&track)
         {
@@ -1753,7 +1734,7 @@ impl StreamingRecording {
         })
     }
 
-    pub fn append_prepared(&mut self, frame: &PreparedFrame) -> Result<(), String> {
+    fn append_prepared(&mut self, frame: &PreparedFrame) -> Result<(), String> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -1765,7 +1746,7 @@ impl StreamingRecording {
             frame.metadata.start_ms,
             frame.metadata.duration_ms,
         );
-        self.append_pcm16(&f32_to_i16_le_bytes(&frame.samples))
+        self.write_pcm16(&f32_to_i16_le_bytes(&frame.samples))
     }
 
     fn append_input(&mut self, input: RecordingInput) -> Result<(), String> {
@@ -1785,7 +1766,7 @@ impl StreamingRecording {
         }
     }
 
-    pub fn append_pcm16(&mut self, pcm: &[u8]) -> Result<(), String> {
+    fn write_pcm16(&mut self, pcm: &[u8]) -> Result<(), String> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -1842,7 +1823,45 @@ impl StreamingRecording {
         Ok(())
     }
 
-    pub fn observe_frame_metadata(
+    #[cfg(test)]
+    pub(crate) fn append_pcm16(&mut self, pcm: &[u8]) -> Result<(), String> {
+        const TEST_TRACK: &str = "test-raw-pcm";
+
+        if !pcm.is_empty() && pcm.len().is_multiple_of(2) {
+            let metadata_is_empty = self.journal.tracks.is_empty()
+                && self.journal.track_configurations.is_empty()
+                && self.journal.clock_mappings.is_empty()
+                && self.journal.sequence_coverage.is_empty();
+            if metadata_is_empty {
+                let track = crate::audio::session::TrackId::new(TEST_TRACK).unwrap();
+                self.journal.observe_revision_transition(
+                    RecordingRevisionTransition::new(
+                        TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
+                        ClockMappingRevision::new(track, 1, 0, 0).unwrap(),
+                    )
+                    .unwrap(),
+                )?;
+            }
+            if self
+                .journal
+                .track_configurations
+                .iter()
+                .any(|configuration| configuration.track_id.as_str() == TEST_TRACK)
+            {
+                let sequence = self
+                    .journal
+                    .sequence_coverage
+                    .iter()
+                    .find(|coverage| coverage.track_id == TEST_TRACK)
+                    .map_or(0, |coverage| coverage.last_sequence.saturating_add(1));
+                self.journal
+                    .observe_frame(TEST_TRACK, 16_000, 1, sequence, sequence);
+            }
+        }
+        self.write_pcm16(pcm)
+    }
+
+    fn observe_frame_metadata(
         &mut self,
         track_id: &str,
         sample_rate_hz: u32,
@@ -1938,6 +1957,7 @@ impl StreamingRecording {
             directory_sync_supported: sync_parent_directory(&self.paths.directory),
             session_metadata: Some(self.session_metadata.clone()),
         };
+        validate_audio_metadata_presence(sidecar.audio_bytes, &sidecar.tracks)?;
         validate_timeline_control_metadata(
             &sidecar.session_id,
             &sidecar.tracks,
@@ -3454,6 +3474,26 @@ mod tests {
     }
 
     #[test]
+    fn nonempty_audio_without_timeline_metadata_cannot_publish_complete() {
+        let dir = tempfile_dir("nonempty-audio-without-metadata");
+        let session = SessionId::new("s-nonempty-audio-without-metadata").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session).unwrap();
+        recording
+            .audio
+            .as_mut()
+            .unwrap()
+            .write_all(&[1, 0])
+            .unwrap();
+        recording.data_bytes = 2;
+
+        let result = recording.finalize().unwrap();
+
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+        assert!(scan_recordings(&dir).unwrap().complete.is_empty());
+    }
+
+    #[test]
     fn every_commit_fault_leaves_an_explicit_partial_candidate_not_a_complete_session() {
         for point in CommitFaultPoint::ALL {
             let dir = tempfile_dir(&format!("fault-{point:?}"));
@@ -3611,9 +3651,9 @@ mod tests {
             .append_input(RecordingInput::Gap(AudioGap {
                 session_id: session.clone(),
                 track_id: track,
-                start_ms: 1,
+                start_ms: 10,
                 duration_ms: 10,
-                source_position_frames: 1,
+                source_position_frames: 160,
                 dropped_frames: 160,
                 cause: crate::audio::frame::GapCause::DeviceDiscontinuity,
                 generation: 1,
@@ -3743,6 +3783,34 @@ mod tests {
     fn scanner_rejects_hash_bound_mismatched_revision_transition_timestamp() {
         assert_hash_bound_sidecar_mutation_is_damaged("revision-timestamp", |sidecar| {
             sidecar["clockMappings"][0]["sessionTimeMs"] = serde_json::Value::from(1);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_gap_with_wrong_duration() {
+        assert_hash_bound_gap_mutation_is_damaged("gap-wrong-duration", |sidecar| {
+            sidecar["timelineGaps"][0]["durationMs"] = serde_json::Value::from(11);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_gap_with_wrong_start() {
+        assert_hash_bound_gap_mutation_is_damaged("gap-wrong-start", |sidecar| {
+            sidecar["timelineGaps"][0]["startMs"] = serde_json::Value::from(11);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_gap_with_wrong_source_position() {
+        assert_hash_bound_gap_mutation_is_damaged("gap-wrong-source", |sidecar| {
+            sidecar["timelineGaps"][0]["sourcePositionFrames"] = serde_json::Value::from(240);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_gap_with_wrong_applicable_revision() {
+        assert_hash_bound_gap_mutation_is_damaged("gap-wrong-revision", |sidecar| {
+            sidecar["clockMappings"][1]["sourcePositionFrames"] = serde_json::Value::from(240);
         });
     }
 
@@ -4059,24 +4127,15 @@ mod tests {
         )
         .unwrap();
         let (sink, receiver) = bounded_sink(SinkKind::Recording, 8);
-        let terminal = Arc::new(Mutex::new(RecordingTerminalState::default()));
-        let worker_terminal = Arc::clone(&terminal);
         let worker_sink = sink.clone();
         let worker_session = session.clone();
         let worker = std::thread::spawn(move || {
-            drain_recording_worker(
-                recording,
-                worker_session,
-                receiver,
-                worker_terminal,
-                worker_sink,
-            )
+            drain_recording_worker(recording, worker_session, receiver, worker_sink)
         });
         let handle = Arc::new(RecordingSinkHandle::with_worker(
             sink,
             session.clone(),
             worker,
-            terminal,
         ));
         for input in [
             recording_revision(&track, 1, 0, 16_000, 0),
@@ -4115,27 +4174,18 @@ mod tests {
         let recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         let (release_tx, release_rx) = mpsc::channel();
         let (sink, receiver) = bounded_sink(SinkKind::Recording, 8);
-        let terminal = Arc::new(Mutex::new(RecordingTerminalState::default()));
-        let worker_terminal = Arc::clone(&terminal);
         let worker_sink = sink.clone();
         let worker_session = session.clone();
         let worker = std::thread::spawn(move || {
             release_rx
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .expect("worker release must arrive");
-            drain_recording_worker(
-                recording,
-                worker_session,
-                receiver,
-                worker_terminal,
-                worker_sink,
-            )
+            drain_recording_worker(recording, worker_session, receiver, worker_sink)
         });
         let handle = Arc::new(RecordingSinkHandle::with_worker(
-            sink,
+            sink.clone(),
             session.clone(),
             worker,
-            Arc::clone(&terminal),
         ));
         for input in [
             recording_revision(&track, 1, 0, 16_000, 0),
@@ -4148,12 +4198,9 @@ mod tests {
         let abort = std::thread::spawn(move || abort_handle.abort("accepted adapter failure"));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
-            let state = terminal.lock().unwrap();
-            if state.degradation.as_deref() == Some("accepted adapter failure") {
-                assert_eq!(state.phase, RecordingTerminalPhase::Accepting);
+            if sink.outcome().error.as_deref() == Some("accepted adapter failure") {
                 break;
             }
-            drop(state);
             assert!(
                 std::time::Instant::now() < deadline,
                 "abort must be accepted before the worker is released"
@@ -4168,6 +4215,121 @@ mod tests {
         assert_eq!(repeated, result);
         assert!(result.committed.is_none());
         assert!(scan_recordings(&dir).unwrap().complete.is_empty());
+    }
+
+    #[test]
+    fn sink_degradation_wins_before_completion_linearizes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile_dir("sink-degradation-wins-linearization");
+        let session = SessionId::new("s-sink-degradation-wins-linearization").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 8);
+        let completion_sampled = Arc::new(std::sync::Barrier::new(2));
+        let release_completion = Arc::new(std::sync::Barrier::new(2));
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        sink.set_before_completion_hook_for_test({
+            let completion_sampled = Arc::clone(&completion_sampled);
+            let release_completion = Arc::clone(&release_completion);
+            let hook_fired = Arc::clone(&hook_fired);
+            Arc::new(move || {
+                if !hook_fired.swap(true, Ordering::SeqCst) {
+                    completion_sampled.wait();
+                    release_completion.wait();
+                }
+            })
+        });
+        let worker_sink = sink.clone();
+        let worker_session = session.clone();
+        let worker = std::thread::spawn(move || {
+            drain_recording_worker(recording, worker_session, receiver, worker_sink)
+        });
+        let handle = Arc::new(RecordingSinkHandle::with_worker(
+            sink.clone(),
+            session.clone(),
+            worker,
+        ));
+        for input in [
+            recording_revision(&track, 1, 0, 16_000, 0),
+            RecordingInput::PreparedFrame(prepared_frame(&session)),
+        ] {
+            sink.try_send(input).unwrap();
+        }
+
+        let finalize_handle = Arc::clone(&handle);
+        let finalize = std::thread::spawn(move || finalize_handle.finalize());
+        completion_sampled.wait();
+        sink.degrade("recording sink failed before completion");
+        release_completion.wait();
+        let result = finalize.join().unwrap().unwrap();
+
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+        assert_eq!(
+            sink.outcome().error.as_deref(),
+            Some("recording sink failed before completion")
+        );
+        assert!(scan_recordings(&dir).unwrap().complete.is_empty());
+    }
+
+    #[test]
+    fn sink_completion_rejects_late_degradation_after_linearization() {
+        let dir = tempfile_dir("sink-completion-wins-linearization");
+        let session = SessionId::new("s-sink-completion-wins-linearization").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let (publication_tx, publication_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut release_rx = Some(release_rx);
+        let recording = StreamingRecording::create_with_publication_hook(
+            &dir,
+            session.clone(),
+            None,
+            move |artifact, barrier, _| {
+                if artifact == PublicationArtifact::CompleteSidecar
+                    && barrier == PublicationBarrier::BeforeHardLink
+                {
+                    publication_tx.send(()).unwrap();
+                    release_rx
+                        .take()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                }
+            },
+        )
+        .unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 8);
+        let worker_sink = sink.clone();
+        let worker_session = session.clone();
+        let worker = std::thread::spawn(move || {
+            drain_recording_worker(recording, worker_session, receiver, worker_sink)
+        });
+        let handle = Arc::new(RecordingSinkHandle::with_worker(
+            sink.clone(),
+            session.clone(),
+            worker,
+        ));
+        for input in [
+            recording_revision(&track, 1, 0, 16_000, 0),
+            RecordingInput::PreparedFrame(prepared_frame(&session)),
+        ] {
+            sink.try_send(input).unwrap();
+        }
+
+        let finalize_handle = Arc::clone(&handle);
+        let finalize = std::thread::spawn(move || finalize_handle.finalize());
+        publication_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker must linearize completion before publication");
+        sink.degrade("late recording sink failure");
+        let late_degradation = sink.outcome().error;
+        release_tx.send(()).unwrap();
+        let result = finalize.join().unwrap().unwrap();
+
+        assert_eq!(result.status, CaptureStatus::Complete);
+        assert!(result.committed.is_some());
+        assert_eq!(late_degradation, None);
     }
 
     #[test]
@@ -4833,9 +4995,9 @@ mod tests {
             .append_input(RecordingInput::Gap(AudioGap {
                 session_id: session.clone(),
                 track_id: track.clone(),
-                start_ms: 1,
+                start_ms: 10,
                 duration_ms: 10,
-                source_position_frames: 1,
+                source_position_frames: 160,
                 dropped_frames: 160,
                 cause: GapCause::CallbackPoolExhausted,
                 generation: 1,
@@ -4846,9 +5008,9 @@ mod tests {
         let append = recording.append_input(RecordingInput::Gap(AudioGap {
             session_id: session.clone(),
             track_id: track,
-            start_ms: 1,
+            start_ms: 10,
             duration_ms: 20,
-            source_position_frames: 1,
+            source_position_frames: 160,
             dropped_frames: 320,
             cause: GapCause::CallbackPoolExhausted,
             generation: 2,
@@ -5208,6 +5370,55 @@ mod tests {
             .unwrap();
         recording
             .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
+            .unwrap();
+        assert_eq!(
+            recording.finalize().unwrap().status,
+            CaptureStatus::Complete
+        );
+
+        let sidecar_path = dir.join(format!("live-{session}.capture.json"));
+        let mut sidecar: serde_json::Value =
+            serde_json::from_slice(&fs::read(&sidecar_path).unwrap()).unwrap();
+        mutate(&mut sidecar);
+        fs::write(&sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        rehash_capture_sidecar(&dir, &session, &sidecar_path);
+
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty(), "{label}");
+        assert_eq!(scan.damaged.len(), 1, "{label}");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    fn assert_hash_bound_gap_mutation_is_damaged<F>(label: &str, mutate: F)
+    where
+        F: FnOnce(&mut serde_json::Value),
+    {
+        let dir = tempfile_dir(label);
+        let session = SessionId::new(format!("s-{label}")).unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
+            .unwrap();
+        recording
+            .append_input(recording_revision(&track, 2, 10, 8_000, 160))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::Gap(AudioGap {
+                session_id: session.clone(),
+                track_id: track,
+                start_ms: 10,
+                duration_ms: 10,
+                source_position_frames: 160,
+                dropped_frames: 80,
+                cause: GapCause::DeviceDiscontinuity,
+                generation: 1,
+            }))
+            .unwrap();
+        let mut frame = prepared_frame_at(&session, 0, 20);
+        frame.metadata.sample_rate_hz = 8_000;
+        recording
+            .append_input(RecordingInput::PreparedFrame(frame))
             .unwrap();
         assert_eq!(
             recording.finalize().unwrap().status,

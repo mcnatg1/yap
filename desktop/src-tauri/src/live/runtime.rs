@@ -28,6 +28,7 @@ const LEVEL_TICK: Duration = Duration::from_millis(50);
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 const ASR_ADAPTER_CANCEL_GRACE: Duration = Duration::from_millis(100);
+const CAPTURE_LOSS_FINAL_DRAIN_ATTEMPTS: usize = 64;
 const CRASH_CLAIM_BIT: u64 = 1 << 63;
 
 fn active_session_matches(active_session: u64, session: u64) -> bool {
@@ -1308,20 +1309,15 @@ fn run_capture_worker(
                     );
                     true
                 },
-                move |loss| match loss {
-                    Ok(snapshot) => match loss_coordinator.lock() {
-                        Ok(mut coordinator) => coordinator.consume_loss(snapshot).is_err(),
-                        Err(_) => true,
-                    },
-                    Err(_) => {
+                move |loss| {
+                    process_capture_loss(&loss_coordinator, loss, |message| {
                         spawn_stream_crash_handler(
                             loss_app.clone(),
                             loss_runtime.clone(),
                             session,
-                            "Microphone capture timing became invalid.".to_string(),
+                            message,
                         );
-                        true
-                    }
+                    })
                 },
             );
         },
@@ -1395,7 +1391,7 @@ fn run_capture_packet_loop_with_timeout<P, E, L>(
         losses,
     } = ports;
     loop {
-        if drain_capture_losses(&losses, &mut process_loss) {
+        if drain_capture_losses(&losses, &mut process_loss) == CaptureLossDrainStep::Stop {
             break;
         }
         let mut should_exit = false;
@@ -1421,24 +1417,86 @@ fn run_capture_packet_loop_with_timeout<P, E, L>(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    let _ = drain_capture_losses(&losses, &mut process_loss);
+    drain_capture_losses_on_shutdown(&losses, &mut process_loss);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureLossDrainStep {
+    Drained,
+    Pending,
+    Progressed,
+    Stop,
 }
 
 fn drain_capture_losses<L>(
     losses: &crate::audio::timeline::LossAccumulator,
     process_loss: &mut L,
-) -> bool
+) -> CaptureLossDrainStep
 where
     L: FnMut(
         Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
     ) -> bool,
 {
     match losses.try_drain() {
-        Ok(crate::audio::timeline::TryDrain::Snapshot(snapshot)) => process_loss(Ok(snapshot)),
-        Ok(crate::audio::timeline::TryDrain::Pending | crate::audio::timeline::TryDrain::Empty) => {
-            false
+        Ok(crate::audio::timeline::TryDrain::Snapshot(snapshot)) => {
+            if process_loss(Ok(snapshot)) {
+                CaptureLossDrainStep::Stop
+            } else {
+                CaptureLossDrainStep::Progressed
+            }
         }
-        Err(error) => process_loss(Err(error)),
+        Ok(crate::audio::timeline::TryDrain::Pending) => CaptureLossDrainStep::Pending,
+        Ok(crate::audio::timeline::TryDrain::Empty) => CaptureLossDrainStep::Drained,
+        Err(error) => {
+            if process_loss(Err(error)) {
+                CaptureLossDrainStep::Stop
+            } else {
+                CaptureLossDrainStep::Progressed
+            }
+        }
+    }
+}
+
+fn drain_capture_losses_on_shutdown<L>(
+    losses: &crate::audio::timeline::LossAccumulator,
+    process_loss: &mut L,
+) where
+    L: FnMut(
+        Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
+    ) -> bool,
+{
+    for _ in 0..CAPTURE_LOSS_FINAL_DRAIN_ATTEMPTS {
+        match drain_capture_losses(losses, process_loss) {
+            CaptureLossDrainStep::Drained | CaptureLossDrainStep::Stop => return,
+            CaptureLossDrainStep::Progressed => {}
+            CaptureLossDrainStep::Pending => std::thread::yield_now(),
+        }
+    }
+    let _ = process_loss(Err(crate::audio::timeline::TimelineError::DrainIncomplete));
+}
+
+fn process_capture_loss<F>(
+    coordinator: &Arc<Mutex<Coordinator>>,
+    loss: Result<crate::audio::timeline::LossSnapshot, crate::audio::timeline::TimelineError>,
+    mut process_failure: F,
+) -> bool
+where
+    F: FnMut(String),
+{
+    match loss {
+        Ok(snapshot) => match coordinator.lock() {
+            Ok(mut coordinator) => coordinator.consume_loss(snapshot).is_err(),
+            Err(_) => true,
+        },
+        Err(error) => {
+            let recording_error = format!("Capture loss timing failed: {error}");
+            coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .degrade_recording(&recording_error);
+            process_failure("Microphone capture timing became invalid.".to_string());
+            true
+        }
     }
 }
 
@@ -1732,6 +1790,25 @@ mod tests {
     use crate::audio::timeline::LossAccumulator;
     use std::sync::Barrier;
 
+    fn capture_loss_coordinator() -> (
+        Arc<Mutex<Coordinator>>,
+        BoundedSink<RecordingInput>,
+        BoundedReceiver<RecordingInput>,
+    ) {
+        let (recording, receiver) = bounded_sink(SinkKind::Recording, 8);
+        let coordinator = Coordinator::new(
+            SessionId::new("runtime-loss-test").unwrap(),
+            TrackId::new("live-microphone").unwrap(),
+            CoordinatorPorts {
+                recording: recording.clone(),
+                local_asr: None,
+                speaker_evidence: None,
+                server_transport: None,
+            },
+        );
+        (Arc::new(Mutex::new(coordinator)), recording, receiver)
+    }
+
     #[test]
     fn stream_crash_retires_runtime_handles() {
         let mut inner = LiveRuntimeInner::for_test();
@@ -1875,6 +1952,140 @@ mod tests {
         callback.join().unwrap();
         worker.join().unwrap();
         assert!(exited.is_ok());
+    }
+
+    #[test]
+    fn accumulator_error_degrades_recording_before_runtime_exit() {
+        let (packet_tx, packet_rx) = mpsc::sync_channel(1);
+        let (returned_tx, _) = mpsc::sync_channel(1);
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let losses = Arc::new(LossAccumulator::new());
+        losses.invalidate();
+        let ports = CapturePorts {
+            packets: packet_rx,
+            returned_buffers: returned_tx,
+            losses,
+        };
+        let (coordinator, recording, _recording_rx) = capture_loss_coordinator();
+        drop(packet_tx);
+        drop(error_tx);
+
+        run_capture_packet_loop_with_timeout(
+            ports,
+            error_rx,
+            Duration::from_millis(1),
+            |_, _| false,
+            |_| false,
+            |loss| process_capture_loss(&coordinator, loss, |_| {}),
+        );
+
+        assert_eq!(
+            recording.outcome().error.as_deref(),
+            Some("Capture loss timing failed: InvalidTiming")
+        );
+    }
+
+    #[test]
+    fn pending_loss_at_shutdown_is_bounded_and_degrades_recording() {
+        let losses = Arc::new(LossAccumulator::new());
+        let registration_started = Arc::new(Barrier::new(2));
+        let release_registration = Arc::new(Barrier::new(2));
+        let callback = {
+            let losses = Arc::clone(&losses);
+            let registration_started = Arc::clone(&registration_started);
+            let release_registration = Arc::clone(&release_registration);
+            std::thread::spawn(move || {
+                losses.record_with_registration_hooks(
+                    0,
+                    1,
+                    crate::audio::frame::GapCause::SinkUnavailable,
+                    || {
+                        registration_started.wait();
+                    },
+                    || {
+                        release_registration.wait();
+                    },
+                );
+            })
+        };
+        registration_started.wait();
+        let (packet_tx, packet_rx) = mpsc::sync_channel(1);
+        let (returned_tx, _) = mpsc::sync_channel(1);
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let ports = CapturePorts {
+            packets: packet_rx,
+            returned_buffers: returned_tx,
+            losses,
+        };
+        let (coordinator, recording, _recording_rx) = capture_loss_coordinator();
+        let (done_tx, done_rx) = mpsc::channel();
+        drop(packet_tx);
+        drop(error_tx);
+        let worker = std::thread::spawn(move || {
+            run_capture_packet_loop_with_timeout(
+                ports,
+                error_rx,
+                Duration::from_millis(1),
+                |_, _| false,
+                |_| false,
+                |loss| process_capture_loss(&coordinator, loss, |_| {}),
+            );
+            done_tx.send(()).unwrap();
+        });
+
+        let exited = done_rx.recv_timeout(Duration::from_secs(1));
+        release_registration.wait();
+        callback.join().unwrap();
+        worker.join().unwrap();
+
+        assert!(
+            exited.is_ok(),
+            "shutdown loss drain must have a fixed wait bound"
+        );
+        assert_eq!(
+            recording.outcome().error.as_deref(),
+            Some("Capture loss timing failed: DrainIncomplete")
+        );
+    }
+
+    #[test]
+    fn final_loss_drain_failure_degrades_recording() {
+        let (packet_tx, packet_rx) = mpsc::sync_channel(1);
+        let (returned_tx, _) = mpsc::sync_channel(1);
+        let (error_tx, error_rx) = mpsc::sync_channel::<cpal::StreamError>(1);
+        let ports = CapturePorts {
+            packets: packet_rx,
+            returned_buffers: returned_tx,
+            losses: Arc::new(LossAccumulator::new()),
+        };
+        packet_tx
+            .send(CapturePacket {
+                source_position_frames: 0,
+                channels: 1,
+                sample_rate_hz: 16_000,
+                samples: vec![0.0],
+            })
+            .unwrap();
+        drop(packet_tx);
+        drop(error_tx);
+        let (coordinator, recording, _recording_rx) = capture_loss_coordinator();
+
+        run_capture_packet_loop_with_timeout(
+            ports,
+            error_rx,
+            Duration::from_millis(1),
+            |_, losses| {
+                losses.invalidate();
+                true
+            },
+            |_| false,
+            |loss| process_capture_loss(&coordinator, loss, |_| {}),
+        );
+
+        assert_eq!(
+            recording.outcome().error.as_deref(),
+            Some("Capture loss timing failed: InvalidTiming")
+        );
     }
 
     #[test]
