@@ -20,8 +20,11 @@ const historySaveWarning = "Transcript history could not be saved.";
 const historySyncWarning = "Live transcript history could not be synced.";
 
 export type LiveHistoryStorePort = {
+  captureNativeHistoryReconciliation: () => (
+    entries: TranscriptHistoryEntry[],
+    warning: string,
+  ) => boolean;
   reconcileHiddenHistory: () => Promise<void>;
-  reconcileNativeHistoryEntries: (entries: TranscriptHistoryEntry[], warning: string) => boolean;
   recordVisibleHistoryEntries: (entries: TranscriptHistoryEntry[], warning: string) => boolean;
 };
 
@@ -54,28 +57,31 @@ export function firstUnshownMaintenanceWarning(
   return alreadyShown ? undefined : warnings[0];
 }
 
-export async function loadStableNativeLiveHistory({
-  getSavedGeneration,
+export async function syncNativeLiveHistory({
+  captureNativeHistoryReconciliation,
   isCancelled,
   listRecoverableSessions,
   listSavedSessions,
+  onMaintenanceWarnings,
 }: {
-  getSavedGeneration: () => number;
+  captureNativeHistoryReconciliation: LiveHistoryStorePort["captureNativeHistoryReconciliation"];
   isCancelled: () => boolean;
   listRecoverableSessions: () => Promise<RecoverableLiveSession[]>;
   listSavedSessions: () => Promise<SavedLiveSessionCatalog>;
+  onMaintenanceWarnings: (warnings: string[]) => void;
 }) {
-  while (true) {
-    const savedGeneration = getSavedGeneration();
-    const [catalog, recoverable] = await Promise.all([
-      listSavedSessions(),
-      listRecoverableSessions(),
-    ]);
-    if (isCancelled()) return undefined;
-    if (savedGeneration === getSavedGeneration()) {
-      return projectNativeLiveHistory(catalog, recoverable);
-    }
-  }
+  if (isCancelled()) return;
+  const applyNativeHistory = captureNativeHistoryReconciliation();
+  const [catalog, recoverable] = await Promise.all([
+    listSavedSessions(),
+    listRecoverableSessions(),
+  ]);
+  if (isCancelled()) return;
+
+  const { entries, maintenanceWarnings } = projectNativeLiveHistory(catalog, recoverable);
+  onMaintenanceWarnings(maintenanceWarnings);
+  if (isCancelled()) return;
+  applyNativeHistory(entries, historySyncWarning);
 }
 
 export function recordSavedLiveSession(
@@ -90,27 +96,26 @@ export function recordSavedLiveSession(
 }
 
 export function useLiveHistorySync({
+  captureNativeHistoryReconciliation,
   onSaved,
   reconcileHiddenHistory,
-  reconcileNativeHistoryEntries,
   recordVisibleHistoryEntries,
 }: LiveHistoryStorePort & {
   onSaved: (entry: TranscriptHistoryEntry) => void;
 }) {
   const portsRef = useRef({
+    captureNativeHistoryReconciliation,
     onSaved,
     reconcileHiddenHistory,
-    reconcileNativeHistoryEntries,
     recordVisibleHistoryEntries,
   });
   portsRef.current = {
+    captureNativeHistoryReconciliation,
     onSaved,
     reconcileHiddenHistory,
-    reconcileNativeHistoryEntries,
     recordVisibleHistoryEntries,
   };
   const maintenanceWarningShownRef = useRef(false);
-  const savedGenerationRef = useRef(0);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -122,10 +127,7 @@ export function useLiveHistorySync({
       recordSavedLiveSession(
         session,
         (...args) => portsRef.current.recordVisibleHistoryEntries(...args),
-        (entry) => {
-          savedGenerationRef.current += 1;
-          portsRef.current.onSaved(entry);
-        },
+        (entry) => portsRef.current.onSaved(entry),
       );
     }).then((stop) => {
       if (cancelled) {
@@ -136,25 +138,23 @@ export function useLiveHistorySync({
     });
 
     void portsRef.current.reconcileHiddenHistory()
-      .then(() => loadStableNativeLiveHistory({
-        getSavedGeneration: () => savedGenerationRef.current,
+      .then(() => syncNativeLiveHistory({
+        captureNativeHistoryReconciliation: () => (
+          portsRef.current.captureNativeHistoryReconciliation()
+        ),
         isCancelled: () => cancelled,
         listRecoverableSessions: listRecoverableLiveSessions,
         listSavedSessions: listSavedLiveSessions,
-      }))
-      .then((projection) => {
-        if (cancelled || !projection) return;
-        const { entries, maintenanceWarnings } = projection;
-        const maintenanceWarning = firstUnshownMaintenanceWarning(
-          maintenanceWarnings,
-          maintenanceWarningShownRef.current,
-        );
-        if (maintenanceWarning) {
+        onMaintenanceWarnings: (warnings) => {
+          const maintenanceWarning = firstUnshownMaintenanceWarning(
+            warnings,
+            maintenanceWarningShownRef.current,
+          );
+          if (!maintenanceWarning) return;
           maintenanceWarningShownRef.current = true;
           toast.warning(maintenanceWarning);
-        }
-        portsRef.current.reconcileNativeHistoryEntries(entries, historySyncWarning);
-      })
+        },
+      }))
       .catch(() => undefined);
 
     return () => {

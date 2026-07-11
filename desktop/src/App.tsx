@@ -83,10 +83,10 @@ export default function App() {
     savePolishedTranscript,
   } = useTranscriptFileActions(loadTranscriptText);
   const {
+    captureNativeHistoryReconciliation,
     forgetHistoryEntry,
     history,
     reconcileHiddenHistory,
-    reconcileNativeHistoryEntries,
     recordVisibleHistoryEntries,
     rememberHiddenHistoryEntry,
   } = useTranscriptHistory();
@@ -145,9 +145,9 @@ export default function App() {
     }
   }, [loadTranscriptText, openWorkspace, selectHistoryEntry]);
   useLiveHistorySync({
+    captureNativeHistoryReconciliation,
     onSaved: onLiveSessionSaved,
     reconcileHiddenHistory,
-    reconcileNativeHistoryEntries,
     recordVisibleHistoryEntries,
   });
   const historyActions = useHistoryActions({
