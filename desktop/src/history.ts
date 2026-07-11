@@ -126,10 +126,22 @@ export function filterHiddenTranscriptHistory(entries: TranscriptHistoryEntry[],
   return entries.filter((entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)));
 }
 
+function isYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
+  return entry.name.toLowerCase().startsWith("live-")
+    && entry.outputPath.replace(/\\/g, "/").toLowerCase().includes("/yap/live-recordings/");
+}
+
+function isCanonicalYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
+  return Boolean(entry.captureCommitPath || entry.recoveryState);
+}
+
 export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
   if (!storage) return [];
+  const migrationInput = readTranscriptHistory(storage);
   return filterHiddenTranscriptHistory(
-    readTranscriptHistory(storage),
+    migrationInput.filter(
+      (entry) => !isYapLiveHistoryEntry(entry) || isCanonicalYapLiveHistoryEntry(entry),
+    ),
     readHiddenTranscriptHistory(storage),
   );
 }
@@ -214,6 +226,7 @@ export async function pruneMissingHiddenTranscriptHistory(
 }
 
 export function recordTranscriptHistory(entries: TranscriptHistoryEntry[], entry: TranscriptHistoryEntry) {
+  if (isYapLiveHistoryEntry(entry) && !isCanonicalYapLiveHistoryEntry(entry)) return entries;
   const identity = transcriptPathIdentity(entry.outputPath);
   return normalizeTranscriptHistory([
     entry,
@@ -239,11 +252,11 @@ export function recordVisibleTranscriptHistoryEntries(
 }
 
 export function isNativeLiveTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
-  return Boolean(entry.captureCommitPath || entry.recoveryState);
+  return isCanonicalYapLiveHistoryEntry(entry);
 }
 
 export function isRecoverableTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
-  return entry.recoveryState === "recoverable";
+  return entry.recoveryState === "recoverable" || entry.recoveryState === "recovered";
 }
 
 export function reconcileNativeTranscriptHistoryEntries(
@@ -259,7 +272,7 @@ export function reconcileNativeTranscriptHistoryEntries(
   );
   return normalizeTranscriptHistory([
     ...visibleNative,
-    ...current.filter((entry) => !isNativeLiveTranscriptHistoryEntry(entry)),
+    ...current.filter((entry) => !isYapLiveHistoryEntry(entry)),
   ]);
 }
 
@@ -273,7 +286,7 @@ export function hideTranscriptHistory(outputPaths: string[], outputPath: string)
 }
 
 export function canDeleteTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
-  if (isRecoverableTranscriptHistoryEntry(entry)) return false;
+  if (!entry.captureCommitPath || isRecoverableTranscriptHistoryEntry(entry)) return false;
   const output = entry.outputPath.replace(/\\/g, "/").toLowerCase();
   const source = entry.sourcePath.replace(/\\/g, "/").toLowerCase();
   const outputName = output.split("/").pop() ?? "";

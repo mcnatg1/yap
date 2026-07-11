@@ -56,7 +56,7 @@ describe("transcript history storage", () => {
       [nativeGone, legacy, imported],
       [incoming],
       [],
-    ).map((entry) => entry.name)).toEqual(["live-current", "live-legacy", "imported"]);
+    ).map((entry) => entry.name)).toEqual(["live-current", "imported"]);
   });
 
   it("keeps hidden native tombstones hidden during a refresh", () => {
@@ -399,12 +399,14 @@ describe("transcript history storage", () => {
         if (key === "yap.transcriptHistory.v1") {
           return JSON.stringify([
             {
+              captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-visible.commit.json",
               createdAt: "2026-01-02T00:00:00.000Z",
               name: "live-visible",
               outputPath: visible,
               sourcePath: visible,
             },
             {
+              captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-hidden.commit.json",
               createdAt: "2026-01-01T00:00:00.000Z",
               name: "live-hidden",
               outputPath: hidden,
@@ -497,8 +499,25 @@ describe("transcript history storage", () => {
     expect(entry.captureCommitPath).toBeUndefined();
   });
 
+  it("does not expose pre-release Yap localStorage rows as runtime history", () => {
+    const storage = {
+      getItem: () => JSON.stringify([
+        {
+          createdAt: "2026-01-01T00:00:00.000Z",
+          name: "live-1720656000000",
+          outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.txt",
+          sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.wav",
+        },
+      ]),
+      setItem: () => undefined,
+    };
+
+    expect(readVisibleTranscriptHistory(storage)).toEqual([]);
+  });
+
   it("only exposes delete for Yap-owned live history entries", () => {
     expect(canDeleteTranscriptHistoryEntry({
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
@@ -532,6 +551,7 @@ describe("transcript history storage", () => {
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav";
 
     expect(historyEntryPlaybackPath({
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath,

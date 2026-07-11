@@ -23,6 +23,7 @@ describe("history job projection", () => {
   it("preserves playback only for matching owned live audio", () => {
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav";
     const job = historyEntryToRecordingJob({
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
@@ -61,7 +62,7 @@ describe("history job projection", () => {
     expect(job.playbackPath).toBe(restoredPath);
   });
 
-  it("projects recoverable history rows as partial without offering playback", () => {
+  it("keeps every partial recovery state out of normal history actions", () => {
     const job = historyEntryToRecordingJob({
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-recoverable",
@@ -87,6 +88,21 @@ describe("history job projection", () => {
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
       sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
       recoveryState: "recoverable",
+    })).toBeUndefined();
+
+    expect(canDeleteTranscriptHistoryEntry({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-recovered",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.wav",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.wav",
+      recoveryState: "recovered",
+    })).toBe(false);
+    expect(historyEntryPlaybackPath({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-recovered",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.wav",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.wav",
+      recoveryState: "recovered",
     })).toBeUndefined();
   });
 });

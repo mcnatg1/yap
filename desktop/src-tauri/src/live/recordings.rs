@@ -14,6 +14,7 @@ use crate::{file_actions, live};
 const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
 const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Audio was saved.";
 const PARTIAL_RECOVERY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION: usize = 16;
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -279,6 +280,9 @@ fn list_session_files_from_dir_at(
         return Ok(Vec::new());
     }
 
+    for warning in migrate_pre_release_recordings(dir) {
+        crate::stt::log_yap(&warning);
+    }
     let scan = recording::scan_recordings(dir)?;
     let (retention_deleted, retention_warnings) =
         reconcile_expired_committed_meetings(dir, &scan.complete, now);
@@ -315,48 +319,6 @@ fn list_session_files_from_dir_at(
             }
         })
         .collect::<Vec<_>>();
-    for entry in
-        std::fs::read_dir(dir).map_err(|err| format!("Failed to read live recordings: {err}"))?
-    {
-        let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
-        let name = entry.file_name();
-        let Some(file_name) = name.to_str() else {
-            continue;
-        };
-        let path = dir.join(file_name);
-        if !recording::is_regular_artifact(&path) || !is_primary_live_transcript_path(&path) {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        if regular_artifact_exists(dir, &format!("{stem}.capture.journal.part"))
-            || regular_artifact_exists(dir, &format!("{stem}.capture.json"))
-            || regular_artifact_exists(dir, &format!("{stem}.capture.partial.json"))
-            || regular_artifact_exists(dir, &format!("{stem}.commit.json"))
-        {
-            continue;
-        }
-        let created_at_ms = created_at_ms_from_live_stem(stem)
-            .expect("primary live transcript predicate validates the stem");
-
-        let audio_path = path.with_extension("wav");
-        let source_path = if recording::is_regular_artifact(&audio_path) {
-            audio_path
-        } else {
-            path.clone()
-        };
-        sessions.push(SavedLiveSession {
-            name: stem.to_string(),
-            source_path: stable_existing_path_string(&source_path),
-            output_path: stable_existing_path_string(&path),
-            created_at_ms,
-            warning: None,
-            capture_commit_path: None,
-            recovery_state: None,
-        });
-    }
-
     for recoverable in list_recoverable_live_sessions_from_dir(dir)? {
         let session_id = crate::audio::session::SessionId::new(recoverable.session_id.clone())?;
         if let Some(saved) = saved_recovered_session(dir, &session_id)? {
@@ -370,6 +332,57 @@ fn list_session_files_from_dir_at(
             .then_with(|| b.name.cmp(&a.name))
     });
     Ok(sessions)
+}
+
+fn migrate_pre_release_recordings(dir: &Path) -> Vec<String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return vec![format!(
+                "Pre-release recording migration could not read its folder: {error}"
+            )]
+        }
+    };
+    let mut wav_names = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| is_pre_release_wav_name(name))
+        .collect::<Vec<_>>();
+    wav_names.sort();
+    let truncated = wav_names.len() > MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION;
+    let mut warnings = Vec::new();
+    for wav_name in wav_names
+        .into_iter()
+        .take(MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION)
+    {
+        let stem = wav_name
+            .strip_suffix(".wav")
+            .expect("pre-release WAV predicate validates suffix");
+        let transcript = format!("{stem}.txt");
+        if dir.join(&transcript).exists() {
+            warnings.push(format!(
+                "Pre-release recording {wav_name} was left untouched because its legacy text has no immutable transcript revision receipt."
+            ));
+            continue;
+        }
+        if let Err(error) = recording::adopt_pre_release_wav(dir, &wav_name) {
+            warnings.push(format!(
+                "Pre-release recording {wav_name} was left untouched: {error}"
+            ));
+        }
+    }
+    if truncated {
+        warnings.push(format!(
+            "Pre-release recording migration is bounded to {MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION} WAV files per reconciliation."
+        ));
+    }
+    warnings
+}
+
+fn is_pre_release_wav_name(name: &str) -> bool {
+    name.strip_suffix(".wav")
+        .and_then(created_at_ms_from_live_stem)
+        .is_some()
 }
 
 fn reconcile_expired_committed_meetings(
@@ -440,24 +453,30 @@ fn delete_expired_committed_meeting(
             manifest.capture_sidecar_sha256.clone(),
         ),
     ];
-    if let Some(highest) = highest_transcript_revision(dir, &manifest.session_id) {
-        if has_valid_transcript_revision(
-            dir,
-            &manifest.session_id,
-            &manifest.capture_sidecar_sha256,
-        ) {
-            let text_name = format!("live-{}.txt", manifest.session_id);
+    let transcript_names = transcript_artifact_names(dir, &manifest.session_id)?;
+    if !transcript_names.is_empty() {
+        let highest = highest_transcript_revision(dir, &manifest.session_id).ok_or_else(|| {
+            "transcript artifacts do not contain a numbered immutable revision".to_string()
+        })?;
+        let expected = std::iter::once(format!("live-{}.txt", manifest.session_id))
+            .chain((1..=highest).map(|revision| {
+                format!("live-{}.transcript.r{revision}.json", manifest.session_id)
+            }))
+            .collect::<HashSet<_>>();
+        if transcript_names != expected
+            || !has_valid_transcript_revision(
+                dir,
+                &manifest.session_id,
+                &manifest.capture_sidecar_sha256,
+            )
+        {
+            return Err("transcript artifacts are incomplete or do not form a valid immutable revision chain".into());
+        }
+        for name in transcript_names {
             artifacts.push((
-                text_name.clone(),
-                recording::sha256_regular_artifact(dir, &text_name)?,
+                name.clone(),
+                recording::sha256_regular_artifact(dir, &name)?,
             ));
-            for revision in 1..=highest {
-                let name = format!("live-{}.transcript.r{revision}.json", manifest.session_id);
-                artifacts.push((
-                    name.clone(),
-                    recording::sha256_regular_artifact(dir, &name)?,
-                ));
-            }
         }
     }
     for (name, sha256) in artifacts {
@@ -667,7 +686,7 @@ fn saved_recovered_session(
         created_at_ms: committed_at_ms(&commit.committed_at_utc),
         warning: Some("Recovered partial recording.".into()),
         capture_commit_path: Some(stable_existing_path_string(&dir.join(commit_name))),
-        recovery_state: Some("recovered".into()),
+        recovery_state: Some("recoverable".into()),
     }))
 }
 
@@ -1059,6 +1078,30 @@ fn created_at_ms_from_live_stem(stem: &str) -> Option<u64> {
     }
 }
 
+fn transcript_artifact_names(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<HashSet<String>, String> {
+    let text = format!("live-{session_id}.txt");
+    let text_partial = format!("{text}.part");
+    let revision_prefix = format!("live-{session_id}.transcript.r");
+    let names = std::fs::read_dir(dir)
+        .map_err(|error| format!("Failed to read transcript artifacts: {error}"))?
+        .map(|entry| entry.map_err(|error| format!("Failed to read transcript artifact: {error}")))
+        .filter_map(|entry| match entry {
+            Ok(entry) => entry.file_name().to_str().map(str::to_owned),
+            Err(_) => None,
+        })
+        .filter(|name| {
+            name == &text
+                || name == &text_partial
+                || (name.starts_with(&revision_prefix)
+                    && (name.ends_with(".json") || name.ends_with(".json.part")))
+        })
+        .collect::<HashSet<_>>();
+    Ok(names)
+}
+
 pub(crate) fn unix_millis_now() -> Result<u64, String> {
     system_time_to_unix_millis(std::time::SystemTime::now())
         .ok_or_else(|| "System clock error: timestamp out of range.".to_string())
@@ -1255,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_live_session_scan_pairs_transcripts_with_audio() {
+    fn normal_history_scan_ignores_pre_release_timestamp_pairs() {
         let dir = std::env::temp_dir().join(format!("yap-live-scan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let transcript = dir.join("live-200.txt");
@@ -1267,10 +1310,62 @@ mod tests {
 
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
+        assert!(sessions.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migration_adopts_a_valid_wav_only_legacy_recording_once() {
+        let dir = test_dir("migrate-legacy-wav");
+        let session = SessionId::new("s-migrate-legacy-source").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let legacy = "live-1720656000000.wav";
+        std::fs::rename(dir.join(format!("live-{session}.wav")), dir.join(legacy)).unwrap();
+        std::fs::remove_file(dir.join(format!("live-{session}.capture.json"))).unwrap();
+        std::fs::remove_file(dir.join(format!("live-{session}.commit.json"))).unwrap();
+
+        let first = migrate_pre_release_recordings(&dir);
+        let sessions = list_session_files_from_dir(&dir).unwrap();
+        let second = migrate_pre_release_recordings(&dir);
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+        assert!(!dir.join(legacy).exists());
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "live-200");
-        assert_eq!(sessions[0].output_path, transcript.display().to_string());
-        assert_eq!(sessions[0].source_path, audio.display().to_string());
+        assert!(sessions[0].capture_commit_path.is_some());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migration_leaves_legacy_wav_and_txt_together_when_text_has_no_revision_receipt() {
+        let dir = test_dir("migrate-legacy-pair");
+        let session = SessionId::new("s-migrate-legacy-pair-source").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let legacy_wav = "live-1720656000001.wav";
+        let legacy_txt = "live-1720656000001.txt";
+        std::fs::rename(
+            dir.join(format!("live-{session}.wav")),
+            dir.join(legacy_wav),
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join(format!("live-{session}.capture.json"))).unwrap();
+        std::fs::remove_file(dir.join(format!("live-{session}.commit.json"))).unwrap();
+        std::fs::write(dir.join(legacy_txt), "old transcript\n").unwrap();
+
+        let warnings = migrate_pre_release_recordings(&dir);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("immutable transcript revision"));
+        assert!(dir.join(legacy_wav).is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(legacy_txt)).unwrap(),
+            "old transcript\n"
+        );
+        assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1301,7 +1396,7 @@ mod tests {
         assert_eq!(recoverable.len(), 1);
         let saved = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
 
-        assert_eq!(saved.recovery_state.as_deref(), Some("recovered"));
+        assert_eq!(saved.recovery_state.as_deref(), Some("recoverable"));
         assert!(dir.join(format!("live-{session}.wav")).is_file());
         let commit =
             std::fs::read_to_string(dir.join(format!("live-{session}.commit.json"))).unwrap();
@@ -1309,7 +1404,7 @@ mod tests {
         assert!(list_session_files_from_dir(&dir)
             .unwrap()
             .iter()
-            .any(|entry| entry.recovery_state.as_deref() == Some("recovered")));
+            .any(|entry| entry.recovery_state.as_deref() == Some("recoverable")));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1974,7 +2069,48 @@ mod tests {
     }
 
     #[test]
-    fn saved_live_session_scan_ignores_polished_and_malformed_names() {
+    fn expired_meeting_with_an_incomplete_transcript_chain_is_retained() {
+        let dir = test_dir("meeting-retention-incomplete-transcript");
+        let session = SessionId::new("s-expired-incomplete-transcript").unwrap();
+        let start = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let metadata = SessionMetadata::new(
+            session.clone(),
+            SessionMode::Meeting,
+            SessionOrigin::LiveCapture,
+            TriggerMode::Toggle,
+            start,
+            None,
+            None,
+            None,
+            Vec::new(),
+            Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_010)),
+        )
+        .unwrap();
+        let mut recording =
+            StreamingRecording::create_with_session_metadata(&dir, metadata).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+        std::fs::write(&transcript, "unbound transcript\n").unwrap();
+
+        let now = OffsetDateTime::from_unix_timestamp(1_020).unwrap();
+        let saved = list_session_files_from_dir_at(&dir, now).unwrap();
+
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0]
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("cleanup is pending"));
+        assert!(dir.join(format!("live-{session}.wav")).is_file());
+        assert!(dir.join(format!("live-{session}.capture.json")).is_file());
+        assert!(dir.join(format!("live-{session}.commit.json")).is_file());
+        assert!(transcript.is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn normal_history_scan_ignores_timestamp_transcripts_and_leaves_them_untouched() {
         let dir =
             std::env::temp_dir().join(format!("yap-live-primary-scan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1990,18 +2126,16 @@ mod tests {
 
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
+        assert!(sessions.is_empty());
         assert_eq!(
-            sessions
-                .iter()
-                .map(|session| session.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["live-205-1", "live-205"]
+            std::fs::read_to_string(dir.join("live-205.txt")).unwrap(),
+            "hello\n"
         );
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn saved_live_session_scan_ignores_directory_shaped_entries() {
+    fn normal_history_scan_ignores_uncommitted_directory_shaped_entries() {
         let dir = std::env::temp_dir().join(format!("yap-live-dir-scan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let transcript_dir = dir.join("live-203.txt");
@@ -2013,9 +2147,8 @@ mod tests {
 
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].output_path, transcript.display().to_string());
-        assert_eq!(sessions[0].source_path, transcript.display().to_string());
+        assert!(sessions.is_empty());
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), "hello\n");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2028,7 +2161,7 @@ mod tests {
 
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
-        assert_eq!(sessions.len(), 1);
+        assert!(sessions.is_empty());
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
             "  THank   you.. \n"
@@ -2045,7 +2178,7 @@ mod tests {
 
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
-        assert_eq!(sessions.len(), 1);
+        assert!(sessions.is_empty());
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
             "No live transcript captured.\n"
@@ -2089,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_live_session_scan_uses_filename_timestamp() {
+    fn normal_history_scan_does_not_use_timestamp_filenames_as_history_metadata() {
         let dir = std::env::temp_dir().join(format!("yap-live-timestamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let transcript = dir.join("live-999-1.txt");
@@ -2097,8 +2230,7 @@ mod tests {
 
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].created_at_ms, 999);
+        assert!(sessions.is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 

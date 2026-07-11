@@ -116,6 +116,19 @@ impl SessionId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn is_current_writer_id(&self) -> bool {
+        let mut parts = self.0.split('-');
+        parts.next() == Some("s")
+            && parts.next().is_some_and(is_generated_id_component)
+            && parts.next().is_some_and(is_generated_id_component)
+            && parts.next().is_some_and(is_generated_id_component)
+            && parts.next().is_none()
+    }
+}
+
+fn is_generated_id_component(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Allocates a durable recording identity by reserving its first artifact with
