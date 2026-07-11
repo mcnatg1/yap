@@ -897,10 +897,10 @@ impl Drop for Coordinator {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier};
     use std::time::{Duration, Instant};
 
-    use crate::audio::capture::CapturePacket;
+    use crate::audio::capture::{new_callback_boundary, CapturePacket};
     use crate::audio::frame::{GapCause, PreparedFrame};
     use crate::audio::recording::{CaptureStatus, RecordingSinkHandle};
     use crate::audio::session::{SessionId, TrackId};
@@ -1039,6 +1039,97 @@ mod tests {
         assert_eq!(frame.metadata.sample_rate_hz, 16_000);
         assert_eq!(frame.metadata.channels, 1);
         assert!(coordinator.outcome(SinkKind::LocalAsr).is_none());
+    }
+
+    #[test]
+    fn capture_boundary_rejects_each_non_finite_callback_as_an_exact_gap() {
+        const FRAME_COUNT: usize = 320;
+        const CHANNELS: usize = 2;
+        const CALLBACK_SAMPLES: usize = FRAME_COUNT * CHANNELS;
+
+        for malformed in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (mut callback, capture) =
+                new_callback_boundary(CHANNELS as u16, 16_000, CALLBACK_SAMPLES, 2, 0).unwrap();
+            let (ports, recording_rx, local_asr_rx) = ports(4, Some(2));
+            let mut coordinator = Coordinator::new(session(), track(), ports);
+
+            let mut rejected = vec![0.25_f32; CALLBACK_SAMPLES];
+            rejected[CALLBACK_SAMPLES / 2] = malformed;
+            callback.write_f32_for_test(&rejected);
+            callback.write_f32_for_test(&vec![0.5_f32; CALLBACK_SAMPLES]);
+
+            let packet = capture.packets.recv().unwrap();
+            assert_eq!(packet.source_position_frames, FRAME_COUNT as u64);
+            assert!(packet.samples.iter().all(|sample| sample.is_finite()));
+            assert!(matches!(
+                capture.packets.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+
+            coordinator.consume(&packet, &capture.losses).unwrap();
+
+            let gap = recv_recording_gap(&recording_rx);
+            assert_eq!(gap.source_position_frames, 0);
+            assert_eq!(gap.dropped_frames, FRAME_COUNT as u64);
+            assert_eq!(gap.start_ms, 0);
+            assert_eq!(gap.duration_ms, 20);
+            assert_eq!(gap.cause, GapCause::DeviceDiscontinuity);
+            let recorded = recv_recording_frame(&recording_rx);
+            let recognized = local_asr_rx
+                .as_ref()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            assert!(recorded.samples.iter().all(|sample| sample.is_finite()));
+            assert!(recognized.samples.iter().all(|sample| sample.is_finite()));
+            assert!(matches!(
+                local_asr_rx
+                    .as_ref()
+                    .unwrap()
+                    .recv_timeout(Duration::from_millis(1)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+        }
+    }
+
+    #[test]
+    fn capture_boundary_normalizes_finite_f32_before_every_sink() {
+        const FRAME_SAMPLES: usize = 320;
+        let positive_denormal = f32::from_bits(1);
+        let negative_denormal = -positive_denormal;
+        let pattern = [
+            -2.0,
+            -1.0,
+            negative_denormal,
+            0.0,
+            positive_denormal,
+            1.0,
+            2.0,
+            0.25,
+        ];
+        let input = pattern
+            .into_iter()
+            .cycle()
+            .take(FRAME_SAMPLES)
+            .collect::<Vec<_>>();
+        let expected = [-1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.25];
+        let (mut callback, capture) =
+            new_callback_boundary(1, 16_000, FRAME_SAMPLES, 1, 0).unwrap();
+        let (ports, recording_rx, local_asr_rx) = ports(3, Some(1));
+        let mut coordinator = Coordinator::new(session(), track(), ports);
+
+        callback.write_f32_for_test(&input);
+        let packet = capture.packets.recv().unwrap();
+        coordinator.consume(&packet, &capture.losses).unwrap();
+
+        let recorded = recv_recording_frame(&recording_rx);
+        let recognized = local_asr_rx
+            .unwrap()
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(&recorded.samples[..expected.len()], &expected);
+        assert_eq!(&recognized.samples[..expected.len()], &expected);
+        assert_eq!(capture.losses.drain(), Ok(None));
     }
 
     #[test]

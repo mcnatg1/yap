@@ -249,8 +249,18 @@ impl CaptureCallback {
             return;
         }
         samples.clear();
+        // A callback is the smallest timing unit: publish every sample or one exact gap.
         for sample in input {
-            samples.push(sample.capture_f32());
+            let Some(sample) = sample.capture_f32() else {
+                self.losses.record(
+                    source_position_frames,
+                    frame_count,
+                    GapCause::DeviceDiscontinuity,
+                );
+                self.return_buffer(samples);
+                return;
+            };
+            samples.push(sample);
         }
 
         let packet = CapturePacket {
@@ -319,24 +329,30 @@ fn callback_frame_count(input_len: usize, channels: usize, ceil: bool) -> Option
 }
 
 trait CaptureSample {
-    fn capture_f32(&self) -> f32;
+    fn capture_f32(&self) -> Option<f32>;
 }
 
 impl CaptureSample for f32 {
-    fn capture_f32(&self) -> f32 {
-        *self
+    fn capture_f32(&self) -> Option<f32> {
+        if !self.is_finite() {
+            None
+        } else if self.is_subnormal() {
+            Some(0.0)
+        } else {
+            Some(self.clamp(-1.0, 1.0))
+        }
     }
 }
 
 impl CaptureSample for i16 {
-    fn capture_f32(&self) -> f32 {
-        (*self as f32 / i16::MAX as f32).clamp(-1.0, 1.0)
+    fn capture_f32(&self) -> Option<f32> {
+        Some((*self as f32 / i16::MAX as f32).clamp(-1.0, 1.0))
     }
 }
 
 impl CaptureSample for u16 {
-    fn capture_f32(&self) -> f32 {
-        ((*self as f32 - 32_768.0) / 32_768.0).clamp(-1.0, 1.0)
+    fn capture_f32(&self) -> Option<f32> {
+        Some(((*self as f32 - 32_768.0) / 32_768.0).clamp(-1.0, 1.0))
     }
 }
 
