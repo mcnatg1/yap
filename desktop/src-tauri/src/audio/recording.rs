@@ -25,7 +25,7 @@ use crate::audio::preprocess::f32_to_i16_le_bytes;
 use crate::audio::session::{
     self, SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode,
 };
-use crate::audio::timeline::{ClockMappingRevision, RecordingInput};
+use crate::audio::timeline::{ClockMappingRevision, RecordingInput, RecordingRevisionTransition};
 
 const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const WAV_HEADER_BYTES: u64 = 44;
@@ -911,12 +911,22 @@ impl CaptureJournal {
         }
     }
 
-    fn observe_track_configuration(
+    fn observe_revision_transition(
         &mut self,
-        configuration: TrackConfigurationRevision,
+        transition: RecordingRevisionTransition,
     ) -> Result<(), String> {
-        if self.track_configurations.len() >= MAX_TIMELINE_CONTROL_EVENTS {
-            return Err("recording track-configuration metadata limit reached".into());
+        let configuration = &transition.configuration;
+        let mapping = &transition.clock_mapping;
+        if self.track_configurations.len() >= MAX_TIMELINE_CONTROL_EVENTS
+            || self.clock_mappings.len() >= MAX_TIMELINE_CONTROL_EVENTS
+        {
+            return Err("recording revision-transition metadata limit reached".into());
+        }
+        if configuration.track_id != mapping.track_id
+            || configuration.revision != mapping.revision
+            || configuration.effective_at_ms != mapping.session_time_ms
+        {
+            return Err("recording revision transition is inconsistent".into());
         }
         let previous = self
             .track_configurations
@@ -931,21 +941,6 @@ impl CaptureJournal {
             None if configuration.revision == 1 && configuration.sample_rate_hz > 0 => {}
             _ => return Err("recording track configuration is not monotonic".into()),
         }
-        self.track_configurations.push(configuration);
-        Ok(())
-    }
-
-    fn observe_clock_mapping(&mut self, mapping: ClockMappingRevision) -> Result<(), String> {
-        if self.clock_mappings.len() >= MAX_TIMELINE_CONTROL_EVENTS {
-            return Err("recording clock-mapping metadata limit reached".into());
-        }
-        if !self
-            .track_configurations
-            .iter()
-            .any(|configuration| configuration.track_id == mapping.track_id)
-        {
-            return Err("recording clock mapping has no track configuration".into());
-        }
         let previous = self
             .clock_mappings
             .iter()
@@ -959,7 +954,8 @@ impl CaptureJournal {
             None if mapping.revision == 1 => {}
             _ => return Err("recording clock mapping is not monotonic".into()),
         }
-        self.clock_mappings.push(mapping);
+        self.track_configurations.push(transition.configuration);
+        self.clock_mappings.push(transition.clock_mapping);
         Ok(())
     }
 
@@ -1080,8 +1076,7 @@ struct JournalDelta {
     schema_version: u16,
     session_id: SessionId,
     tracks: Vec<JournalTrack>,
-    track_configurations: Vec<TrackConfigurationRevision>,
-    clock_mappings: Vec<ClockMappingRevision>,
+    revision_transitions: Vec<RecordingRevisionTransition>,
     timeline_gap_start_index: usize,
     timeline_gaps: Vec<AudioGap>,
     sequence_coverage: Vec<SequenceCoverage>,
@@ -1109,8 +1104,7 @@ enum JournalRecord {
 #[derive(Debug, Clone)]
 struct DurableJournalState {
     tracks: BTreeSet<String>,
-    track_configurations: usize,
-    clock_mappings: usize,
+    revision_transitions: usize,
     timeline_gaps: Vec<AudioGap>,
     sequence_coverage: BTreeMap<String, SequenceCoverage>,
     sequence_gaps: usize,
@@ -1118,10 +1112,13 @@ struct DurableJournalState {
 
 impl DurableJournalState {
     fn from_journal(journal: &CaptureJournal) -> Self {
+        debug_assert_eq!(
+            journal.track_configurations.len(),
+            journal.clock_mappings.len()
+        );
         Self {
             tracks: journal.tracks.keys().cloned().collect(),
-            track_configurations: journal.track_configurations.len(),
-            clock_mappings: journal.clock_mappings.len(),
+            revision_transitions: journal.track_configurations.len(),
             timeline_gaps: journal.timeline_gaps.clone(),
             sequence_coverage: journal
                 .sequence_coverage
@@ -1145,9 +1142,21 @@ impl DurableJournalState {
                 .filter(|(track_id, _)| !self.tracks.contains(*track_id))
                 .map(|(_, track)| track.clone())
                 .collect(),
-            track_configurations: journal.track_configurations[self.track_configurations..]
-                .to_vec(),
-            clock_mappings: journal.clock_mappings[self.clock_mappings..].to_vec(),
+            revision_transitions: journal.track_configurations[self.revision_transitions..]
+                .iter()
+                .cloned()
+                .zip(
+                    journal.clock_mappings[self.revision_transitions..]
+                        .iter()
+                        .cloned(),
+                )
+                .map(
+                    |(configuration, clock_mapping)| RecordingRevisionTransition {
+                        configuration,
+                        clock_mapping,
+                    },
+                )
+                .collect(),
             timeline_gap_start_index,
             timeline_gaps: journal.timeline_gaps[timeline_gap_start_index..].to_vec(),
             sequence_coverage: journal
@@ -1681,12 +1690,8 @@ impl StreamingRecording {
         }
         match input {
             RecordingInput::PreparedFrame(frame) => self.append_prepared(&frame),
-            RecordingInput::TrackConfigured(configuration) => {
-                self.journal.observe_track_configuration(configuration)?;
-                self.persist_journal()
-            }
-            RecordingInput::ClockMapped(mapping) => {
-                self.journal.observe_clock_mapping(mapping)?;
+            RecordingInput::RevisionTransition(transition) => {
+                self.journal.observe_revision_transition(transition)?;
                 self.persist_journal()
             }
             RecordingInput::Gap(gap) => {
@@ -2436,10 +2441,9 @@ fn apply_journal_delta(journal: &mut CaptureJournal, delta: JournalDelta) -> Res
     for track in delta.tracks {
         journal.tracks.insert(track.track_id.clone(), track);
     }
-    journal
-        .track_configurations
-        .extend(delta.track_configurations);
-    journal.clock_mappings.extend(delta.clock_mappings);
+    for transition in delta.revision_transitions {
+        journal.observe_revision_transition(transition)?;
+    }
     if delta.timeline_gap_start_index > journal.timeline_gaps.len() {
         return Err("recording journal timeline-gap delta is out of order".into());
     }
@@ -3504,14 +3508,7 @@ mod tests {
         let track = TrackId::new("live-microphone").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording
-            .append_input(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        recording
-            .append_input(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track.clone(), 1, 0, 0).unwrap(),
-            ))
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         recording
             .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
@@ -3555,14 +3552,7 @@ mod tests {
         let track = TrackId::new("live-microphone").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording
-            .append_input(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        recording
-            .append_input(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track, 1, 0, 0).unwrap(),
-            ))
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         recording
             .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
@@ -3590,14 +3580,7 @@ mod tests {
         let track = TrackId::new("live-microphone").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording
-            .append_input(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        recording
-            .append_input(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track, 1, 0, 0).unwrap(),
-            ))
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         recording
             .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
@@ -3847,15 +3830,7 @@ mod tests {
 
         handle
             .sink()
-            .try_send(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        handle
-            .sink()
-            .try_send(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track.clone(), 1, 0, 0).unwrap(),
-            ))
+            .try_send(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         handle
             .sink()
@@ -3863,9 +3838,7 @@ mod tests {
             .unwrap();
         handle
             .sink()
-            .try_send(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track, 3, 1, 16_000).unwrap(),
-            ))
+            .try_send(recording_revision(&track, 3, 1, 16_000, 1))
             .unwrap();
 
         let result = handle.finalize().unwrap();
@@ -3928,10 +3901,7 @@ mod tests {
             terminal,
         ));
         for input in [
-            RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ),
-            RecordingInput::ClockMapped(ClockMappingRevision::new(track, 1, 0, 0).unwrap()),
+            recording_revision(&track, 1, 0, 16_000, 0),
             RecordingInput::PreparedFrame(prepared_frame(&session)),
         ] {
             handle.sink().try_send(input).unwrap();
@@ -3957,6 +3927,69 @@ mod tests {
             })
         ));
         assert_eq!(finalize_result.unwrap().status, CaptureStatus::Complete);
+    }
+
+    #[test]
+    fn accepted_abort_wins_before_completion_linearizes() {
+        let dir = tempfile_dir("abort-wins-linearization");
+        let session = SessionId::new("s-abort-wins-linearization").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 8);
+        let terminal = Arc::new(Mutex::new(RecordingTerminalState::default()));
+        let worker_terminal = Arc::clone(&terminal);
+        let worker_sink = sink.clone();
+        let worker_session = session.clone();
+        let worker = std::thread::spawn(move || {
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("worker release must arrive");
+            drain_recording_worker(
+                recording,
+                worker_session,
+                receiver,
+                worker_terminal,
+                worker_sink,
+            )
+        });
+        let handle = Arc::new(RecordingSinkHandle::with_worker(
+            sink,
+            session.clone(),
+            worker,
+            Arc::clone(&terminal),
+        ));
+        for input in [
+            recording_revision(&track, 1, 0, 16_000, 0),
+            RecordingInput::PreparedFrame(prepared_frame(&session)),
+        ] {
+            handle.sink().try_send(input).unwrap();
+        }
+
+        let abort_handle = Arc::clone(&handle);
+        let abort = std::thread::spawn(move || abort_handle.abort("accepted adapter failure"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let state = terminal.lock().unwrap();
+            if state.degradation.as_deref() == Some("accepted adapter failure") {
+                assert_eq!(state.phase, RecordingTerminalPhase::Accepting);
+                break;
+            }
+            drop(state);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "abort must be accepted before the worker is released"
+            );
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        let result = abort.join().unwrap().unwrap();
+        let repeated = handle.finalize().unwrap();
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert_eq!(repeated, result);
+        assert!(result.committed.is_none());
+        assert!(scan_recordings(&dir).unwrap().complete.is_empty());
     }
 
     #[test]
@@ -4021,10 +4054,7 @@ mod tests {
             receiver,
         ));
         for input in [
-            RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ),
-            RecordingInput::ClockMapped(ClockMappingRevision::new(track, 1, 0, 0).unwrap()),
+            recording_revision(&track, 1, 0, 16_000, 0),
             RecordingInput::PreparedFrame(prepared_frame(&session)),
         ] {
             handle.sink().try_send(input).unwrap();
@@ -4438,14 +4468,7 @@ mod tests {
         let track = TrackId::new("live-microphone").unwrap();
         let mut recording = StreamingRecording::create(&dir, session).unwrap();
         recording
-            .append_input(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        recording
-            .append_input(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track, 1, 0, 0).unwrap(),
-            ))
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         let mut terminal_error = None;
         for sequence in (0..FOUR_HOURS_AT_TEN_HZ * 2).step_by(2) {
@@ -4490,14 +4513,7 @@ mod tests {
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         for track in [&microphone, &loopback] {
             recording
-                .append_input(RecordingInput::TrackConfigured(
-                    TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-                ))
-                .unwrap();
-            recording
-                .append_input(RecordingInput::ClockMapped(
-                    ClockMappingRevision::new(track.clone(), 1, 0, 0).unwrap(),
-                ))
+                .append_input(recording_revision(track, 1, 0, 16_000, 0))
                 .unwrap();
         }
         recording
@@ -4556,14 +4572,7 @@ mod tests {
         let track = TrackId::new("live-microphone").unwrap();
         let mut recording = StreamingRecording::create(&dir, session).unwrap();
         recording
-            .append_input(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        recording
-            .append_input(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track, 1, 0, 0).unwrap(),
-            ))
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         recording.observe_frame_metadata("live-microphone", 16_000, 1, 4, 0, 100);
         recording.persist_journal_for_test().unwrap();
@@ -4637,14 +4646,7 @@ mod tests {
         let track = TrackId::new("live-microphone").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording
-            .append_input(RecordingInput::TrackConfigured(
-                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
-            ))
-            .unwrap();
-        recording
-            .append_input(RecordingInput::ClockMapped(
-                ClockMappingRevision::new(track.clone(), 1, 0, 0).unwrap(),
-            ))
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
         recording
             .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
@@ -4681,6 +4683,49 @@ mod tests {
         assert!(recording.paths.journal_part.is_file());
         let recovered = read_journal_snapshot(&recording.paths.journal_part).unwrap();
         assert_eq!(recovered.session_id, session);
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+    }
+
+    #[test]
+    fn revision_transition_capacity_boundary_keeps_a_replayable_partial_prefix() {
+        let dir = tempfile_dir("revision-transition-capacity-boundary");
+        let session = SessionId::new("s-revision-transition-capacity-boundary").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
+            .unwrap();
+        let transition = revision_transition(&track, 2, 10, 48_000, 480);
+        let mut projected = recording.journal.clone();
+        projected
+            .observe_revision_transition(transition.clone())
+            .unwrap();
+        let transition_record = JournalRecord::Delta {
+            delta: recording.journal_durable.delta(&projected),
+        };
+        let serialized_transition = serialize_journal_record(&transition_record).unwrap();
+        let serialized_transition_text = std::str::from_utf8(&serialized_transition).unwrap();
+        assert!(serialized_transition_text.contains("revisionTransitions"));
+        assert!(!serialized_transition_text.contains("trackConfigurations"));
+        assert!(!serialized_transition_text.contains("clockMappings"));
+        let transition_bytes = serialized_transition.len();
+        recording.journal_bytes =
+            MAX_JOURNAL_BYTES - MAX_JOURNAL_TERMINAL_BYTES - transition_bytes as u64 + 1;
+
+        let append_error = recording
+            .append_input(RecordingInput::RevisionTransition(transition))
+            .unwrap_err();
+        let journal = recording.paths.journal_part.clone();
+        drop(recording);
+        let recovered = read_journal_snapshot(&journal).unwrap();
+
+        assert!(append_error.contains("journal durability stopped"));
+        assert_eq!(recovered.track_configurations.len(), 1);
+        assert_eq!(recovered.clock_mappings.len(), 1);
+        assert_eq!(recovered.track_configurations[0].revision, 1);
+        assert_eq!(recovered.clock_mappings[0].revision, 1);
         let scan = scan_recordings(&dir).unwrap();
         assert!(scan.complete.is_empty());
         assert_eq!(scan.partial.len(), 1);
@@ -4970,6 +5015,48 @@ mod tests {
     #[cfg(windows)]
     fn create_file_symlink_for_test(original: &Path, link: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_file(original, link)
+    }
+
+    fn revision_transition(
+        track: &TrackId,
+        revision: u32,
+        effective_at_ms: u64,
+        sample_rate_hz: u32,
+        source_position_frames: u64,
+    ) -> RecordingRevisionTransition {
+        RecordingRevisionTransition::new(
+            TrackConfigurationRevision::new(
+                track.clone(),
+                revision,
+                effective_at_ms,
+                sample_rate_hz,
+            )
+            .unwrap(),
+            ClockMappingRevision::new(
+                track.clone(),
+                revision,
+                source_position_frames,
+                effective_at_ms,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn recording_revision(
+        track: &TrackId,
+        revision: u32,
+        effective_at_ms: u64,
+        sample_rate_hz: u32,
+        source_position_frames: u64,
+    ) -> RecordingInput {
+        RecordingInput::RevisionTransition(revision_transition(
+            track,
+            revision,
+            effective_at_ms,
+            sample_rate_hz,
+            source_position_frames,
+        ))
     }
 
     fn prepared_frame(session_id: &SessionId) -> PreparedFrame {

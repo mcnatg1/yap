@@ -9,7 +9,8 @@ use crate::audio::frame::{PreparedFrame, TrackConfigurationRevision};
 use crate::audio::preprocess::{downmix_to_mono, rms_level, AudioLevelNormalizer, LinearResampler};
 use crate::audio::session::{SessionId, TrackId};
 use crate::audio::timeline::{
-    ClockMappingRevision, LossAccumulator, RecordingInput, Timeline, TimelineEvent, TryDrain,
+    ClockMappingRevision, LossAccumulator, RecordingInput, RecordingRevisionTransition, Timeline,
+    TimelineEvent, TryDrain,
 };
 
 pub const RECORDING_QUEUE_CAPACITY: usize = 128;
@@ -500,7 +501,14 @@ impl Coordinator {
     }
 
     pub fn close(&mut self) {
-        self.ports.recording.close();
+        if self.pending_losses.is_empty() {
+            self.ports.recording.close();
+        } else {
+            self.pending_losses.clear();
+            self.ports
+                .recording
+                .close_with_error("recording closed with unpublished pre-configuration loss");
+        }
         for sink in [
             self.ports.local_asr.as_ref(),
             self.ports.speaker_evidence.as_ref(),
@@ -627,15 +635,6 @@ impl Coordinator {
             packet.sample_rate_hz,
         )
         .map_err(|error| format!("Capture track configuration failed: {error}"))?;
-        self.timeline
-            .configure_track(track_configuration.clone())
-            .map_err(|error| format!("Capture track configuration failed: {error}"))?;
-        let _ = self
-            .ports
-            .recording
-            .try_send(RecordingInput::TrackConfigured(track_configuration));
-        self.revision_events
-            .push(RevisionEvent::TrackConfigured(self.track_revision));
         let clock_mapping = ClockMappingRevision::new(
             self.track_id.clone(),
             self.clock_revision,
@@ -643,13 +642,21 @@ impl Coordinator {
             session_time_ms,
         )
         .map_err(|error| format!("Capture clock mapping failed: {error}"))?;
+        let recording_transition =
+            RecordingRevisionTransition::new(track_configuration.clone(), clock_mapping.clone())
+                .map_err(|error| format!("Capture recording revision failed: {error}"))?;
+        self.timeline
+            .configure_track(track_configuration)
+            .map_err(|error| format!("Capture track configuration failed: {error}"))?;
         self.timeline
             .map_clock(clock_mapping.clone())
             .map_err(|error| format!("Capture clock mapping failed: {error}"))?;
         let _ = self
             .ports
             .recording
-            .try_send(RecordingInput::ClockMapped(clock_mapping));
+            .try_send(RecordingInput::RevisionTransition(recording_transition));
+        self.revision_events
+            .push(RevisionEvent::TrackConfigured(self.track_revision));
         self.revision_events
             .push(RevisionEvent::ClockMapped(self.clock_revision));
         self.capture_config = Some(configuration);
@@ -734,9 +741,7 @@ mod tests {
         loop {
             match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
                 RecordingInput::PreparedFrame(frame) => return frame,
-                RecordingInput::TrackConfigured(_)
-                | RecordingInput::ClockMapped(_)
-                | RecordingInput::Gap(_) => {}
+                RecordingInput::RevisionTransition(_) | RecordingInput::Gap(_) => {}
             }
         }
     }

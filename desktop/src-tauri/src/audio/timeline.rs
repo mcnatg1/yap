@@ -65,6 +65,31 @@ impl ClockMappingRevision {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingRevisionTransition {
+    pub(crate) configuration: TrackConfigurationRevision,
+    pub(crate) clock_mapping: ClockMappingRevision,
+}
+
+impl RecordingRevisionTransition {
+    pub fn new(
+        configuration: TrackConfigurationRevision,
+        clock_mapping: ClockMappingRevision,
+    ) -> Result<Self, TimelineError> {
+        if configuration.track_id != clock_mapping.track_id
+            || configuration.revision != clock_mapping.revision
+            || configuration.effective_at_ms != clock_mapping.session_time_ms
+        {
+            return Err(TimelineError::InvalidRevision);
+        }
+        Ok(Self {
+            configuration,
+            clock_mapping,
+        })
+    }
+}
+
 /// Ordered input accepted by the durable recording writer.
 ///
 /// Frames carry PCM, while control events preserve the coordinator's exact
@@ -72,8 +97,7 @@ impl ClockMappingRevision {
 #[derive(Debug, Clone)]
 pub enum RecordingInput {
     PreparedFrame(PreparedFrame),
-    TrackConfigured(TrackConfigurationRevision),
-    ClockMapped(ClockMappingRevision),
+    RevisionTransition(RecordingRevisionTransition),
     Gap(AudioGap),
 }
 

@@ -160,6 +160,32 @@ fn closed_recording_sink_cannot_publish_a_complete_capture() {
 }
 
 #[test]
+fn preconfiguration_loss_followed_by_close_cannot_publish_complete() {
+    let directory = temp_directory("preconfiguration-loss-close");
+    let session_id = session_id("preconfiguration-loss-close");
+    let (mut coordinator, recording) = recording_coordinator(directory.clone(), session_id);
+
+    coordinator
+        .consume_loss(LossSnapshot {
+            first_source_position_frames: 0,
+            dropped_frames: 1_600,
+            cause: GapCause::CallbackPoolExhausted,
+            generation: 1,
+        })
+        .unwrap();
+    coordinator.close();
+
+    let result = recording.finalize().unwrap();
+    assert_eq!(result.status, CaptureStatus::Partial);
+    assert!(result.committed.is_none());
+    let scan = scan_recordings(&directory).unwrap();
+    assert!(scan.complete.is_empty());
+    assert_eq!(scan.partial.len(), 1);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn saturated_recording_sink_cannot_publish_a_complete_capture() {
     let directory = temp_directory("saturated-sink");
     let session_id = session_id("saturated-sink");
@@ -259,7 +285,7 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
     }));
     let outcome = coordinator.outcome(SinkKind::Recording).unwrap();
     assert_eq!(outcome.dropped_frames, 0);
-    assert_eq!(outcome.accepted_frames, LOSS_EVENTS + 3);
+    assert_eq!(outcome.accepted_frames, LOSS_EVENTS + 2);
     assert!(coordinator.high_water_mark(SinkKind::Recording).unwrap() <= RECORDING_QUEUE_CAPACITY);
     coordinator.close();
 
