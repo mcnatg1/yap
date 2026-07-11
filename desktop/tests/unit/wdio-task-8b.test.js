@@ -1,6 +1,14 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  rmdirSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -11,21 +19,22 @@ import {
   createWdioRunIsolation,
   listRecordingArtifacts,
   registerTask8bLifecycleListeners,
-  removePrivateRunRoot,
   removePrivateRunRootWhenReleased,
   resetPrivateRecordingRoot,
+  waitForTask8bSavedEvent,
 } from "../wdio/task-8b-helpers.js";
 
-const temporaryRoots = [];
+const privateIsolations = [];
+let fixtureSequence = 0;
 
-function temporaryRoot(label) {
-  const root = path.join(
-    tmpdir(),
-    `yap-${label}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
-  mkdirSync(root, { recursive: true });
-  temporaryRoots.push(root);
-  return root;
+function privateIsolation(label, env = {}) {
+  fixtureSequence += 1;
+  const safeLabel = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const isolation = createWdioRunIsolation(env, {
+    token: `unit-${safeLabel}-${process.pid}-${Date.now()}-${fixtureSequence}`,
+  });
+  privateIsolations.push(isolation);
+  return isolation;
 }
 
 function writeCanonicalBundle(recordingRoot, name = "live-s-18c13f2a28c8be80-d018-2") {
@@ -48,12 +57,18 @@ function writeCanonicalBundle(recordingRoot, name = "live-s-18c13f2a28c8be80-d01
   };
 }
 
-afterEach(() => {
-  while (temporaryRoots.length) {
-    const root = temporaryRoots.pop();
-    if (existsSync(root)) {
-      rmSync(root, { force: true, recursive: true });
+afterEach(async () => {
+  const failures = [];
+  while (privateIsolations.length) {
+    const isolation = privateIsolations.pop();
+    try {
+      await removePrivateRunRootWhenReleased(isolation);
+    } catch (error) {
+      failures.push(error);
     }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Task 8b unit fixture cleanup failed");
   }
 });
 
@@ -182,12 +197,104 @@ describe("Task 8b transactional lifecycle listeners", () => {
       delete globalThis.__yapTask8bLifecycle;
     }
   });
+
+  it("retains a rejecting unlistener for a later successful retry", async () => {
+    let rejectOnceAttempts = 0;
+    const priorTauri = globalThis.__TAURI__;
+    globalThis.__TAURI__ = {
+      event: {
+        async listen(name) {
+          if (name !== "live-session") return () => undefined;
+          return async () => {
+            rejectOnceAttempts += 1;
+            if (rejectOnceAttempts === 1) throw new Error("unlisten retry required");
+          };
+        },
+      },
+    };
+
+    try {
+      await registerTask8bLifecycleListeners();
+      await expect(globalThis.__yapTask8bLifecycle.cleanup())
+        .rejects.toThrow("unlisten retry required");
+      expect(globalThis.__yapTask8bLifecycle.unlisteners).toHaveLength(1);
+      await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(1);
+      await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(0);
+    } finally {
+      globalThis.__TAURI__ = priorTauri;
+      delete globalThis.__yapTask8bLifecycle;
+    }
+  });
+
+  it("preserves failed registration cleanup handles for outer-finally recovery", async () => {
+    let cleanupAttempts = 0;
+    const priorTauri = globalThis.__TAURI__;
+    globalThis.__TAURI__ = {
+      event: {
+        async listen(name) {
+          if (name === "live-level") throw new Error("registration failed");
+          return async () => {
+            cleanupAttempts += 1;
+            if (cleanupAttempts === 1) throw new Error("partial cleanup failed");
+          };
+        },
+      },
+    };
+
+    try {
+      await expect(registerTask8bLifecycleListeners())
+        .rejects.toThrow(/registration failed.*partial cleanup failed/i);
+      expect(globalThis.__yapTask8bLifecycle.unlisteners).toHaveLength(1);
+      await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(1);
+      await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(0);
+    } finally {
+      globalThis.__TAURI__ = priorTauri;
+      delete globalThis.__yapTask8bLifecycle;
+    }
+  });
+
+  it("waits through delayed saved-event dispatch before returning evidence", async () => {
+    globalThis.__yapTask8bLifecycle = { levels: [], saved: [], sessions: [] };
+    const dispatch = setTimeout(() => {
+      globalThis.__yapTask8bLifecycle.saved.push({ name: "live-s-1-2-3" });
+    }, 10);
+
+    try {
+      await expect(waitForTask8bSavedEvent({}, {
+        expectedCount: 1,
+        pollIntervalMs: 1,
+        timeoutMs: 100,
+      })).resolves.toMatchObject({
+        saved: [{ name: "live-s-1-2-3" }],
+      });
+    } finally {
+      clearTimeout(dispatch);
+      delete globalThis.__yapTask8bLifecycle;
+    }
+  });
+
+  it("fails within the bounded saved-event deadline", async () => {
+    globalThis.__yapTask8bLifecycle = { levels: [], saved: [], sessions: [] };
+    try {
+      await expect(waitForTask8bSavedEvent({}, {
+        expectedCount: 1,
+        pollIntervalMs: 1,
+        timeoutMs: 10,
+      })).rejects.toThrow(/timed out waiting for 1 saved event/i);
+    } finally {
+      delete globalThis.__yapTask8bLifecycle;
+    }
+  });
 });
 
 describe("Task 8b canonical saved-session ownership", () => {
   function fixture() {
-    const recordingRoot = temporaryRoot("owned-recordings");
-    return { recordingRoot, saved: writeCanonicalBundle(recordingRoot) };
+    const isolation = privateIsolation("owned-recordings");
+    return {
+      isolation,
+      recordingRoot: isolation.recordingRoot,
+      saved: writeCanonicalBundle(isolation.recordingRoot),
+    };
   }
 
   it("accepts one exact current-run bundle under the canonical isolated root", () => {
@@ -208,13 +315,14 @@ describe("Task 8b canonical saved-session ownership", () => {
   });
 
   it("rejects relative paths and a different parent", () => {
-    const { recordingRoot, saved } = fixture();
+    const { isolation, recordingRoot, saved } = fixture();
     expect(() => assertOwnedSavedSession({ ...saved, sourcePath: `${saved.name}.wav` }, recordingRoot, {
       nowMs: 2_500,
       runStartedAtMs: 1_500,
     })).toThrow(/absolute Windows path/i);
 
-    const foreignRoot = temporaryRoot("foreign-recordings");
+    const foreignRoot = path.join(isolation.runRoot, "foreign-recordings");
+    mkdirSync(foreignRoot);
     const foreignWav = path.join(foreignRoot, `${saved.name}.wav`);
     writeFileSync(foreignWav, Buffer.alloc(64));
     expect(() => assertOwnedSavedSession({ ...saved, sourcePath: foreignWav }, recordingRoot, {
@@ -224,8 +332,9 @@ describe("Task 8b canonical saved-session ownership", () => {
   });
 
   it("rejects a canonical path escape even when the lexical parent matches", () => {
-    const { recordingRoot, saved } = fixture();
-    const foreignRoot = temporaryRoot("canonical-escape");
+    const { isolation, recordingRoot, saved } = fixture();
+    const foreignRoot = path.join(isolation.runRoot, "canonical-escape");
+    mkdirSync(foreignRoot);
     const foreignWav = path.join(foreignRoot, `${saved.name}.wav`);
     writeFileSync(foreignWav, Buffer.alloc(64));
     const canonicalize = (candidate) => candidate === saved.sourcePath ? foreignWav : candidate;
@@ -257,13 +366,143 @@ describe("Task 8b canonical saved-session ownership", () => {
 });
 
 describe("Task 8b WDIO run isolation", () => {
-  it("sets absolute recording and WebView roots under one generated temp run", () => {
-    const testsRoot = temporaryRoot("wdio-tests");
-    const env = {};
-    const isolation = createWdioRunIsolation(testsRoot, env, {
-      token: "20260711-001122334455",
-    });
+  it("rejects paired temp-root and run-root substitution", async () => {
+    const owner = privateIsolation("paired-substitution");
+    const tempRoot = path.join(owner.runRoot, "outside");
+    const runRoot = path.join(tempRoot, "run-victim");
+    const recordingRoot = path.join(runRoot, "live-recordings");
+    const webviewRoot = path.join(runRoot, "webview2");
+    mkdirSync(recordingRoot, { recursive: true });
+    mkdirSync(webviewRoot);
+    const marker = path.join(runRoot, "marker.txt");
+    writeFileSync(marker, "keep");
 
+    await expect(removePrivateRunRootWhenReleased({
+      recordingRoot,
+      runRoot,
+      tempRoot,
+      token: "victim",
+      webviewRoot,
+    })).rejects.toThrow(/fixed WDIO temp root/i);
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("rejects a token and run-root mismatch", async () => {
+    const isolation = privateIsolation("token-mismatch");
+    const marker = path.join(isolation.runRoot, "marker.txt");
+    writeFileSync(marker, "keep");
+
+    await expect(removePrivateRunRootWhenReleased({
+      ...isolation,
+      token: "different-token",
+    })).rejects.toThrow(/token.*run root/i);
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it.each(["../escape", "trailing-", "UPPERCASE"])(
+    "rejects the non-canonical run token %s",
+    (token) => {
+      expect(() => createWdioRunIsolation({}, { token })).toThrow(/unsupported characters/i);
+    },
+  );
+
+  it("rejects a substituted recording-root child", async () => {
+    const isolation = privateIsolation("recording-substitution");
+    const substituted = path.join(isolation.runRoot, "different-recordings");
+    mkdirSync(substituted);
+    const marker = path.join(substituted, "marker.txt");
+    const runMarker = path.join(isolation.runRoot, "run-marker.txt");
+    writeFileSync(marker, "keep");
+    writeFileSync(runMarker, "keep");
+
+    await expect(resetPrivateRecordingRoot({
+      ...isolation,
+      recordingRoot: substituted,
+    })).rejects.toThrow(/recording root.*exact child/i);
+    expect(existsSync(marker)).toBe(true);
+
+    await expect(removePrivateRunRootWhenReleased({
+      ...isolation,
+      webviewRoot: substituted,
+    })).rejects.toThrow(/WebView root.*exact child/i);
+    expect(existsSync(runMarker)).toBe(true);
+  });
+
+  it("rejects an exact recording-root reparse redirect when links are supported", async () => {
+    const isolation = privateIsolation("recording-link");
+    const redirectTarget = path.join(isolation.runRoot, "redirect-target");
+    mkdirSync(redirectTarget);
+    rmdirSync(isolation.recordingRoot);
+    try {
+      symlinkSync(redirectTarget, isolation.recordingRoot, "junction");
+    } catch (error) {
+      if (["EPERM", "ENOTSUP", "UNKNOWN"].includes(error?.code)) {
+        mkdirSync(isolation.recordingRoot);
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      await expect(resetPrivateRecordingRoot(isolation)).rejects.toThrow(/link|reparse|redirect/i);
+    } finally {
+      if (existsSync(isolation.recordingRoot) && lstatSync(isolation.recordingRoot).isSymbolicLink()) {
+        unlinkSync(isolation.recordingRoot);
+        mkdirSync(isolation.recordingRoot);
+      }
+    }
+  });
+
+  it("revalidates relationships after an asynchronous removal retry", async () => {
+    const isolation = privateIsolation("retry-revalidation");
+    const redirectTarget = path.join(isolation.runRoot, "retry-redirect-target");
+    mkdirSync(redirectTarget);
+    let removeCalls = 0;
+    let linkSupported = true;
+
+    try {
+      await expect(removePrivateRunRootWhenReleased(isolation, {
+        maxAttempts: 3,
+        onRetry() {
+          rmdirSync(isolation.recordingRoot);
+          try {
+            symlinkSync(redirectTarget, isolation.recordingRoot, "junction");
+          } catch (error) {
+            linkSupported = false;
+            mkdirSync(isolation.recordingRoot);
+            if (!["EPERM", "ENOTSUP", "UNKNOWN"].includes(error?.code)) throw error;
+          }
+        },
+        removeDirectory: async () => {
+          removeCalls += 1;
+          const error = new Error("directory busy");
+          error.code = "EBUSY";
+          throw error;
+        },
+        retryDelayMs: 0,
+      })).rejects.toThrow(linkSupported ? /link|reparse|redirect/i : /locked/i);
+      if (linkSupported) expect(removeCalls).toBe(1);
+    } finally {
+      if (existsSync(isolation.recordingRoot) && lstatSync(isolation.recordingRoot).isSymbolicLink()) {
+        unlinkSync(isolation.recordingRoot);
+        mkdirSync(isolation.recordingRoot);
+      }
+    }
+  });
+
+  it("sets exact absolute roots below the module-derived fixed temp parent", async () => {
+    const env = {};
+    const isolation = privateIsolation("fixed-layout", env);
+    const expectedTempRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "results",
+      "temp",
+      "wdio",
+    );
+
+    expect(isolation.tempRoot).toBe(expectedTempRoot);
+    expect(isolation.runRoot).toBe(path.join(expectedTempRoot, `run-${isolation.token}`));
     expect(path.win32.isAbsolute(isolation.recordingRoot)).toBe(true);
     expect(path.win32.isAbsolute(isolation.webviewRoot)).toBe(true);
     expect(path.dirname(isolation.recordingRoot)).toBe(isolation.runRoot);
@@ -272,27 +511,28 @@ describe("Task 8b WDIO run isolation", () => {
     expect(env.WEBVIEW2_USER_DATA_FOLDER).toBe(isolation.webviewRoot);
     expect(listRecordingArtifacts(isolation.recordingRoot)).toEqual([]);
 
-    removePrivateRunRoot(isolation);
+    await removePrivateRunRootWhenReleased(isolation);
     expect(existsSync(isolation.runRoot)).toBe(false);
   });
 
-  it("resets only the proven private recording root and refuses an outside cleanup", () => {
-    const testsRoot = temporaryRoot("wdio-cleanup");
-    const isolation = createWdioRunIsolation(testsRoot, {}, { token: "safe-cleanup" });
+  it("resets only the proven private recording root and refuses an outside cleanup", async () => {
+    const isolation = privateIsolation("safe-cleanup");
     writeFileSync(path.join(isolation.recordingRoot, "owned.txt"), "owned");
-    expect(resetPrivateRecordingRoot(isolation)).toEqual(["owned.txt"]);
+    await expect(resetPrivateRecordingRoot(isolation)).resolves.toEqual(["owned.txt"]);
     assertRecordingRootEmpty(isolation.recordingRoot);
 
-    const outside = temporaryRoot("must-survive");
-    const marker = path.join(outside, "marker.txt");
+    const outside = privateIsolation("must-survive");
+    const marker = path.join(outside.runRoot, "marker.txt");
     writeFileSync(marker, "keep");
-    expect(() => removePrivateRunRoot({ ...isolation, runRoot: outside })).toThrow(/refusing/i);
+    await expect(removePrivateRunRootWhenReleased({
+      ...isolation,
+      runRoot: outside.runRoot,
+    })).rejects.toThrow(/token.*run root/i);
     expect(existsSync(marker)).toBe(true);
   });
 
   it("removes the private run root through the asynchronous service-cleanup seam", async () => {
-    const testsRoot = temporaryRoot("wdio-async-cleanup");
-    const isolation = createWdioRunIsolation(testsRoot, {}, { token: "async-cleanup" });
+    const isolation = privateIsolation("async-cleanup");
 
     await removePrivateRunRootWhenReleased(isolation);
 

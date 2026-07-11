@@ -14,7 +14,7 @@ const testsRoot = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = path.resolve(testsRoot, "..");
 const appBinaryPath =
   process.env.APP_BINARY ?? path.join(desktopRoot, "src-tauri", "target", "debug", binaryName);
-const isolation = createWdioRunIsolation(testsRoot);
+const isolation = createWdioRunIsolation();
 class Task8bIsolationCleanupService {
   async onComplete() {
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -78,7 +78,7 @@ export const config = {
     }
     const artifacts = listRecordingArtifacts(isolation.recordingRoot);
     if (artifacts.length > 0) {
-      const removed = resetPrivateRecordingRoot(isolation);
+      const removed = await resetPrivateRecordingRoot(isolation);
       throw new Error(
         `WDIO test leaked private recording artifacts; removed from the isolated root: ${removed.join(", ")}`,
       );
@@ -86,11 +86,11 @@ export const config = {
     assertRecordingRootEmpty(isolation.recordingRoot);
     console.info("[Task 8b isolation] afterTest recordingRoot=empty");
   },
-  onComplete() {
+  async onComplete() {
     const artifacts = listRecordingArtifacts(isolation.recordingRoot);
     let leakageError;
     if (artifacts.length > 0) {
-      const removed = resetPrivateRecordingRoot(isolation);
+      const removed = await resetPrivateRecordingRoot(isolation);
       leakageError = new Error(
         `WDIO run left private recording artifacts; removed before final cleanup: ${removed.join(", ")}`,
       );

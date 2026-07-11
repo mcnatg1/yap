@@ -5,11 +5,11 @@ import {
   mkdirSync,
   readdirSync,
   realpathSync,
-  rmSync,
   statSync,
 } from "node:fs";
 import { rm as removeAsync } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const MICROPHONE_PERMISSION_DENIED_PREFIX = "Microphone permission denied:";
 
@@ -25,11 +25,17 @@ export async function registerTask8bLifecycleListeners() {
   };
   globalThis.__yapTask8bLifecycle = state;
   state.cleanup = async () => {
-    const unlisteners = state.unlisteners.splice(0);
+    const pending = [...state.unlisteners];
+    let cleaned = 0;
     const failures = [];
-    for (const unlisten of unlisteners) {
+    for (const unlisten of pending) {
       try {
         await unlisten();
+        const index = state.unlisteners.indexOf(unlisten);
+        if (index >= 0) {
+          state.unlisteners.splice(index, 1);
+          cleaned += 1;
+        }
       } catch (error) {
         failures.push(String(error));
       }
@@ -37,7 +43,7 @@ export async function registerTask8bLifecycleListeners() {
     if (failures.length > 0) {
       throw new Error(`Lifecycle listener cleanup failed: ${failures.join("; ")}`);
     }
-    return unlisteners.length;
+    return cleaned;
   };
 
   try {
@@ -60,6 +66,46 @@ export async function registerTask8bLifecycleListeners() {
       );
     }
     throw registrationError;
+  }
+}
+
+export async function waitForTask8bSavedEvent(_tauri, options = {}) {
+  const expectedCount = options.expectedCount ?? 1;
+  const pollIntervalMs = options.pollIntervalMs ?? 25;
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  if (!Number.isInteger(expectedCount) || expectedCount < 1) {
+    throw new Error("Saved-event barrier expectedCount must be a positive integer.");
+  }
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error("Saved-event barrier pollIntervalMs must be positive.");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Saved-event barrier timeoutMs must be positive.");
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const state = globalThis.__yapTask8bLifecycle;
+    if (!state || !Array.isArray(state.saved)) {
+      throw new Error("Task 8b lifecycle state is unavailable while waiting for a saved event.");
+    }
+    if (state.saved.length >= expectedCount) {
+      return {
+        levels: [...state.levels],
+        saved: [...state.saved],
+        sessions: [...state.sessions],
+      };
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(
+        `Timed out waiting for ${expectedCount} saved event(s); received ${state.saved.length}.`,
+      );
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, Math.min(pollIntervalMs, remainingMs));
+    });
   }
 }
 
@@ -265,100 +311,157 @@ function generatedToken() {
   return `${new Date().toISOString().replace(/[^0-9]/g, "")}-${process.pid}-${randomUUID()}`;
 }
 
-function assertSafeIsolationRoot(isolation) {
-  const tempRoot = requireAbsoluteWindowsPath(isolation.tempRoot, "WDIO temp root");
-  const runRoot = requireAbsoluteWindowsPath(isolation.runRoot, "WDIO run root");
-  if (!sameWindowsPath(path.win32.dirname(runRoot), tempRoot)
-    || !path.win32.basename(runRoot).startsWith("run-")) {
-    throw new Error("Refusing cleanup outside the generated WDIO temp root.");
-  }
-  if (existsSync(tempRoot)) {
-    const canonicalTemp = requireAbsoluteWindowsPath(realpathSync.native(tempRoot), "Canonical WDIO temp root");
-    if (!sameWindowsPath(canonicalTemp, tempRoot)) {
-      throw new Error("Refusing cleanup through a redirected WDIO temp root.");
-    }
-  }
-  if (existsSync(runRoot)) {
-    const canonicalRun = requireAbsoluteWindowsPath(realpathSync.native(runRoot), "Canonical WDIO run root");
-    if (!sameWindowsPath(canonicalRun, runRoot)
-      || !sameWindowsPath(path.win32.dirname(canonicalRun), tempRoot)) {
-      throw new Error("Refusing cleanup through a redirected WDIO run root.");
-    }
-  }
-  return { runRoot, tempRoot };
+const helperDirectory = path.dirname(fileURLToPath(import.meta.url));
+const fixedWdioTempRoot = path.resolve(helperDirectory, "..", "results", "temp", "wdio");
+const isolationTokenPattern = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
+const retryableRemovalCodes = new Set(["EBUSY", "EMFILE", "ENFILE", "ENOTEMPTY", "EPERM"]);
+
+function expectedIsolationPaths(token) {
+  const runRoot = path.join(fixedWdioTempRoot, `run-${token}`);
+  return {
+    recordingRoot: path.join(runRoot, "live-recordings"),
+    runRoot,
+    tempRoot: fixedWdioTempRoot,
+    webviewRoot: path.join(runRoot, "webview2"),
+  };
 }
 
-export function createWdioRunIsolation(testsRoot, env = process.env, options = {}) {
-  const tempRoot = path.resolve(testsRoot, "results", "temp", "wdio");
-  const token = options.token ?? env.YAP_WDIO_RUN_TOKEN ?? generatedToken();
-  if (!/^[a-z0-9][a-z0-9-]{0,127}$/i.test(token)) {
+function assertUnredirectedDirectory(candidate, label) {
+  if (!existsSync(candidate)) return false;
+  const metadata = lstatSync(candidate);
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`${label} must not be a link or reparse redirect.`);
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error(`${label} must be a directory.`);
+  }
+  const canonical = requireAbsoluteWindowsPath(realpathSync.native(candidate), `Canonical ${label}`);
+  if (!sameWindowsPath(canonical, candidate)) {
+    throw new Error(`${label} resolves through a canonical redirect.`);
+  }
+  return true;
+}
+
+function assertSafeIsolationRoot(isolation) {
+  if (!isolation || typeof isolation !== "object") {
+    throw new Error("WDIO isolation proof is required for cleanup.");
+  }
+  const { token } = isolation;
+  if (typeof token !== "string" || !isolationTokenPattern.test(token)) {
     throw new Error("WDIO isolation token contains unsupported characters.");
   }
-  const runRoot = path.resolve(tempRoot, `run-${token}`);
-  const recordingRoot = path.join(runRoot, "live-recordings");
-  const webviewRoot = path.join(runRoot, "webview2");
-  mkdirSync(recordingRoot, { recursive: true });
-  mkdirSync(webviewRoot, { recursive: true });
 
-  env.YAP_WDIO_RUN_TOKEN = token;
-  env.YAP_WDIO_RUN_ROOT = runRoot;
-  env.YAP_LIVE_RECORDINGS_DIR = recordingRoot;
-  env.WEBVIEW2_USER_DATA_FOLDER = webviewRoot;
-
-  const isolation = { recordingRoot, runRoot, tempRoot, token, webviewRoot };
-  assertSafeIsolationRoot(isolation);
-  return isolation;
-}
-
-export function resetPrivateRecordingRoot(isolation) {
-  const { runRoot } = assertSafeIsolationRoot(isolation);
+  const expected = expectedIsolationPaths(token);
+  const tempRoot = requireAbsoluteWindowsPath(isolation.tempRoot, "WDIO temp root");
+  if (!sameWindowsPath(tempRoot, expected.tempRoot)) {
+    throw new Error("WDIO temp root must equal the fixed WDIO temp root.");
+  }
+  const runRoot = requireAbsoluteWindowsPath(isolation.runRoot, "WDIO run root");
+  if (!sameWindowsPath(runRoot, expected.runRoot)) {
+    throw new Error("WDIO token and run root do not have the required exact relationship.");
+  }
   const recordingRoot = requireAbsoluteWindowsPath(
     isolation.recordingRoot,
     "WDIO private recording root",
   );
-  if (!sameWindowsPath(recordingRoot, path.win32.join(runRoot, "live-recordings"))) {
-    throw new Error("Refusing to reset a recording root outside the generated WDIO run root.");
+  if (!sameWindowsPath(recordingRoot, expected.recordingRoot)) {
+    throw new Error("WDIO recording root is not the exact child of the token-derived run root.");
+  }
+  const webviewRoot = requireAbsoluteWindowsPath(isolation.webviewRoot, "WDIO WebView root");
+  if (!sameWindowsPath(webviewRoot, expected.webviewRoot)) {
+    throw new Error("WDIO WebView root is not the exact child of the token-derived run root.");
+  }
+
+  const tempExists = assertUnredirectedDirectory(expected.tempRoot, "Fixed WDIO temp root");
+  const runExists = assertUnredirectedDirectory(expected.runRoot, "WDIO run root");
+  if (runExists && !tempExists) {
+    throw new Error("WDIO run root exists without the fixed WDIO temp root.");
+  }
+  assertUnredirectedDirectory(expected.recordingRoot, "WDIO recording root");
+  assertUnredirectedDirectory(expected.webviewRoot, "WDIO WebView root");
+  return expected;
+}
+
+export function createWdioRunIsolation(env = process.env, options = {}) {
+  const token = options.token ?? env.YAP_WDIO_RUN_TOKEN ?? generatedToken();
+  if (typeof token !== "string" || !isolationTokenPattern.test(token)) {
+    throw new Error("WDIO isolation token contains unsupported characters.");
+  }
+  const isolation = { ...expectedIsolationPaths(token), token };
+
+  mkdirSync(isolation.tempRoot, { recursive: true });
+  assertUnredirectedDirectory(isolation.tempRoot, "Fixed WDIO temp root");
+  if (!existsSync(isolation.runRoot)) mkdirSync(isolation.runRoot);
+  assertUnredirectedDirectory(isolation.runRoot, "WDIO run root");
+  if (!existsSync(isolation.recordingRoot)) mkdirSync(isolation.recordingRoot);
+  if (!existsSync(isolation.webviewRoot)) mkdirSync(isolation.webviewRoot);
+  assertSafeIsolationRoot(isolation);
+
+  env.YAP_WDIO_RUN_TOKEN = token;
+  env.YAP_WDIO_RUN_ROOT = isolation.runRoot;
+  env.YAP_LIVE_RECORDINGS_DIR = isolation.recordingRoot;
+  env.WEBVIEW2_USER_DATA_FOLDER = isolation.webviewRoot;
+  return isolation;
+}
+
+async function safeRemovePrivateDirectory(isolation, targetName, options = {}) {
+  const maxAttempts = options.maxAttempts ?? 150;
+  const retryDelayMs = options.retryDelayMs ?? 100;
+  const removeDirectory = options.removeDirectory ?? removeAsync;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error("Private cleanup maxAttempts must be a positive integer.");
+  }
+  if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0) {
+    throw new Error("Private cleanup retryDelayMs must not be negative.");
+  }
+  if (targetName !== "recordingRoot" && targetName !== "runRoot") {
+    throw new Error("Private cleanup target is not allowed.");
+  }
+
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const target = assertSafeIsolationRoot(isolation)[targetName];
+    if (!existsSync(target)) return;
+
+    try {
+      await removeDirectory(target, { force: true, recursive: true });
+      if (!existsSync(target)) return;
+      lastError = new Error("recursive removal returned while the target still existed");
+    } catch (error) {
+      if (!retryableRemovalCodes.has(error?.code)) throw error;
+      lastError = error;
+    }
+
+    if (attempt === maxAttempts) break;
+    if (options.onRetry) await options.onRetry({ attempt, target });
+    if (retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  const target = expectedIsolationPaths(isolation.token)[targetName];
+  throw new Error(
+    `Private WDIO ${targetName} remained locked after ${maxAttempts} attempts: ${target}; ${String(lastError)}`,
+  );
+}
+
+export async function resetPrivateRecordingRoot(isolation, options = {}) {
+  const { recordingRoot, runRoot } = assertSafeIsolationRoot(isolation);
+  if (!existsSync(runRoot)) {
+    throw new Error("Cannot reset a recording root after its private WDIO run root was removed.");
   }
   const artifacts = listRecordingArtifacts(recordingRoot);
-  if (existsSync(recordingRoot)) {
-    rmSync(recordingRoot, {
-      force: true,
-      maxRetries: 100,
-      recursive: true,
-      retryDelay: 100,
-    });
+  await safeRemovePrivateDirectory(isolation, "recordingRoot", options);
+
+  const revalidated = assertSafeIsolationRoot(isolation);
+  if (!existsSync(revalidated.runRoot)) {
+    throw new Error("Private WDIO run root disappeared before recording-root recreation.");
   }
-  mkdirSync(recordingRoot, { recursive: true });
+  if (!existsSync(revalidated.recordingRoot)) mkdirSync(revalidated.recordingRoot);
+  assertSafeIsolationRoot(isolation);
   return artifacts;
 }
 
-export function removePrivateRunRoot(isolation) {
-  const { runRoot } = assertSafeIsolationRoot(isolation);
-  if (existsSync(runRoot)) {
-    rmSync(runRoot, {
-      force: true,
-      maxRetries: 100,
-      recursive: true,
-      retryDelay: 100,
-    });
-  }
-}
-
-export async function removePrivateRunRootWhenReleased(isolation) {
-  const { runRoot } = assertSafeIsolationRoot(isolation);
-  const retryableCodes = new Set(["EBUSY", "EMFILE", "ENFILE", "ENOTEMPTY", "EPERM"]);
-  let lastError;
-  for (let attempt = 0; attempt < 150; attempt += 1) {
-    try {
-      await removeAsync(runRoot, { force: true, recursive: true });
-      if (!existsSync(runRoot)) return;
-    } catch (error) {
-      if (!retryableCodes.has(error?.code)) throw error;
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(
-    `Private WDIO run root remained locked after service shutdown: ${runRoot}; ${String(lastError)}`,
-  );
+export async function removePrivateRunRootWhenReleased(isolation, options = {}) {
+  await safeRemovePrivateDirectory(isolation, "runRoot", options);
 }

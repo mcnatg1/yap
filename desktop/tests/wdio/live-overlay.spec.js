@@ -4,6 +4,7 @@ import {
   classifyNativeReadiness,
   listRecordingArtifacts,
   registerTask8bLifecycleListeners,
+  waitForTask8bSavedEvent,
 } from "./task-8b-helpers.js";
 
 const lifecycleAssertions = [
@@ -65,6 +66,7 @@ async function cleanupLifecycle(runStartedAtMs) {
   const errors = [];
   const listenerCleanupCounts = [];
   let saved = [];
+  let stopResolved = false;
 
   const attempt = async (label, operation) => {
     try {
@@ -79,7 +81,21 @@ async function cleanupLifecycle(runStartedAtMs) {
     const target = (await switchToWindow("live-overlay")) ? "live-overlay" : "main";
     if (target === "main") await browser.tauri.switchWindow("main");
     await browser.tauri.execute(({ core }) => core.invoke("stop_live_session"));
+    stopResolved = true;
   });
+
+  if (stopResolved && Number.isFinite(runStartedAtMs)) {
+    await attempt("saved-event barrier failed", async () => {
+      if (!(await switchToWindow("live-overlay"))) {
+        throw new Error("Live overlay closed before the saved event could be observed.");
+      }
+      await browser.tauri.execute(waitForTask8bSavedEvent, {
+        expectedCount: 1,
+        pollIntervalMs: 25,
+        timeoutMs: 5_000,
+      });
+    });
+  }
 
   await attempt("saved-event capture failed", async () => {
     saved = (await readLifecycleEvidence()).saved;
