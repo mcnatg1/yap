@@ -19,7 +19,7 @@
 - The audio callback must not wait on inference, disk, React, or an ordinary bounded queue to report loss.
 - Recording, local ASR, future evidence, and future transport have separate bounded queues and separate degradation results.
 - Recording files remain inspectable files. No audio or transcript body belongs in a database.
-- Existing single-microphone settings remain readable. Pre-release `live-<timestamp>[-suffix].wav/.txt` artifacts are bounded migration input only: a valid WAV without legacy text may be adopted into a canonical commit; a pair with legacy text remains untouched and is reported because it cannot prove the immutable transcript-revision contract.
+- Existing single-microphone settings remain readable. Pre-release `live-<timestamp>[-suffix].wav/.txt` artifacts are a deliberate compatibility break: product runtime leaves them physically untouched and never indexes, recovers, retains, renames, deletes, or adopts them. A future explicit operator tool is separate work.
 - Phase boundary: this plan completes the client-audio parts of canonical Phase 1 and the capture prerequisites pulled forward from Phases 3 and 5. Phase 8 still begins with anonymous speaker inference.
 
 ## Governing Documents
@@ -76,7 +76,7 @@ desktop/src-tauri/src/install_identity.rs  non-secret local owner namespace
 | Recording, ASR, evidence, and transport fail independently | Task 5 |
 | More than ten minutes records with bounded memory | Tasks 6 and 8 |
 | Completion requires a commit manifest; crashes remain partial | Tasks 6-7 |
-| Dictation remains compatible; pre-release artifacts have a bounded migration path | Tasks 1, 7, and 8 |
+| Dictation remains compatible; pre-release artifacts stay outside product runtime | Tasks 1, 7, and 8 |
 | No local speaker model or new inference framework lands | Global constraints and final review gate |
 
 ---
@@ -837,7 +837,7 @@ Replace `LiveRuntime::stop() -> StreamFinishStatus` with `LiveStopResult`. A fin
 
 - [ ] **Step 3: Scan committed and partial sessions separately**
 
-`list_saved_live_sessions` discovers sessions only from hash-valid `.commit.json` files, validates the highest transcript result revision when present, and reads creation time from committed metadata. Normal history never scans timestamp-named WAV/TXT pairs. Keep one isolated, bounded migration adapter: it may adopt a canonical validated WAV-only source with deterministic identity, no overwrite, commit-last publication, verification, and source cleanup only after success; a legacy TXT pair cannot prove the immutable revision contract and therefore remains untouched with a reported warning. Do not teach `created_at_ms_from_live_stem` to guess the new opaque ID format. Add `list_recoverable_live_sessions` for private partial artifacts. Validate every path remains inside the effective Yap recordings directory before returning it.
+`list_saved_live_sessions` discovers sessions only from hash-valid `.commit.json` files, validates the highest transcript result revision when present, and reads creation time from committed metadata. Timestamp-named WAV/TXT pairs are physically untouched and never scanned, adopted, warned about, or treated as history/recovery/retention input. Add `list_recoverable_live_sessions` only for private artifacts from the current writer. Validate every path remains inside the effective Yap recordings directory before returning it.
 
 Delete partial artifacts whose recorded recovery expiry is older than 24 hours during startup/list reconciliation. Cleanup must resolve every candidate under the Yap recordings directory, ignore unknown files, and report failures without hiding still-recoverable sessions.
 
@@ -854,9 +854,9 @@ delete_recoverable_live_session(session_id: String) -> Result<(), String>
 
 Recovery patches a valid partial WAV length, publishes a sidecar and commit marked `partial`, and never invents missing gap metadata. Deletion removes only Rust-resolved files for that session. Surface recoverable sessions in the existing History list with `Partial` status and `Recover` / `Delete` menu actions; do not add a card or modal inside the history surface.
 
-- [ ] **Step 5: Retire normal legacy history after bounded migration**
+- [ ] **Step 5: Retire pre-release runtime history**
 
-Extend `SavedLiveSession` and `TranscriptHistoryEntry` with optional `captureCommitPath` and `recoveryState`. Parse old localStorage rows only as migration input; do not retain a parallel normal-runtime legacy history path. A recovered partial remains a compact partial row with Recover/Delete-only actions. Existing `.wav/.txt` pairs without a canonical commit are never normal history, recovery, or retention-deletion candidates.
+Extend `SavedLiveSession` and `TranscriptHistoryEntry` with optional `captureCommitPath` and `recoveryState`. Strict timestamp-named localStorage WAV/TXT rows are excluded regardless of absolute, custom, or relative path; unrelated imported rows remain available. A recovered partial remains a compact partial row with Recover/Delete-only actions. Existing pre-release `.wav/.txt` pairs without a canonical commit are never history, recovery, retention, or normal deletion candidates.
 
 - [ ] **Step 6: Run Rust and frontend tests**
 
@@ -944,7 +944,7 @@ git commit -m "Verify the client audio foundation"
 - [ ] Manifest builders fail closed on cross-session and cross-track contamination.
 - [ ] Gaps remain explicit and end-exclusive timing remains monotonic.
 - [ ] Dictation behavior and serialized settings remain backward compatible.
-- [ ] Pre-release live artifacts are either safely adopted into a canonical commit or left untouched and reported; they are never a second history format.
+- [ ] Pre-release live artifacts remain physically untouched and outside every product runtime path; a future explicit operator tool is out of scope.
 - [ ] Capture sidecars contain opaque device references and no raw OS device labels.
 - [ ] Dictation injection still uses only final transcript text.
 - [ ] No speaker model, SQLite, Opus, server connector, or new inference dependency landed.

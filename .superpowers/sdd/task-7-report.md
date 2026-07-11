@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE_WITH_CONCERNS
+DONE
 
 ## RED Evidence
 
@@ -37,7 +37,7 @@ DONE_WITH_CONCERNS
 
 ## UI Compatibility Review
 
-- Legacy localStorage entries are accepted unchanged; new fields are optional.
+- LocalStorage remains backward-readable, but strict timestamp-named pre-release WAV/TXT rows are excluded regardless of default, custom, or relative location; unrelated imports remain available.
 - No new card, modal, dependency, or breakpoint was introduced. The history list uses the existing menu primitives and Phosphor icons.
 
 ## Scope Review
@@ -84,7 +84,7 @@ DONE
 
 ### Scope And Concern Review
 
-- Preserved Task 6 commit-last/no-follow/hash validation, Task 7 saving lease/exactly-once stop effects, command authorization, 24-hour partial cleanup, legacy scans, transcript independence, and the restrained history surface.
+- Preserved Task 6 commit-last/no-follow/hash validation, Task 7 saving lease/exactly-once stop effects, command authorization, 24-hour partial cleanup, transcript independence, and the restrained history surface.
 - No server, model, diarization, or SQLite changes. No remaining Task 7 concerns identified.
 
 ---
@@ -94,28 +94,30 @@ DONE
 ### Decision
 
 - Yap is pre-release: the only normal recording format is a hash-valid current commit manifest plus its bound artifacts. Timestamp-named WAV/TXT files are not history, recovery, or retention-cleanup candidates.
-- The isolated migration adapter processes at most 16 timestamp-named WAV files per reconciliation. It deterministically derives a canonical ID from a validated WAV hash, uses no-follow/create-new/no-overwrite and commit-last publication, revalidates the result, and only then removes the WAV source. A legacy TXT pair is left intact and reported because it cannot satisfy the immutable transcript-revision contract without inventing provenance.
+- No runtime migration adapter exists. Timestamp-named WAV/TXT files remain unindexed and physically untouched: no product path renames, deletes, adopts, warns about, or recovers them. A future explicit operator tool is out of scope.
 
 ### Repair Coverage
 
 - A public final WAV becomes recoverable only with current-writer partial lineage; a timestamp-named final WAV is ignored and cannot enter 24-hour cleanup.
+- Timestamp-named files are also rejected by the normal history-file deletion command, so the pre-release break does not leave a second mutation path behind.
 - Recovered partials now use the single `recoverable` UI state. Older persisted `recovered` rows are also gated as partial, so neither state can preview, copy, open, reveal, hide, play, or use normal deletion.
 - Expired-meeting deletion now enumerates transcript artifacts first and deletes nothing unless their exact contiguous revision set and hash chain validate. A failure stays visible as `Expired meeting cleanup is pending`.
-- LocalStorage parsing remains available for migration input, but runtime visible history and reconciliation discard uncommitted Yap live rows; normal Yap actions require a canonical commit or a partial-recovery state.
+- Runtime visible history and reconciliation discard strict timestamp-named WAV/TXT rows by name and expected basenames, independent of their directory. Normal Yap actions require a canonical commit or a partial-recovery state.
 
 ### Focused Regression Evidence
 
-- `audio::recording`: timestamp-named final WAVs are ignored; current-writer final WAVs with partial lineage remain recoverable.
-- `live::recordings`: WAV-only migration is idempotent and canonical; WAV/TXT migration leaves both sources untouched; incomplete expired-meeting transcript chains retain all artifacts.
+- `audio::recording`: timestamp-named final WAVs are ignored; a current-writer final WAV with its journal but no partial sidecar remains recoverable.
+- `live::recordings`: WAV-only and WAV/TXT pre-release artifacts remain untouched and unindexed; retry after recovered-commit publication returns the verified saved partial; incomplete expired-meeting transcript chains retain all artifacts.
 - `history` and `history-utils`: pre-release localStorage rows are hidden from runtime history and all partial states are action-gated.
 
 ### Final Verification
 
 - `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml audio::recording` - pass (40 focused tests).
-- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::recordings` - pass (40 focused tests).
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::recordings` - pass (42 focused tests).
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml file_actions::tests` - pass (40 focused tests).
 - `pnpm --dir desktop test -- history.test.ts history-utils.test.ts` - pass (100 tests across the configured unit suite).
 - `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` - pass.
 - `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.
 - `pnpm --dir desktop build` - pass.
-- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml -- --test-threads=1` - pass (411 library tests plus 1 parity integration test). The default parallel run completed 410/411 and exposed an existing global test-only receipt-handle counter race; the failing test passes in isolation and in the serial broad run.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass (414 library tests plus 1 parity integration test, default parallel execution).
 - `pnpm --dir desktop test` - pass (100 tests).

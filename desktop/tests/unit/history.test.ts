@@ -56,7 +56,7 @@ describe("transcript history storage", () => {
       [nativeGone, legacy, imported],
       [incoming],
       [],
-    ).map((entry) => entry.name)).toEqual(["live-current", "imported"]);
+    ).map((entry) => entry.name)).toEqual(["live-current", "live-legacy", "imported"]);
   });
 
   it("keeps hidden native tombstones hidden during a refresh", () => {
@@ -499,20 +499,39 @@ describe("transcript history storage", () => {
     expect(entry.captureCommitPath).toBeUndefined();
   });
 
-  it("does not expose pre-release Yap localStorage rows as runtime history", () => {
+  it("does not expose strict pre-release localStorage rows outside the default Yap path", () => {
     const storage = {
       getItem: () => JSON.stringify([
         {
           createdAt: "2026-01-01T00:00:00.000Z",
           name: "live-1720656000000",
-          outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.txt",
-          sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.wav",
+          outputPath: "D:\\custom-recordings\\live-1720656000000.txt",
+          sourcePath: "D:\\custom-recordings\\live-1720656000000.wav",
+        },
+        {
+          createdAt: "2026-01-02T00:00:00.000Z",
+          name: "live-1720656000001-2",
+          outputPath: "relative-recordings/live-1720656000001-2.txt",
+          sourcePath: "relative-recordings/live-1720656000001-2.wav",
+        },
+        {
+          createdAt: "2026-01-03T00:00:00.000Z",
+          name: "live-1720656000002",
+          outputPath: "imports/interview-transcript.txt",
+          sourcePath: "imports/interview.wav",
         },
       ]),
       setItem: () => undefined,
     };
 
-    expect(readVisibleTranscriptHistory(storage)).toEqual([]);
+    expect(readVisibleTranscriptHistory(storage)).toEqual([
+      {
+        createdAt: "2026-01-03T00:00:00.000Z",
+        name: "live-1720656000002",
+        outputPath: "imports/interview-transcript.txt",
+        sourcePath: "imports/interview.wav",
+      },
+    ]);
   });
 
   it("only exposes delete for Yap-owned live history entries", () => {

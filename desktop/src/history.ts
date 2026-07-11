@@ -126,9 +126,15 @@ export function filterHiddenTranscriptHistory(entries: TranscriptHistoryEntry[],
   return entries.filter((entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)));
 }
 
-function isYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
-  return entry.name.toLowerCase().startsWith("live-")
-    && entry.outputPath.replace(/\\/g, "/").toLowerCase().includes("/yap/live-recordings/");
+function historyPathBasename(path: string) {
+  return path.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
+}
+
+function isPreReleaseLiveHistoryEntry(entry: TranscriptHistoryEntry) {
+  const name = entry.name.toLowerCase();
+  return /^live-\d+(?:-\d+)?$/.test(name)
+    && historyPathBasename(entry.outputPath) === `${name}.txt`
+    && historyPathBasename(entry.sourcePath) === `${name}.wav`;
 }
 
 function isCanonicalYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
@@ -137,10 +143,10 @@ function isCanonicalYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
 
 export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
   if (!storage) return [];
-  const migrationInput = readTranscriptHistory(storage);
+  const history = readTranscriptHistory(storage);
   return filterHiddenTranscriptHistory(
-    migrationInput.filter(
-      (entry) => !isYapLiveHistoryEntry(entry) || isCanonicalYapLiveHistoryEntry(entry),
+    history.filter(
+      (entry) => !isPreReleaseLiveHistoryEntry(entry) || isCanonicalYapLiveHistoryEntry(entry),
     ),
     readHiddenTranscriptHistory(storage),
   );
@@ -226,7 +232,7 @@ export async function pruneMissingHiddenTranscriptHistory(
 }
 
 export function recordTranscriptHistory(entries: TranscriptHistoryEntry[], entry: TranscriptHistoryEntry) {
-  if (isYapLiveHistoryEntry(entry) && !isCanonicalYapLiveHistoryEntry(entry)) return entries;
+  if (isPreReleaseLiveHistoryEntry(entry) && !isCanonicalYapLiveHistoryEntry(entry)) return entries;
   const identity = transcriptPathIdentity(entry.outputPath);
   return normalizeTranscriptHistory([
     entry,
@@ -272,7 +278,9 @@ export function reconcileNativeTranscriptHistoryEntries(
   );
   return normalizeTranscriptHistory([
     ...visibleNative,
-    ...current.filter((entry) => !isYapLiveHistoryEntry(entry)),
+    ...current.filter(
+      (entry) => !isCanonicalYapLiveHistoryEntry(entry) && !isPreReleaseLiveHistoryEntry(entry),
+    ),
   ]);
 }
 

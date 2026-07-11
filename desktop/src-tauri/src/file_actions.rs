@@ -476,7 +476,11 @@ fn deletable_yap_owned_live_transcript_path_from_dir(
         .canonicalize()
         .map_err(|_| "Only Yap-owned live transcripts can be deleted from device.".to_string())?;
 
-    if !path.is_file() || !path.starts_with(&owned_dir) || !is_live_transcript_file(&path) {
+    if !path.is_file()
+        || !path.starts_with(&owned_dir)
+        || !is_live_transcript_file(&path)
+        || is_pre_release_live_transcript_file(&path)
+    {
         return Err("Only Yap-owned live transcripts can be deleted from device.".into());
     }
     Ok(path)
@@ -568,6 +572,31 @@ fn is_live_transcript_file(path: &std::path::Path) -> bool {
             .is_some_and(|stem| stem.starts_with("live-"))
 }
 
+fn is_pre_release_live_transcript_file(path: &std::path::Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(is_pre_release_live_stem)
+}
+
+fn is_pre_release_live_stem(stem: &str) -> bool {
+    let Some(stem) = stem.strip_prefix("live-") else {
+        return false;
+    };
+    let mut parts = stem.split('-');
+    if parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_none()
+    {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(suffix) if suffix.parse::<u16>().is_ok() && parts.next().is_none() => true,
+        _ => false,
+    }
+}
+
 fn is_live_recording_file(path: &std::path::Path) -> bool {
     has_extension(path, &["wav"])
         && path
@@ -622,8 +651,8 @@ mod tests {
     #[test]
     fn hidden_prune_authorizes_only_missing_primary_owned_transcripts() {
         let dir = temp_test_dir("hidden-prune-owned");
-        let existing = dir.join("live-100.txt");
-        let missing = dir.join("live-101-1.txt");
+        let existing = dir.join("live-s-100.txt");
+        let missing = dir.join("live-s-101.txt");
         std::fs::write(&existing, "still here").unwrap();
 
         let resolutions = resolve_owned_live_transcript_paths_from_dir(
@@ -662,14 +691,14 @@ mod tests {
     #[test]
     fn hidden_prune_resolves_legacy_case_alias_to_canonical_output() {
         let dir = temp_test_dir("hidden-prune-case-alias");
-        let transcript = dir.join("live-108.txt");
+        let transcript = dir.join("live-s-108.txt");
         std::fs::write(&transcript, "still here").unwrap();
         let requested = dir
             .display()
             .to_string()
             .to_uppercase()
             .replace("LIVE-RECORDINGS", "live-recordings");
-        let requested = std::path::PathBuf::from(requested).join("live-108.txt");
+        let requested = std::path::PathBuf::from(requested).join("live-s-108.txt");
 
         let resolutions = resolve_owned_live_transcript_paths_from_dir(
             vec![requested.display().to_string()],
@@ -695,9 +724,9 @@ mod tests {
 
         let confirmed = resolve_owned_live_transcript_paths_from_dir(
             vec![
-                external.join("live-102.txt").display().to_string(),
-                nested.join("live-103.txt").display().to_string(),
-                "live-104.txt".into(),
+                external.join("live-s-102.txt").display().to_string(),
+                nested.join("live-s-103.txt").display().to_string(),
+                "live-s-104.txt".into(),
                 dir.join("live-105.polished.txt").display().to_string(),
                 dir.join("live-nope.txt").display().to_string(),
                 dir.join("notes.txt").display().to_string(),
@@ -1116,8 +1145,8 @@ mod tests {
     #[test]
     fn delete_history_entry_files_removes_owned_live_audio() {
         let dir = temp_test_dir("delete-owned-live");
-        let transcript = dir.join("live-300.txt");
-        let audio = dir.join("live-300.wav");
+        let transcript = dir.join("live-s-300.txt");
+        let audio = dir.join("live-s-300.wav");
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&audio, b"RIFF").unwrap();
 
@@ -1129,10 +1158,27 @@ mod tests {
     }
 
     #[test]
+    fn delete_history_entry_files_keeps_pre_release_timestamp_artifacts() {
+        let dir = temp_test_dir("delete-pre-release-live");
+        let transcript = dir.join("live-1720656000000.txt");
+        let audio = dir.join("live-1720656000000.wav");
+        std::fs::write(&transcript, "legacy\n").unwrap();
+        std::fs::write(&audio, b"RIFF").unwrap();
+
+        let error = delete_history_entry_files_at_from_dir(transcript.display().to_string(), &dir)
+            .unwrap_err();
+
+        assert!(error.contains("Yap-owned live transcripts"));
+        assert!(transcript.is_file());
+        assert!(audio.is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn delete_history_entry_files_keeps_imported_source_audio() {
         let owned_dir = temp_test_dir("delete-owned-dir");
         let imported_dir = temp_test_dir("delete-imported-source");
-        let transcript = owned_dir.join("live-301.txt");
+        let transcript = owned_dir.join("live-s-301.txt");
         let audio = imported_dir.join("clip.wav");
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&audio, b"RIFF").unwrap();
@@ -1149,9 +1195,9 @@ mod tests {
     #[test]
     fn delete_history_entry_files_ignores_mismatched_owned_source() {
         let dir = temp_test_dir("delete-mismatched-owned-source");
-        let transcript = dir.join("live-302.txt");
-        let matching_audio = dir.join("live-302.wav");
-        let other_audio = dir.join("live-303.wav");
+        let transcript = dir.join("live-s-302.txt");
+        let matching_audio = dir.join("live-s-302.wav");
+        let other_audio = dir.join("live-s-303.wav");
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::write(&matching_audio, b"RIFF").unwrap();
         std::fs::write(&other_audio, b"RIFF").unwrap();
@@ -1167,8 +1213,8 @@ mod tests {
     #[test]
     fn delete_history_entry_files_ignores_directory_shaped_audio() {
         let dir = temp_test_dir("delete-audio-dir");
-        let transcript = dir.join("live-304.txt");
-        let audio_dir = dir.join("live-304.wav");
+        let transcript = dir.join("live-s-304.txt");
+        let audio_dir = dir.join("live-s-304.wav");
         std::fs::write(&transcript, "hello\n").unwrap();
         std::fs::create_dir_all(&audio_dir).unwrap();
 

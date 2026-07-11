@@ -14,7 +14,6 @@ use crate::{file_actions, live};
 const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
 const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Audio was saved.";
 const PARTIAL_RECOVERY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION: usize = 16;
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,9 +279,6 @@ fn list_session_files_from_dir_at(
         return Ok(Vec::new());
     }
 
-    for warning in migrate_pre_release_recordings(dir) {
-        crate::stt::log_yap(&warning);
-    }
     let scan = recording::scan_recordings(dir)?;
     let (retention_deleted, retention_warnings) =
         reconcile_expired_committed_meetings(dir, &scan.complete, now);
@@ -332,57 +328,6 @@ fn list_session_files_from_dir_at(
             .then_with(|| b.name.cmp(&a.name))
     });
     Ok(sessions)
-}
-
-fn migrate_pre_release_recordings(dir: &Path) -> Vec<String> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            return vec![format!(
-                "Pre-release recording migration could not read its folder: {error}"
-            )]
-        }
-    };
-    let mut wav_names = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-        .filter(|name| is_pre_release_wav_name(name))
-        .collect::<Vec<_>>();
-    wav_names.sort();
-    let truncated = wav_names.len() > MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION;
-    let mut warnings = Vec::new();
-    for wav_name in wav_names
-        .into_iter()
-        .take(MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION)
-    {
-        let stem = wav_name
-            .strip_suffix(".wav")
-            .expect("pre-release WAV predicate validates suffix");
-        let transcript = format!("{stem}.txt");
-        if dir.join(&transcript).exists() {
-            warnings.push(format!(
-                "Pre-release recording {wav_name} was left untouched because its legacy text has no immutable transcript revision receipt."
-            ));
-            continue;
-        }
-        if let Err(error) = recording::adopt_pre_release_wav(dir, &wav_name) {
-            warnings.push(format!(
-                "Pre-release recording {wav_name} was left untouched: {error}"
-            ));
-        }
-    }
-    if truncated {
-        warnings.push(format!(
-            "Pre-release recording migration is bounded to {MAX_PRE_RELEASE_MIGRATIONS_PER_RECONCILIATION} WAV files per reconciliation."
-        ));
-    }
-    warnings
-}
-
-fn is_pre_release_wav_name(name: &str) -> bool {
-    name.strip_suffix(".wav")
-        .and_then(created_at_ms_from_live_stem)
-        .is_some()
 }
 
 fn reconcile_expired_committed_meetings(
@@ -547,6 +492,9 @@ fn recoverable_session_from_dir(
 
 fn recover_live_session_in_dir(dir: &Path, session_id: String) -> Result<SavedLiveSession, String> {
     let session_id = crate::audio::session::SessionId::new(session_id)?;
+    if let Some(saved) = saved_recovered_session(dir, &session_id)? {
+        return Ok(saved);
+    }
     ensure_recoverable_session(dir, &session_id)?;
     let candidate = recoverable_session_from_dir(dir, &session_id)?;
     if candidate.expires_at_ms <= unix_millis_now()? {
@@ -1062,20 +1010,7 @@ pub(crate) fn is_primary_live_transcript_path(path: &std::path::Path) -> bool {
         && path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .and_then(created_at_ms_from_live_stem)
-            .is_some()
-}
-
-fn created_at_ms_from_live_stem(stem: &str) -> Option<u64> {
-    let mut parts = stem.strip_prefix("live-")?.split('-');
-    let created_at_ms = parts.next()?.parse().ok()?;
-    match parts.next() {
-        None => Some(created_at_ms),
-        Some(suffix) if suffix.parse::<u16>().is_ok() && parts.next().is_none() => {
-            Some(created_at_ms)
-        }
-        _ => None,
-    }
+            .is_some_and(|stem| stem.starts_with("live-s-"))
 }
 
 fn transcript_artifact_names(
@@ -1315,8 +1250,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_adopts_a_valid_wav_only_legacy_recording_once() {
-        let dir = test_dir("migrate-legacy-wav");
+    fn normal_history_scan_leaves_a_wav_only_pre_release_recording_untouched() {
+        let dir = test_dir("ignore-legacy-wav");
         let session = SessionId::new("s-migrate-legacy-source").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording.append_pcm16(&[1, 0]).unwrap();
@@ -1326,21 +1261,18 @@ mod tests {
         std::fs::remove_file(dir.join(format!("live-{session}.capture.json"))).unwrap();
         std::fs::remove_file(dir.join(format!("live-{session}.commit.json"))).unwrap();
 
-        let first = migrate_pre_release_recordings(&dir);
         let sessions = list_session_files_from_dir(&dir).unwrap();
-        let second = migrate_pre_release_recordings(&dir);
 
-        assert!(first.is_empty());
-        assert!(second.is_empty());
-        assert!(!dir.join(legacy).exists());
-        assert_eq!(sessions.len(), 1);
-        assert!(sessions[0].capture_commit_path.is_some());
+        assert!(sessions.is_empty());
+        assert!(dir.join(legacy).is_file());
+        assert!(!dir.join(format!("live-{session}.capture.json")).exists());
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn migration_leaves_legacy_wav_and_txt_together_when_text_has_no_revision_receipt() {
-        let dir = test_dir("migrate-legacy-pair");
+    fn normal_history_scan_leaves_pre_release_wav_and_txt_untouched() {
+        let dir = test_dir("ignore-legacy-pair");
         let session = SessionId::new("s-migrate-legacy-pair-source").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording.append_pcm16(&[1, 0]).unwrap();
@@ -1356,16 +1288,14 @@ mod tests {
         std::fs::remove_file(dir.join(format!("live-{session}.commit.json"))).unwrap();
         std::fs::write(dir.join(legacy_txt), "old transcript\n").unwrap();
 
-        let warnings = migrate_pre_release_recordings(&dir);
+        let sessions = list_session_files_from_dir(&dir).unwrap();
 
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("immutable transcript revision"));
+        assert!(sessions.is_empty());
         assert!(dir.join(legacy_wav).is_file());
         assert_eq!(
             std::fs::read_to_string(dir.join(legacy_txt)).unwrap(),
             "old transcript\n"
         );
-        assert!(list_session_files_from_dir(&dir).unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1405,6 +1335,53 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry.recovery_state.as_deref() == Some("recoverable")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_retry_returns_the_existing_verified_partial_commit() {
+        let dir = test_dir("recover-retry");
+        let session = SessionId::new("s-recover-retry").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0, 2, 0]).unwrap();
+        }
+
+        let first = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+        let retry = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+
+        assert_eq!(retry.capture_commit_path, first.capture_commit_path);
+        assert_eq!(retry.source_path, first.source_path);
+        assert_eq!(retry.recovery_state.as_deref(), Some("recoverable"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn journal_owned_final_wav_without_a_partial_sidecar_remains_recoverable() {
+        let dir = test_dir("journal-owned-orphan");
+        let session = SessionId::new("s-journal-owned-orphan").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        recording::recover_partial_wav(&dir, &session).unwrap();
+
+        let recoverable = list_recoverable_live_sessions_from_dir(&dir).unwrap();
+
+        assert_eq!(recoverable.len(), 1);
+        assert!(recoverable[0]
+            .audio_partial_path
+            .as_deref()
+            .unwrap()
+            .ends_with(".wav"));
+        assert!(recoverable[0]
+            .journal_partial_path
+            .as_deref()
+            .unwrap()
+            .ends_with(".capture.journal.part"));
+        assert!(!dir
+            .join(format!("live-{session}.capture.partial.json"))
+            .exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
