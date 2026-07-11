@@ -258,6 +258,37 @@ describe("live history synchronization", () => {
     expect(sync.listRecoverableSessions).toHaveBeenCalledTimes(1);
   });
 
+  it("does no work when cancellation is visible before synchronization starts", async () => {
+    const history = createHistoryStoreHarness();
+    const applyNativeHistory = vi.fn();
+    const captureNativeHistoryReconciliation = vi.fn(() => applyNativeHistory);
+    const listSavedSessions = vi.fn(async (): Promise<SavedLiveSessionCatalog> => ({
+      maintenanceWarnings: ["Maintenance needed"],
+      sessions: [savedSession()],
+    }));
+    const listRecoverableSessions = vi.fn(async () => [recoverableSession()]);
+    const onMaintenanceWarnings = vi.fn();
+    let completed = false;
+
+    await syncNativeLiveHistory({
+      captureNativeHistoryReconciliation,
+      isCancelled: () => true,
+      listRecoverableSessions,
+      listSavedSessions,
+      onMaintenanceWarnings,
+    }).then(() => {
+      completed = true;
+    });
+
+    expect(completed).toBe(true);
+    expect(captureNativeHistoryReconciliation).not.toHaveBeenCalled();
+    expect(listSavedSessions).not.toHaveBeenCalled();
+    expect(listRecoverableSessions).not.toHaveBeenCalled();
+    expect(onMaintenanceWarnings).not.toHaveBeenCalled();
+    expect(applyNativeHistory).not.toHaveBeenCalled();
+    expect(history.replacements).toHaveLength(0);
+  });
+
   it("does not reconcile or warn after cancellation while the bounded pair resolves", async () => {
     const history = createHistoryStoreHarness();
     let cancelled = false;
@@ -353,6 +384,47 @@ describe("live history synchronization", () => {
     })]);
     expect(history.persistedHistory()[0]).not.toHaveProperty("recoveryState");
     expect(history.persistedHistory()[0]).not.toHaveProperty("warning");
+  });
+
+  it("preserves only the exact accepted output for a preexisting same-name session", async () => {
+    const history = createHistoryStoreHarness();
+    const canonical = savedSession({ name: "live-shared" });
+    const staleRecoverable = recoverableSession({
+      name: canonical.name,
+      sessionId: "shared",
+    });
+    const unrelated = savedSession({ name: "live-unrelated" });
+    const seeded = projectNativeLiveHistory(
+      { maintenanceWarnings: [], sessions: [unrelated] },
+      [staleRecoverable],
+    );
+    expect(history.store.recordVisibleHistoryEntries(
+      seeded.entries,
+      "seed warning",
+    )).toBe(true);
+
+    const sync = startDeferredSync(history.store.captureNativeHistoryReconciliation);
+    await vi.waitFor(() => expect(sync.listSavedSessions).toHaveBeenCalledTimes(1));
+    expect(recordSavedLiveSession(
+      canonical,
+      history.store.recordVisibleHistoryEntries,
+      vi.fn(),
+    )).toBe(true);
+    sync.catalog.resolve({ maintenanceWarnings: [], sessions: [unrelated] });
+    sync.recoverable.resolve([staleRecoverable]);
+    await sync.synchronizing;
+
+    const persisted = history.persistedHistory();
+    expect(persisted.filter((entry) => entry.name === canonical.name)).toEqual([
+      expect.objectContaining({
+        captureCommitPath: canonical.captureCommitPath,
+        outputPath: canonical.outputPath,
+      }),
+    ]);
+    expect(new Set(persisted.map((entry) => entry.outputPath))).toEqual(new Set([
+      canonical.outputPath,
+      unrelated.outputPath,
+    ]));
   });
 
   it("applies a captured native reconciliation closure only once", () => {

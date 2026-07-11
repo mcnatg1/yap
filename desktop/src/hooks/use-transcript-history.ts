@@ -38,17 +38,20 @@ export function createTranscriptHistoryStore({
   storage,
 }: TranscriptHistoryStoreOptions) {
   let acceptedNativeGeneration = 0;
-  const acceptedNativeGenerationBySession = new Map<string, number>();
+  const acceptedNativeGenerationByOutput = new Map<
+    string,
+    { generation: number; session: string }
+  >();
 
   const pruneAcceptedNativeGenerations = (history: TranscriptHistoryEntry[]) => {
-    const retainedSessions = new Set(
+    const retainedOutputIdentities = new Set(
       history
         .filter(isNativeLiveTranscriptHistoryEntry)
-        .map((entry) => entry.name),
+        .map((entry) => transcriptPathIdentity(entry.outputPath)),
     );
-    for (const session of acceptedNativeGenerationBySession.keys()) {
-      if (!retainedSessions.has(session)) {
-        acceptedNativeGenerationBySession.delete(session);
+    for (const outputIdentity of acceptedNativeGenerationByOutput.keys()) {
+      if (!retainedOutputIdentities.has(outputIdentity)) {
+        acceptedNativeGenerationByOutput.delete(outputIdentity);
       }
     }
   };
@@ -73,19 +76,23 @@ export function createTranscriptHistoryStore({
       return false;
     }
 
-    const nextOutputPaths = new Set(
-      next.map((entry) => transcriptPathIdentity(entry.outputPath)),
-    );
-    const acceptedNativeSessions = new Set(
+    const candidateNativeOutputIdentities = new Set(
       entries
         .filter(isNativeLiveTranscriptHistoryEntry)
-        .filter((entry) => nextOutputPaths.has(transcriptPathIdentity(entry.outputPath)))
-        .map((entry) => entry.name),
+        .map((entry) => transcriptPathIdentity(entry.outputPath)),
     );
-    if (acceptedNativeSessions.size) {
+    const acceptedNativeEntries = next
+      .filter(isNativeLiveTranscriptHistoryEntry)
+      .filter((entry) => (
+        candidateNativeOutputIdentities.has(transcriptPathIdentity(entry.outputPath))
+      ));
+    if (acceptedNativeEntries.length) {
       acceptedNativeGeneration += 1;
-      for (const session of acceptedNativeSessions) {
-        acceptedNativeGenerationBySession.set(session, acceptedNativeGeneration);
+      for (const entry of acceptedNativeEntries) {
+        acceptedNativeGenerationByOutput.set(
+          transcriptPathIdentity(entry.outputPath),
+          { generation: acceptedNativeGeneration, session: entry.name },
+        );
       }
     }
     pruneAcceptedNativeGenerations(next);
@@ -101,10 +108,15 @@ export function createTranscriptHistoryStore({
       if (applied) return false;
       applied = true;
 
-      const acceptedAfterBaseline = getCurrentHistory().filter((entry) => (
-        isNativeLiveTranscriptHistoryEntry(entry)
-        && (acceptedNativeGenerationBySession.get(entry.name) ?? 0) > baselineGeneration
-      ));
+      const acceptedAfterBaseline = getCurrentHistory().filter((entry) => {
+        if (!isNativeLiveTranscriptHistoryEntry(entry)) return false;
+        const metadata = acceptedNativeGenerationByOutput.get(
+          transcriptPathIdentity(entry.outputPath),
+        );
+        return metadata !== undefined
+          && metadata.generation > baselineGeneration
+          && metadata.session === entry.name;
+      });
       const acceptedSessions = new Set(
         acceptedAfterBaseline.map((entry) => entry.name),
       );
