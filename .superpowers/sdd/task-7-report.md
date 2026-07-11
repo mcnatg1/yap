@@ -237,3 +237,28 @@ DONE
 - `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.
 - `pnpm --dir desktop test` - pass (101 tests).
 - `pnpm --dir desktop build` - pass.
+
+---
+
+## Deletion Cleanup Concurrency And Fairness Repair (2026-07-11)
+
+### Implementation
+
+- Serialized deletion-intent publication and reconciliation behind one process-wide ownership lock. A catalog scan can reclaim same-process evidence only while no same-process writer can still be publishing it; fresh evidence from another process remains untouched until the existing age safeguard permits reconciliation.
+- Replaced lexically fixed cleanup batches with a bounded per-directory rotating cursor. Each pass still retains at most 128 candidates in each bounded partition, but advances the cursor even when selected artifacts cannot be removed so a permanently failing early candidate cannot starve later cleanup work.
+- Kept cursor state process-local and bounded to 64 directories. Restarting resets the maintenance cursor, which is acceptable because cleanup state is advisory; durable recording and deletion truth remains in commit manifests and deletion intents.
+- Preserved the prerelease canonical-format decision: timestamp-era `live-<timestamp>` files are neither migrated nor indexed by the runtime, and no compatibility adapter was reintroduced.
+
+### Regression Coverage
+
+- A publication barrier test holds an active intent quarantine while a competing writer starts and proves reconciliation cannot reclaim the in-flight evidence.
+- Fresh foreign-process intent evidence remains retained, while abandoned same-process evidence is reconciled under exclusive ownership during catalog maintenance.
+- A full failed cleanup batch advances on the next pass and selects a candidate beyond the original lexical budget.
+
+### Verification
+
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::recordings` passed three default-parallel runs: 65 tests each.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` passed: 435 library tests and 1 parity integration test.
+- `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` passed.
+- `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` passed.
+- `git diff --check` passed.

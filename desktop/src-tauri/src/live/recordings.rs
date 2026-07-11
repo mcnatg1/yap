@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -19,6 +20,81 @@ const MAX_DELETION_ARTIFACTS: usize = 128;
 const MAX_MAINTENANCE_WARNINGS: usize = 8;
 const MAX_PRIVATE_DELETION_LEFTOVERS: usize = 128;
 const PRIVATE_DELETION_LEFTOVER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+static DELETION_INTENT_OWNERSHIP: OnceLock<Mutex<()>> = OnceLock::new();
+static PRIVATE_CLEANUP_CURSORS: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+
+const MAX_PRIVATE_CLEANUP_CURSOR_DIRS: usize = 64;
+
+fn deletion_intent_ownership() -> MutexGuard<'static, ()> {
+    DELETION_INTENT_OWNERSHIP
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn private_cleanup_cursor(dir: &Path) -> Option<String> {
+    PRIVATE_CLEANUP_CURSORS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(dir)
+        .cloned()
+}
+
+fn update_private_cleanup_cursor(dir: &Path, cursor: Option<String>) {
+    let mut cursors = PRIVATE_CLEANUP_CURSORS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(cursor) = cursor else {
+        return;
+    };
+    if cursors.len() >= MAX_PRIVATE_CLEANUP_CURSOR_DIRS && !cursors.contains_key(dir) {
+        cursors.clear();
+    }
+    cursors.insert(dir.to_path_buf(), cursor);
+}
+
+struct RotatingPrivateCandidates {
+    cursor: Option<String>,
+    after: BTreeSet<String>,
+    before: BTreeSet<String>,
+    overflow: bool,
+}
+
+impl RotatingPrivateCandidates {
+    fn new(cursor: Option<String>) -> Self {
+        Self {
+            cursor,
+            after: BTreeSet::new(),
+            before: BTreeSet::new(),
+            overflow: false,
+        }
+    }
+
+    fn push(&mut self, name: String) {
+        let before_cursor = self.cursor.as_ref().is_some_and(|cursor| name <= *cursor);
+        let target = if before_cursor {
+            &mut self.before
+        } else {
+            &mut self.after
+        };
+        self.overflow |= push_bounded_candidate(target, name, MAX_PRIVATE_DELETION_LEFTOVERS);
+    }
+
+    fn finish(self) -> (BTreeSet<String>, bool, Option<String>) {
+        let mut selected = self.after;
+        let mut wrapped_last = None;
+        let remaining = MAX_PRIVATE_DELETION_LEFTOVERS.saturating_sub(selected.len());
+        for name in self.before.into_iter().take(remaining) {
+            wrapped_last = Some(name.clone());
+            selected.insert(name);
+        }
+        let next_cursor = wrapped_last.or_else(|| selected.last().cloned());
+        (selected, self.overflow, next_cursor)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -584,6 +660,7 @@ fn write_deletion_intent_with_publication_barrier<F>(
 where
     F: FnMut(bool),
 {
+    let _ownership = deletion_intent_ownership();
     validate_deletion_intent(intent)?;
     let dir = path
         .parent()
@@ -595,7 +672,7 @@ where
     if name != deletion_intent_name(&intent.session_id) {
         return Err("recording deletion intent name does not match its session".into());
     }
-    reconcile_intent_evidence_quarantines(dir, name)?;
+    reconcile_intent_evidence_quarantines_while_owned(dir, name)?;
     let replace_corrupt_final = if physical_entry_exists(dir, name)? {
         let existing = recording::read_regular_artifact(dir, name)
             .ok()
@@ -700,6 +777,11 @@ struct ReconciliationWarnings {
 }
 
 fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
+    let _ownership = deletion_intent_ownership();
+    reconcile_pending_deletion_intents_while_owned(dir)
+}
+
+fn reconcile_pending_deletion_intents_while_owned(dir: &Path) -> ReconciliationWarnings {
     let mut warnings = ReconciliationWarnings {
         session_warnings: HashMap::new(),
         maintenance_warnings: Vec::new(),
@@ -707,9 +789,8 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return warnings;
     };
-    let mut private_candidates = BTreeSet::new();
+    let mut private_candidates = RotatingPrivateCandidates::new(private_cleanup_cursor(dir));
     let mut intent_names = BTreeSet::new();
-    let mut private_candidate_overflow = false;
     for entry in entries {
         let Ok(entry) = entry else {
             continue;
@@ -718,27 +799,35 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
             continue;
         };
         if let Some(leftover) = private_deletion_leftover(&name) {
-            let active = matches!(
-                leftover,
-                PrivateDeletionLeftover::Staging { process_id }
-                    | PrivateDeletionLeftover::Quarantine { process_id }
-                    if process_id == std::process::id()
-            );
-            if !active {
-                match private_deletion_leftover_is_old(dir, &name) {
-                    Ok(true) => {
-                        private_candidate_overflow |= push_bounded_candidate(
-                            &mut private_candidates,
-                            name.clone(),
-                            MAX_PRIVATE_DELETION_LEFTOVERS,
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(error) => push_maintenance_warning(
-                        &mut warnings.maintenance_warnings,
-                        format!("Private recording deletion cleanup was retained: {name}: {error}"),
-                    ),
+            if let Some((artifact_name, process_id)) = generic_delete_quarantine(&name) {
+                if process_id == std::process::id()
+                    && deletion_intent_session(artifact_name).is_some()
+                {
+                    let _ = push_bounded_candidate(
+                        &mut intent_names,
+                        artifact_name.to_string(),
+                        MAX_PRIVATE_DELETION_LEFTOVERS,
+                    );
                 }
+            }
+            match private_deletion_leftover_is_reconcilable(dir, &name, leftover) {
+                Ok(true) => {
+                    if let Some((artifact_name, _)) = generic_delete_quarantine(&name) {
+                        if deletion_intent_session(artifact_name).is_some() {
+                            let _ = push_bounded_candidate(
+                                &mut intent_names,
+                                artifact_name.to_string(),
+                                MAX_PRIVATE_DELETION_LEFTOVERS,
+                            );
+                        }
+                    }
+                    private_candidates.push(name.clone());
+                }
+                Ok(false) => {}
+                Err(error) => push_maintenance_warning(
+                    &mut warnings.maintenance_warnings,
+                    format!("Private recording deletion cleanup was retained: {name}: {error}"),
+                ),
             }
         } else if looks_like_private_deletion_artifact(&name) {
             push_maintenance_warning(
@@ -750,11 +839,22 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
             let _ = push_bounded_candidate(&mut intent_names, name, MAX_PRIVATE_DELETION_LEFTOVERS);
         }
     }
+    let (private_candidates, private_candidate_overflow, next_private_cursor) =
+        private_candidates.finish();
+    update_private_cleanup_cursor(dir, next_private_cursor);
     if private_candidate_overflow {
         push_maintenance_warning(
             &mut warnings.maintenance_warnings,
             "Private recording deletion cleanup scan reached its fixed budget.".into(),
         );
+    }
+    for name in &intent_names {
+        if let Err(error) = reconcile_intent_evidence_quarantines_while_owned(dir, name) {
+            push_maintenance_warning(
+                &mut warnings.maintenance_warnings,
+                format!("Recording cleanup evidence was retained: {name}: {error}"),
+            );
+        }
     }
     reconcile_private_deletion_leftovers(
         dir,
@@ -792,12 +892,22 @@ fn reconcile_private_deletion_leftovers<'a>(
     warnings: &mut Vec<String>,
 ) {
     for name in names {
+        match physical_entry_exists(dir, name) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(error) => {
+                push_maintenance_warning(
+                    warnings,
+                    format!("Private recording deletion cleanup was retained: {name}: {error}"),
+                );
+                continue;
+            }
+        }
         match private_deletion_leftover(name) {
             Some(PrivateDeletionLeftover::Staging { process_id })
-            | Some(PrivateDeletionLeftover::Quarantine { process_id })
-                if process_id == std::process::id() => {}
-            Some(_) => {
-                match private_deletion_leftover_is_old(dir, name) {
+            | Some(PrivateDeletionLeftover::Quarantine { process_id }) => {
+                let leftover = PrivateDeletionLeftover::Quarantine { process_id };
+                match private_deletion_leftover_is_reconcilable(dir, name, leftover) {
                     Ok(true) => {
                         if let Err(error) = recording::remove_regular_artifact(dir, name) {
                             push_maintenance_warning(
@@ -819,6 +929,34 @@ fn reconcile_private_deletion_leftovers<'a>(
             ),
             None => {}
         }
+    }
+}
+
+fn private_deletion_leftover_is_reconcilable(
+    dir: &Path,
+    name: &str,
+    leftover: PrivateDeletionLeftover,
+) -> Result<bool, String> {
+    let process_id = match leftover {
+        PrivateDeletionLeftover::Staging { process_id }
+        | PrivateDeletionLeftover::Quarantine { process_id } => process_id,
+    };
+    if process_id == std::process::id() {
+        Ok(false)
+    } else {
+        private_deletion_leftover_is_old(dir, name)
+    }
+}
+
+fn intent_evidence_quarantine_is_reconcilable(
+    dir: &Path,
+    name: &str,
+    process_id: u32,
+) -> Result<bool, String> {
+    if process_id == std::process::id() {
+        Ok(true)
+    } else {
+        private_deletion_leftover_is_old(dir, name)
     }
 }
 
@@ -909,7 +1047,16 @@ fn push_bounded_candidate(candidates: &mut BTreeSet<String>, name: String, limit
     true
 }
 
+#[cfg(test)]
 fn reconcile_intent_evidence_quarantines(dir: &Path, intent_name: &str) -> Result<(), String> {
+    let _ownership = deletion_intent_ownership();
+    reconcile_intent_evidence_quarantines_while_owned(dir, intent_name)
+}
+
+fn reconcile_intent_evidence_quarantines_while_owned(
+    dir: &Path,
+    intent_name: &str,
+) -> Result<(), String> {
     let mut newest = None;
     for entry in std::fs::read_dir(dir)
         .map_err(|error| format!("Failed to scan recording deletion evidence: {error}"))?
@@ -919,7 +1066,12 @@ fn reconcile_intent_evidence_quarantines(dir: &Path, intent_name: &str) -> Resul
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        if generic_delete_quarantine(&name).map(|(artifact, _)| artifact) != Some(intent_name) {
+        let Some((artifact_name, process_id)) = generic_delete_quarantine(&name) else {
+            continue;
+        };
+        if artifact_name != intent_name
+            || !intent_evidence_quarantine_is_reconcilable(dir, &name, process_id)?
+        {
             continue;
         }
         let file = recording::open_regular_artifact(dir, &name)?;
@@ -941,7 +1093,7 @@ fn reconcile_intent_evidence_quarantines(dir: &Path, intent_name: &str) -> Resul
     if !physical_entry_exists(dir, intent_name)? {
         let artifact = recording::verified_regular_artifact(dir, &newest)?;
         recording::restore_verified_quarantined_artifact(&artifact, &dir.join(intent_name))?;
-        return reconcile_intent_evidence_quarantines(dir, intent_name);
+        return reconcile_intent_evidence_quarantines_while_owned(dir, intent_name);
     }
     for entry in std::fs::read_dir(dir)
         .map_err(|error| format!("Failed to scan recording deletion evidence: {error}"))?
@@ -951,7 +1103,12 @@ fn reconcile_intent_evidence_quarantines(dir: &Path, intent_name: &str) -> Resul
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        if generic_delete_quarantine(&name).map(|(artifact, _)| artifact) == Some(intent_name) {
+        let Some((artifact_name, process_id)) = generic_delete_quarantine(&name) else {
+            continue;
+        };
+        if artifact_name == intent_name
+            && intent_evidence_quarantine_is_reconcilable(dir, &name, process_id)?
+        {
             let artifact = recording::verified_regular_artifact(dir, &name)?;
             recording::remove_verified_quarantined_artifact(&artifact)?;
         }
@@ -2065,6 +2222,19 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(old))
             .unwrap();
+    }
+
+    fn intent_quarantine_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("deletion.v1.json.delete-")
+            })
+            .count()
     }
 
     #[test]
@@ -3253,6 +3423,29 @@ mod tests {
     }
 
     #[test]
+    fn private_cleanup_rotation_advances_past_a_failed_full_batch() {
+        let names = (0..=MAX_PRIVATE_DELETION_LEFTOVERS)
+            .map(|index| format!("candidate-{index:03}"))
+            .collect::<Vec<_>>();
+
+        let mut first = RotatingPrivateCandidates::new(None);
+        for name in &names {
+            first.push(name.clone());
+        }
+        let (first_batch, _, cursor) = first.finish();
+        assert_eq!(first_batch.len(), MAX_PRIVATE_DELETION_LEFTOVERS);
+        assert!(!first_batch.contains(names.last().unwrap()));
+
+        let mut second = RotatingPrivateCandidates::new(cursor);
+        for name in &names {
+            second.push(name.clone());
+        }
+        let (second_batch, _, _) = second.finish();
+
+        assert!(second_batch.contains(names.last().unwrap()));
+    }
+
+    #[test]
     fn corrupt_intent_retries_remove_each_verified_quarantine() {
         let dir = test_dir("corrupt-intent-retry-cleanup");
         let session = SessionId::new("s-corrupt-intent-retry-cleanup").unwrap();
@@ -3349,6 +3542,40 @@ mod tests {
     }
 
     #[test]
+    fn fresh_foreign_intent_quarantine_is_retained_during_reconciliation() {
+        let dir = test_dir("fresh-foreign-intent-quarantine");
+        let session = SessionId::new("s-fresh-foreign-intent-quarantine").unwrap();
+        let intent_name = deletion_intent_name(&session);
+        let quarantine = format!(".{intent_name}.delete-999999-0");
+        std::fs::write(dir.join(&quarantine), b"foreign in-flight intent").unwrap();
+
+        reconcile_intent_evidence_quarantines(&dir, &intent_name).unwrap();
+
+        assert!(!dir.join(&intent_name).exists());
+        assert!(dir.join(&quarantine).is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn current_pid_intent_quarantine_is_reconciled_during_catalog_maintenance() {
+        let dir = test_dir("current-pid-intent-quarantine");
+        let session = SessionId::new("s-current-pid-intent-quarantine").unwrap();
+        let intent_name = deletion_intent_name(&session);
+        let quarantine = format!(".{intent_name}.delete-{}-0", std::process::id());
+        std::fs::write(dir.join(&quarantine), b"prior failed intent").unwrap();
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        assert!(dir.join(&intent_name).is_file());
+        assert!(!dir.join(&quarantine).exists());
+        assert!(catalog
+            .maintenance_warnings
+            .iter()
+            .any(|warning| warning.contains("pending")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn damaged_commit_warnings_take_priority_when_maintenance_warning_cap_is_full() {
         let dir = test_dir("damaged-warning-priority");
         let session = SessionId::new("s-damaged-warning-priority").unwrap();
@@ -3414,6 +3641,69 @@ mod tests {
         .is_err());
         assert_eq!(std::fs::read(&intent_path).unwrap(), b"replacement intent");
         assert!(dir.join(format!("live-{session}.commit.json")).is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn concurrent_intent_replacements_do_not_reconcile_an_active_quarantine() {
+        let dir = test_dir("concurrent-intent-replacements");
+        let session = SessionId::new("s-concurrent-intent-replacements").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+        let intent_path = dir.join(deletion_intent_name(&session));
+        std::fs::write(&intent_path, b"{corrupt").unwrap();
+
+        let (first_quarantined_tx, first_quarantined_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let first_path = intent_path.clone();
+        let first_intent = intent.clone();
+        let first = std::thread::spawn(move || {
+            write_deletion_intent_with_publication_barrier(
+                &first_path,
+                &first_intent,
+                move |published| {
+                    if !published {
+                        first_quarantined_tx.send(()).unwrap();
+                        release_first_rx.recv().unwrap();
+                    }
+                },
+            )
+        });
+
+        first_quarantined_rx.recv().unwrap();
+        assert!(!intent_path.exists());
+        assert_eq!(intent_quarantine_count(&dir), 1);
+
+        let (contender_started_tx, contender_started_rx) = std::sync::mpsc::channel();
+        let (contender_finished_tx, contender_finished_rx) = std::sync::mpsc::channel();
+        let contender_path = intent_path.clone();
+        let contender_intent = intent.clone();
+        let contender = std::thread::spawn(move || {
+            contender_started_tx.send(()).unwrap();
+            let result = write_deletion_intent(&contender_path, &contender_intent);
+            contender_finished_tx.send(result).unwrap();
+        });
+
+        contender_started_rx.recv().unwrap();
+        assert!(!intent_path.exists());
+        assert_eq!(intent_quarantine_count(&dir), 1);
+
+        release_first_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        assert!(contender_finished_rx.recv().unwrap().is_ok());
+        contender.join().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&intent_path).unwrap(),
+            serde_json::to_string(&intent).unwrap() + "\n"
+        );
+        assert_eq!(intent_quarantine_count(&dir), 0);
         std::fs::remove_dir_all(dir).ok();
     }
 
