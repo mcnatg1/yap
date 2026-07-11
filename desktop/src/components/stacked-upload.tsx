@@ -30,6 +30,7 @@ import {
   formatElapsed,
   isRecordingActive,
   isRecordingRetryable,
+  queuedServerMessage,
   type RecordingJobStatus,
   type RecordingJobView,
 } from "@/lib/app-types";
@@ -100,7 +101,7 @@ const statusMeta = {
     progress: null,
     variant: "outline" as const,
   },
-  server_processing_cohere: {
+  server_processing: {
     label: "Server",
     icon: Loader2,
     progress: null,
@@ -166,7 +167,7 @@ const attachmentState = {
   queued_server: "idle",
   preprocessing: "processing",
   uploading: "uploading",
-  server_processing_cohere: "processing",
+  server_processing: "processing",
   local_transcribing: "processing",
   saving: "processing",
   diarization_queued: "idle",
@@ -250,6 +251,8 @@ function UploadCard({
             : meta.label)
         : item.status === "queued_local_fallback" || item.status === "accepted"
           ? "Ready"
+          : item.status === "queued_server"
+            ? queuedServerMessage
           : item.status.startsWith("blocked_")
             ? "Waiting"
           : "Needs attention");

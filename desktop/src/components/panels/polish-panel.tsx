@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { CaretDown as ChevronDown } from "@phosphor-icons/react/CaretDown";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { FloppyDisk as Save } from "@phosphor-icons/react/FloppyDisk";
@@ -26,6 +26,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { basename, isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
 import {
+  developmentPolishAvailable,
+  isPolishDraftCurrent,
   polishToneHints,
   polishToneLabels,
   polishTranscript,
@@ -36,6 +38,16 @@ type RunDetails = {
   model: string;
   tokensPerSecond?: number;
   totalSeconds?: number;
+};
+
+type PolishPanelProps = {
+  item?: RecordingJobView;
+  onLoadText: (path: string) => Promise<string>;
+  onOpenHelp?: () => void;
+  onPolished: (outputPath: string, text: string) => void;
+  onSave: (item: RecordingJobView, text: string) => Promise<string>;
+  originalText?: string;
+  polishedText?: string;
 };
 
 function PreviewColumn({ empty, title, value }: { empty: string; title: string; value?: string }) {
@@ -75,7 +87,26 @@ function compactStatus({
   return "Loading transcript…";
 }
 
-export function PolishPanel({
+export function PolishPanel(props: PolishPanelProps) {
+  if (!developmentPolishAvailable) {
+    return (
+      <Card className="surface-workspace-inset min-w-0 bg-card py-0">
+        <CardHeader className="p-4 sm:p-5">
+          <Badge className="w-fit" variant="secondary">
+            <Sparkles data-icon="inline-start" />
+            Polish
+          </Badge>
+          <CardTitle className="mt-3 text-2xl">Polish unavailable</CardTitle>
+          <CardDescription>Local transcript cleanup is still in development.</CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  return <DevelopmentPolishPanel {...props} />;
+}
+
+function DevelopmentPolishPanel({
   item,
   onLoadText,
   onOpenHelp,
@@ -83,53 +114,85 @@ export function PolishPanel({
   onSave,
   originalText,
   polishedText,
-}: {
-  item?: RecordingJobView;
-  onLoadText: (path: string) => Promise<string>;
-  onOpenHelp?: () => void;
-  onPolished: (outputPath: string, text: string) => void;
-  onSave: (item: RecordingJobView, text: string) => Promise<string>;
-  originalText?: string;
-  polishedText?: string;
-}) {
+}: PolishPanelProps) {
   const ready = Boolean(item?.output && isRecordingFinished(item.status));
   const [tone, setTone] = useState<PolishTone>("light");
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runDetails, setRunDetails] = useState<RunDetails | null>(null);
   const [savedPath, setSavedPath] = useState("");
-  const hasPolishedText = Boolean(polishedText?.trim());
+  const [draftContext, setDraftContext] = useState<string>();
+  const currentContext = item?.output ? `${item.output}\0${tone}` : "";
+  const operationRef = useRef(0);
+  const contextRef = useRef(currentContext);
+
+  useLayoutEffect(() => {
+    contextRef.current = currentContext;
+    operationRef.current += 1;
+  }, [currentContext]);
+
+  useLayoutEffect(() => () => {
+    operationRef.current += 1;
+  }, []);
+
+  const hasPolishedText = isPolishDraftCurrent({
+    currentContext,
+    draftContext,
+    running,
+    text: polishedText,
+  });
+  const currentPolishedText = hasPolishedText ? polishedText : undefined;
   const canPolish = ready && Boolean(item?.output) && !running;
   const statusLine = compactStatus({ hasPolishedText, originalText, ready, running });
+
+  useEffect(() => {
+    setDraftContext(undefined);
+    setRunDetails(null);
+    setRunning(false);
+    setSavedPath("");
+    setSaving(false);
+  }, [currentContext]);
 
   async function runPolish() {
     if (!item?.output || running) return;
 
+    const outputPath = item.output;
+    const requestedContext = currentContext;
+    const requestedTone = tone;
+    const operation = ++operationRef.current;
     setRunning(true);
+    setDraftContext(undefined);
     setRunDetails(null);
     setSavedPath("");
 
     try {
-      const source = originalText ?? (await onLoadText(item.output));
-      const result = await polishTranscript({ text: source, tone });
-      onPolished(item.output, result.text);
+      const source = originalText ?? (await onLoadText(outputPath));
+      const result = await polishTranscript({ text: source, tone: requestedTone });
+      if (operationRef.current !== operation || contextRef.current !== requestedContext) return;
+
+      onPolished(outputPath, result.text);
+      setDraftContext(requestedContext);
       setRunDetails({
         model: result.model.replace("gemma4:", ""),
         tokensPerSecond: result.tokensPerSecond,
         totalSeconds: result.totalSeconds,
       });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      if (operationRef.current === operation && contextRef.current === requestedContext) {
+        toast.error(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setRunning(false);
+      if (operationRef.current === operation && contextRef.current === requestedContext) {
+        setRunning(false);
+      }
     }
   }
 
   async function copyPolished() {
-    if (!polishedText) return;
+    if (!currentPolishedText) return;
 
     try {
-      await navigator.clipboard.writeText(polishedText);
+      await navigator.clipboard.writeText(currentPolishedText);
       toast.success("Polished draft copied");
     } catch {
       toast.error("Copy failed");
@@ -137,12 +200,12 @@ export function PolishPanel({
   }
 
   async function savePolished() {
-    if (!item || !polishedText || saving) return;
+    if (!item || !currentPolishedText || saving || running) return;
 
     setSaving(true);
     try {
-      const path = await onSave(item, polishedText);
-      setSavedPath(path);
+      const path = await onSave(item, currentPolishedText);
+      if (contextRef.current === currentContext) setSavedPath(path);
     } catch {
       // onSave surfaces save errors via toast.
     } finally {
@@ -249,7 +312,7 @@ export function PolishPanel({
           />
           <PreviewColumn
             title="Polished"
-            value={polishedText}
+            value={currentPolishedText}
             empty="Run Polish to create a cleaned draft."
           />
         </div>

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import {
+  createInitialPipelineState,
+  isRecordingActive,
+  queuedServerMessage,
+  type RecordingJobStatus,
+  type RecordingJobView,
+} from "@/lib/app-types";
 import {
   availableQueuedServerSlots,
   createQueuedServerRecordingJobs,
@@ -22,7 +28,7 @@ function storageWith(value: string) {
 }
 
 describe("recording queue storage", () => {
-  it("hydrates only queued server recordings and resumes ids", () => {
+  it("hydrates queued server recordings with compact safe ids", () => {
     const jobs = normalizeRecordingQueue([
       { id: 3, name: "meeting.wav", path: "C:/meeting.wav", error: "Queued" },
       { id: 4, path: "C:/notes.txt" },
@@ -31,21 +37,43 @@ describe("recording queue storage", () => {
     ]);
 
     expect(jobs).toMatchObject([
-      { id: 5, path: "C:/meeting.wav", route: "serverBatch", status: "queued_server" },
-      { id: 6, name: "demo.mp3", path: "C:/demo.mp3", route: "serverBatch", status: "queued_server" },
+      { error: queuedServerMessage, id: 1, path: "C:/meeting.wav", route: "serverBatch", status: "queued_server" },
+      { error: queuedServerMessage, id: 2, name: "demo.mp3", path: "C:/demo.mp3", route: "serverBatch", status: "queued_server" },
     ]);
-    expect(nextRecordingQueueId(jobs)).toBe(7);
+    expect(nextRecordingQueueId(jobs)).toBe(3);
   });
 
-  it("drops duplicate ids from corrupt queue storage", () => {
+  it("repairs duplicate ids without dropping path-unique recordings", () => {
     const jobs = normalizeRecordingQueue([
       { id: 7, path: "C:/first.wav" },
       { id: 7, path: "C:/second.wav" },
       { id: 8, path: "C:/third.wav" },
     ]);
 
-    expect(jobs.map((job) => job.id)).toEqual([7, 8]);
+    expect(jobs.map((job) => job.id)).toEqual([1, 2, 3]);
+    expect(jobs.map((job) => job.path)).toEqual([
+      "C:/first.wav",
+      "C:/second.wav",
+      "C:/third.wav",
+    ]);
     expect(new Set(jobs.map((job) => job.id)).size).toBe(jobs.length);
+  });
+
+  it("rejects unsafe persisted ids before assigning unique safe ids", () => {
+    const jobs = normalizeRecordingQueue([
+      { id: Number.MAX_SAFE_INTEGER, path: "C:/safe-max.wav" },
+      { id: Number.MAX_SAFE_INTEGER + 1, path: "C:/unsafe.wav" },
+      { id: Number.POSITIVE_INFINITY, path: "C:/infinite.wav" },
+      { id: 1.5, path: "C:/fractional.wav" },
+      { id: 1, path: "C:/normal.wav" },
+    ]);
+
+    expect(jobs.map(({ id, path }) => ({ id, path }))).toEqual([
+      { id: 1, path: "C:/normal.wav" },
+      { id: 2, path: "C:/safe-max.wav" },
+    ]);
+    expect(jobs.every((job) => Number.isSafeInteger(job.id))).toBe(true);
+    expect(nextRecordingQueueId(jobs)).toBe(3);
   });
 
   it("stores only queued server jobs", () => {
@@ -68,7 +96,7 @@ describe("recording queue storage", () => {
     ], storage);
 
     expect(readRecordingQueue(storage)).toMatchObject([
-      { id: 2, path: "C:/take.wav", status: "queued_server" },
+      { id: 1, path: "C:/take.wav", status: "queued_server" },
     ]);
     expect(readRecordingQueue(storage)[0].playbackPath).toBeUndefined();
   });
@@ -82,19 +110,18 @@ describe("recording queue storage", () => {
     );
 
     expect(jobs).toHaveLength(200);
-    expect(jobs[0].id).toBe(6);
-    expect(jobs.at(-1)?.id).toBe(205);
+    expect(jobs[0]).toMatchObject({ id: 1, path: "C:/take-6.wav" });
+    expect(jobs.at(-1)).toMatchObject({ id: 200, path: "C:/take-205.wav" });
   });
 
   it("projects approved selected recordings into queued server jobs", () => {
     const jobs = createQueuedServerRecordingJobs(
       [{ id: 9, path: "C:/meeting.wav", playbackPath: "\\\\?\\C:\\meeting.wav" }],
-      "Queued",
     );
 
     expect(jobs).toMatchObject([
       {
-        error: "Queued",
+        error: queuedServerMessage,
         id: 9,
         intent: "recording",
         name: "meeting.wav",
@@ -114,12 +141,19 @@ describe("recording queue storage", () => {
         path: `C:/meeting-${index}.wav`,
         playbackPath: `C:/meeting-${index}.wav`,
       })),
-      "Queued",
     );
 
     expect(availableQueuedServerSlots([
       ...queued,
       { ...queued[0], id: 10, status: "complete" },
     ])).toBe(maxStoredQueueJobs - 2);
+  });
+
+  it("uses a model-agnostic server status and truthful queue copy", () => {
+    const serverProcessingStatus: RecordingJobStatus = "server_processing";
+
+    expect(isRecordingActive(serverProcessingStatus)).toBe(true);
+    expect(queuedServerMessage).toContain("organization's transcription server");
+    expect(queuedServerMessage).not.toMatch(/\blocal\b|\bprivate\b/i);
   });
 });

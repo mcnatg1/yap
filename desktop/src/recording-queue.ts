@@ -3,6 +3,7 @@ import {
   basename,
   createInitialPipelineState,
   extension,
+  queuedServerMessage,
   type QueuedRecordingPath,
   type RecordingJobView,
 } from "@/lib/app-types";
@@ -13,16 +14,14 @@ export const maxStoredQueueJobs = 200;
 type QueueStorage = Pick<Storage, "getItem" | "setItem">;
 type ApprovedQueuedRecordingPath = QueuedRecordingPath & { playbackPath: string };
 
-function isStoredQueuedRecording(value: unknown): value is Pick<RecordingJobView, "error" | "id" | "name" | "path"> {
+function isStoredQueuedRecording(value: unknown): value is Pick<RecordingJobView, "id" | "path"> {
   if (!value || typeof value !== "object") return false;
   const item = value as Record<string, unknown>;
   return (
-    Number.isInteger(item.id) &&
+    Number.isSafeInteger(item.id) &&
     Number(item.id) > 0 &&
     typeof item.path === "string" &&
-    audioExts.has(extension(item.path)) &&
-    (item.name === undefined || typeof item.name === "string") &&
-    (item.error === undefined || typeof item.error === "string")
+    audioExts.has(extension(item.path))
   );
 }
 
@@ -30,23 +29,21 @@ export function normalizeRecordingQueue(value: unknown): RecordingJobView[] {
   if (!Array.isArray(value)) return [];
 
   const seen = new Set<string>();
-  const seenIds = new Set<number>();
   return value
     .filter(isStoredQueuedRecording)
     .sort((a, b) => b.id - a.id)
     .filter((item) => {
-      if (seen.has(item.path) || seenIds.has(item.id)) return false;
+      if (seen.has(item.path)) return false;
       seen.add(item.path);
-      seenIds.add(item.id);
       return true;
     })
     .slice(0, maxStoredQueueJobs)
     .sort((a, b) => a.id - b.id)
-    .map((item) => ({
-      error: item.error,
-      id: item.id,
+    .map((item, index) => ({
+      error: queuedServerMessage,
+      id: index + 1,
       intent: "recording",
-      name: item.name || basename(item.path),
+      name: basename(item.path),
       path: item.path,
       pipeline: createInitialPipelineState(),
       route: "serverBatch",
@@ -76,10 +73,9 @@ export function availableQueuedServerSlots(jobs: RecordingJobView[]) {
 
 export function createQueuedServerRecordingJobs(
   recordings: ApprovedQueuedRecordingPath[],
-  error: string,
 ): RecordingJobView[] {
   return recordings.map(({ id, path, playbackPath }) => ({
-    error,
+    error: queuedServerMessage,
     id,
     intent: "recording",
     name: basename(path),

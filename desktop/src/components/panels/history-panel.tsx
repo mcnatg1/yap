@@ -65,6 +65,17 @@ import { cn } from "@/lib/utils";
 
 const maxHistoryPreviewCacheEntries = maxTranscriptHistoryEntries;
 
+export function projectHistorySearchDisplay({
+  hasResults,
+  indexingBodies,
+}: {
+  hasResults: boolean;
+  indexingBodies: boolean;
+}): "results" | "indexing" | "empty" {
+  if (hasResults) return "results";
+  return indexingBodies ? "indexing" : "empty";
+}
+
 function HistoryActionMenu({
   entry,
   onCopy,
@@ -214,6 +225,7 @@ export function HistoryPanel({
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
+  const [indexingBodies, setIndexingBodies] = useState(false);
   const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
   const previewTextByPathRef = useRef(previewTextByPath);
@@ -242,30 +254,48 @@ export function HistoryPanel({
   const searchableEntries = useMemo(() => previewSearchEntries(entries), [entries]);
 
   useEffect(() => {
-    if (!shouldSearchTranscriptBodies(searchFilter) || !onLoadPreviewText) return;
+    if (!shouldSearchTranscriptBodies(searchFilter) || !onLoadPreviewText) {
+      setIndexingBodies(false);
+      return;
+    }
+
+    const hasUnindexedBodies = searchableEntries.some(
+      (entry) => previewTextByPathRef.current[entry.outputPath] === undefined,
+    );
+    if (!hasUnindexedBodies) {
+      setIndexingBodies(false);
+      return;
+    }
 
     let cancelled = false;
     const generation = previewSearchGenerationRef.current.begin();
+    setIndexingBodies(true);
     void (async () => {
-      for (const entry of searchableEntries) {
-        if (cancelled) break;
-        if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
-        try {
-          await previewLoaderRef.current.load(
-            entry,
-            previewTextByPathRef.current,
-            onLoadPreviewText,
-            (outputPath, text) => {
-              if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
-              setPreviewTextByPath((current) =>
-                current[outputPath] === undefined
-                  ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
-                  : current,
-              );
-            },
-          );
-        } catch {
-          // Keep search indexing the rest of history when one transcript moved or is unreadable.
+      try {
+        for (const entry of searchableEntries) {
+          if (cancelled) break;
+          if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
+          try {
+            await previewLoaderRef.current.load(
+              entry,
+              previewTextByPathRef.current,
+              onLoadPreviewText,
+              (outputPath, text) => {
+                if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
+                setPreviewTextByPath((current) =>
+                  current[outputPath] === undefined
+                    ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
+                    : current,
+                );
+              },
+            );
+          } catch {
+            // Keep search indexing the rest of history when one transcript moved or is unreadable.
+          }
+        }
+      } finally {
+        if (!cancelled && previewSearchGenerationRef.current.isCurrent(generation)) {
+          setIndexingBodies(false);
         }
       }
     })();
@@ -300,6 +330,10 @@ export function HistoryPanel({
     () => groupHistoryByDay(historyWindow.visibleEntries),
     [historyWindow.visibleEntries],
   );
+  const searchDisplay = projectHistorySearchDisplay({
+    hasResults: visibleGroups.length > 0,
+    indexingBodies,
+  });
 
   return (
     <Card className="surface-workspace-inset min-w-0 bg-card py-0">
@@ -342,7 +376,7 @@ export function HistoryPanel({
               )}
             </div>
             <ScrollArea className="h-[min(620px,calc(100vh-230px))] pr-3">
-              {visibleGroups.length ? (
+              {searchDisplay === "results" ? (
                 <div className="flex flex-col gap-6">
                   {visibleGroups.map((group) => (
                     <section key={group.key}>
@@ -447,6 +481,13 @@ export function HistoryPanel({
                       Show older
                     </Button>
                   ) : null}
+                </div>
+              ) : searchDisplay === "indexing" ? (
+                <div
+                  aria-live="polite"
+                  className="flex items-center justify-center py-8 text-sm text-muted-foreground"
+                >
+                  Searching transcript text...
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">

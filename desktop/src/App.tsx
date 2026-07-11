@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
 import { AppSidebar } from "@/components/app/app-sidebar";
-import { HelpSheet, SettingsSheet } from "@/components/panels/app-sheets";
+import { HelpSheet, projectAppModalState, SettingsSheet } from "@/components/panels/app-sheets";
 import { DropHero } from "@/components/panels/drop-hero";
 import { HistoryPanel } from "@/components/panels/history-panel";
 import { PolishPanel } from "@/components/panels/polish-panel";
@@ -36,7 +36,9 @@ import {
   isRecordingFinished,
   isRecordingRetryable,
   isRecordingRunnable,
+  queuedServerMessage,
   recordingStatusForStartFailure,
+  type RailAction,
   type RecordingJobView,
   workspaceCopy,
 } from "@/lib/app-types";
@@ -53,8 +55,6 @@ import {
   writeRecordingQueue,
 } from "@/recording-queue";
 import { SttInvokeError, startTranscribe } from "@/stt";
-
-const batchServerQueuedMessage = "Queued until a transcription server is connected.";
 
 export default function App() {
   const initialQueue = useMemo(() => readRecordingQueue(), []);
@@ -120,12 +120,12 @@ export default function App() {
     closeDetails,
     detailsOpen,
     helpOpen,
-    onDetailsOpenChange,
-    onHelpOpenChange,
-    openWorkspace,
+    onDetailsOpenChange: setDetailsOpen,
+    onHelpOpenChange: setHelpOpen,
+    openWorkspace: navigateWorkspace,
     railCollapsed,
     setRailCollapsed,
-    showDetails,
+    showDetails: showDetailsNavigation,
     workspaceView,
   } = useWorkspaceNavigation({
     onOpenDetails: () => void settingsRefreshRef.current(),
@@ -133,6 +133,28 @@ export default function App() {
       setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
     },
   });
+  const setAppModal = useCallback((modal: "settings" | "help" | null) => {
+    const next = projectAppModalState(modal);
+    setDetailsOpen(next.detailsOpen);
+    setHelpOpen(next.helpOpen);
+  }, [setDetailsOpen, setHelpOpen]);
+  const openWorkspace = useCallback((action: RailAction) => {
+    if (action === "details") setAppModal("settings");
+    if (action === "help") setAppModal("help");
+    navigateWorkspace(action);
+  }, [navigateWorkspace, setAppModal]);
+  const showDetails = useCallback(() => {
+    setAppModal("settings");
+    showDetailsNavigation();
+  }, [setAppModal, showDetailsNavigation]);
+  const onDetailsOpenChange = useCallback((open: boolean) => {
+    if (open) setAppModal("settings");
+    else setDetailsOpen(false);
+  }, [setAppModal, setDetailsOpen]);
+  const onHelpOpenChange = useCallback((open: boolean) => {
+    if (open) setAppModal("help");
+    else setHelpOpen(false);
+  }, [setAppModal, setHelpOpen]);
   const onLiveSessionSaved = useCallback((entry: TranscriptHistoryEntry) => {
     selectHistoryEntry(entry);
     openWorkspace("home");
@@ -203,8 +225,8 @@ export default function App() {
     if (acceptedCandidates.length > accepted.length) {
       toast.warning(
         accepted.length
-          ? `Queued ${accepted.length} of ${acceptedCandidates.length} recordings. Connect a server before adding more.`
-          : "Server queue is full. Connect a server before adding more recordings.",
+          ? `Queued ${accepted.length} of ${acceptedCandidates.length} recordings. Connect to your organization's transcription server before adding more.`
+          : "The organization server queue is full. Connect before adding more recordings.",
       );
     }
 
@@ -234,7 +256,7 @@ export default function App() {
       .slice(0, availableQueuedServerSlots(current));
     if (!addable.length) return;
 
-    const newItems = createQueuedServerRecordingJobs(addable, batchServerQueuedMessage);
+    const newItems = createQueuedServerRecordingJobs(addable);
     setQueue((current) => [...current, ...newItems]);
     openWorkspace("transcribe");
     selectQueueItem(newItems[newItems.length - 1].id);
@@ -268,7 +290,7 @@ export default function App() {
   async function transcribeItems(pending: RecordingJobView[]) {
     if (!pending.length || running || !isTauri()) return;
     if (pending.some((item) => item.intent === "recording")) {
-      toast.error(batchServerQueuedMessage);
+      toast.error(queuedServerMessage);
       return;
     }
 

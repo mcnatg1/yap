@@ -2,7 +2,36 @@ import { polishNumGpuLayers } from "@/settings";
 
 const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
 
+export function isDevelopmentPolishAvailable({
+  explicitlyEnabled,
+  isDevelopment,
+}: {
+  explicitlyEnabled: boolean;
+  isDevelopment: boolean;
+}) {
+  return isDevelopment && explicitlyEnabled;
+}
+
+export const developmentPolishAvailable = isDevelopmentPolishAvailable({
+  explicitlyEnabled: import.meta.env.VITE_ENABLE_DEVELOPMENT_POLISH === "true",
+  isDevelopment: import.meta.env.DEV,
+});
+
 export type PolishTone = "light" | "clean" | "notes";
+
+export function isPolishDraftCurrent({
+  currentContext,
+  draftContext,
+  running,
+  text,
+}: {
+  currentContext: string;
+  draftContext?: string;
+  running: boolean;
+  text?: string;
+}) {
+  return !running && Boolean(text?.trim()) && Boolean(currentContext) && draftContext === currentContext;
+}
 
 export const polishToneLabels: Record<PolishTone, string> = {
   light: "Light",
@@ -51,6 +80,10 @@ export async function polishTranscript({
   text: string;
   tone: PolishTone;
 }): Promise<PolishResult> {
+  if (!developmentPolishAvailable) {
+    throw new Error("Polish is available only in explicitly enabled development builds.");
+  }
+
   const source = text.trim();
   if (!source) throw new Error("The selected transcript is empty.");
 

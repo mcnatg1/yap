@@ -62,6 +62,13 @@ import { cn } from "@/lib/utils";
 
 type SettingsSection = "general" | "system" | "about";
 
+export function projectAppModalState(modal: "settings" | "help" | null) {
+  return {
+    detailsOpen: modal === "settings",
+    helpOpen: modal === "help",
+  };
+}
+
 const settingsSections: { id: SettingsSection; icon: ComponentType<{ className?: string }>; label: string }[] = [
   { id: "general", icon: Mic, label: "General" },
   { id: "system", icon: Server, label: "System" },

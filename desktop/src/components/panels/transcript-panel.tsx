@@ -30,6 +30,7 @@ import {
   formatElapsed,
   isRecordingActive,
   isRecordingFinished,
+  queuedServerMessage,
   type RecordingJobStatus,
   type RecordingJobView,
 } from "@/lib/app-types";
@@ -40,7 +41,7 @@ function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: num
   switch (status) {
     case "uploading":
       return "Uploading";
-    case "server_processing_cohere":
+    case "server_processing":
       return "Processing on server";
     case "diarization_running":
       return "Finding speakers";
@@ -534,7 +535,7 @@ export function TranscriptPanel({
                 </Badge>
                 <p className="text-[15px] leading-7 text-muted-foreground">
                   {item.route === "serverBatch"
-                    ? "The finished transcript will appear here after a transcription server is connected."
+                    ? queuedServerMessage
                     : "The finished transcript will appear here as soon as the local run completes."}
                 </p>
               </div>

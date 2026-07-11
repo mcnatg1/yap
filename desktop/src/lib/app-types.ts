@@ -11,7 +11,7 @@ export const workspaceCopy: Record<WorkspaceView, { title: string; description: 
   },
   transcribe: {
     title: "Transcribe",
-    description: "Add files. Run when ready.",
+    description: "Add recordings to your organization's transcription queue.",
   },
   polish: {
     title: "Polish",
@@ -24,6 +24,9 @@ export function isWorkspaceView(value: unknown): value is WorkspaceView {
 }
 
 export const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
+
+export const queuedServerMessage =
+  "Queued for your organization's transcription server. It will start when Yap connects.";
 
 export const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 export const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
@@ -76,7 +79,7 @@ export type RecordingJobStatus =
   | "queued_server"
   | "preprocessing"
   | "uploading"
-  | "server_processing_cohere"
+  | "server_processing"
   | "local_transcribing"
   | "saving"
   | "diarization_queued"
@@ -171,7 +174,7 @@ const activeRecordingStatuses = new Set<RecordingJobStatus>([
   "preflighting",
   "preprocessing",
   "uploading",
-  "server_processing_cohere",
+  "server_processing",
   "local_transcribing",
   "saving",
   "diarization_running",
