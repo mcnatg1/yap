@@ -1,13 +1,13 @@
 # Source-Aware Diarization Design
 
-**Status:** Accepted design; client foundation prerequisites are next and model-specific diarization is not yet implemented
+**Status:** Accepted design; client capture foundation implemented and verified 2026-07-11; model-specific diarization remains deferred
 **Date:** 2026-07-10
 **Scope:** Track-aware client audio contracts, local anonymous speaker evidence, and server-authoritative reconciliation for Yap meeting sessions.
 **Decision:** [ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md)
 
 ## Problem
 
-Yap's implemented live path records one microphone stream, sends the same prepared samples to local ASR, and saves one WAV/TXT pair. Tested audio manifest scaffolding exists, but it is not connected to production capture and currently describes `live` versus `recording` as an audio source. That shape cannot represent a future microphone plus system-loopback meeting, preserve callback gaps, or support independent recording, ASR, speaker evidence, and server transport.
+Yap's implemented live path records one microphone stream through the source-aware coordinator. Track-aware prepared frames, atomic configuration/clock revisions, and exact gaps fan out to independent bounded recording, local-ASR, evidence, and transport sinks. The recording sink streams to disk and publishes an immutable capture sidecar and commit; recovery and deletion operate on that canonical lineage. System loopback, server transport, and speaker inference remain future consumers of the same contract.
 
 The existing diarization ADRs also disagree about ownership and algorithms. This design establishes the contract before selecting or integrating a heavier diarization model.
 
@@ -16,7 +16,7 @@ The existing diarization ADRs also disagree about ownership and algorithms. This
 - Preserve dictation behavior and latency when speaker processing is absent, slow, or broken.
 - Represent session mode, trigger gesture, physical capture source, model-local speaker slot, session speaker, and durable identity independently.
 - Preserve timestamp-aligned source tracks and explicit gaps.
-- Replace the current bounded in-memory meeting recording with a crash-recoverable streaming artifact so a full retained session is available for reconciliation.
+- Keep meeting recording crash-recoverable and streaming so retained source audio is available for reconciliation without a retained-PCM duration cap.
 - Produce useful local `Unknown` and `Speaker N` results without storing durable guest biometrics.
 - Let a server reprocess retained audio and publish revisioned authoritative results.
 - Reuse existing dependencies for the first measurable baseline.
@@ -35,12 +35,12 @@ The existing diarization ADRs also disagree about ownership and algorithms. This
 
 | File | Current role | Design implication |
 |------|--------------|--------------------|
-| `desktop/src-tauri/src/live/runtime.rs` | One CPAL microphone stream, downmix/resample, local ASR, PCM retention | Split capture/preprocessing from independent sinks without changing current UI behavior. |
-| `desktop/src-tauri/src/audio/frame.rs` | Timestamp and chunk metadata scaffolding | Add track identity and validated timeline semantics. |
-| `desktop/src-tauri/src/audio/manifest.rs` | Tested session/chunk envelope builders | Rename origin semantics, validate ownership, and include content identity. |
+| `desktop/src-tauri/src/live/runtime.rs` | CPAL microphone adapter, source-aware coordinator, independent bounded sinks, local ASR, and streaming recording | Add future source/transport/evidence consumers without changing dictation behavior. |
+| `desktop/src-tauri/src/audio/frame.rs` | Track-aware prepared-frame, exact-gap, chunk, replay-key, and content-identity contracts | Keep this as the canonical media contract. |
+| `desktop/src-tauri/src/audio/manifest.rs` | Strict session/chunk envelope builders with ownership, content identity, and timeline validation | Extend only through current schema decisions; do not add a compatibility adapter. |
 | `desktop/src-tauri/src/audio/preprocess.rs` | Deterministic mono conversion, resampling, RMS | Reuse per track. |
 | `desktop/src-tauri/src/audio/vad.rs` | Deterministic energy VAD scaffolding | Keep VAD advisory; never use it to erase source audio. |
-| `desktop/src-tauri/src/live/recordings.rs` | One live WAV/TXT artifact pair | Add an immutable capture sidecar and separate result revisions before multi-track persistence. |
+| `desktop/src-tauri/src/live/recordings.rs` | Hash-valid committed catalog, immutable transcript revisions, partial recovery, and deletion | Link future server jobs to committed artifacts without changing capture completeness. |
 | `desktop/src-tauri/Cargo.toml` | Already depends on `sherpa-onnx` | Use its speaker APIs for the first benchmark instead of adding another runtime. |
 
 ## Domain Model
@@ -102,11 +102,15 @@ pub struct SessionMetadata {
     pub retention_expires_at_utc: Option<String>,
 }
 
-pub enum TimelineEvent {
-    TrackConfigured(TrackConfigurationRevision),
-    ClockMapped(ClockMappingRevision),
-    Frame(PreparedFrame),
+pub enum RecordingInput {
+    PreparedFrame(PreparedFrame),
+    RevisionTransition(RecordingRevisionTransition),
     Gap(AudioGap),
+}
+
+pub struct RecordingRevisionTransition {
+    pub configuration: TrackConfigurationRevision,
+    pub clock_mapping: ClockMappingRevision,
 }
 
 pub struct TrackConfigurationRevision {
@@ -136,13 +140,13 @@ pub struct PreparedFrame {
 }
 ```
 
-`TriggerMode` replaces the conceptual meaning of the current `LiveCaptureMode`; serialized settings remain backward compatible. `SessionMode` says whether the workflow is dictation or a meeting. `SessionOrigin` says whether audio was captured live or imported. An imported file does not claim microphone or system provenance unless the user explicitly supplies it, and mixed imports remain `Mixed`. The current `AudioSource::{Live, Recording}` migrates to `SessionOrigin` and is not reused as a physical source.
+`TriggerMode` carries the durable gesture meaning while serialized live settings remain backward compatible. `SessionMode` says whether the workflow is dictation or a meeting. `SessionOrigin` says whether audio was captured live or imported. An imported file does not claim microphone or system provenance unless the user explicitly supplies it, and mixed imports remain `Mixed`. Historical `AudioSource::{Live, Recording}` values are not reused as physical source provenance.
 
 `started_at_utc` anchors the session for history and audit; all audio, diarization, and word timing uses the monotonic session timeline. Locale, country, and language values are normalized hints, not inferred identity: BCP 47 for locale/language and ISO 3166-1 alpha-2 for country. `country_code_hint` is collected only from an explicit user or organization setting when routing actually needs it; Yap does not derive it from IP address or device location. A track's `device_id` is an opaque app-local configuration reference; raw OS device labels are diagnostic data and are not uploaded by default. Mutable processing/retry state belongs in the runtime or durable job ledger, not the immutable capture manifest.
 
 ## Capture And Fan-Out
 
-One capture coordinator owns the monotonic session clock and accepts events from capture adapters. The existing CPAL microphone implementation becomes the first adapter. A future WASAPI loopback adapter uses the same event contract. A device, format, or source-clock change emits new configuration and clock-mapping revisions before subsequent frames; conversion metadata remains replayable instead of being inferred from callback counts.
+One capture coordinator owns the monotonic session clock and accepts input from capture adapters. The production CPAL microphone is the first adapter. A future WASAPI loopback adapter uses the same contract. A device, format, or source-clock change applies one atomic configuration/clock revision transition before subsequent frames; conversion metadata remains replayable instead of being inferred from callback counts.
 
 Preprocessing is per track. The coordinator fans prepared frames into independent bounded sinks:
 
@@ -263,6 +267,8 @@ Intervals are end-exclusive `[start_ms, end_ms)` on the common monotonic session
 
 Source audio, transcript text, and human-readable speaker timelines remain inspectable files. An immutable capture sidecar stores track descriptors, configuration and clock-mapping revisions, gaps, and source artifact hashes. Result revisions are separate immutable artifacts so later reconciliation cannot invalidate the committed capture.
 
+The capture sidecar/commit protocol, hash-validated catalog, partial recovery, and deletion are implemented for the production microphone path. Pre-release timestamp-era recordings remain untouched and unindexed, with no migration adapter or alternate reader.
+
 Local embeddings and centroids are memory-only. They are discarded after local finalization. Server reconciliation recomputes them from retained audio.
 
 Before automatic upload, retry, or reconnect drain ships, pending jobs move from the frontend queue shell to a Rust-owned SQLite ledger as required by the existing client storage design. SQLite stores job and revision metadata, never WAV/Opus bytes, transcript bodies, credentials, or embeddings.
@@ -277,9 +283,11 @@ A session is complete only when a valid commit manifest has been published:
 4. A small commit manifest naming and hashing the final artifacts is written through a temporary file and atomically published last.
 5. Restart treats missing, malformed, or hash-invalid commit manifests as partial recovery candidates. A partial artifact can be recovered, retried, exported, or deleted, but cannot appear as a completed recording.
 
+This protocol is implemented. Recording input streams through the writer; complete publication requires the immutable sidecar and commit, while failed or interrupted publication remains explicitly partial and recoverable.
+
 The implementation uses the strongest available file flush and atomic-replace primitives on each platform and documents any residual power-loss window. Fault-injection tests stop the process before and after every numbered boundary. A future SQLite transaction may reference a committed artifact or explicitly register a partial artifact; it cannot promote one implicitly.
 
-Each transcript/speaker result revision is then written as its own immutable artifact through temporary-write, flush, and atomic-publish. It references the capture-manifest hash, its revision number, provenance, and optionally the prior result hash. A rebuildable result index may point to the latest verified revision, but it is not part of capture completeness. Crashing during result publication leaves the committed recording valid and the unfinished result absent or partial; it never rewrites the capture manifest.
+Each transcript or future speaker result revision is written as its own immutable artifact through temporary-write, flush, and atomic-publish. It references the capture-manifest hash, its revision number, provenance, and optionally the prior result hash. Transcript revisions are implemented; speaker-result production remains deferred. A rebuildable result index may point to the latest verified revision, but it is not part of capture completeness. Crashing during result publication leaves the committed recording valid and the unfinished result absent or partial; it never rewrites the capture manifest.
 
 ### Replay identity
 
@@ -370,7 +378,7 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - A saturated audio handoff still emits the exact dropped interval through the reserved loss accumulator.
 - Callback updates racing an accumulator drain survive in the next loss generation.
 - Same logical key/same hash replays; same key/different hash fails; same hash/different key remains distinct.
-- Older single-microphone settings and artifacts remain readable.
+- Current canonical single-microphone settings and artifacts remain readable; pre-release timestamp-era recordings remain untouched and unindexed.
 
 ### Runtime tests
 
@@ -409,22 +417,22 @@ Client transient embedding and exemplar types must not implement ordinary persis
 
 ## Phased Delivery
 
-### Foundation slice F1: Contract and manifest correctness (canonical Phases 1 and 3)
+### Foundation slice F1: Contract and manifest correctness (implemented)
 
 - Add track-aware session, frame, gap, chunk, evidence, and revision types.
 - Add strict builder validation, logical replay keys, and separate content identity.
 - Keep production microphone behavior unchanged.
 
-### Foundation slice F2: Independent capture sinks and durable recording (canonical Phases 1 and 5)
+### Foundation slice F2: Independent capture sinks and durable recording (implemented)
 
 - Extract the current CPAL microphone adapter.
 - Add the monotonic timeline, revisioned track/clock events, and callback-safe explicit gaps.
 - Separate recording, local ASR, and speaker-evidence lifecycle ownership.
 - Stream microphone audio to a crash-recoverable temporary artifact with bounded memory, then finalize through the commit-manifest protocol.
-- Remove the current ten-minute retained-PCM limitation for meeting sessions without allowing unbounded memory growth.
+- Remove the retained-PCM duration limitation for meeting sessions without allowing unbounded memory growth.
 - Persist an immutable single-track capture sidecar and separate result revisions while preserving current WAV/TXT playback.
 
-### Phase 8 slice 8a: Local anonymous baseline
+### Deferred Phase 8 slice: Local anonymous baseline
 
 - Add optional speaker-model download state.
 - Benchmark a commercially usable `sherpa-onnx` embedding model.
@@ -441,18 +449,20 @@ Client transient embedding and exemplar types must not implement ordinary persis
 
 ## Acceptance For The Client Foundation Plan
 
-- Dictation behavior and existing serialized settings remain backward compatible.
-- Production microphone capture can record without constructing local ASR.
-- A meeting longer than ten minutes records complete audio with bounded memory and recoverable partial state.
-- Audio drops are explicit timeline gaps.
-- Gap reporting still works when the ordinary callback queue is saturated.
-- Manifest builders reject cross-session and cross-track contamination.
-- Recording completion requires a valid commit manifest; crash states remain partial.
-- Logical idempotency keys and byte hashes obey the replay matrix.
-- No speaker model or embedding runtime is added by the foundation plan.
-- Recording, ASR, evidence, and transport queues are independently bounded.
-- No new inference framework is added.
-- Existing Rust, frontend unit, Playwright, and WDIO checks remain green; new deterministic Rust tests cover the contracts before device tests.
+- [x] Dictation behavior and existing serialized settings remain backward compatible.
+- [x] Production microphone capture can record without constructing local ASR.
+- [x] Long capture streams to disk with bounded memory and recoverable partial state; there is no retained-PCM duration cap.
+- [x] Audio drops are explicit timeline gaps.
+- [x] Gap reporting still works when the ordinary callback queue is saturated.
+- [x] Manifest builders reject cross-session and cross-track contamination.
+- [x] Recording completion requires a valid commit manifest; crash states remain partial.
+- [x] Logical idempotency keys and byte hashes obey the replay matrix.
+- [x] No speaker model or embedding runtime was added by the foundation plan.
+- [x] Recording, ASR, evidence, and transport queues are independently bounded.
+- [x] No new inference framework was added.
+- [x] Rust, frontend unit, Playwright, and native WDIO checks are green; deterministic Rust contracts precede real-device evidence.
+
+Still deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; release packaging; and native hardware CI smoke.
 
 ## Acceptance For The Phase 8 Local Baseline Plan
 

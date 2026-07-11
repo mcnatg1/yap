@@ -1,6 +1,6 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-10)
+**Status:** Living document (2026-07-11)
 **Authority:** Decisions are normative in [ADR 0001–0020](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 > **2026-07-08 — Local model reset:** Yap keeps one local live/offline fallback model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Client-side fusion routing is rejected; model routing belongs on the server.
@@ -71,7 +71,7 @@
 | Knowledge base | Local OKF markdown (old 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
-The **client shell** (`yap-desktop`) is identical in both profiles: mic capture, VAD/endpointing, Opus encoding, hotkey, ghost UI, and server connector. The local path is a Nemotron INT8 fallback for live/offline use. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
+The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, and local Nemotron fallback are implemented. Opus encoding and the server connector remain deferred. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
@@ -163,7 +163,7 @@ Imported and official recording jobs never run through local Nemotron. When the 
 
 ### Team / server profile — high-level
 
-Thin client shell + GB-class server node. The client-side STT sidecars are replaced by server model pools; the client connector streams Opus audio and receives tokens/labels. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
+Thin client shell + GB-class server node. In the planned connected profile, server model pools own official inference; the deferred client connector will stream Opus audio and receive tokens/labels. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
 
 ```mermaid
 flowchart TB
@@ -385,7 +385,7 @@ Everything from the original 7-layer flowchart and master spec is captured below
 | **16 GB RAM budget** | ✅ Reconciled | ADR 0020 | No diarization model is promoted without measured CPU, RSS, and latency evidence |
 | **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server batch only; queue/block during disconnects; never use local Nemotron |
 
-Rows marked as future remain architecture-only. The Windows hotkey/injection path and current local live fallback are implemented client behavior.
+Rows marked as future remain architecture-only. The Windows hotkey/injection path, local live fallback, source-aware microphone capture, bounded sink fan-out, and durable recording/recovery path are implemented client behavior.
 
 ---
 
@@ -410,10 +410,13 @@ Mic → bounded capture/preprocess → Nemotron INT8 (sherpa-onnx)
   → partial/final state → overlay
   → stop-time target revalidation → Windows Unicode injection
   → clipboard fallback when target/input validation fails
-  → local WAV/TXT history
+  → track-aware prepared frames + exact gaps
+      → independent bounded recording/local-ASR/evidence/transport sinks
+      → streaming WAV + immutable capture sidecar/commit
+      → hash-validated history, partial recovery, and deletion
 ```
 
-### Follow-on preprocessing/server path
+### Implemented fan-out and deferred preprocessing/server consumers
 
 ```
 Mic → optional AGC → Silero VAD
@@ -701,14 +704,14 @@ timeline
 | Phase | Status | Where we are now |
 |-------|--------|------------------|
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
-| **1** | In progress | History/playback/setup and a Rust orchestrator skeleton exist. Rust does not yet own the full job lifecycle; capture still retains at most ten minutes in memory and lacks the source-aware sink/persistence foundation. |
+| **1** | Capture foundation implemented; job ledger remains | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, and a Rust orchestrator skeleton exist. The Rust-owned SQLite server-job ledger is still deferred. |
 | **2** | Implemented baseline; hardening remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Native CI smoke, release packaging, and measured latency/accuracy gates remain. |
 | **3** | Starting now | `server/` exists as a small staging area; the real API/WSS contract still needs to be written. |
 | **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
-| **8** | Design accepted; implementation not started | ADR 0020 and the source-aware design are canonical. Local anonymous inference waits on the pulled-forward capture foundation, benchmark fixtures, and server contract. |
+| **8** | Capture prerequisites implemented; diarization deferred | ADR 0020 and the source-aware design are canonical. Track/timeline/recording prerequisites are implemented; the anonymous speaker model, real benchmark, result production, and server reconciliation are not. |
 | **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
 | **10** | Later | Corporate access hardening, release packaging, and repo split come after the MVP server is real. |
 
@@ -716,11 +719,15 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Sequencing rule:** ADR 0020 spans both foundation and feature work. Its contract/manifest and independent recording-sink slices are pulled forward into the Phase 1 desktop foundation because Phase 3–5 server work must consume stable capture artifacts. Phase 8 begins with anonymous speaker inference and result reconciliation; it must not force a rewrite of capture or upload.
 
+**Capture persistence rule:** current `live-s-...` sessions use one canonical recording contract (`PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`) and are complete only after immutable sidecar/commit publication. Partial artifacts are recoverable/deletable. Pre-release timestamp-era recordings remain untouched and unindexed; no migration adapter or alternate fixture path is planned.
+
+**Deferred after the verified capture foundation:** the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; release packaging; and native hardware CI smoke.
+
 **Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
-**Next implementation order:** [Client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md), then [server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). The second plan creates durable job ownership and real reachability, but leaves upload drain, WSS runtime, ASR pools, auth, and diarization to their canonical phases.
+**Next implementation order:** [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
 
 ---
 
@@ -770,9 +777,9 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 **Client audio foundation (pulled forward into Phases 1–5)**
 
-- [ ] Track-aware frames, manifests, content hashes, and explicit gaps
-- [ ] Independent bounded recording, ASR, evidence, and transport sinks
-- [ ] Crash-safe streaming recording and immutable capture commit manifest
+- [x] Track-aware frames, manifests, content hashes, and explicit gaps
+- [x] Independent bounded recording, ASR, evidence, and transport sinks
+- [x] Crash-safe streaming recording, immutable capture sidecar/commit, and recover/delete lifecycle
 - [ ] Rust-owned durable reconnect ledger before automatic drain
 
 **Meeting evidence and diarization (Phase 8)**
