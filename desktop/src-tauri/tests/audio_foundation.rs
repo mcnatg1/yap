@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 use yap_desktop_lib::audio::capture::CapturePacket;
 use yap_desktop_lib::audio::coordinator::{
-    bounded_sink, Coordinator, CoordinatorPorts, RecordingInput, SinkKind, RECORDING_QUEUE_CAPACITY,
+    bounded_sink, Coordinator, CoordinatorPorts, SinkKind, RECORDING_QUEUE_CAPACITY,
 };
 use yap_desktop_lib::audio::frame::GapCause;
 use yap_desktop_lib::audio::recording::{scan_recordings, CaptureStatus, RecordingSinkHandle};
 use yap_desktop_lib::audio::session::{SessionId, TrackId};
-use yap_desktop_lib::audio::timeline::LossSnapshot;
+use yap_desktop_lib::audio::timeline::{LossSnapshot, RecordingInput, TimelineEvent};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -198,7 +198,11 @@ fn saturated_recording_sink_cannot_publish_a_complete_capture() {
 }
 
 #[test]
-fn four_hour_timeline_stays_bounded_without_retaining_pcm() {
+fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() {
+    const FOUR_HOURS_FRAMES: u64 = 4 * 60 * 60 * 16_000;
+    const LOSS_EVENTS: u64 = 1_090;
+    const COALESCED_PREFIX: u64 = 64;
+
     let directory = temp_directory("four-hours");
     let session_id = session_id("four-hours");
     let (mut coordinator, recording) = recording_coordinator(directory.clone(), session_id.clone());
@@ -206,25 +210,71 @@ fn four_hour_timeline_stays_bounded_without_retaining_pcm() {
     coordinator
         .consume(&packet(0, vec![0.0; 16]), &Default::default())
         .unwrap();
-    coordinator
-        .consume_loss(LossSnapshot {
-            first_source_position_frames: 16,
-            dropped_frames: 4 * 60 * 60 * 16_000,
-            cause: GapCause::CallbackPoolExhausted,
-            generation: 1,
+    let frames_per_loss = FOUR_HOURS_FRAMES / LOSS_EVENTS;
+    let mut source_position = 16_u64;
+    for index in 0..LOSS_EVENTS {
+        let dropped_frames = if index + 1 == LOSS_EVENTS {
+            16 + FOUR_HOURS_FRAMES - source_position
+        } else {
+            frames_per_loss
+        };
+        let cause = if index < COALESCED_PREFIX {
+            GapCause::CallbackPoolExhausted
+        } else if index.is_multiple_of(2) {
+            GapCause::DeviceDiscontinuity
+        } else {
+            GapCause::SinkUnavailable
+        };
+        coordinator
+            .consume_loss(LossSnapshot {
+                first_source_position_frames: source_position,
+                dropped_frames,
+                cause,
+                generation: index + 1,
+            })
+            .unwrap();
+        source_position += dropped_frames;
+        if index % 16 == 15 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    assert_eq!(source_position, 16 + FOUR_HOURS_FRAMES);
+    let gaps = coordinator
+        .timeline_events()
+        .iter()
+        .filter_map(|event| match event {
+            TimelineEvent::Gap(gap) => Some(gap),
+            _ => None,
         })
-        .unwrap();
+        .collect::<Vec<_>>();
+    assert_eq!(gaps.len(), 1 + (LOSS_EVENTS - COALESCED_PREFIX) as usize);
+    assert_eq!(gaps[0].generation, COALESCED_PREFIX);
+    assert_eq!(gaps[0].dropped_frames, frames_per_loss * COALESCED_PREFIX);
+    assert!(gaps.windows(2).all(|pair| {
+        pair[0].generation < pair[1].generation
+            && pair[0].end_ms().unwrap() <= pair[1].start_ms
+            && pair[0].source_position_frames + pair[0].dropped_frames
+                <= pair[1].source_position_frames
+    }));
+    let outcome = coordinator.outcome(SinkKind::Recording).unwrap();
+    assert_eq!(outcome.dropped_frames, 0);
+    assert_eq!(outcome.accepted_frames, LOSS_EVENTS + 3);
     assert!(coordinator.high_water_mark(SinkKind::Recording).unwrap() <= RECORDING_QUEUE_CAPACITY);
     coordinator.close();
 
     let result = recording.finalize().unwrap();
-    assert_eq!(result.status, CaptureStatus::Complete);
-    let sidecar = sidecar_json(&directory, &session_id);
-    assert_eq!(sidecar["timelineGaps"].as_array().unwrap().len(), 1);
-    assert_eq!(sidecar["timelineGaps"][0]["durationMs"], 14_400_000);
-    assert_eq!(sidecar["trackConfigurations"].as_array().unwrap().len(), 1);
-    assert_eq!(sidecar["clockMappings"].as_array().unwrap().len(), 1);
-    assert_eq!(sidecar["audioBytes"], 76);
+    assert_eq!(result.status, CaptureStatus::Partial);
+    assert!(result.committed.is_none());
+    assert_eq!(
+        fs::metadata(directory.join(format!("live-{session_id}.wav.part")))
+            .unwrap()
+            .len(),
+        76
+    );
+    let scan = scan_recordings(&directory).unwrap();
+    assert!(scan.complete.is_empty());
+    assert_eq!(scan.partial.len(), 1);
 
     fs::remove_dir_all(directory).unwrap();
 }

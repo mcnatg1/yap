@@ -3,7 +3,9 @@ use std::hint::spin_loop;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
 
-use crate::audio::frame::{AudioFrame, AudioGap, GapCause, TrackConfigurationRevision};
+use crate::audio::frame::{
+    AudioFrame, AudioGap, GapCause, PreparedFrame, TrackConfigurationRevision,
+};
 use crate::audio::session::{SessionId, TrackId};
 
 const NO_CAUSE: u8 = 0;
@@ -61,6 +63,18 @@ impl ClockMappingRevision {
             session_time_ms,
         })
     }
+}
+
+/// Ordered input accepted by the durable recording writer.
+///
+/// Frames carry PCM, while control events preserve the coordinator's exact
+/// source timeline without making other sinks consume recording metadata.
+#[derive(Debug, Clone)]
+pub enum RecordingInput {
+    PreparedFrame(PreparedFrame),
+    TrackConfigured(TrackConfigurationRevision),
+    ClockMapped(ClockMappingRevision),
+    Gap(AudioGap),
 }
 
 #[derive(Debug, Clone, PartialEq)]

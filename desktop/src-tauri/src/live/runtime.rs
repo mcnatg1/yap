@@ -10,14 +10,15 @@ use tauri::{Emitter, Manager};
 
 use crate::audio::capture::{CaptureAdapter, CapturePacket, CapturePorts};
 use crate::audio::coordinator::{
-    bounded_sink, BoundedReceiver, BoundedSink, Coordinator, CoordinatorPorts, RecordingInput,
-    SinkKind, LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
+    bounded_sink, BoundedReceiver, BoundedSink, Coordinator, CoordinatorPorts, SinkKind,
+    LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
 };
 use crate::audio::frame::PreparedFrame;
 use crate::audio::recording::{RecordingFinalizeResult, RecordingSinkHandle};
 use crate::audio::session::{
     SessionId, SessionMetadata, SessionMode, SessionOrigin, TrackId, TriggerMode,
 };
+use crate::audio::timeline::RecordingInput;
 
 use super::state::{LiveLevelView, LiveSessionState};
 use super::stream::{self, LiveStreamEngine, StreamMessage};

@@ -5,11 +5,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::audio::capture::CapturePacket;
-use crate::audio::frame::{AudioGap, PreparedFrame, TrackConfigurationRevision};
+use crate::audio::frame::{PreparedFrame, TrackConfigurationRevision};
 use crate::audio::preprocess::{downmix_to_mono, rms_level, AudioLevelNormalizer, LinearResampler};
 use crate::audio::session::{SessionId, TrackId};
 use crate::audio::timeline::{
-    ClockMappingRevision, LossAccumulator, Timeline, TimelineEvent, TryDrain,
+    ClockMappingRevision, LossAccumulator, RecordingInput, Timeline, TimelineEvent, TryDrain,
 };
 
 pub const RECORDING_QUEUE_CAPACITY: usize = 128;
@@ -24,18 +24,6 @@ pub enum SinkKind {
     LocalAsr,
     SpeakerEvidence,
     ServerTransport,
-}
-
-/// Ordered input accepted by the durable recording writer.
-///
-/// Frames carry PCM, while control events preserve the coordinator's exact
-/// source timeline without making other sinks consume recording metadata.
-#[derive(Debug, Clone)]
-pub enum RecordingInput {
-    PreparedFrame(PreparedFrame),
-    TrackConfigured(TrackConfigurationRevision),
-    ClockMapped(ClockMappingRevision),
-    Gap(AudioGap),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -691,10 +679,10 @@ mod tests {
     use crate::audio::capture::CapturePacket;
     use crate::audio::frame::{GapCause, PreparedFrame};
     use crate::audio::session::{SessionId, TrackId};
-    use crate::audio::timeline::{LossAccumulator, TimelineEvent};
+    use crate::audio::timeline::{LossAccumulator, RecordingInput, TimelineEvent};
 
     use super::{
-        bounded_sink, Coordinator, CoordinatorPorts, RecordingInput, RevisionEvent, SinkKind,
+        bounded_sink, Coordinator, CoordinatorPorts, RevisionEvent, SinkKind,
         EVIDENCE_QUEUE_CAPACITY, LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
         SERVER_TRANSPORT_QUEUE_CAPACITY,
     };
