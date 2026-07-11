@@ -9,9 +9,15 @@ use std::thread::JoinHandle;
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 
 use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+#[cfg(windows)]
+use windows::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
 
 use crate::audio::coordinator::{BoundedReceiver, BoundedSink};
 use crate::audio::frame::PreparedFrame;
@@ -29,6 +35,9 @@ const MAX_JOURNAL_TERMINAL_BYTES: u64 = 256;
 
 #[cfg(test)]
 type SidecarPublishHook = Box<dyn FnOnce(&RecordingPaths) + Send>;
+#[cfg(test)]
+type PublicationHook =
+    Box<dyn FnMut(PublicationArtifact, PublicationBarrier, &RecordingPaths) + Send>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -212,6 +221,33 @@ impl RecordingSinkHandle {
     }
 
     #[cfg(test)]
+    pub(crate) fn spawn_with_fault_for_test(
+        directory: PathBuf,
+        session_id: SessionId,
+        sink: BoundedSink<PreparedFrame>,
+        receiver: BoundedReceiver<PreparedFrame>,
+        fault: CommitFaultPoint,
+        append_write_attempts: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        let worker_session_id = session_id.clone();
+        let abort_reason = Arc::new(Mutex::new(None));
+        let worker_abort_reason = Arc::clone(&abort_reason);
+        let worker = std::thread::spawn(move || {
+            let mut recording = match StreamingRecording::create_with_fault(
+                &directory,
+                worker_session_id.clone(),
+                fault,
+            ) {
+                Ok(recording) => recording,
+                Err(error) => return worker_creation_failure(worker_session_id, error),
+            };
+            recording.append_write_attempts = Some(append_write_attempts);
+            drain_recording_worker(recording, worker_session_id, receiver, worker_abort_reason)
+        });
+        Self::with_worker(sink, session_id, worker, abort_reason)
+    }
+
+    #[cfg(test)]
     pub(crate) fn spawn_panicking_for_test(
         sink: BoundedSink<PreparedFrame>,
         _receiver: BoundedReceiver<PreparedFrame>,
@@ -323,26 +359,42 @@ fn run_recording_worker(
     reserved_wav_part: bool,
     abort_reason: Arc<Mutex<Option<String>>>,
 ) -> RecordingFinalizeResult {
-    let mut recording = match if reserved_wav_part {
+    let recording = match if reserved_wav_part {
         StreamingRecording::create_reserved(&directory, session_id.clone())
     } else {
         StreamingRecording::create(&directory, session_id.clone())
     } {
         Ok(recording) => recording,
-        Err(error) => {
-            return RecordingFinalizeResult {
-                session_id,
-                status: CaptureStatus::Partial,
-                committed: None,
-                partial_lineage: None,
-                error: Some(error),
-            };
-        }
+        Err(error) => return worker_creation_failure(session_id, error),
     };
+    drain_recording_worker(recording, session_id, receiver, abort_reason)
+}
+
+fn worker_creation_failure(session_id: SessionId, error: String) -> RecordingFinalizeResult {
+    RecordingFinalizeResult {
+        session_id,
+        status: CaptureStatus::Partial,
+        committed: None,
+        partial_lineage: None,
+        error: Some(error),
+    }
+}
+
+fn drain_recording_worker(
+    mut recording: StreamingRecording,
+    session_id: SessionId,
+    receiver: BoundedReceiver<PreparedFrame>,
+    abort_reason: Arc<Mutex<Option<String>>>,
+) -> RecordingFinalizeResult {
+    let mut terminal_error = None;
     loop {
         match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(frame) => {
-                let _ = recording.append_prepared(&frame);
+                if terminal_error.is_none() {
+                    if let Err(error) = recording.append_prepared(&frame) {
+                        terminal_error = Some(error);
+                    }
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -364,7 +416,7 @@ fn run_recording_worker(
         })
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureSidecar {
     schema_version: u16,
@@ -382,7 +434,7 @@ struct CaptureSidecar {
     directory_sync_supported: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialCaptureSidecar {
     schema_version: u16,
@@ -674,6 +726,24 @@ pub struct StreamingRecording {
     fail_journal_writes: bool,
     #[cfg(test)]
     after_sidecar_publish: Option<SidecarPublishHook>,
+    #[cfg(test)]
+    publication_hook: Option<PublicationHook>,
+    #[cfg(test)]
+    append_write_attempts: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationArtifact {
+    Audio,
+    CompleteSidecar,
+    PartialSidecar,
+    Commit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationBarrier {
+    BeforeHardLink,
+    AfterHardLink,
 }
 
 #[derive(Debug, Clone)]
@@ -746,6 +816,36 @@ impl RecordingPaths {
             .unwrap()
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[cfg(test)]
+    fn path_for_publication(
+        &self,
+        artifact: PublicationArtifact,
+        barrier: PublicationBarrier,
+    ) -> PathBuf {
+        match (artifact, barrier) {
+            (PublicationArtifact::CompleteSidecar, PublicationBarrier::BeforeHardLink) => {
+                self.sidecar_part.clone()
+            }
+            (PublicationArtifact::CompleteSidecar, PublicationBarrier::AfterHardLink) => {
+                self.sidecar.clone()
+            }
+            (PublicationArtifact::PartialSidecar, PublicationBarrier::BeforeHardLink) => {
+                self.partial_sidecar_part.clone()
+            }
+            (PublicationArtifact::PartialSidecar, PublicationBarrier::AfterHardLink) => {
+                self.partial_sidecar.clone()
+            }
+            (PublicationArtifact::Commit, PublicationBarrier::BeforeHardLink) => {
+                self.commit_part.clone()
+            }
+            (PublicationArtifact::Commit, PublicationBarrier::AfterHardLink) => self.commit.clone(),
+            (PublicationArtifact::Audio, PublicationBarrier::BeforeHardLink) => {
+                self.wav_part.clone()
+            }
+            (PublicationArtifact::Audio, PublicationBarrier::AfterHardLink) => self.wav.clone(),
+        }
     }
 }
 
@@ -827,6 +927,21 @@ impl StreamingRecording {
         Ok(recording)
     }
 
+    #[cfg(test)]
+    fn create_with_publication_hook<F>(
+        directory: &Path,
+        session_id: SessionId,
+        fault: Option<CommitFaultPoint>,
+        hook: F,
+    ) -> Result<Self, String>
+    where
+        F: FnMut(PublicationArtifact, PublicationBarrier, &RecordingPaths) + Send + 'static,
+    {
+        let mut recording = Self::create_inner(directory, session_id, false, fault)?;
+        recording.publication_hook = Some(Box::new(hook));
+        Ok(recording)
+    }
+
     fn create_inner(
         directory: &Path,
         session_id: SessionId,
@@ -891,10 +1006,17 @@ impl StreamingRecording {
             fail_journal_writes: false,
             #[cfg(test)]
             after_sidecar_publish: None,
+            #[cfg(test)]
+            publication_hook: None,
+            #[cfg(test)]
+            append_write_attempts: None,
         })
     }
 
     pub fn append_prepared(&mut self, frame: &PreparedFrame) -> Result<(), String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
         self.observe_frame_metadata(
             frame.metadata.track_id.as_str(),
             frame.metadata.sample_rate_hz,
@@ -907,6 +1029,9 @@ impl StreamingRecording {
     }
 
     pub fn append_pcm16(&mut self, pcm: &[u8]) -> Result<(), String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
         if !pcm.len().is_multiple_of(2) {
             return self.fail("PCM16 append has an odd byte length".into());
         }
@@ -918,6 +1043,10 @@ impl StreamingRecording {
             .is_none_or(|total| total > self.data_limit)
         {
             return self.fail("Live recording exceeds the WAV 32-bit data-length limit".into());
+        }
+        #[cfg(test)]
+        if let Some(attempts) = &self.append_write_attempts {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         if let Err(error) = self.hit_fault(CommitFaultPoint::Append) {
             return self.fail(error);
@@ -948,7 +1077,9 @@ impl StreamingRecording {
             if let Err(error) = sync_result {
                 return self.fail(format!("Failed to flush live audio: {error}"));
             }
-            self.persist_journal()?;
+            if let Err(error) = self.persist_journal() {
+                return self.fail(error);
+            }
             self.samples_since_sync = 0;
         }
         Ok(())
@@ -1007,23 +1138,28 @@ impl StreamingRecording {
         audio
             .sync_all()
             .map_err(|error| format!("Failed to sync finalized live audio: {error}"))?;
-        let audio_bytes = audio
-            .metadata()
-            .map_err(|error| format!("Failed to inspect finalized live audio: {error}"))?
-            .len();
-        let audio_sha256 = sha256_open_file(&mut audio)?;
-        drop(audio);
 
         self.persist_journal()?;
         drop(self.journal_file.take());
 
         self.hit_fault(CommitFaultPoint::FinalArtifactRename)?;
-        self.publish(
-            &self.paths.wav_part,
-            &self.paths.wav,
+        let wav_part = self.paths.wav_part.clone();
+        let wav = self.paths.wav.clone();
+        let mut published_audio = self.publish_owned(
+            &wav_part,
+            &wav,
+            &audio,
             "finalize live audio",
+            PublicationArtifact::Audio,
             CommitFaultPoint::AudioStagingCleanup,
         )?;
+        let audio_bytes = published_audio
+            .metadata()
+            .map_err(|error| format!("Failed to inspect finalized live audio: {error}"))?
+            .len();
+        let audio_sha256 = sha256_open_file(&mut published_audio)?;
+        drop(published_audio);
+        drop(audio);
 
         let sidecar = CaptureSidecar {
             schema_version: CAPTURE_SCHEMA_VERSION,
@@ -1039,20 +1175,29 @@ impl StreamingRecording {
             sink_degraded: self.journal.sink_degraded,
             directory_sync_supported: sync_parent_directory(&self.paths.directory),
         };
-        write_json_file(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
+        let sidecar_file =
+            write_json_file_open(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
         self.hit_fault(CommitFaultPoint::SidecarSync)?;
-        sync_file(&self.paths.sidecar_part, "capture sidecar")?;
-        let sidecar_receipt = receipt_from_synced_file(
-            &self.paths.sidecar_part,
-            self.paths.sidecar_file_name(),
-            CaptureStatus::Complete,
-        )?;
-        self.publish(
-            &self.paths.sidecar_part,
-            &self.paths.sidecar,
+        sidecar_file
+            .sync_all()
+            .map_err(|error| format!("Failed to sync capture sidecar: {error}"))?;
+        let sidecar_part = self.paths.sidecar_part.clone();
+        let sidecar_path = self.paths.sidecar.clone();
+        let mut published_sidecar = self.publish_owned(
+            &sidecar_part,
+            &sidecar_path,
+            &sidecar_file,
             "publish capture sidecar",
+            PublicationArtifact::CompleteSidecar,
             CommitFaultPoint::SidecarStagingCleanup,
         )?;
+        let sidecar_receipt = receipt_from_published_sidecar(
+            &mut published_sidecar,
+            self.paths.sidecar_file_name(),
+            &sidecar,
+        )?;
+        drop(published_sidecar);
+        drop(sidecar_file);
         self.sidecar_receipt = Some(sidecar_receipt.clone());
         #[cfg(test)]
         if let Some(hook) = self.after_sidecar_publish.take() {
@@ -1071,16 +1216,24 @@ impl StreamingRecording {
             committed_at_utc: now_utc()?,
         };
         manifest.validate()?;
-        write_json_file(&self.paths.commit_part, &manifest, "capture commit")?;
+        let commit_file =
+            write_json_file_open(&self.paths.commit_part, &manifest, "capture commit")?;
         self.hit_fault(CommitFaultPoint::CommitSync)?;
-        sync_file(&self.paths.commit_part, "capture commit")?;
+        commit_file
+            .sync_all()
+            .map_err(|error| format!("Failed to sync capture commit: {error}"))?;
         self.hit_fault(CommitFaultPoint::CommitRename)?;
-        self.publish(
-            &self.paths.commit_part,
-            &self.paths.commit,
+        let commit_part = self.paths.commit_part.clone();
+        let commit = self.paths.commit.clone();
+        let mut published_commit = self.publish_owned(
+            &commit_part,
+            &commit,
+            &commit_file,
             "publish capture commit",
+            PublicationArtifact::Commit,
             CommitFaultPoint::CommitStagingCleanup,
         )?;
+        let manifest = manifest_from_published_commit(&mut published_commit, &manifest)?;
         let _ = sync_parent_directory(&self.paths.directory);
         Ok(manifest)
     }
@@ -1118,21 +1271,28 @@ impl StreamingRecording {
             session_id: self.paths.session_id.clone(),
             status: CaptureStatus::Partial,
         };
-        write_json_file(
+        let partial_sidecar_file = write_json_file_open(
             &self.paths.partial_sidecar_part,
             &sidecar,
             "partial capture sidecar",
         )?;
-        sync_file(&self.paths.partial_sidecar_part, "partial capture sidecar")?;
-        let receipt = receipt_from_synced_file(
-            &self.paths.partial_sidecar_part,
-            self.paths.partial_sidecar_file_name(),
-            CaptureStatus::Partial,
-        )?;
-        publish_no_replace(
-            &self.paths.partial_sidecar_part,
-            &self.paths.partial_sidecar,
+        partial_sidecar_file
+            .sync_all()
+            .map_err(|error| format!("Failed to sync partial capture sidecar: {error}"))?;
+        let partial_sidecar_part = self.paths.partial_sidecar_part.clone();
+        let partial_sidecar = self.paths.partial_sidecar.clone();
+        let mut published_sidecar = self.publish_owned(
+            &partial_sidecar_part,
+            &partial_sidecar,
+            &partial_sidecar_file,
             "publish partial capture sidecar",
+            PublicationArtifact::PartialSidecar,
+            CommitFaultPoint::SidecarStagingCleanup,
+        )?;
+        let receipt = receipt_from_published_partial_sidecar(
+            &mut published_sidecar,
+            self.paths.partial_sidecar_file_name(),
+            &sidecar,
         )?;
         let _ = sync_parent_directory(&self.paths.directory);
         self.sidecar_receipt = Some(receipt.clone());
@@ -1144,8 +1304,7 @@ impl StreamingRecording {
     }
 
     fn fail<T>(&mut self, error: String) -> Result<T, String> {
-        self.failure = Some(error.clone());
-        Err(error)
+        Err(self.failure.get_or_insert(error).clone())
     }
 
     fn hit_fault(&self, point: CommitFaultPoint) -> Result<(), String> {
@@ -1222,27 +1381,75 @@ impl StreamingRecording {
         self.journal_growth_stopped = true;
     }
 
-    fn publish(
-        &self,
+    fn publish_owned(
+        &mut self,
         source: &Path,
         destination: &Path,
+        owned_staging: &File,
         label: &str,
+        artifact: PublicationArtifact,
         cleanup_fault: CommitFaultPoint,
-    ) -> Result<(), String> {
-        let publication = publish_no_replace_with_cleanup(source, destination, label, |staging| {
-            #[cfg(test)]
-            if self.fault == Some(cleanup_fault) {
-                return Err(std::io::Error::other(format!(
-                    "injected post-link cleanup failure at {cleanup_fault:?}"
-                )));
+    ) -> Result<File, String> {
+        self.publication_barrier(artifact, PublicationBarrier::BeforeHardLink);
+        let opened_staging = open_regular_path(source)?;
+        if !same_file_identity(owned_staging, &opened_staging)? {
+            return Err(format!(
+                "Refused to {label}: staging path no longer names the owned file"
+            ));
+        }
+        drop(opened_staging);
+
+        fs::hard_link(source, destination)
+            .map_err(|error| format!("Failed to {label}: {error}"))?;
+        self.publication_barrier(artifact, PublicationBarrier::AfterHardLink);
+
+        let destination_file = open_regular_path(destination)?;
+        if !same_file_identity(owned_staging, &destination_file)? {
+            return Err(format!(
+                "Refused to {label}: published destination does not name the owned file"
+            ));
+        }
+
+        let cleanup_warning = match open_regular_path(source) {
+            Ok(current_staging) if same_file_identity(owned_staging, &current_staging)? => {
+                #[cfg(test)]
+                if self.fault == Some(cleanup_fault) {
+                    Some(format!(
+                        "Published {label}, but staging cleanup is pending: injected post-link cleanup failure at {cleanup_fault:?}"
+                    ))
+                } else {
+                    fs::remove_file(source)
+                        .err()
+                        .map(|error| format!("Published {label}, but staging cleanup is pending: {error}"))
+                }
+                #[cfg(not(test))]
+                {
+                    let _ = cleanup_fault;
+                    fs::remove_file(source)
+                        .err()
+                        .map(|error| format!("Published {label}, but staging cleanup is pending: {error}"))
+                }
             }
-            let _ = cleanup_fault;
-            fs::remove_file(staging)
-        })?;
-        if let Some(warning) = publication.cleanup_warning {
+            Ok(_) => Some(format!(
+                "Published {label}, but staging cleanup is pending: staging path no longer names the owned file"
+            )),
+            Err(error) => Some(format!(
+                "Published {label}, but staging cleanup is pending: {error}"
+            )),
+        };
+        if let Some(warning) = cleanup_warning {
             crate::stt::log_yap(&warning);
         }
-        Ok(())
+        Ok(destination_file)
+    }
+
+    fn publication_barrier(&mut self, artifact: PublicationArtifact, barrier: PublicationBarrier) {
+        #[cfg(test)]
+        if let Some(mut hook) = self.publication_hook.take() {
+            hook(artifact, barrier, &self.paths);
+            self.publication_hook = Some(hook);
+        }
+        let _ = (artifact, barrier);
     }
 
     #[cfg(test)]
@@ -1280,37 +1487,18 @@ fn create_new(path: &Path, label: &str) -> Result<File, String> {
         .map_err(|error| format!("Failed to create {label}: {error}"))
 }
 
-/// Publishes a fully synced same-directory artifact without ever replacing an
-/// existing path. Hard-link creation is atomic and refuses collisions on the
-/// supported local filesystems used for recordings.
-pub(crate) struct PublishedArtifact {
-    cleanup_warning: Option<String>,
-}
-
 pub(crate) fn publish_no_replace(
     source: &Path,
     destination: &Path,
     label: &str,
-) -> Result<PublishedArtifact, String> {
-    publish_no_replace_with_cleanup(source, destination, label, |staging| {
-        fs::remove_file(staging)
-    })
-}
-
-fn publish_no_replace_with_cleanup<F>(
-    source: &Path,
-    destination: &Path,
-    label: &str,
-    cleanup: F,
-) -> Result<PublishedArtifact, String>
-where
-    F: FnOnce(&Path) -> std::io::Result<()>,
-{
+) -> Result<(), String> {
     fs::hard_link(source, destination).map_err(|error| format!("Failed to {label}: {error}"))?;
-    let cleanup_warning = cleanup(source)
-        .err()
-        .map(|error| format!("Published {label}, but staging cleanup is pending: {error}"));
-    Ok(PublishedArtifact { cleanup_warning })
+    if let Err(error) = fs::remove_file(source) {
+        crate::stt::log_yap(&format!(
+            "Published {label}, but staging cleanup is pending: {error}"
+        ));
+    }
+    Ok(())
 }
 
 fn write_wav_header(file: &mut File, data_bytes: u64) -> Result<(), String> {
@@ -1441,21 +1629,17 @@ fn read_journal_snapshot(path: &Path) -> Result<CaptureJournal, String> {
     read_journal_append_log(directory, name)
 }
 
-fn write_json_file<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Result<(), String> {
+fn write_json_file_open<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+    label: &str,
+) -> Result<File, String> {
     let mut file = create_new(path, label)?;
     serde_json::to_writer(&mut file, value)
         .map_err(|error| format!("Failed to write {label}: {error}"))?;
     file.write_all(b"\n")
-        .map_err(|error| format!("Failed to write {label}: {error}"))
-}
-
-fn sync_file(path: &Path, label: &str) -> Result<(), String> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| format!("Failed to sync {label}: {error}"))
+        .map_err(|error| format!("Failed to write {label}: {error}"))?;
+    Ok(file)
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
@@ -1490,17 +1674,59 @@ fn sha256_open_file(file: &mut File) -> Result<String, String> {
         .collect())
 }
 
-fn receipt_from_synced_file(
-    path: &Path,
+fn receipt_from_published_sidecar(
+    file: &mut File,
     file_name: String,
-    status: CaptureStatus,
+    expected: &CaptureSidecar,
 ) -> Result<PublicationReceipt, String> {
     validate_artifact_name(&file_name)?;
+    let sha256 = sha256_open_file(file)?;
+    let text = read_open_file(file)?;
+    let published: CaptureSidecar = serde_json::from_str(&text)
+        .map_err(|error| format!("Failed to parse published capture sidecar: {error}"))?;
+    if &published != expected {
+        return Err("published capture sidecar does not match the owned sidecar".into());
+    }
     Ok(PublicationReceipt {
         file_name,
-        sha256: sha256_file(path)?,
-        status,
+        sha256,
+        status: CaptureStatus::Complete,
     })
+}
+
+fn receipt_from_published_partial_sidecar(
+    file: &mut File,
+    file_name: String,
+    expected: &PartialCaptureSidecar,
+) -> Result<PublicationReceipt, String> {
+    validate_artifact_name(&file_name)?;
+    let sha256 = sha256_open_file(file)?;
+    let text = read_open_file(file)?;
+    let published: PartialCaptureSidecar = serde_json::from_str(&text)
+        .map_err(|error| format!("Failed to parse published partial capture sidecar: {error}"))?;
+    if &published != expected {
+        return Err("published partial capture sidecar does not match the owned sidecar".into());
+    }
+    Ok(PublicationReceipt {
+        file_name,
+        sha256,
+        status: CaptureStatus::Partial,
+    })
+}
+
+fn manifest_from_published_commit(
+    file: &mut File,
+    expected: &CaptureCommitManifest,
+) -> Result<CaptureCommitManifest, String> {
+    let _commit_sha256 = sha256_open_file(file)?;
+    let text = read_open_file(file)?;
+    let published: CaptureCommitManifest = serde_json::from_str(&text)
+        .map_err(|error| format!("Failed to parse published capture commit: {error}"))?;
+    published.validate()?;
+    if &published != expected {
+        return Err("published capture commit does not match the owned commit".into());
+    }
+    Ok(published)
 }
 
 fn now_utc() -> Result<String, String> {
@@ -1667,6 +1893,54 @@ pub(crate) fn open_regular_artifact(directory: &Path, name: &str) -> Result<File
         return Err("recording artifact is a reparse point".into());
     }
     Ok(file)
+}
+
+fn open_regular_path(path: &Path) -> Result<File, String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| "recording artifact has no parent directory".to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "recording artifact has no valid file name".to_string())?;
+    open_regular_artifact(directory, name)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &File, right: &File) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let left = left
+        .metadata()
+        .map_err(|error| format!("Failed to inspect owned recording artifact: {error}"))?;
+    let right = right
+        .metadata()
+        .map_err(|error| format!("Failed to inspect published recording artifact: {error}"))?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &File, right: &File) -> Result<bool, String> {
+    fn identity(file: &File) -> Result<(u32, u64), String> {
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            GetFileInformationByHandle(
+                HANDLE(file.as_raw_handle()),
+                &mut information as *mut BY_HANDLE_FILE_INFORMATION,
+            )
+        }
+        .map_err(|error| format!("Failed to inspect recording file identity: {error}"))?;
+        let file_index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        Ok((information.dwVolumeSerialNumber, file_index))
+    }
+
+    Ok(identity(left)? == identity(right)?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(_left: &File, _right: &File) -> Result<bool, String> {
+    Err("recording publication ownership is unsupported on this platform".into())
 }
 
 pub(crate) fn read_regular_artifact(directory: &Path, name: &str) -> Result<String, String> {
@@ -1879,6 +2153,117 @@ mod tests {
             fs::read(&paths.sidecar).unwrap(),
             b"attacker complete sidecar"
         );
+    }
+
+    #[test]
+    fn publication_replacement_barriers_fail_closed_without_deleting_unowned_artifacts() {
+        for artifact in [
+            PublicationArtifact::CompleteSidecar,
+            PublicationArtifact::PartialSidecar,
+            PublicationArtifact::Commit,
+        ] {
+            for barrier in [
+                PublicationBarrier::BeforeHardLink,
+                PublicationBarrier::AfterHardLink,
+            ] {
+                let dir = tempfile_dir(&format!("publication-{artifact:?}-{barrier:?}"));
+                let session = SessionId::new("s-publication-replacement").unwrap();
+                let unowned_path = Arc::new(Mutex::new(None));
+                let hook_path = Arc::clone(&unowned_path);
+                let mut recording = StreamingRecording::create_with_publication_hook(
+                    &dir,
+                    session.clone(),
+                    if artifact == PublicationArtifact::PartialSidecar {
+                        Some(CommitFaultPoint::AudioSync)
+                    } else {
+                        None
+                    },
+                    move |published, reached, paths| {
+                        if published != artifact || reached != barrier {
+                            return;
+                        }
+                        let target = paths.path_for_publication(artifact, barrier);
+                        let displaced = target
+                            .with_extension(format!("displaced-{:?}-{:?}", artifact, barrier));
+                        fs::rename(&target, &displaced).unwrap();
+                        fs::write(&target, b"unowned replacement").unwrap();
+                        *hook_path.lock().unwrap() = Some(target);
+                    },
+                )
+                .unwrap();
+                recording.append_pcm16(&[1, 0]).unwrap();
+
+                let result = recording.finalize().unwrap();
+                let replacement = unowned_path
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("replacement barrier ran");
+
+                assert_eq!(
+                    result.status,
+                    CaptureStatus::Partial,
+                    "{artifact:?} {barrier:?}"
+                );
+                assert!(result.committed.is_none(), "{artifact:?} {barrier:?}");
+                assert_eq!(fs::read(replacement).unwrap(), b"unowned replacement");
+                assert!(scan_recordings(&dir).unwrap().complete.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_caches_the_first_append_failure_while_draining_later_frames() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile_dir("worker-terminal-append-failure");
+        let session = SessionId::new("s-worker-terminal-append-failure").unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 64);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handle = Arc::new(RecordingSinkHandle::spawn_with_fault_for_test(
+            dir.clone(),
+            session.clone(),
+            sink,
+            receiver,
+            CommitFaultPoint::Append,
+            Arc::clone(&attempts),
+        ));
+
+        handle.sink().try_send(prepared_frame(&session)).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while attempts.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "first append was not attempted"
+            );
+            std::thread::yield_now();
+        }
+        for _ in 0..1_000 {
+            let _ = handle.sink().try_send(prepared_frame(&session));
+        }
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let finalize_handle = Arc::clone(&handle);
+        std::thread::spawn(move || {
+            result_tx.send(finalize_handle.finalize()).unwrap();
+        });
+        let result = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("worker must finish after draining the bounded receiver")
+            .unwrap();
+        let repeated = handle.finalize().unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(result, repeated);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("injected recording fault at Append")
+        );
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(dir.join(format!("live-{session}.wav.part")).is_file());
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
+        assert!(scan_recordings(&dir).unwrap().complete.is_empty());
+        assert_eq!(scan_recordings(&dir).unwrap().partial.len(), 1);
     }
 
     #[test]
