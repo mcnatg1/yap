@@ -10,13 +10,38 @@ const NO_CAUSE: u8 = 0;
 const LOSS_RUN_CAPACITY: usize = 64;
 const REGISTRATION_TICKET_CAPACITY: usize = LOSS_RUN_CAPACITY * 4;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClockMappingRevision {
     pub track_id: TrackId,
     pub revision: u32,
     pub source_position_frames: u64,
     pub session_time_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClockMappingRevisionWire {
+    track_id: TrackId,
+    revision: u32,
+    source_position_frames: u64,
+    session_time_ms: u64,
+}
+
+impl<'de> serde::Deserialize<'de> for ClockMappingRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ClockMappingRevisionWire::deserialize(deserializer)?;
+        Self::new(
+            wire.track_id,
+            wire.revision,
+            wire.source_position_frames,
+            wire.session_time_ms,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ClockMappingRevision {
@@ -905,6 +930,18 @@ mod tests {
 
     fn track_id(value: &str) -> TrackId {
         TrackId::new(value).unwrap()
+    }
+
+    #[test]
+    fn clock_mapping_json_rejects_zero_revision() {
+        let json = r#"{
+            "trackId":"microphone",
+            "revision":0,
+            "sourcePositionFrames":0,
+            "sessionTimeMs":0
+        }"#;
+
+        assert!(serde_json::from_str::<ClockMappingRevision>(json).is_err());
     }
 
     fn configured_timeline(track: &TrackId, sample_rate_hz: u32) -> Timeline {

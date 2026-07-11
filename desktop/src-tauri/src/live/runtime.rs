@@ -10,8 +10,8 @@ use tauri::{Emitter, Manager};
 
 use crate::audio::capture::{CaptureAdapter, CapturePacket, CapturePorts};
 use crate::audio::coordinator::{
-    bounded_sink, BoundedReceiver, BoundedSink, Coordinator, CoordinatorPorts, SinkKind,
-    LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
+    bounded_sink, BoundedReceiver, BoundedSink, Coordinator, CoordinatorPorts, RecordingInput,
+    SinkKind, LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
 };
 use crate::audio::frame::PreparedFrame;
 use crate::audio::recording::{RecordingFinalizeResult, RecordingSinkHandle};
@@ -1219,7 +1219,7 @@ struct CaptureWorkerContext {
     app: tauri::AppHandle,
     session: u64,
     active_session: Arc<AtomicU64>,
-    recording: BoundedSink<PreparedFrame>,
+    recording: BoundedSink<RecordingInput>,
     local_asr: BoundedSink<PreparedFrame>,
     level_tx: mpsc::Sender<f32>,
 }

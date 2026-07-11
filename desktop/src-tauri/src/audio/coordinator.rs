@@ -5,7 +5,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::audio::capture::CapturePacket;
-use crate::audio::frame::{PreparedFrame, TrackConfigurationRevision};
+use crate::audio::frame::{AudioGap, PreparedFrame, TrackConfigurationRevision};
 use crate::audio::preprocess::{downmix_to_mono, rms_level, AudioLevelNormalizer, LinearResampler};
 use crate::audio::session::{SessionId, TrackId};
 use crate::audio::timeline::{
@@ -24,6 +24,18 @@ pub enum SinkKind {
     LocalAsr,
     SpeakerEvidence,
     ServerTransport,
+}
+
+/// Ordered input accepted by the durable recording writer.
+///
+/// Frames carry PCM, while control events preserve the coordinator's exact
+/// source timeline without making other sinks consume recording metadata.
+#[derive(Debug, Clone)]
+pub enum RecordingInput {
+    PreparedFrame(PreparedFrame),
+    TrackConfigured(TrackConfigurationRevision),
+    ClockMapped(ClockMappingRevision),
+    Gap(AudioGap),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +82,7 @@ pub struct BoundedReceiver<T> {
 }
 
 pub struct CoordinatorPorts {
-    pub recording: BoundedSink<PreparedFrame>,
+    pub recording: BoundedSink<RecordingInput>,
     pub local_asr: Option<BoundedSink<PreparedFrame>>,
     pub speaker_evidence: Option<BoundedSink<PreparedFrame>>,
     pub server_transport: Option<BoundedSink<PreparedFrame>>,
@@ -157,6 +169,11 @@ impl<T> BoundedSink<T> {
             self.state.close_count.fetch_add(1, Ordering::Relaxed);
             self.state.closed.store(true, Ordering::Release);
         }
+    }
+
+    fn close_with_error(&self, error: &str) {
+        self.record_drop(error);
+        self.close();
     }
 
     pub fn outcome(&self) -> SinkOutcome {
@@ -446,7 +463,10 @@ impl Coordinator {
             metadata,
             samples: Arc::from(samples),
         };
-        let _ = self.ports.recording.try_send(prepared.clone());
+        let _ = self
+            .ports
+            .recording
+            .try_send(RecordingInput::PreparedFrame(prepared.clone()));
         for sink in [
             self.ports.local_asr.as_ref(),
             self.ports.speaker_evidence.as_ref(),
@@ -487,6 +507,7 @@ impl Coordinator {
             .start_ms
             .checked_add(u64::from(gap.duration_ms))
             .ok_or_else(|| "Capture timeline gap overflowed.".to_string())?;
+        let _ = self.ports.recording.try_send(RecordingInput::Gap(gap));
         Ok(())
     }
 
@@ -505,13 +526,20 @@ impl Coordinator {
     }
 
     pub fn close_sink(&mut self, kind: SinkKind) {
-        if let Some(sink) = self.sink(kind) {
+        if kind == SinkKind::Recording {
+            self.ports
+                .recording
+                .close_with_error("recording sink closed before capture completion");
+        } else if let Some(sink) = self.frame_sink(kind) {
             sink.close();
         }
     }
 
     pub fn outcome(&self, kind: SinkKind) -> Option<SinkOutcome> {
-        self.sink(kind).map(BoundedSink::outcome)
+        match kind {
+            SinkKind::Recording => Some(self.ports.recording.outcome()),
+            _ => self.frame_sink(kind).map(BoundedSink::outcome),
+        }
     }
 
     pub fn outcomes(&self) -> Vec<SinkOutcome> {
@@ -527,11 +555,17 @@ impl Coordinator {
     }
 
     pub fn high_water_mark(&self, kind: SinkKind) -> Option<usize> {
-        self.sink(kind).map(BoundedSink::high_water_mark)
+        match kind {
+            SinkKind::Recording => Some(self.ports.recording.high_water_mark()),
+            _ => self.frame_sink(kind).map(BoundedSink::high_water_mark),
+        }
     }
 
     pub fn close_count(&self, kind: SinkKind) -> usize {
-        self.sink(kind).map_or(0, BoundedSink::close_count)
+        match kind {
+            SinkKind::Recording => self.ports.recording.close_count(),
+            _ => self.frame_sink(kind).map_or(0, BoundedSink::close_count),
+        }
     }
 
     pub fn timeline_events(&self) -> &[TimelineEvent] {
@@ -547,9 +581,9 @@ impl Coordinator {
         self.loss_pending_hook = Some(hook);
     }
 
-    fn sink(&self, kind: SinkKind) -> Option<&BoundedSink<PreparedFrame>> {
+    fn frame_sink(&self, kind: SinkKind) -> Option<&BoundedSink<PreparedFrame>> {
         match kind {
-            SinkKind::Recording => Some(&self.ports.recording),
+            SinkKind::Recording => None,
             SinkKind::LocalAsr => self.ports.local_asr.as_ref(),
             SinkKind::SpeakerEvidence => self.ports.speaker_evidence.as_ref(),
             SinkKind::ServerTransport => self.ports.server_transport.as_ref(),
@@ -598,30 +632,36 @@ impl Coordinator {
             .clock_revision
             .checked_add(1)
             .ok_or_else(|| "Capture clock revision overflowed.".to_string())?;
+        let track_configuration = TrackConfigurationRevision::new(
+            self.track_id.clone(),
+            self.track_revision,
+            session_time_ms,
+            packet.sample_rate_hz,
+        )
+        .map_err(|error| format!("Capture track configuration failed: {error}"))?;
         self.timeline
-            .configure_track(
-                TrackConfigurationRevision::new(
-                    self.track_id.clone(),
-                    self.track_revision,
-                    session_time_ms,
-                    packet.sample_rate_hz,
-                )
-                .map_err(|error| format!("Capture track configuration failed: {error}"))?,
-            )
+            .configure_track(track_configuration.clone())
             .map_err(|error| format!("Capture track configuration failed: {error}"))?;
+        let _ = self
+            .ports
+            .recording
+            .try_send(RecordingInput::TrackConfigured(track_configuration));
         self.revision_events
             .push(RevisionEvent::TrackConfigured(self.track_revision));
+        let clock_mapping = ClockMappingRevision::new(
+            self.track_id.clone(),
+            self.clock_revision,
+            source_position_frames,
+            session_time_ms,
+        )
+        .map_err(|error| format!("Capture clock mapping failed: {error}"))?;
         self.timeline
-            .map_clock(
-                ClockMappingRevision::new(
-                    self.track_id.clone(),
-                    self.clock_revision,
-                    source_position_frames,
-                    session_time_ms,
-                )
-                .map_err(|error| format!("Capture clock mapping failed: {error}"))?,
-            )
+            .map_clock(clock_mapping.clone())
             .map_err(|error| format!("Capture clock mapping failed: {error}"))?;
+        let _ = self
+            .ports
+            .recording
+            .try_send(RecordingInput::ClockMapped(clock_mapping));
         self.revision_events
             .push(RevisionEvent::ClockMapped(self.clock_revision));
         self.capture_config = Some(configuration);
@@ -649,12 +689,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::audio::capture::CapturePacket;
-    use crate::audio::frame::GapCause;
+    use crate::audio::frame::{GapCause, PreparedFrame};
     use crate::audio::session::{SessionId, TrackId};
     use crate::audio::timeline::{LossAccumulator, TimelineEvent};
 
     use super::{
-        bounded_sink, Coordinator, CoordinatorPorts, RevisionEvent, SinkKind,
+        bounded_sink, Coordinator, CoordinatorPorts, RecordingInput, RevisionEvent, SinkKind,
         EVIDENCE_QUEUE_CAPACITY, LOCAL_ASR_QUEUE_CAPACITY, RECORDING_QUEUE_CAPACITY,
         SERVER_TRANSPORT_QUEUE_CAPACITY,
     };
@@ -681,8 +721,8 @@ mod tests {
         local_asr_capacity: Option<usize>,
     ) -> (
         CoordinatorPorts,
-        super::BoundedReceiver<crate::audio::frame::PreparedFrame>,
-        Option<super::BoundedReceiver<crate::audio::frame::PreparedFrame>>,
+        super::BoundedReceiver<RecordingInput>,
+        Option<super::BoundedReceiver<PreparedFrame>>,
     ) {
         let (recording, recording_rx) = bounded_sink(SinkKind::Recording, recording_capacity);
         let (local_asr, local_asr_rx) = local_asr_capacity
@@ -702,15 +742,26 @@ mod tests {
         )
     }
 
+    fn recv_recording_frame(receiver: &super::BoundedReceiver<RecordingInput>) -> PreparedFrame {
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
+                RecordingInput::PreparedFrame(frame) => return frame,
+                RecordingInput::TrackConfigured(_)
+                | RecordingInput::ClockMapped(_)
+                | RecordingInput::Gap(_) => {}
+            }
+        }
+    }
+
     #[test]
     fn recording_continues_when_local_asr_is_absent() {
-        let (ports, recording_rx, _) = ports(2, None);
+        let (ports, recording_rx, _) = ports(3, None);
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = LossAccumulator::new();
 
         coordinator.consume(&packet(0), &losses).unwrap();
 
-        let frame = recording_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let frame = recv_recording_frame(&recording_rx);
         assert_eq!(frame.metadata.sample_rate_hz, 16_000);
         assert_eq!(frame.metadata.channels, 1);
         assert!(coordinator.outcome(SinkKind::LocalAsr).is_none());
@@ -718,7 +769,7 @@ mod tests {
 
     #[test]
     fn stalled_asr_does_not_block_recording_or_callback_intake() {
-        let (ports, recording_rx, local_asr_rx) = ports(2, Some(1));
+        let (ports, recording_rx, local_asr_rx) = ports(4, Some(1));
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = LossAccumulator::new();
         let started = Instant::now();
@@ -727,22 +778,8 @@ mod tests {
         coordinator.consume(&packet(480), &losses).unwrap();
 
         assert!(started.elapsed() < Duration::from_millis(100));
-        assert_eq!(
-            recording_rx
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap()
-                .metadata
-                .sequence,
-            0
-        );
-        assert_eq!(
-            recording_rx
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap()
-                .metadata
-                .sequence,
-            1
-        );
+        assert_eq!(recv_recording_frame(&recording_rx).metadata.sequence, 0);
+        assert_eq!(recv_recording_frame(&recording_rx).metadata.sequence, 1);
         assert_eq!(
             local_asr_rx
                 .unwrap()
@@ -763,7 +800,7 @@ mod tests {
 
     #[test]
     fn one_sink_failure_does_not_close_other_sinks() {
-        let (ports, recording_rx, local_asr_rx) = ports(1, Some(1));
+        let (ports, recording_rx, local_asr_rx) = ports(3, Some(1));
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = LossAccumulator::new();
         coordinator.close_sink(SinkKind::LocalAsr);
@@ -771,14 +808,7 @@ mod tests {
 
         coordinator.consume(&packet(0), &losses).unwrap();
 
-        assert_eq!(
-            recording_rx
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap()
-                .metadata
-                .sequence,
-            0
-        );
+        assert_eq!(recv_recording_frame(&recording_rx).metadata.sequence, 0);
         assert!(!coordinator.outcome(SinkKind::Recording).unwrap().closed);
         assert!(coordinator.outcome(SinkKind::LocalAsr).unwrap().closed);
     }
@@ -799,7 +829,7 @@ mod tests {
 
     #[test]
     fn composed_result_marks_only_the_failed_or_degraded_sinks() {
-        let (ports, recording_rx, local_asr_rx) = ports(1, Some(1));
+        let (ports, recording_rx, local_asr_rx) = ports(3, Some(1));
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = LossAccumulator::new();
         coordinator.close_sink(SinkKind::LocalAsr);
@@ -972,28 +1002,28 @@ mod tests {
 
     #[test]
     fn source_positions_and_losses_leave_a_timeline_gap() {
-        let (ports, recording_rx, _) = ports(1, None);
+        let (ports, recording_rx, _) = ports(4, None);
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = Arc::new(LossAccumulator::new());
         losses.record(0, 480, GapCause::SinkUnavailable);
 
         coordinator.consume(&packet(480), &losses).unwrap();
 
-        let frame = recording_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let frame = recv_recording_frame(&recording_rx);
         assert_eq!(frame.metadata.start_ms, 10);
         assert!(coordinator.timeline_events().iter().any(|event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 0 && gap.duration_ms == 10)));
     }
 
     #[test]
     fn initial_losses_use_the_first_packet_clock_without_inventing_elapsed_time() {
-        let (ports, recording_rx, _) = ports(1, None);
+        let (ports, recording_rx, _) = ports(4, None);
         let mut coordinator = Coordinator::new(session(), track(), ports);
         let losses = LossAccumulator::new();
         losses.record(1_000, 480, GapCause::SinkUnavailable);
 
         coordinator.consume(&packet(1_480), &losses).unwrap();
 
-        let frame = recording_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let frame = recv_recording_frame(&recording_rx);
         assert_eq!(frame.metadata.start_ms, 10);
         assert!(coordinator.timeline_events().iter().any(
             |event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 0 && gap.duration_ms == 10 && gap.source_position_frames == 1_000)

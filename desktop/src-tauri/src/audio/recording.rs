@@ -19,18 +19,20 @@ use windows::Win32::Foundation::HANDLE;
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
 
-use crate::audio::coordinator::{BoundedReceiver, BoundedSink};
-use crate::audio::frame::PreparedFrame;
+use crate::audio::coordinator::{BoundedReceiver, BoundedSink, RecordingInput};
+use crate::audio::frame::{AudioGap, GapCause, PreparedFrame, TrackConfigurationRevision};
 use crate::audio::preprocess::f32_to_i16_le_bytes;
 use crate::audio::session::{
     self, SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode,
 };
+use crate::audio::timeline::ClockMappingRevision;
 
 const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const WAV_HEADER_BYTES: u64 = 44;
 const PCM16_BYTES_PER_SAMPLE: u64 = 2;
 const DEFAULT_SYNC_INTERVAL_SAMPLES: u64 = 16_000;
 const MAX_SEQUENCE_GAP_DETAILS: usize = 1_024;
+const MAX_TIMELINE_CONTROL_EVENTS: usize = 1_024;
 const MAX_JOURNAL_BYTES: u64 = 512 * 1024;
 const MAX_JOURNAL_RECORD_BYTES: u64 = 8 * 1024;
 const MAX_JOURNAL_TERMINAL_BYTES: u64 = 256;
@@ -277,7 +279,7 @@ impl RecordingFinalizeResult {
 }
 
 pub struct RecordingSinkHandle {
-    sink: BoundedSink<PreparedFrame>,
+    sink: BoundedSink<RecordingInput>,
     session_id: SessionId,
     abort_reason: Arc<Mutex<Option<String>>>,
     state: Mutex<RecordingSinkState>,
@@ -296,16 +298,16 @@ impl RecordingSinkHandle {
     pub fn spawn(
         directory: PathBuf,
         session_id: SessionId,
-        sink: BoundedSink<PreparedFrame>,
-        receiver: BoundedReceiver<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
+        receiver: BoundedReceiver<RecordingInput>,
     ) -> Self {
         Self::spawn_inner(directory, session_id, sink, receiver, None)
     }
 
     pub(crate) fn spawn_reserved(
         reservation: RecordingReservation,
-        sink: BoundedSink<PreparedFrame>,
-        receiver: BoundedReceiver<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
+        receiver: BoundedReceiver<RecordingInput>,
     ) -> Self {
         let directory = reservation.paths.directory.clone();
         let session_id = reservation.session_id().clone();
@@ -315,13 +317,14 @@ impl RecordingSinkHandle {
     fn spawn_inner(
         directory: PathBuf,
         session_id: SessionId,
-        sink: BoundedSink<PreparedFrame>,
-        receiver: BoundedReceiver<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
+        receiver: BoundedReceiver<RecordingInput>,
         reservation: Option<RecordingReservation>,
     ) -> Self {
         let worker_session_id = session_id.clone();
         let abort_reason = Arc::new(Mutex::new(None));
         let worker_abort_reason = Arc::clone(&abort_reason);
+        let worker_sink = sink.clone();
         let worker = std::thread::spawn(move || {
             run_recording_worker(
                 directory,
@@ -329,13 +332,14 @@ impl RecordingSinkHandle {
                 receiver,
                 reservation,
                 worker_abort_reason,
+                worker_sink,
             )
         });
         Self::with_worker(sink, session_id, worker, abort_reason)
     }
 
     fn with_worker(
-        sink: BoundedSink<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
         session_id: SessionId,
         worker: JoinHandle<RecordingFinalizeResult>,
         abort_reason: Arc<Mutex<Option<String>>>,
@@ -359,8 +363,8 @@ impl RecordingSinkHandle {
     pub(crate) fn spawn_with_fault_for_test(
         directory: PathBuf,
         session_id: SessionId,
-        sink: BoundedSink<PreparedFrame>,
-        receiver: BoundedReceiver<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
+        receiver: BoundedReceiver<RecordingInput>,
         fault: CommitFaultPoint,
         append_write_attempts: Arc<std::sync::atomic::AtomicUsize>,
         journal_write_attempts: Arc<std::sync::atomic::AtomicUsize>,
@@ -368,6 +372,7 @@ impl RecordingSinkHandle {
         let worker_session_id = session_id.clone();
         let abort_reason = Arc::new(Mutex::new(None));
         let worker_abort_reason = Arc::clone(&abort_reason);
+        let worker_sink = sink.clone();
         let worker = std::thread::spawn(move || {
             let mut recording = match StreamingRecording::create_with_fault(
                 &directory,
@@ -380,15 +385,21 @@ impl RecordingSinkHandle {
             recording.append_write_attempts = Some(append_write_attempts);
             recording.journal_write_attempts = Some(journal_write_attempts);
             recording.sync_interval_samples = 1;
-            drain_recording_worker(recording, worker_session_id, receiver, worker_abort_reason)
+            drain_recording_worker(
+                recording,
+                worker_session_id,
+                receiver,
+                worker_abort_reason,
+                worker_sink,
+            )
         });
         Self::with_worker(sink, session_id, worker, abort_reason)
     }
 
     #[cfg(test)]
     pub(crate) fn spawn_panicking_for_test(
-        sink: BoundedSink<PreparedFrame>,
-        _receiver: BoundedReceiver<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
+        _receiver: BoundedReceiver<RecordingInput>,
         session_id: SessionId,
     ) -> Self {
         Self::with_worker(
@@ -403,7 +414,7 @@ impl RecordingSinkHandle {
 
     #[cfg(test)]
     pub(crate) fn spawn_unavailable_for_test(
-        sink: BoundedSink<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
         session_id: SessionId,
     ) -> Self {
         Self {
@@ -424,15 +435,15 @@ impl RecordingSinkHandle {
     pub(crate) fn spawn_with_finalization_counter_for_test(
         directory: PathBuf,
         session_id: SessionId,
-        sink: BoundedSink<PreparedFrame>,
-        receiver: BoundedReceiver<PreparedFrame>,
+        sink: BoundedSink<RecordingInput>,
+        receiver: BoundedReceiver<RecordingInput>,
     ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let handle = Self::spawn(directory, session_id, sink, receiver);
         let count = std::sync::Arc::clone(&handle.finalization_count);
         (handle, count)
     }
 
-    pub fn sink(&self) -> BoundedSink<PreparedFrame> {
+    pub fn sink(&self) -> BoundedSink<RecordingInput> {
         self.sink.clone()
     }
 
@@ -493,9 +504,10 @@ impl RecordingSinkHandle {
 fn run_recording_worker(
     directory: PathBuf,
     session_id: SessionId,
-    receiver: BoundedReceiver<PreparedFrame>,
+    receiver: BoundedReceiver<RecordingInput>,
     reservation: Option<RecordingReservation>,
     abort_reason: Arc<Mutex<Option<String>>>,
+    sink: BoundedSink<RecordingInput>,
 ) -> RecordingFinalizeResult {
     let recording = match reservation {
         Some(reservation) => StreamingRecording::create_reserved(reservation),
@@ -505,7 +517,7 @@ fn run_recording_worker(
         Ok(recording) => recording,
         Err(error) => return worker_creation_failure(session_id, error),
     };
-    drain_recording_worker(recording, session_id, receiver, abort_reason)
+    drain_recording_worker(recording, session_id, receiver, abort_reason, sink)
 }
 
 fn worker_creation_failure(session_id: SessionId, error: String) -> RecordingFinalizeResult {
@@ -522,15 +534,16 @@ fn worker_creation_failure(session_id: SessionId, error: String) -> RecordingFin
 fn drain_recording_worker(
     mut recording: StreamingRecording,
     session_id: SessionId,
-    receiver: BoundedReceiver<PreparedFrame>,
+    receiver: BoundedReceiver<RecordingInput>,
     abort_reason: Arc<Mutex<Option<String>>>,
+    sink: BoundedSink<RecordingInput>,
 ) -> RecordingFinalizeResult {
     let mut terminal_error = None;
     loop {
         match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(frame) => {
+            Ok(input) => {
                 if terminal_error.is_none() {
-                    if let Err(error) = recording.append_prepared(&frame) {
+                    if let Err(error) = recording.append_input(input) {
                         terminal_error = Some(error);
                     }
                 }
@@ -543,6 +556,13 @@ fn drain_recording_worker(
         if let Some(reason) = abort_reason.take() {
             recording.abort(reason);
         }
+    }
+    let outcome = sink.outcome();
+    if outcome.dropped_frames > 0 || outcome.error.is_some() {
+        recording.abort(format!(
+            "recording sink degraded: {}",
+            outcome.error.unwrap_or_else(|| "input was dropped".into())
+        ));
     }
     recording
         .finalize()
@@ -565,7 +585,9 @@ struct CaptureSidecar {
     audio_sha256: String,
     audio_bytes: u64,
     tracks: Vec<JournalTrack>,
-    clock_mappings: Vec<JournalClockMapping>,
+    track_configurations: Vec<TrackConfigurationRevision>,
+    clock_mappings: Vec<ClockMappingRevision>,
+    timeline_gaps: Vec<AudioGap>,
     sequence_coverage: Vec<SequenceCoverage>,
     sequence_gaps: Vec<SequenceGap>,
     #[serde(default)]
@@ -600,9 +622,110 @@ impl CaptureSidecar {
         if let Some(metadata) = &self.session_metadata {
             validate_capture_metadata(metadata, &self.session_id)?;
         }
+        validate_timeline_control_metadata(
+            &self.session_id,
+            &self.track_configurations,
+            &self.clock_mappings,
+            &self.timeline_gaps,
+        )?;
         validate_artifact_name(&self.audio_file)?;
         validate_sha256(&self.audio_sha256)
     }
+}
+
+fn validate_timeline_control_metadata(
+    session_id: &SessionId,
+    track_configurations: &[TrackConfigurationRevision],
+    clock_mappings: &[ClockMappingRevision],
+    timeline_gaps: &[AudioGap],
+) -> Result<(), String> {
+    if track_configurations.len() > MAX_TIMELINE_CONTROL_EVENTS
+        || clock_mappings.len() > MAX_TIMELINE_CONTROL_EVENTS
+        || timeline_gaps.len() > MAX_TIMELINE_CONTROL_EVENTS
+    {
+        return Err("recording timeline metadata exceeds its fixed bound".into());
+    }
+
+    let mut configurations = BTreeMap::<String, (u32, u64)>::new();
+    for configuration in track_configurations {
+        let track = configuration.track_id.as_str().to_string();
+        if configuration.revision == 0 || configuration.sample_rate_hz == 0 {
+            return Err("recording track configuration is invalid".into());
+        }
+        match configurations.get(&track) {
+            Some((revision, effective_at_ms))
+                if revision.checked_add(1) == Some(configuration.revision)
+                    && configuration.effective_at_ms >= *effective_at_ms => {}
+            None if configuration.revision == 1 => {}
+            _ => return Err("recording track configuration revisions are not contiguous".into()),
+        }
+        configurations.insert(
+            track,
+            (configuration.revision, configuration.effective_at_ms),
+        );
+    }
+
+    let mut mappings = BTreeMap::<String, (u32, u64, u64)>::new();
+    for mapping in clock_mappings {
+        let track = mapping.track_id.as_str().to_string();
+        if !configurations.contains_key(&track) || mapping.revision == 0 {
+            return Err("recording clock mapping has no valid track configuration".into());
+        }
+        match mappings.get(&track) {
+            Some((revision, source_position_frames, session_time_ms))
+                if revision.checked_add(1) == Some(mapping.revision)
+                    && mapping.source_position_frames >= *source_position_frames
+                    && mapping.session_time_ms >= *session_time_ms => {}
+            None if mapping.revision == 1 => {}
+            _ => return Err("recording clock mapping revisions are not contiguous".into()),
+        }
+        mappings.insert(
+            track,
+            (
+                mapping.revision,
+                mapping.source_position_frames,
+                mapping.session_time_ms,
+            ),
+        );
+    }
+
+    let mut gaps = BTreeMap::<String, (u64, u64, u64, GapCause)>::new();
+    for gap in timeline_gaps {
+        let track = gap.track_id.as_str().to_string();
+        if gap.session_id != *session_id
+            || !configurations.contains_key(&track)
+            || gap.duration_ms == 0
+            || gap.dropped_frames == 0
+        {
+            return Err("recording timeline gap is invalid".into());
+        }
+        let end_ms = gap
+            .start_ms
+            .checked_add(u64::from(gap.duration_ms))
+            .ok_or_else(|| "recording timeline gap end overflowed".to_string())?;
+        let end_source = gap
+            .source_position_frames
+            .checked_add(gap.dropped_frames)
+            .ok_or_else(|| "recording timeline gap source range overflowed".to_string())?;
+        if let Some((generation, previous_end_ms, previous_end_source, previous_cause)) =
+            gaps.get(&track)
+        {
+            if gap.generation <= *generation
+                || gap.start_ms < *previous_end_ms
+                || gap.source_position_frames < *previous_end_source
+            {
+                return Err("recording timeline gaps are not monotonic".into());
+            }
+            if gap.start_ms == *previous_end_ms
+                && gap.source_position_frames == *previous_end_source
+                && gap.cause == *previous_cause
+            {
+                return Err("recording timeline contains an uncoalesced contiguous gap".into());
+            }
+        }
+        gaps.insert(track, (gap.generation, end_ms, end_source, gap.cause));
+    }
+    Ok(())
 }
 
 fn validate_capture_metadata(
@@ -622,14 +745,6 @@ struct JournalTrack {
     sample_rate_hz: u32,
     channels: u16,
     first_start_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JournalClockMapping {
-    track_id: String,
-    sequence: u64,
-    session_time_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -662,7 +777,9 @@ struct CaptureJournal {
     schema_version: u16,
     session_id: SessionId,
     tracks: BTreeMap<String, JournalTrack>,
-    clock_mappings: Vec<JournalClockMapping>,
+    track_configurations: Vec<TrackConfigurationRevision>,
+    clock_mappings: Vec<ClockMappingRevision>,
+    timeline_gaps: Vec<AudioGap>,
     sequence_coverage: Vec<SequenceCoverage>,
     sequence_gaps: Vec<SequenceGap>,
     #[serde(default)]
@@ -676,7 +793,9 @@ impl CaptureJournal {
             schema_version: CAPTURE_SCHEMA_VERSION,
             session_id,
             tracks: BTreeMap::new(),
+            track_configurations: Vec::new(),
             clock_mappings: Vec::new(),
+            timeline_gaps: Vec::new(),
             sequence_coverage: Vec::new(),
             sequence_gaps: Vec::new(),
             sequence_gap_overflow: None,
@@ -700,18 +819,6 @@ impl CaptureJournal {
                 channels,
                 first_start_ms: start_ms,
             });
-        if !self
-            .clock_mappings
-            .iter()
-            .any(|mapping| mapping.track_id == track_id)
-        {
-            self.clock_mappings.push(JournalClockMapping {
-                track_id: track_id.to_string(),
-                sequence,
-                session_time_ms: start_ms,
-            });
-        }
-
         let coverage_index = self
             .sequence_coverage
             .iter()
@@ -739,6 +846,127 @@ impl CaptureJournal {
                 last_sequence: sequence,
             }),
         }
+    }
+
+    fn observe_track_configuration(
+        &mut self,
+        configuration: TrackConfigurationRevision,
+    ) -> Result<(), String> {
+        if self.track_configurations.len() >= MAX_TIMELINE_CONTROL_EVENTS {
+            return Err("recording track-configuration metadata limit reached".into());
+        }
+        let previous = self
+            .track_configurations
+            .iter()
+            .rev()
+            .find(|previous| previous.track_id == configuration.track_id);
+        match previous {
+            Some(previous)
+                if previous.revision.checked_add(1) == Some(configuration.revision)
+                    && configuration.effective_at_ms >= previous.effective_at_ms
+                    && configuration.sample_rate_hz > 0 => {}
+            None if configuration.revision == 1 && configuration.sample_rate_hz > 0 => {}
+            _ => return Err("recording track configuration is not monotonic".into()),
+        }
+        self.track_configurations.push(configuration);
+        Ok(())
+    }
+
+    fn observe_clock_mapping(&mut self, mapping: ClockMappingRevision) -> Result<(), String> {
+        if self.clock_mappings.len() >= MAX_TIMELINE_CONTROL_EVENTS {
+            return Err("recording clock-mapping metadata limit reached".into());
+        }
+        if !self
+            .track_configurations
+            .iter()
+            .any(|configuration| configuration.track_id == mapping.track_id)
+        {
+            return Err("recording clock mapping has no track configuration".into());
+        }
+        let previous = self
+            .clock_mappings
+            .iter()
+            .rev()
+            .find(|previous| previous.track_id == mapping.track_id);
+        match previous {
+            Some(previous)
+                if previous.revision.checked_add(1) == Some(mapping.revision)
+                    && mapping.source_position_frames >= previous.source_position_frames
+                    && mapping.session_time_ms >= previous.session_time_ms => {}
+            None if mapping.revision == 1 => {}
+            _ => return Err("recording clock mapping is not monotonic".into()),
+        }
+        self.clock_mappings.push(mapping);
+        Ok(())
+    }
+
+    fn observe_gap(&mut self, gap: AudioGap) -> Result<(), String> {
+        if gap.session_id != self.session_id
+            || gap.duration_ms == 0
+            || gap.dropped_frames == 0
+            || !self
+                .track_configurations
+                .iter()
+                .any(|configuration| configuration.track_id == gap.track_id)
+            || gap.end_ms().is_none()
+            || gap
+                .source_position_frames
+                .checked_add(gap.dropped_frames)
+                .is_none()
+        {
+            return Err("recording timeline gap is invalid".into());
+        }
+        if let Some(index) = self.timeline_gaps.iter().position(|previous| {
+            previous.session_id == gap.session_id
+                && previous.track_id == gap.track_id
+                && previous.cause == gap.cause
+                && previous.start_ms == gap.start_ms
+                && previous.source_position_frames == gap.source_position_frames
+        }) {
+            let previous = &self.timeline_gaps[index];
+            if gap.generation <= previous.generation
+                || gap.duration_ms < previous.duration_ms
+                || gap.dropped_frames < previous.dropped_frames
+                || self.timeline_gaps[index + 1..]
+                    .iter()
+                    .any(|later| later.track_id == gap.track_id)
+            {
+                return Err("recording timeline gap replacement regressed".into());
+            }
+            self.timeline_gaps[index] = gap;
+            return Ok(());
+        }
+        if self.timeline_gaps.len() >= MAX_TIMELINE_CONTROL_EVENTS {
+            return Err("recording timeline-gap metadata limit reached".into());
+        }
+        if let Some(previous) = self
+            .timeline_gaps
+            .iter()
+            .rev()
+            .find(|previous| previous.track_id == gap.track_id)
+        {
+            let previous_end_ms = previous
+                .end_ms()
+                .ok_or_else(|| "recording timeline gap end overflowed".to_string())?;
+            let previous_end_source = previous
+                .source_position_frames
+                .checked_add(previous.dropped_frames)
+                .ok_or_else(|| "recording timeline gap source range overflowed".to_string())?;
+            if gap.generation <= previous.generation
+                || gap.start_ms < previous_end_ms
+                || gap.source_position_frames < previous_end_source
+            {
+                return Err("recording timeline gap is not monotonic".into());
+            }
+            if gap.cause == previous.cause
+                && gap.start_ms == previous_end_ms
+                && gap.source_position_frames == previous_end_source
+            {
+                return Err("recording timeline gap was not coalesced".into());
+            }
+        }
+        self.timeline_gaps.push(gap);
+        Ok(())
     }
 
     fn record_gap(&mut self, track_id: &str, first_sequence: u64, next_sequence: u64) {
@@ -789,7 +1017,10 @@ struct JournalDelta {
     schema_version: u16,
     session_id: SessionId,
     tracks: Vec<JournalTrack>,
-    clock_mappings: Vec<JournalClockMapping>,
+    track_configurations: Vec<TrackConfigurationRevision>,
+    clock_mappings: Vec<ClockMappingRevision>,
+    timeline_gap_start_index: usize,
+    timeline_gaps: Vec<AudioGap>,
     sequence_coverage: Vec<SequenceCoverage>,
     gap_start_index: usize,
     sequence_gaps: Vec<SequenceGap>,
@@ -815,7 +1046,9 @@ enum JournalRecord {
 #[derive(Debug, Clone)]
 struct DurableJournalState {
     tracks: BTreeSet<String>,
+    track_configurations: usize,
     clock_mappings: usize,
+    timeline_gaps: Vec<AudioGap>,
     sequence_coverage: BTreeMap<String, SequenceCoverage>,
     sequence_gaps: usize,
 }
@@ -824,7 +1057,9 @@ impl DurableJournalState {
     fn from_journal(journal: &CaptureJournal) -> Self {
         Self {
             tracks: journal.tracks.keys().cloned().collect(),
+            track_configurations: journal.track_configurations.len(),
             clock_mappings: journal.clock_mappings.len(),
+            timeline_gaps: journal.timeline_gaps.clone(),
             sequence_coverage: journal
                 .sequence_coverage
                 .iter()
@@ -836,6 +1071,8 @@ impl DurableJournalState {
 
     fn delta(&self, journal: &CaptureJournal) -> JournalDelta {
         let gap_start_index = self.sequence_gaps.saturating_sub(1);
+        let timeline_gap_start_index =
+            first_changed_index(&self.timeline_gaps, &journal.timeline_gaps);
         JournalDelta {
             schema_version: CAPTURE_SCHEMA_VERSION,
             session_id: journal.session_id.clone(),
@@ -845,7 +1082,11 @@ impl DurableJournalState {
                 .filter(|(track_id, _)| !self.tracks.contains(*track_id))
                 .map(|(_, track)| track.clone())
                 .collect(),
+            track_configurations: journal.track_configurations[self.track_configurations..]
+                .to_vec(),
             clock_mappings: journal.clock_mappings[self.clock_mappings..].to_vec(),
+            timeline_gap_start_index,
+            timeline_gaps: journal.timeline_gaps[timeline_gap_start_index..].to_vec(),
             sequence_coverage: journal
                 .sequence_coverage
                 .iter()
@@ -860,6 +1101,14 @@ impl DurableJournalState {
             sink_degraded: journal.sink_degraded,
         }
     }
+}
+
+fn first_changed_index<T: PartialEq>(durable: &[T], current: &[T]) -> usize {
+    durable
+        .iter()
+        .zip(current)
+        .position(|(durable, current)| durable != current)
+        .unwrap_or_else(|| durable.len().min(current.len()))
 }
 
 pub struct StreamingRecording {
@@ -1363,6 +1612,24 @@ impl StreamingRecording {
         self.append_pcm16(&f32_to_i16_le_bytes(&frame.samples))
     }
 
+    fn append_input(&mut self, input: RecordingInput) -> Result<(), String> {
+        match input {
+            RecordingInput::PreparedFrame(frame) => self.append_prepared(&frame),
+            RecordingInput::TrackConfigured(configuration) => {
+                self.journal.observe_track_configuration(configuration)?;
+                self.persist_journal()
+            }
+            RecordingInput::ClockMapped(mapping) => {
+                self.journal.observe_clock_mapping(mapping)?;
+                self.persist_journal()
+            }
+            RecordingInput::Gap(gap) => {
+                self.journal.observe_gap(gap)?;
+                self.persist_journal()
+            }
+        }
+    }
+
     pub fn append_pcm16(&mut self, pcm: &[u8]) -> Result<(), String> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
@@ -1503,7 +1770,9 @@ impl StreamingRecording {
             audio_sha256,
             audio_bytes,
             tracks: self.journal.tracks.values().cloned().collect(),
+            track_configurations: self.journal.track_configurations.clone(),
             clock_mappings: self.journal.clock_mappings.clone(),
+            timeline_gaps: self.journal.timeline_gaps.clone(),
             sequence_coverage: self.journal.sequence_coverage.clone(),
             sequence_gaps: self.journal.sequence_gaps.clone(),
             sequence_gap_overflow: self.journal.sequence_gap_overflow.clone(),
@@ -1511,6 +1780,12 @@ impl StreamingRecording {
             directory_sync_supported: sync_parent_directory(&self.paths.directory),
             session_metadata: Some(self.session_metadata.clone()),
         };
+        validate_timeline_control_metadata(
+            &sidecar.session_id,
+            &sidecar.track_configurations,
+            &sidecar.clock_mappings,
+            &sidecar.timeline_gaps,
+        )?;
         let sidecar_file =
             write_json_file_open(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
         self.hit_fault(CommitFaultPoint::SidecarSync)?;
@@ -2023,6 +2298,12 @@ fn read_journal_append_log(directory: &Path, name: &str) -> Result<CaptureJourna
 
 fn parse_journal_append_log(text: &str) -> Result<CaptureJournal, String> {
     if let Ok(snapshot) = serde_json::from_str::<CaptureJournal>(text) {
+        validate_timeline_control_metadata(
+            &snapshot.session_id,
+            &snapshot.track_configurations,
+            &snapshot.clock_mappings,
+            &snapshot.timeline_gaps,
+        )?;
         return Ok(snapshot);
     }
     let mut journal = None;
@@ -2059,7 +2340,14 @@ fn parse_journal_append_log(text: &str) -> Result<CaptureJournal, String> {
             }
         }
     }
-    journal.ok_or_else(|| "recording journal has no valid header".into())
+    let journal = journal.ok_or_else(|| "recording journal has no valid header".to_string())?;
+    validate_timeline_control_metadata(
+        &journal.session_id,
+        &journal.track_configurations,
+        &journal.clock_mappings,
+        &journal.timeline_gaps,
+    )?;
+    Ok(journal)
 }
 
 pub(crate) fn parse_journal_for_session(
@@ -2076,7 +2364,17 @@ fn apply_journal_delta(journal: &mut CaptureJournal, delta: JournalDelta) -> Res
     for track in delta.tracks {
         journal.tracks.insert(track.track_id.clone(), track);
     }
+    journal
+        .track_configurations
+        .extend(delta.track_configurations);
     journal.clock_mappings.extend(delta.clock_mappings);
+    if delta.timeline_gap_start_index > journal.timeline_gaps.len() {
+        return Err("recording journal timeline-gap delta is out of order".into());
+    }
+    journal
+        .timeline_gaps
+        .truncate(delta.timeline_gap_start_index);
+    journal.timeline_gaps.extend(delta.timeline_gaps);
     for coverage in delta.sequence_coverage {
         if let Some(existing) = journal
             .sequence_coverage
@@ -2088,7 +2386,7 @@ fn apply_journal_delta(journal: &mut CaptureJournal, delta: JournalDelta) -> Res
             journal.sequence_coverage.push(coverage);
         }
     }
-    if delta.gap_start_index > journal.sequence_gaps.len() {
+    if delta.gap_start_index != journal.sequence_gaps.len().saturating_sub(1) {
         return Err("recording journal gap delta is out of order".into());
     }
     journal.sequence_gaps.truncate(delta.gap_start_index);
@@ -3128,6 +3426,57 @@ mod tests {
     }
 
     #[test]
+    fn scanner_rejects_hash_bound_invalid_timeline_metadata() {
+        let dir = tempfile_dir("invalid-timeline-sidecar");
+        let session = SessionId::new("s-invalid-timeline-sidecar").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording
+            .append_input(RecordingInput::TrackConfigured(
+                TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
+            ))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::ClockMapped(
+                ClockMappingRevision::new(track.clone(), 1, 0, 0).unwrap(),
+            ))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::Gap(AudioGap {
+                session_id: session.clone(),
+                track_id: track,
+                start_ms: 1,
+                duration_ms: 10,
+                source_position_frames: 1,
+                dropped_frames: 160,
+                cause: crate::audio::frame::GapCause::DeviceDiscontinuity,
+                generation: 1,
+            }))
+            .unwrap();
+        recording.finalize().unwrap();
+
+        let sidecar_path = dir.join(format!("live-{session}.capture.json"));
+        let mut sidecar: serde_json::Value =
+            serde_json::from_slice(&fs::read(&sidecar_path).unwrap()).unwrap();
+        sidecar["timelineGaps"][0]["durationMs"] = serde_json::Value::from(0);
+        fs::write(&sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+
+        let commit_path = dir.join(format!("live-{session}.commit.json"));
+        let mut commit: CaptureCommitManifest =
+            serde_json::from_slice(&fs::read(&commit_path).unwrap()).unwrap();
+        commit.capture_sidecar_sha256 = sha256_file(&sidecar_path).unwrap();
+        fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.damaged.len(), 1);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn partial_lineage_uses_the_owned_partial_receipt_not_a_colliding_complete_sidecar() {
         let dir = tempfile_dir("partial-receipt-collision");
         let session = SessionId::new("s-partial-receipt-collision").unwrap();
@@ -3229,7 +3578,10 @@ mod tests {
             journal_attempts,
         ));
 
-        handle.sink().try_send(prepared_frame(&session)).unwrap();
+        handle
+            .sink()
+            .try_send(RecordingInput::PreparedFrame(prepared_frame(&session)))
+            .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         while attempts.load(Ordering::SeqCst) == 0 {
             assert!(
@@ -3239,7 +3591,9 @@ mod tests {
             std::thread::yield_now();
         }
         for _ in 0..1_000 {
-            let _ = handle.sink().try_send(prepared_frame(&session));
+            let _ = handle
+                .sink()
+                .try_send(RecordingInput::PreparedFrame(prepared_frame(&session)));
         }
 
         let (result_tx, result_rx) = mpsc::channel();
@@ -3289,7 +3643,10 @@ mod tests {
                 Arc::clone(&journal_attempts),
             ));
 
-            handle.sink().try_send(prepared_frame(&session)).unwrap();
+            handle
+                .sink()
+                .try_send(RecordingInput::PreparedFrame(prepared_frame(&session)))
+                .unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
             while attempts.load(Ordering::SeqCst) == 0 {
                 assert!(
@@ -3299,7 +3656,9 @@ mod tests {
                 std::thread::yield_now();
             }
             for _ in 0..1_000 {
-                let _ = handle.sink().try_send(prepared_frame(&session));
+                let _ = handle
+                    .sink()
+                    .try_send(RecordingInput::PreparedFrame(prepared_frame(&session)));
             }
 
             let (result_tx, result_rx) = mpsc::channel();
@@ -3389,7 +3748,10 @@ mod tests {
             sink,
             receiver,
         ));
-        handle.sink().try_send(prepared_frame(&session)).unwrap();
+        handle
+            .sink()
+            .try_send(RecordingInput::PreparedFrame(prepared_frame(&session)))
+            .unwrap();
 
         let left_handle = Arc::clone(&handle);
         let left = std::thread::spawn(move || left_handle.finalize().unwrap());
@@ -3822,6 +4184,74 @@ mod tests {
             recovered.sequence_coverage[0].last_sequence <= FOUR_HOURS_AT_TEN_HZ * 2 - 2,
             "a bounded append journal may retain a valid prefix once it reaches its terminal marker"
         );
+    }
+
+    #[test]
+    fn journal_replay_keeps_an_earlier_multitrack_gap_replacement() {
+        let dir = tempfile_dir("journal-multitrack-gap-replacement");
+        let session = SessionId::new("s-journal-multitrack-gap-replacement").unwrap();
+        let microphone = TrackId::new("microphone").unwrap();
+        let loopback = TrackId::new("system-loopback").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        for track in [&microphone, &loopback] {
+            recording
+                .append_input(RecordingInput::TrackConfigured(
+                    TrackConfigurationRevision::new(track.clone(), 1, 0, 16_000).unwrap(),
+                ))
+                .unwrap();
+            recording
+                .append_input(RecordingInput::ClockMapped(
+                    ClockMappingRevision::new(track.clone(), 1, 0, 0).unwrap(),
+                ))
+                .unwrap();
+        }
+        recording
+            .append_input(RecordingInput::Gap(AudioGap {
+                session_id: session.clone(),
+                track_id: microphone.clone(),
+                start_ms: 0,
+                duration_ms: 10,
+                source_position_frames: 0,
+                dropped_frames: 160,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 1,
+            }))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::Gap(AudioGap {
+                session_id: session.clone(),
+                track_id: loopback,
+                start_ms: 0,
+                duration_ms: 10,
+                source_position_frames: 0,
+                dropped_frames: 160,
+                cause: GapCause::DeviceDiscontinuity,
+                generation: 2,
+            }))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::Gap(AudioGap {
+                session_id: session,
+                track_id: microphone.clone(),
+                start_ms: 0,
+                duration_ms: 20,
+                source_position_frames: 0,
+                dropped_frames: 320,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 3,
+            }))
+            .unwrap();
+
+        let replayed = read_journal_snapshot(&recording.paths.journal_part).unwrap();
+        assert_eq!(replayed.timeline_gaps.len(), 2);
+        let microphone_gap = replayed
+            .timeline_gaps
+            .iter()
+            .find(|gap| gap.track_id == microphone)
+            .unwrap();
+        assert_eq!(microphone_gap.duration_ms, 20);
+        assert_eq!(microphone_gap.dropped_frames, 320);
+        assert_eq!(microphone_gap.generation, 3);
     }
 
     #[test]
