@@ -146,7 +146,7 @@ export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined
   const history = readTranscriptHistory(storage);
   return filterHiddenTranscriptHistory(
     history.filter(
-      (entry) => !isPreReleaseLiveHistoryEntry(entry) || isCanonicalYapLiveHistoryEntry(entry),
+      (entry) => !isPreReleaseLiveHistoryEntry(entry),
     ),
     readHiddenTranscriptHistory(storage),
   );

@@ -121,3 +121,32 @@ DONE
 - `pnpm --dir desktop build` - pass.
 - `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass (414 library tests plus 1 parity integration test, default parallel execution).
 - `pnpm --dir desktop test` - pass (100 tests).
+
+---
+
+## Final Deletion And Authorization Repair
+
+### Status
+
+DONE
+
+### Implementation
+
+- Replaced the frontend pathname-based `delete_history_entry_files` route with `delete_saved_live_session(session_id)`, registered through the main-window command boundary.
+- Added a schema-v1 deletion intent for manual and expired-meeting cleanup. It validates the commit, exact transcript revision chain, and bounded same-session artifacts before publishing; it removes artifacts hash-safely, then the commit, then the intent.
+- Reconciliation resumes pending intents before committed-recording scanning. Failed cleanup preserves the intent and surfaces a session warning when the commit is still valid; malformed/orphaned intents are logged and not trusted.
+- Updated owned-path file actions so canonical committed audio/transcript validation is required inside the Yap recordings directory. Timestamp-era and other uncommitted artifacts cannot fall through into the playback registry; registered external imports still do.
+
+### Focused Coverage
+
+- Manual deletion removes bound audio, sidecar, transcript, immutable revision, safely attributable polished derivative, commit, and intent.
+- A crash-style state after audio removal is resumed during listing; mismatched replacements are preserved with the intent retained; forged intents cannot name an arbitrary or cross-session file.
+- Audio-only committed deletion, expired-meeting shared cleanup, dictation no-retention survival, timestamp-path action rejection, and canonical audio/transcript resolution are covered.
+
+### Final Verification
+
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass (414 library tests plus 1 parity integration test, default parallel execution).
+- `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` - pass.
+- `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.
+- `pnpm --dir desktop test` - pass (101 tests).
+- `pnpm --dir desktop build` - pass.

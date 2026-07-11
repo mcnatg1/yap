@@ -101,6 +101,10 @@ export function deleteRecoverableLiveSession(sessionId: string): Promise<void> {
   return invoke<void>("delete_recoverable_live_session", { sessionId });
 }
 
+export function deleteSavedLiveSession(sessionId: string): Promise<void> {
+  return invoke<void>("delete_saved_live_session", { sessionId });
+}
+
 export function resolveOwnedLiveTranscriptPaths(
   outputPaths: string[],
 ): Promise<OwnedLiveTranscriptPathResolution[]> {

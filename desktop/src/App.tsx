@@ -65,6 +65,7 @@ import {
 } from "@/recording-queue";
 import {
   deleteRecoverableLiveSession,
+  deleteSavedLiveSession,
   listRecoverableLiveSessions,
   listSavedLiveSessions,
   recoverLiveSession,
@@ -735,10 +736,9 @@ export default function App() {
   }
 
   async function deleteHistoryEntry(entry: TranscriptHistoryEntry) {
+    const sessionId = entry.name.replace(/^live-/, "");
     try {
-      await invoke("delete_history_entry_files", {
-        outputPath: entry.outputPath,
-      });
+      await deleteSavedLiveSession(sessionId);
       if (!rememberHiddenHistoryEntry(entry.outputPath)) return;
       if (!forgetHistoryEntry(entry.outputPath)) return;
       clearHistorySelectionIf(entry.outputPath);

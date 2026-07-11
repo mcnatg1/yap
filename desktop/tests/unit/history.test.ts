@@ -534,6 +534,21 @@ describe("transcript history storage", () => {
     ]);
   });
 
+  it("never revives a timestamp pre-release row with a fabricated commit path", () => {
+    const storage = {
+      getItem: () => JSON.stringify([{
+        captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.commit.json",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        name: "live-1720656000000",
+        outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.txt",
+        sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-1720656000000.wav",
+      }]),
+      setItem: () => undefined,
+    };
+
+    expect(readVisibleTranscriptHistory(storage)).toEqual([]);
+  });
+
   it("only exposes delete for Yap-owned live history entries", () => {
     expect(canDeleteTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",

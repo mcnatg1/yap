@@ -949,3 +949,12 @@ git commit -m "Verify the client audio foundation"
 - [ ] Dictation injection still uses only final transcript text.
 - [ ] No speaker model, SQLite, Opus, server connector, or new inference dependency landed.
 - [ ] Docs describe exactly what the verified code now does.
+
+---
+
+## Task 7 Deletion Authorization Repair (2026-07-10)
+
+- Completed history deletion is a Rust-owned `delete_saved_live_session(session_id)` command. The frontend requests deletion only for a native canonical row and sends its opaque session ID; it no longer supplies a transcript pathname to a generic delete route.
+- Manual deletion and expired live-meeting retention share one same-directory, schema-versioned deletion intent. The intent binds the session, reason, original commit hash, and a bounded list of exact same-session artifact hashes. Artifacts are removed with no-follow, hash-and-identity-safe quarantine helpers; the commit is always last.
+- Startup/list reconciliation resumes valid pending intents before normal commit scanning. Missing artifacts are treated as already removed, while replacements or malformed intents remain on disk with a warning rather than deleting an unverified file.
+- Canonical Yap paths resolve through a hash-valid commit. Uncommitted or timestamp-era files inside the recordings directory cannot be read, previewed, polished, opened, revealed, registered for playback, or deleted through product actions. Registered external recordings remain supported.

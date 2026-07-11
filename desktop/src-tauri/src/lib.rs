@@ -407,6 +407,15 @@ fn delete_recoverable_live_session(
 }
 
 #[tauri::command]
+fn delete_saved_live_session(
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<(), String> {
+    file_actions::ensure_main_window(&window)?;
+    live::recordings::delete_saved_live_session(session_id)
+}
+
+#[tauri::command]
 fn show_main_workspace(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -913,6 +922,7 @@ pub fn run() {
             list_recoverable_live_sessions,
             recover_live_session,
             delete_recoverable_live_session,
+            delete_saved_live_session,
             show_main_workspace,
             polish_num_gpu,
             start_transcribe,
@@ -923,8 +933,7 @@ pub fn run() {
             file_actions::read_text_preview,
             file_actions::write_polished_text,
             file_actions::open_app_path,
-            file_actions::reveal_app_path,
-            file_actions::delete_history_entry_files
+            file_actions::reveal_app_path
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
