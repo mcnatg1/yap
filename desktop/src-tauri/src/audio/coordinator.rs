@@ -161,8 +161,14 @@ impl<T> BoundedSink<T> {
     }
 
     fn close_with_error(&self, error: &str) {
-        self.record_drop(error);
+        self.degrade(error);
         self.close();
+    }
+
+    pub(crate) fn degrade(&self, error: &str) {
+        if let Ok(mut current) = self.state.error.lock() {
+            current.get_or_insert_with(|| error.to_string());
+        }
     }
 
     pub fn outcome(&self) -> SinkOutcome {
@@ -230,9 +236,7 @@ impl<T> BoundedSink<T> {
 
     fn record_drop(&self, error: &str) {
         self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut current) = self.state.error.lock() {
-            current.get_or_insert_with(|| error.to_string());
-        }
+        self.degrade(error);
     }
 
     fn observe_high_water_mark(&self, queued: usize) {
@@ -350,6 +354,65 @@ pub enum RevisionEvent {
     },
 }
 
+const PENDING_LOSS_CAPACITY: usize = 64;
+
+struct PendingLosses {
+    snapshots: Vec<crate::audio::timeline::LossSnapshot>,
+}
+
+impl PendingLosses {
+    fn new() -> Self {
+        Self {
+            snapshots: Vec::with_capacity(PENDING_LOSS_CAPACITY),
+        }
+    }
+
+    fn push(&mut self, loss: crate::audio::timeline::LossSnapshot) -> bool {
+        if self.snapshots.len() < PENDING_LOSS_CAPACITY {
+            self.snapshots.push(loss);
+            return true;
+        }
+        let Some(previous) = self.snapshots.last_mut() else {
+            return false;
+        };
+        let Some(previous_end) = previous
+            .first_source_position_frames
+            .checked_add(previous.dropped_frames)
+        else {
+            return false;
+        };
+        let Some(merged_frames) = previous.dropped_frames.checked_add(loss.dropped_frames) else {
+            return false;
+        };
+        if previous.cause != loss.cause
+            || previous_end != loss.first_source_position_frames
+            || loss.generation <= previous.generation
+        {
+            return false;
+        }
+        previous.dropped_frames = merged_frames;
+        previous.generation = loss.generation;
+        true
+    }
+
+    fn drain_into(&mut self, drained: &mut Vec<crate::audio::timeline::LossSnapshot>) {
+        drained.append(&mut self.snapshots);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    fn clear(&mut self) {
+        self.snapshots.clear();
+    }
+}
+
 pub struct Coordinator {
     track_id: TrackId,
     ports: CoordinatorPorts,
@@ -360,7 +423,7 @@ pub struct Coordinator {
     last_session_end_ms: u64,
     resampler: Option<LinearResampler>,
     level_normalizer: AudioLevelNormalizer,
-    pending_losses: Vec<crate::audio::timeline::LossSnapshot>,
+    pending_losses: PendingLosses,
     revision_events: Vec<RevisionEvent>,
     #[cfg(test)]
     loss_pending_hook: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -378,7 +441,7 @@ impl Coordinator {
             last_session_end_ms: 0,
             resampler: None,
             level_normalizer: AudioLevelNormalizer::new(),
-            pending_losses: Vec::new(),
+            pending_losses: PendingLosses::new(),
             revision_events: Vec::new(),
             #[cfg(test)]
             loss_pending_hook: None,
@@ -390,14 +453,21 @@ impl Coordinator {
         packet: &CapturePacket,
         losses: &LossAccumulator,
     ) -> Result<f32, String> {
-        let pending_losses = self.drain_losses(losses)?;
+        let pending_losses = self.drain_losses(losses).inspect_err(|error| {
+            self.ports.recording.degrade(error);
+        })?;
         if self.capture_config.is_none() {
             let first_source_position_frames = pending_losses
                 .first()
                 .map_or(packet.source_position_frames, |loss| {
                     loss.first_source_position_frames
                 });
-            self.ensure_configuration(packet, first_source_position_frames, 0)?;
+            if let Err(error) = self.ensure_configuration(packet, first_source_position_frames, 0) {
+                if !pending_losses.is_empty() {
+                    self.ports.recording.degrade(&error);
+                }
+                return Err(error);
+            }
             for loss in pending_losses {
                 self.apply_loss(loss)?;
             }
@@ -470,7 +540,10 @@ impl Coordinator {
     }
 
     pub fn poll_losses(&mut self, losses: &LossAccumulator) -> Result<(), String> {
-        for loss in self.drain_losses(losses)? {
+        let drained = self.drain_losses(losses).inspect_err(|error| {
+            self.ports.recording.degrade(error);
+        })?;
+        for loss in drained {
             self.consume_loss(loss)?;
         }
         Ok(())
@@ -481,21 +554,30 @@ impl Coordinator {
         loss: crate::audio::timeline::LossSnapshot,
     ) -> Result<(), String> {
         if self.capture_config.is_none() {
-            self.pending_losses.push(loss);
+            if !self.pending_losses.push(loss) {
+                self.ports
+                    .recording
+                    .degrade("recording pending-loss capacity exhausted");
+            }
             return Ok(());
         }
         self.apply_loss(loss)
     }
 
     fn apply_loss(&mut self, loss: crate::audio::timeline::LossSnapshot) -> Result<(), String> {
-        let gap = self
-            .timeline
-            .gap(&self.track_id, loss)
-            .map_err(|error| format!("Capture timeline gap failed: {error}"))?;
+        let gap = self.timeline.gap(&self.track_id, loss).map_err(|error| {
+            let error = format!("Capture timeline gap failed: {error}");
+            self.ports.recording.degrade(&error);
+            error
+        })?;
         self.last_session_end_ms = gap
             .start_ms
             .checked_add(u64::from(gap.duration_ms))
-            .ok_or_else(|| "Capture timeline gap overflowed.".to_string())?;
+            .ok_or_else(|| {
+                let error = "Capture timeline gap overflowed.".to_string();
+                self.ports.recording.degrade(&error);
+                error
+            })?;
         let _ = self.ports.recording.try_send(RecordingInput::Gap(gap));
         Ok(())
     }
@@ -507,7 +589,8 @@ impl Coordinator {
             self.pending_losses.clear();
             self.ports
                 .recording
-                .close_with_error("recording closed with unpublished pre-configuration loss");
+                .degrade("recording closed with unpublished pre-configuration loss");
+            self.ports.recording.close();
         }
         for sink in [
             self.ports.local_asr.as_ref(),
@@ -590,7 +673,8 @@ impl Coordinator {
         &mut self,
         losses: &LossAccumulator,
     ) -> Result<Vec<crate::audio::timeline::LossSnapshot>, String> {
-        let mut drained = std::mem::take(&mut self.pending_losses);
+        let mut drained = Vec::with_capacity(PENDING_LOSS_CAPACITY * 2);
+        self.pending_losses.drain_into(&mut drained);
         loop {
             match losses.try_drain() {
                 Ok(TryDrain::Snapshot(loss)) => drained.push(loss),
@@ -685,8 +769,9 @@ mod tests {
 
     use crate::audio::capture::CapturePacket;
     use crate::audio::frame::{GapCause, PreparedFrame};
+    use crate::audio::recording::{CaptureStatus, RecordingSinkHandle};
     use crate::audio::session::{SessionId, TrackId};
-    use crate::audio::timeline::{LossAccumulator, RecordingInput, TimelineEvent};
+    use crate::audio::timeline::{LossAccumulator, LossSnapshot, RecordingInput, TimelineEvent};
 
     use super::{
         bounded_sink, Coordinator, CoordinatorPorts, RevisionEvent, SinkKind,
@@ -1021,6 +1106,179 @@ mod tests {
         assert!(coordinator.timeline_events().iter().any(
             |event| matches!(event, TimelineEvent::Gap(gap) if gap.start_ms == 0 && gap.duration_ms == 10 && gap.source_position_frames == 1_000)
         ));
+    }
+
+    #[test]
+    fn pending_loss_followed_by_configuration_failure_cannot_publish_complete() {
+        let directory = std::env::temp_dir().join(format!(
+            "yap-pending-loss-configuration-failure-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = SessionId::new("pending-loss-configuration-failure").unwrap();
+        let (ports, recording_rx, _) = ports(RECORDING_QUEUE_CAPACITY, None);
+        let recording = RecordingSinkHandle::spawn(
+            directory.clone(),
+            session.clone(),
+            ports.recording.clone(),
+            recording_rx,
+        );
+        let mut coordinator = Coordinator::new(session.clone(), track(), ports);
+
+        coordinator
+            .consume_loss(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 1_600,
+                cause: GapCause::CallbackPoolExhausted,
+                generation: 1,
+            })
+            .unwrap();
+        assert!(coordinator
+            .consume(
+                &CapturePacket {
+                    source_position_frames: 1_600,
+                    channels: 2,
+                    sample_rate_hz: 0,
+                    samples: vec![0.0; 960],
+                },
+                &LossAccumulator::new(),
+            )
+            .is_err());
+        coordinator
+            .consume(&packet(1_600), &LossAccumulator::new())
+            .unwrap();
+        let degradation = coordinator.outcome(SinkKind::Recording).unwrap().error;
+        coordinator.close();
+        let result = recording.finalize().unwrap();
+
+        assert_eq!(
+            degradation.as_deref(),
+            Some("Invalid microphone configuration.")
+        );
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+        assert!(
+            std::fs::metadata(directory.join(format!("live-{session}.wav.part")))
+                .unwrap()
+                .len()
+                > 44
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn loss_application_failure_cannot_publish_complete() {
+        let directory = std::env::temp_dir().join(format!(
+            "yap-loss-application-failure-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = SessionId::new("loss-application-failure").unwrap();
+        let (ports, recording_rx, _) = ports(RECORDING_QUEUE_CAPACITY, None);
+        let recording = RecordingSinkHandle::spawn(
+            directory.clone(),
+            session.clone(),
+            ports.recording.clone(),
+            recording_rx,
+        );
+        let mut coordinator = Coordinator::new(session.clone(), track(), ports);
+
+        coordinator
+            .consume(&packet(0), &LossAccumulator::new())
+            .unwrap();
+        assert!(coordinator
+            .consume_loss(LossSnapshot {
+                first_source_position_frames: 0,
+                dropped_frames: 480,
+                cause: GapCause::DeviceDiscontinuity,
+                generation: 1,
+            })
+            .is_err());
+        coordinator
+            .consume(&packet(480), &LossAccumulator::new())
+            .unwrap();
+        let degradation = coordinator.outcome(SinkKind::Recording).unwrap().error;
+        coordinator.close();
+        let result = recording.finalize().unwrap();
+
+        assert_eq!(
+            degradation.as_deref(),
+            Some("Capture timeline gap failed: InvalidTiming")
+        );
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+        assert!(
+            std::fs::metadata(directory.join(format!("live-{session}.wav.part")))
+                .unwrap()
+                .len()
+                > 44
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sustained_preconfiguration_loss_is_bounded_and_finalizes_partial_with_audio() {
+        const EXPECTED_PENDING_LOSS_BOUND: usize = 64;
+        const LOSS_COUNT: usize = EXPECTED_PENDING_LOSS_BOUND * 4;
+        const LOSS_FRAMES: u64 = 240;
+
+        let directory =
+            std::env::temp_dir().join(format!("yap-bounded-pending-loss-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = SessionId::new("bounded-pending-loss").unwrap();
+        let (ports, recording_rx, _) = ports(RECORDING_QUEUE_CAPACITY, None);
+        let recording = RecordingSinkHandle::spawn(
+            directory.clone(),
+            session.clone(),
+            ports.recording.clone(),
+            recording_rx,
+        );
+        let mut coordinator = Coordinator::new(session.clone(), track(), ports);
+
+        for index in 0..LOSS_COUNT {
+            coordinator
+                .consume_loss(LossSnapshot {
+                    first_source_position_frames: index as u64 * LOSS_FRAMES,
+                    dropped_frames: LOSS_FRAMES,
+                    cause: if index.is_multiple_of(2) {
+                        GapCause::CallbackPoolExhausted
+                    } else {
+                        GapCause::DeviceDiscontinuity
+                    },
+                    generation: index as u64 + 1,
+                })
+                .unwrap();
+        }
+        let pending_count = coordinator.pending_losses.len();
+        let degraded = coordinator.outcome(SinkKind::Recording).unwrap().error;
+        coordinator
+            .consume(
+                &packet(LOSS_COUNT as u64 * LOSS_FRAMES),
+                &LossAccumulator::new(),
+            )
+            .unwrap();
+        let degradation_after_audio = coordinator.outcome(SinkKind::Recording).unwrap().error;
+        coordinator.close();
+        let result = recording.finalize().unwrap();
+
+        assert!(pending_count <= EXPECTED_PENDING_LOSS_BOUND);
+        assert_eq!(
+            degraded.as_deref(),
+            Some("recording pending-loss capacity exhausted")
+        );
+        assert_eq!(degradation_after_audio, degraded);
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+        assert!(
+            std::fs::metadata(directory.join(format!("live-{session}.wav.part")))
+                .unwrap()
+                .len()
+                > 44
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

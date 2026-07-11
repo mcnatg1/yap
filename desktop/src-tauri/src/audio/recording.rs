@@ -583,6 +583,9 @@ fn drain_recording_worker(
                         recording.abort(error);
                         input_failed = true;
                     }
+                    if recording.journal.sink_degraded {
+                        sink.degrade("recording sequence discontinuity");
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -669,6 +672,13 @@ impl CaptureSidecar {
             &self.clock_mappings,
             &self.timeline_gaps,
         )?;
+        validate_sequence_metadata(
+            &self.tracks,
+            &self.sequence_coverage,
+            &self.sequence_gaps,
+            self.sequence_gap_overflow.as_ref(),
+            self.sink_degraded,
+        )?;
         validate_artifact_name(&self.audio_file)?;
         validate_sha256(&self.audio_sha256)
     }
@@ -699,6 +709,7 @@ fn validate_timeline_control_metadata<'a>(
     }
 
     let mut configurations = BTreeMap::<String, (u32, u64)>::new();
+    let mut configuration_times = BTreeMap::<(String, u32), u64>::new();
     for configuration in track_configurations {
         let track = configuration.track_id.as_str().to_string();
         if configuration.revision == 0 || configuration.sample_rate_hz == 0 {
@@ -712,8 +723,12 @@ fn validate_timeline_control_metadata<'a>(
             _ => return Err("recording track configuration revisions are not contiguous".into()),
         }
         configurations.insert(
-            track,
+            track.clone(),
             (configuration.revision, configuration.effective_at_ms),
+        );
+        configuration_times.insert(
+            (track, configuration.revision),
+            configuration.effective_at_ms,
         );
     }
 
@@ -722,6 +737,11 @@ fn validate_timeline_control_metadata<'a>(
         let track = mapping.track_id.as_str().to_string();
         if !configurations.contains_key(&track) || mapping.revision == 0 {
             return Err("recording clock mapping has no valid track configuration".into());
+        }
+        if configuration_times.get(&(track.clone(), mapping.revision))
+            != Some(&mapping.session_time_ms)
+        {
+            return Err("recording revision transition timestamp does not match".into());
         }
         match mappings.get(&track) {
             Some((revision, source_position_frames, session_time_ms))
@@ -787,6 +807,70 @@ fn validate_timeline_control_metadata<'a>(
             }
         }
         gaps.insert(track, (gap.generation, end_ms, end_source, gap.cause));
+    }
+    Ok(())
+}
+
+fn validate_sequence_metadata(
+    tracks: &[JournalTrack],
+    sequence_coverage: &[SequenceCoverage],
+    sequence_gaps: &[SequenceGap],
+    sequence_gap_overflow: Option<&SequenceGapOverflow>,
+    sink_degraded: bool,
+) -> Result<(), String> {
+    let track_ids = tracks
+        .iter()
+        .map(|track| track.track_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut coverage_by_track = BTreeMap::new();
+    for coverage in sequence_coverage {
+        if !track_ids.contains(coverage.track_id.as_str())
+            || coverage.first_sequence > coverage.last_sequence
+            || coverage_by_track
+                .insert(coverage.track_id.as_str(), coverage)
+                .is_some()
+        {
+            return Err("recording sequence coverage is invalid".into());
+        }
+    }
+    if coverage_by_track.len() != track_ids.len() {
+        return Err("recording track has no sequence coverage".into());
+    }
+
+    let mut previous_gap_end = BTreeMap::<&str, u64>::new();
+    for gap in sequence_gaps {
+        let coverage = coverage_by_track
+            .get(gap.track_id.as_str())
+            .ok_or_else(|| "recording sequence gap has no coverage".to_string())?;
+        let gap_end = gap
+            .first_sequence
+            .checked_add(gap.dropped_frames)
+            .filter(|end| gap.dropped_frames > 0 && *end <= coverage.last_sequence)
+            .ok_or_else(|| "recording sequence gap is invalid".to_string())?;
+        if gap.first_sequence <= coverage.first_sequence
+            || previous_gap_end
+                .get(gap.track_id.as_str())
+                .is_some_and(|previous_end| gap.first_sequence < *previous_end)
+        {
+            return Err("recording sequence gaps are not ordered".into());
+        }
+        previous_gap_end.insert(gap.track_id.as_str(), gap_end);
+    }
+
+    if let Some(overflow) = sequence_gap_overflow {
+        if overflow.detail_capacity != MAX_SEQUENCE_GAP_DETAILS as u32
+            || sequence_gaps.len() != MAX_SEQUENCE_GAP_DETAILS
+            || overflow.omitted_gap_count == 0
+            || overflow.omitted_dropped_frames == 0
+        {
+            return Err("recording sequence-gap overflow is invalid".into());
+        }
+    }
+    if (!sequence_gaps.is_empty() || sequence_gap_overflow.is_some()) && !sink_degraded {
+        return Err("recording sequence degradation is inconsistent".into());
+    }
+    if sink_degraded || !sequence_gaps.is_empty() || sequence_gap_overflow.is_some() {
+        return Err("degraded recording metadata cannot be complete".into());
     }
     Ok(())
 }
@@ -1775,6 +1859,9 @@ impl StreamingRecording {
         if let Some(result) = &self.finalized {
             return Ok(result.clone());
         }
+        if self.journal.sink_degraded && self.failure.is_none() {
+            self.abort("recording sequence metadata is degraded".into());
+        }
         if self.failure.is_some() {
             return Ok(self.partial_result());
         }
@@ -1857,6 +1944,13 @@ impl StreamingRecording {
             &sidecar.track_configurations,
             &sidecar.clock_mappings,
             &sidecar.timeline_gaps,
+        )?;
+        validate_sequence_metadata(
+            &sidecar.tracks,
+            &sidecar.sequence_coverage,
+            &sidecar.sequence_gaps,
+            sidecar.sequence_gap_overflow.as_ref(),
+            sidecar.sink_degraded,
         )?;
         let sidecar_file =
             write_json_file_open(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
@@ -3609,6 +3703,50 @@ mod tests {
     }
 
     #[test]
+    fn scanner_rejects_hash_bound_sink_degradation() {
+        assert_hash_bound_sidecar_mutation_is_damaged("sink-degraded", |sidecar| {
+            sidecar["sinkDegraded"] = serde_json::Value::Bool(true);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_sequence_gap_metadata() {
+        assert_hash_bound_sidecar_mutation_is_damaged("sequence-gap", |sidecar| {
+            sidecar["sequenceGaps"] = serde_json::json!([{
+                "trackId": "live-microphone",
+                "firstSequence": 1,
+                "droppedFrames": 1
+            }]);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_sequence_gap_overflow() {
+        assert_hash_bound_sidecar_mutation_is_damaged("sequence-gap-overflow", |sidecar| {
+            sidecar["sequenceGapOverflow"] = serde_json::json!({
+                "detailCapacity": 1_024,
+                "omittedGapCount": 1,
+                "omittedDroppedFrames": 1
+            });
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_malformed_sequence_coverage() {
+        assert_hash_bound_sidecar_mutation_is_damaged("sequence-coverage", |sidecar| {
+            sidecar["sequenceCoverage"][0]["firstSequence"] = serde_json::Value::from(2);
+            sidecar["sequenceCoverage"][0]["lastSequence"] = serde_json::Value::from(1);
+        });
+    }
+
+    #[test]
+    fn scanner_rejects_hash_bound_mismatched_revision_transition_timestamp() {
+        assert_hash_bound_sidecar_mutation_is_damaged("revision-timestamp", |sidecar| {
+            sidecar["clockMappings"][0]["sessionTimeMs"] = serde_json::Value::from(1);
+        });
+    }
+
+    #[test]
     fn partial_lineage_uses_the_owned_partial_receipt_not_a_colliding_complete_sidecar() {
         let dir = tempfile_dir("partial-receipt-collision");
         let session = SessionId::new("s-partial-receipt-collision").unwrap();
@@ -3849,6 +3987,46 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("not monotonic")));
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+    }
+
+    #[test]
+    fn sequence_discontinuity_keeps_later_audio_but_cannot_publish_complete() {
+        let dir = tempfile_dir("worker-sequence-discontinuity");
+        let session = SessionId::new("s-worker-sequence-discontinuity").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 8);
+        let handle = RecordingSinkHandle::spawn(dir.clone(), session.clone(), sink, receiver);
+        let recording_sink = handle.sink();
+        for input in [
+            recording_revision(&track, 1, 0, 16_000, 0),
+            RecordingInput::PreparedFrame(prepared_frame_at(&session, 0, 0)),
+            RecordingInput::PreparedFrame(prepared_frame_at(&session, 2, 1)),
+            RecordingInput::PreparedFrame(prepared_frame_at(&session, 3, 2)),
+        ] {
+            recording_sink.try_send(input).unwrap();
+        }
+
+        let result = handle.finalize().unwrap();
+
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert!(result.committed.is_none());
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("sequence")));
+        assert_eq!(
+            recording_sink.outcome().error.as_deref(),
+            Some("recording sequence discontinuity")
+        );
+        assert_eq!(
+            fs::metadata(dir.join(format!("live-{session}.wav.part")))
+                .unwrap()
+                .len(),
+            50
+        );
         let scan = scan_recordings(&dir).unwrap();
         assert!(scan.complete.is_empty());
         assert_eq!(scan.partial.len(), 1);
@@ -5017,6 +5195,38 @@ mod tests {
         std::os::windows::fs::symlink_file(original, link)
     }
 
+    fn assert_hash_bound_sidecar_mutation_is_damaged<F>(label: &str, mutate: F)
+    where
+        F: FnOnce(&mut serde_json::Value),
+    {
+        let dir = tempfile_dir(label);
+        let session = SessionId::new(format!("s-{label}")).unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
+            .unwrap();
+        recording
+            .append_input(RecordingInput::PreparedFrame(prepared_frame(&session)))
+            .unwrap();
+        assert_eq!(
+            recording.finalize().unwrap().status,
+            CaptureStatus::Complete
+        );
+
+        let sidecar_path = dir.join(format!("live-{session}.capture.json"));
+        let mut sidecar: serde_json::Value =
+            serde_json::from_slice(&fs::read(&sidecar_path).unwrap()).unwrap();
+        mutate(&mut sidecar);
+        fs::write(&sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        rehash_capture_sidecar(&dir, &session, &sidecar_path);
+
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty(), "{label}");
+        assert_eq!(scan.damaged.len(), 1, "{label}");
+        fs::remove_dir_all(dir).ok();
+    }
+
     fn revision_transition(
         track: &TrackId,
         revision: u32,
@@ -5060,14 +5270,18 @@ mod tests {
     }
 
     fn prepared_frame(session_id: &SessionId) -> PreparedFrame {
+        prepared_frame_at(session_id, 0, 0)
+    }
+
+    fn prepared_frame_at(session_id: &SessionId, sequence: u64, start_ms: u64) -> PreparedFrame {
         PreparedFrame {
             metadata: AudioFrame {
                 session_id: session_id.clone(),
                 track_id: TrackId::new("live-microphone").unwrap(),
-                sequence: 0,
+                sequence,
                 sample_rate_hz: 16_000,
                 channels: 1,
-                start_ms: 0,
+                start_ms,
                 duration_ms: 1,
                 sample_count: 1,
             },
