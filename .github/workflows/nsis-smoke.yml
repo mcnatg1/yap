@@ -1,0 +1,71 @@
+name: NSIS Bundle Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nsis-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  nsis-bundle-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+          key: ${{ runner.os }}-nsis-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nsis-
+            ${{ runner.os }}-cargo-
+      - run: pnpm install --frozen-lockfile
+      - name: Verify release-evidence configuration
+        run: node --test ./tests/scripts/release-evidence.test.mjs
+      - name: Require exact FreeFlow provenance for published releases
+        if: github.event_name == 'release'
+        run: node ./tests/scripts/assert-third-party-provenance.mjs
+      - name: Record the outstanding release provenance gate
+        if: github.event_name != 'release'
+        shell: pwsh
+        run: |
+          "### Third-party provenance" >> $env:GITHUB_STEP_SUMMARY
+          "The reviewed FreeFlow MIT notice is packaged. Its exact upstream revision remains a published-release gate until verified from the original import." >> $env:GITHUB_STEP_SUMMARY
+      - name: Build NSIS bundle
+        run: pnpm tauri build --bundles nsis
+      - name: Install, launch, verify notices, and uninstall
+        shell: pwsh
+        run: ./tests/scripts/smoke-nsis.ps1
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: nsis-smoke-${{ github.run_id }}
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            desktop/tests/results/nsis-smoke.json
+          if-no-files-found: ignore
+          retention-days: 7

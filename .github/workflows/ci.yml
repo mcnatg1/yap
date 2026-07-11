@@ -83,6 +83,58 @@ jobs:
             --ignore RUSTSEC-2026-0194 `
             --ignore RUSTSEC-2026-0195
 
+  native-wdio:
+    name: Native WDIO smoke (required, no hardware)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+          key: ${{ runner.os }}-native-wdio-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri*.json') }}
+          restore-keys: |
+            ${{ runner.os }}-native-wdio-
+            ${{ runner.os }}-cargo-
+      - run: pnpm install --frozen-lockfile
+      - name: Verify release-evidence configuration
+        run: node --test ./tests/scripts/release-evidence.test.mjs
+      - name: Build the WDIO-enabled app once
+        run: pnpm test:desktop:build
+      - name: Run required hardware-independent WDIO specs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force tests/results | Out-Null
+          & pnpm exec wdio run ./tests/wdio.required.conf.ts 2>&1 |
+            Tee-Object -FilePath tests/results/native-wdio-trace.log
+          $wdioExitCode = $LASTEXITCODE
+          if ($wdioExitCode -ne 0) {
+            exit $wdioExitCode
+          }
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: native-wdio-failure-${{ github.run_id }}
+          path: desktop/tests/results
+          if-no-files-found: warn
+          retention-days: 7
+
   server:
     runs-on: windows-latest
     timeout-minutes: 10
