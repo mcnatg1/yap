@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
 import {
   applyRestoredQueuePlaybackPaths,
-  mergeHistoryPlaybackPaths,
-  trimHistoryPlaybackPaths,
+  mergeHistoryPlaybackAdmissions,
+  trimHistoryPlaybackAdmissions,
 } from "@/lib/playback-registry";
 
 function queuedRecording(id: number, path: string): RecordingJobView {
@@ -26,34 +26,45 @@ describe("playback registry projections", () => {
 
     const next = applyRestoredQueuePlaybackPaths(
       [first, second],
-      [{ id: 1, playbackPath: "\\\\?\\C:\\meeting.wav" }],
+      [{ byteLength: 4_096, id: 1, playbackPath: "\\\\?\\C:\\meeting.wav" }],
     );
 
-    expect(next[0]).toMatchObject({ playbackPath: "\\\\?\\C:\\meeting.wav" });
+    expect(next[0]).toMatchObject({
+      playbackByteLength: 4_096,
+      playbackPath: "\\\\?\\C:\\meeting.wav",
+    });
     expect(next[1]).toBe(second);
   });
 
-  it("trims stale history playback paths", () => {
-    expect(trimHistoryPlaybackPaths(
-      { "keep.txt": "keep.wav", "stale.txt": "stale.wav" },
+  it("trims stale history playback admissions", () => {
+    expect(trimHistoryPlaybackAdmissions(
+      {
+        "keep.txt": { byteLength: 4, playbackPath: "keep.wav" },
+        "stale.txt": { byteLength: 8, playbackPath: "stale.wav" },
+      },
       [{
         createdAt: "2026-01-01T00:00:00.000Z",
         name: "keep",
         outputPath: "keep.txt",
         sourcePath: "keep.wav",
       }],
-    )).toEqual({ "keep.txt": "keep.wav" });
+    )).toEqual({ "keep.txt": { byteLength: 4, playbackPath: "keep.wav" } });
   });
 
-  it("merges restored history playback paths only when values change", () => {
-    const current = { "meeting.txt": "meeting.wav" };
+  it("merges restored history playback admissions only when metadata changes", () => {
+    const current = {
+      "meeting.txt": { byteLength: 4, playbackPath: "meeting.wav" },
+    };
 
-    expect(mergeHistoryPlaybackPaths(current, [])).toBe(current);
-    expect(mergeHistoryPlaybackPaths(current, [
-      { outputPath: "meeting.txt", playbackPath: "meeting.wav" },
+    expect(mergeHistoryPlaybackAdmissions(current, [])).toBe(current);
+    expect(mergeHistoryPlaybackAdmissions(current, [
+      { byteLength: 4, outputPath: "meeting.txt", playbackPath: "meeting.wav" },
     ])).toBe(current);
-    expect(mergeHistoryPlaybackPaths(current, [
-      { outputPath: "other.txt", playbackPath: "other.wav" },
-    ])).toEqual({ "meeting.txt": "meeting.wav", "other.txt": "other.wav" });
+    expect(mergeHistoryPlaybackAdmissions(current, [
+      { byteLength: 8, outputPath: "other.txt", playbackPath: "other.wav" },
+    ])).toEqual({
+      "meeting.txt": { byteLength: 4, playbackPath: "meeting.wav" },
+      "other.txt": { byteLength: 8, playbackPath: "other.wav" },
+    });
   });
 });

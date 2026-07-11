@@ -56,6 +56,15 @@ import {
 } from "@/recording-queue";
 import { SttInvokeError, startTranscribe } from "@/stt";
 
+function withHistoryPlaybackByteLength(
+  item: RecordingJobView | undefined,
+  byteLengths: Record<string, number>,
+) {
+  if (item?.intent !== "live" || !item.output) return item;
+  const playbackByteLength = byteLengths[item.output];
+  return playbackByteLength === undefined ? item : { ...item, playbackByteLength };
+}
+
 export default function App() {
   const initialQueue = useMemo(() => readRecordingQueue(), []);
   const [queue, setQueue] = useState<RecordingJobView[]>(initialQueue);
@@ -90,7 +99,10 @@ export default function App() {
     recordVisibleHistoryEntries,
     rememberHiddenHistoryEntry,
   } = useTranscriptHistory();
-  const historyPlaybackPaths = useRegisteredPlayback(queue, setQueue, history);
+  const {
+    historyPlaybackByteLengths,
+    historyPlaybackPaths,
+  } = useRegisteredPlayback(queue, setQueue, history);
   const {
     clearHistorySelectionIf,
     closeHistoryReview,
@@ -99,11 +111,25 @@ export default function App() {
     selectHistoryEntry,
     selectQueueItem,
     selectQueueItemOnly,
-    selectedHistoryItem,
+    selectedHistoryItem: selectedHistoryItemWithoutPlaybackMetadata,
     selectedHistoryOutput,
     selectedId,
-    selectedItem,
+    selectedItem: selectedItemWithoutPlaybackMetadata,
   } = useRecordingSelection({ history, historyPlaybackPaths, queue });
+  const selectedHistoryItem = useMemo(
+    () => withHistoryPlaybackByteLength(
+      selectedHistoryItemWithoutPlaybackMetadata,
+      historyPlaybackByteLengths,
+    ),
+    [historyPlaybackByteLengths, selectedHistoryItemWithoutPlaybackMetadata],
+  );
+  const selectedItem = useMemo(
+    () => withHistoryPlaybackByteLength(
+      selectedItemWithoutPlaybackMetadata,
+      historyPlaybackByteLengths,
+    ),
+    [historyPlaybackByteLengths, selectedItemWithoutPlaybackMetadata],
+  );
   const queueRef = useRef(queue);
   const recordingDrop = useRecordingDrop(addPaths);
 
@@ -234,13 +260,23 @@ export default function App() {
       await Promise.all(
         accepted.map(async (item) => {
           try {
-            return { ...item, playbackPath: await allowRecordingPlaybackPath(item.path) };
+            const admission = await allowRecordingPlaybackPath(item.path);
+            return {
+              ...item,
+              playbackByteLength: admission.byteLength,
+              playbackPath: admission.playbackPath,
+            };
           } catch {
             return undefined;
           }
         }),
       )
-    ).filter((item): item is { id: number; path: string; playbackPath: string } => Boolean(item));
+    ).filter((item): item is {
+      id: number;
+      path: string;
+      playbackByteLength: number;
+      playbackPath: string;
+    } => Boolean(item));
 
     if (accepted.length && approved.length < accepted.length) {
       toast.warning("Some recordings could not be prepared for playback.");
@@ -256,7 +292,13 @@ export default function App() {
       .slice(0, availableQueuedServerSlots(current));
     if (!addable.length) return;
 
-    const newItems = createQueuedServerRecordingJobs(addable);
+    const playbackByteLengths = new Map(
+      addable.map((item) => [item.id, item.playbackByteLength]),
+    );
+    const newItems = createQueuedServerRecordingJobs(addable).map((item) => ({
+      ...item,
+      playbackByteLength: playbackByteLengths.get(item.id),
+    }));
     setQueue((current) => [...current, ...newItems]);
     openWorkspace("transcribe");
     selectQueueItem(newItems[newItems.length - 1].id);

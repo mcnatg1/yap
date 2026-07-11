@@ -24,17 +24,25 @@ pub struct OwnedLiveTranscriptPathResolution {
     missing: bool,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPlaybackAdmission {
+    playback_path: String,
+    byte_length: u64,
+}
+
 #[tauri::command]
 pub fn allow_recording_playback_path(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     path: String,
-) -> Result<String, String> {
+) -> Result<RecordingPlaybackAdmission, String> {
     ensure_main_window(&window)?;
     let path = register_playback_path_at(path, &recording_playback_registry_path())?;
     revalidate_owned_playback_path(&path)?;
+    let admission = playback_admission_for_path(&path)?;
     allow_asset_playback_path(&app, &path)?;
-    Ok(path.display().to_string())
+    Ok(admission)
 }
 
 #[tauri::command]
@@ -42,25 +50,15 @@ pub fn restore_recording_playback_path(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     path: String,
-) -> Result<String, String> {
+) -> Result<RecordingPlaybackAdmission, String> {
     ensure_main_window(&window)?;
-    let path = std::path::PathBuf::from(path);
-    let path =
-        if path_is_inside_owned_live_directory(&path, &crate::live::recordings::recordings_dir()) {
-            crate::live::recordings::canonical_committed_live_path_from_dir(
-                &path,
-                &crate::live::recordings::recordings_dir(),
-                false,
-            )?
-        } else {
-            registered_playback_path_at(
-                path.display().to_string(),
-                &recording_playback_registry_path(),
-            )?
-        };
-    revalidate_owned_playback_path(&path)?;
-    allow_asset_playback_path(&app, &path)?;
-    Ok(path.display().to_string())
+    let admission = restore_playback_admission_at(
+        path,
+        &recording_playback_registry_path(),
+        &crate::live::recordings::recordings_dir(),
+    )?;
+    allow_asset_playback_path(&app, std::path::Path::new(&admission.playback_path))?;
+    Ok(admission)
 }
 
 #[tauri::command]
@@ -385,6 +383,36 @@ fn registered_playback_path_at(
     registered_recording_path_at(&std::path::PathBuf::from(path), registry_path)
 }
 
+fn restore_playback_admission_at(
+    path: String,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<RecordingPlaybackAdmission, String> {
+    let path = std::path::PathBuf::from(path);
+    let path = if path_is_inside_owned_live_directory(&path, owned_dir) {
+        crate::live::recordings::canonical_committed_live_path_from_dir(&path, owned_dir, false)?
+    } else {
+        registered_playback_path_at(path.display().to_string(), registry_path)?
+    };
+    revalidate_owned_playback_path_from_dir(&path, owned_dir)?;
+    playback_admission_for_path(&path)
+}
+
+fn playback_admission_for_path(
+    path: &std::path::Path,
+) -> Result<RecordingPlaybackAdmission, String> {
+    let metadata = path
+        .metadata()
+        .map_err(|error| format!("Failed to inspect recording: {error}"))?;
+    if !metadata.is_file() || !is_recording_media_path(path) {
+        return Err("Choose a supported audio or video file.".into());
+    }
+    Ok(RecordingPlaybackAdmission {
+        playback_path: path.display().to_string(),
+        byte_length: metadata.len(),
+    })
+}
+
 pub(crate) fn ensure_registered_recording_paths(
     paths: &[std::path::PathBuf],
 ) -> Result<(), String> {
@@ -520,12 +548,15 @@ fn owned_live_transcript_file_from_dir(
 }
 
 fn revalidate_owned_playback_path(path: &std::path::Path) -> Result<(), String> {
-    if path_is_inside_owned_live_directory(path, &crate::live::recordings::recordings_dir()) {
-        crate::live::recordings::canonical_committed_live_path_from_dir(
-            path,
-            &crate::live::recordings::recordings_dir(),
-            false,
-        )?;
+    revalidate_owned_playback_path_from_dir(path, &crate::live::recordings::recordings_dir())
+}
+
+fn revalidate_owned_playback_path_from_dir(
+    path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<(), String> {
+    if path_is_inside_owned_live_directory(path, owned_dir) {
+        crate::live::recordings::canonical_committed_live_path_from_dir(path, owned_dir, false)?;
     }
     Ok(())
 }
@@ -1055,6 +1086,41 @@ mod tests {
         let restored = registered_playback_path_at(media.display().to_string(), &registry).unwrap();
 
         assert_eq!(restored, registered);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_admission_reports_canonical_path_and_byte_length() {
+        let dir = temp_test_dir("playback-admission-metadata");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&media, b"RIFFdata").unwrap();
+
+        let admission = playback_admission_for_path(&media.canonicalize().unwrap()).unwrap();
+
+        assert_eq!(
+            admission.playback_path,
+            media.canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(admission.byte_length, 8);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn playback_restore_revalidates_native_authorization() {
+        let dir = temp_test_dir("playback-admission-revalidate");
+        let registry = dir.join("registry.json");
+        let owned = dir.join("owned");
+        let media = dir.join("meeting.wav");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+        register_playback_path_at_from_owned_dir(media.display().to_string(), &registry, &owned)
+            .unwrap();
+        std::fs::remove_file(&media).unwrap();
+
+        let error = restore_playback_admission_at(media.display().to_string(), &registry, &owned)
+            .unwrap_err();
+
+        assert_eq!(error, "File no longer exists.");
         std::fs::remove_dir_all(dir).ok();
     }
 

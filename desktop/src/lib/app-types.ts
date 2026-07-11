@@ -143,10 +143,16 @@ export type RecordingPipelineState = {
   postprocessing: PipelineStageStatus;
 };
 
+export type PlaybackAdmission = {
+  playbackPath: string;
+  byteLength: number;
+};
+
 export type RecordingJobView = {
   id: number;
   path: string;
   playbackPath?: string;
+  playbackByteLength?: number;
   name: string;
   intent: RecordingIntent;
   status: RecordingJobStatus;

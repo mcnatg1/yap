@@ -1,4 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { FileAudio } from "@phosphor-icons/react/FileAudio";
@@ -54,6 +61,61 @@ function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: num
   }
 }
 
+// WaveSurfer decodes the full file to PCM. Both limits bound that expansion;
+// larger recordings stay on the browser's streaming native media path.
+export const maxDecodedWaveformBytes = 32 * 1024 * 1024;
+export const maxDecodedWaveformDurationSeconds = 15 * 60;
+
+type DisposableWaveform = {
+  destroy: () => void;
+};
+
+function canMountDecodedWaveform(byteLength: number, durationSeconds: number) {
+  return (
+    Number.isSafeInteger(byteLength) &&
+    byteLength >= 0 &&
+    byteLength <= maxDecodedWaveformBytes &&
+    Number.isFinite(durationSeconds) &&
+    durationSeconds > 0 &&
+    durationSeconds <= maxDecodedWaveformDurationSeconds
+  );
+}
+
+export function mountDecodedWaveform<T extends DisposableWaveform>({
+  byteLength,
+  create,
+  durationSeconds,
+  subscribe,
+}: {
+  byteLength: number;
+  create: () => T;
+  durationSeconds: number;
+  subscribe: (waveform: T) => Array<() => void>;
+}) {
+  if (!canMountDecodedWaveform(byteLength, durationSeconds)) {
+    return undefined;
+  }
+
+  const waveform = create();
+  let unsubscribers: Array<() => void>;
+  try {
+    unsubscribers = subscribe(waveform);
+  } catch (error) {
+    waveform.destroy();
+    throw error;
+  }
+  let disposed = false;
+  return {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+      waveform.destroy();
+    },
+    waveform,
+  };
+}
+
 function RecordingPlayer({
   item,
   onOpen,
@@ -66,17 +128,31 @@ function RecordingPlayer({
   variant?: "panel" | "modal";
 }) {
   const displayedSecondRef = useRef(0);
+  const dragPointerIdRef = useRef<number | undefined>(undefined);
   const audioRef = useRef<HTMLAudioElement>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
   const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
   const statusId = useId();
   const errorId = useId();
   const [currentSeconds, setCurrentSeconds] = useState(0);
-  const [durationSeconds, setDurationSeconds] = useState<number>();
+  const [progressSeconds, setProgressSeconds] = useState(0);
+  const [nativeMetadata, setNativeMetadata] = useState<{
+    durationSeconds: number;
+    recordingSrc: string;
+  }>();
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
   const recordingPath = item.playbackPath;
   const recordingSrc = useMemo(() => (isTauri() && recordingPath ? convertFileSrc(recordingPath) : undefined), [recordingPath]);
+  const durationSeconds = nativeMetadata && nativeMetadata.recordingSrc === recordingSrc
+    ? nativeMetadata.durationSeconds
+    : undefined;
+  const waveformMode = durationSeconds === undefined
+    ? "pending"
+    : item.playbackByteLength !== undefined &&
+        canMountDecodedWaveform(item.playbackByteLength, durationSeconds)
+      ? "decoded"
+      : "lightweight";
   const recordingStatus = failed
     ? "Playback unavailable"
     : isRecordingFinished(item.status)
@@ -90,61 +166,71 @@ function RecordingPlayer({
 
   useEffect(() => {
     setCurrentSeconds(0);
+    setProgressSeconds(0);
     displayedSecondRef.current = 0;
+    dragPointerIdRef.current = undefined;
     setFailed(false);
     setPlaying(false);
-    setDurationSeconds(undefined);
   }, [recordingSrc]);
 
   useEffect(() => {
     const audio = audioRef.current;
     const container = waveformRef.current;
-    if (!audio || !container || !recordingSrc) return;
+    const byteLength = item.playbackByteLength;
+    if (
+      !audio ||
+      !container ||
+      !recordingSrc ||
+      durationSeconds === undefined ||
+      byteLength === undefined
+    ) return;
 
-    const waveSurfer = WaveSurfer.create({
-      barGap: 2,
-      barMinHeight: 3,
-      barRadius: 999,
-      barWidth: 3,
-      container,
-      cursorWidth: 0,
-      dragToSeek: true,
-      height: 56,
-      hideScrollbar: true,
-      media: audio,
-      normalize: true,
-      progressColor: "#034f46",
-      waveColor: "rgba(117, 111, 102, 0.28)",
+    const mounted = mountDecodedWaveform({
+      byteLength,
+      create: () => WaveSurfer.create({
+        barGap: 2,
+        barMinHeight: 3,
+        barRadius: 999,
+        barWidth: 3,
+        container,
+        cursorWidth: 0,
+        dragToSeek: true,
+        height: 56,
+        hideScrollbar: true,
+        media: audio,
+        normalize: true,
+        progressColor: "#034f46",
+        waveColor: "rgba(117, 111, 102, 0.28)",
+      }),
+      durationSeconds,
+      subscribe: (waveSurfer) => [
+        waveSurfer.on("ready", () => {
+          setFailed(false);
+          setDisplaySeconds(waveSurfer.getCurrentTime());
+        }),
+        waveSurfer.on("timeupdate", setDisplaySeconds),
+        waveSurfer.on("seeking", setDisplaySeconds),
+        waveSurfer.on("interaction", setDisplaySeconds),
+        waveSurfer.on("play", () => setPlaying(true)),
+        waveSurfer.on("pause", () => setPlaying(false)),
+        waveSurfer.on("finish", () => {
+          setPlaying(false);
+          setDisplaySeconds(waveSurfer.getDuration());
+        }),
+        waveSurfer.on("error", () => {
+          setFailed(Boolean(audio.error));
+          setPlaying(false);
+        }),
+      ],
     });
-    waveSurferRef.current = waveSurfer;
-
-    const unsubscribers = [
-      waveSurfer.on("ready", (duration) => {
-        setDurationSeconds(Number.isFinite(duration) ? duration : undefined);
-        setFailed(false);
-        setDisplaySeconds(waveSurfer.getCurrentTime());
-      }),
-      waveSurfer.on("timeupdate", setDisplaySeconds),
-      waveSurfer.on("seeking", setDisplaySeconds),
-      waveSurfer.on("interaction", setDisplaySeconds),
-      waveSurfer.on("play", () => setPlaying(true)),
-      waveSurfer.on("pause", () => setPlaying(false)),
-      waveSurfer.on("finish", () => {
-        setPlaying(false);
-        setDisplaySeconds(waveSurfer.getDuration());
-      }),
-      waveSurfer.on("error", () => {
-        setFailed(Boolean(audio.error));
-        setPlaying(false);
-      }),
-    ];
+    if (!mounted) return;
+    waveSurferRef.current = mounted.waveform;
 
     return () => {
-      unsubscribers.forEach((unsubscribe) => unsubscribe());
-      waveSurfer.destroy();
-      if (waveSurferRef.current === waveSurfer) waveSurferRef.current = undefined;
+      mounted.dispose();
+      if (waveSurferRef.current === mounted.waveform) waveSurferRef.current = undefined;
     };
-  }, [recordingSrc]);
+  }, [durationSeconds, item.playbackByteLength, recordingSrc]);
 
   if (!recordingPath || !recordingSrc) return null;
 
@@ -157,15 +243,18 @@ function RecordingPlayer({
 
   function syncMediaDuration() {
     const duration = audioRef.current?.duration;
-    if (duration && Number.isFinite(duration)) {
-      setDurationSeconds(duration);
+    if (recordingSrc && duration && Number.isFinite(duration)) {
+      setNativeMetadata({ durationSeconds: duration, recordingSrc });
       setFailed(false);
     }
   }
 
   function syncMediaTime() {
     const currentTime = audioRef.current?.currentTime;
-    if (currentTime !== undefined && Number.isFinite(currentTime)) setDisplaySeconds(currentTime);
+    if (currentTime !== undefined && Number.isFinite(currentTime)) {
+      setProgressSeconds(currentTime);
+      setDisplaySeconds(currentTime);
+    }
   }
 
   function seekToRatio(ratio: number) {
@@ -180,6 +269,7 @@ function RecordingPlayer({
     } else if (audio) {
       audio.currentTime = nextSeconds;
     }
+    setProgressSeconds(nextSeconds);
     setDisplaySeconds(nextSeconds);
   }
 
@@ -190,6 +280,21 @@ function RecordingPlayer({
     const currentTime = waveSurfer?.getCurrentTime() ?? audio?.currentTime;
     if (currentTime === undefined || !duration || !Number.isFinite(duration)) return;
     seekToRatio((currentTime + deltaSeconds) / duration);
+  }
+
+  function seekFromPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    if (waveformMode !== "lightweight" || !canSeek) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width <= 0) return;
+    seekToRatio((event.clientX - bounds.left) / bounds.width);
+  }
+
+  function finishPointerSeek(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragPointerIdRef.current !== event.pointerId) return;
+    dragPointerIdRef.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }
 
   function togglePlayback() {
@@ -213,6 +318,10 @@ function RecordingPlayer({
       audio.pause();
     }
   }
+
+  const lightweightProgress = durationSeconds
+    ? Math.max(0, Math.min(100, (progressSeconds / durationSeconds) * 100))
+    : 0;
 
   return (
     <section className={cn("grid gap-3 border-b", variant === "modal" ? "bg-background px-8 py-6" : "bg-muted/40 p-4 sm:p-5")} aria-label="Recording playback">
@@ -307,10 +416,33 @@ function RecordingPlayer({
                 seekToRatio(1);
               }
             }}
+            onPointerCancel={finishPointerSeek}
+            onPointerDown={(event) => {
+              if (waveformMode !== "lightweight" || !canSeek) return;
+              dragPointerIdRef.current = event.pointerId;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              seekFromPointer(event);
+            }}
+            onPointerMove={(event) => {
+              if (dragPointerIdRef.current === event.pointerId) seekFromPointer(event);
+            }}
+            onPointerUp={(event) => {
+              if (dragPointerIdRef.current === event.pointerId) seekFromPointer(event);
+              finishPointerSeek(event);
+            }}
             ref={waveformRef}
             role="slider"
             tabIndex={canSeek ? 0 : -1}
-          />
+          >
+            {waveformMode === "decoded" ? null : (
+              <div className="pointer-events-none absolute inset-x-3 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-foreground/10">
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-100 ease-linear motion-reduce:transition-none"
+                  style={{ width: waveformMode === "lightweight" ? `${lightweightProgress}%` : "0%" }}
+                />
+              </div>
+            )}
+          </div>
         </div>
         <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
           <span>{playing ? "Playing" : recordingStatus}</span>

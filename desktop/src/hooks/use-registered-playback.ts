@@ -1,13 +1,14 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 
 import type { TranscriptHistoryEntry } from "@/history";
 import type { RecordingJobView } from "@/lib/app-types";
 import {
   applyRestoredQueuePlaybackPaths,
-  mergeHistoryPlaybackPaths,
-  restoreHistoryPlaybackPaths,
+  mergeHistoryPlaybackAdmissions,
+  restoreHistoryPlaybackAdmissions,
   restoreQueuePlaybackPaths,
-  trimHistoryPlaybackPaths,
+  trimHistoryPlaybackAdmissions,
+  type HistoryPlaybackAdmissions,
 } from "@/lib/playback-registry";
 
 export function useRegisteredPlayback(
@@ -15,7 +16,8 @@ export function useRegisteredPlayback(
   setQueue: Dispatch<SetStateAction<RecordingJobView[]>>,
   history: TranscriptHistoryEntry[],
 ) {
-  const [historyPlaybackPaths, setHistoryPlaybackPaths] = useState<Record<string, string>>({});
+  const [historyPlaybackAdmissions, setHistoryPlaybackAdmissions] =
+    useState<HistoryPlaybackAdmissions>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -30,20 +32,33 @@ export function useRegisteredPlayback(
   }, [queue, setQueue]);
 
   useEffect(() => {
-    setHistoryPlaybackPaths((current) => trimHistoryPlaybackPaths(current, history));
+    setHistoryPlaybackAdmissions((current) => trimHistoryPlaybackAdmissions(current, history));
   }, [history]);
 
   useEffect(() => {
     let cancelled = false;
-    void restoreHistoryPlaybackPaths(history, historyPlaybackPaths).then((restored) => {
+    void restoreHistoryPlaybackAdmissions(history, historyPlaybackAdmissions).then((restored) => {
       if (cancelled || !restored.length) return;
-      setHistoryPlaybackPaths((current) => mergeHistoryPlaybackPaths(current, restored));
+      setHistoryPlaybackAdmissions((current) => mergeHistoryPlaybackAdmissions(current, restored));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [history, historyPlaybackPaths]);
+  }, [history, historyPlaybackAdmissions]);
 
-  return historyPlaybackPaths;
+  return useMemo(() => ({
+    historyPlaybackByteLengths: Object.fromEntries(
+      Object.entries(historyPlaybackAdmissions).map(([outputPath, admission]) => [
+        outputPath,
+        admission.byteLength,
+      ]),
+    ),
+    historyPlaybackPaths: Object.fromEntries(
+      Object.entries(historyPlaybackAdmissions).map(([outputPath, admission]) => [
+        outputPath,
+        admission.playbackPath,
+      ]),
+    ),
+  }), [historyPlaybackAdmissions]);
 }
