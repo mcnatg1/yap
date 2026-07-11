@@ -5,7 +5,7 @@ pub(crate) fn is_main_window(label: &str) -> bool {
     label == MAIN_WINDOW_LABEL
 }
 
-pub(crate) fn is_main_or_overlay_window(label: &str) -> bool {
+fn is_main_or_overlay_window(label: &str) -> bool {
     is_main_window(label) || label == LIVE_OVERLAY_WINDOW_LABEL
 }
 

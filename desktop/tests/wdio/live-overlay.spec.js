@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import {
   assertOwnedSavedSession,
   assertRecordingRootEmpty,
@@ -6,6 +9,8 @@ import {
   registerTask8bLifecycleListeners,
   waitForTask8bSavedEvent,
 } from "./task-8b-helpers.js";
+
+const execFileAsync = promisify(execFile);
 
 const lifecycleAssertions = [
   "overlay-context start and stop without main-window UI interaction",
@@ -24,6 +29,137 @@ async function switchToWindow(label) {
   if (!windows.includes(label)) return false;
   await browser.tauri.switchWindow(label);
   return true;
+}
+
+async function showMainWindowNatively() {
+  const webdriverPort = Number(browser.options.port ?? 4445);
+  if (!Number.isInteger(webdriverPort)) {
+    throw new Error(`Cannot identify the WDIO app from WebDriver port ${browser.options.port}.`);
+  }
+  // Resolve the isolated app by its WebDriver listener before touching any HWND.
+  const { stdout } = await execFileAsync(
+    "netstat.exe",
+    ["-ano", "-p", "tcp"],
+    { timeout: 5_000, windowsHide: true },
+  );
+  const listenerPattern = new RegExp(
+    `^\\s*TCP\\s+\\S+:${webdriverPort}\\s+\\S+\\s+LISTENING\\s+(\\d+)\\s*$`,
+    "mi",
+  );
+  const appPid = Number(stdout.match(listenerPattern)?.[1]);
+  if (!Number.isInteger(appPid) || appPid <= 0) {
+    throw new Error(`No WDIO app is listening on port ${webdriverPort}.`);
+  }
+  const script = `
+$ErrorActionPreference = "Stop"
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class WdioNativeWindow {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+
+    public static bool ShowLargestWindowForProcess(uint ownerPid) {
+        IntPtr largestWindow = IntPtr.Zero;
+        long largestArea = 0;
+        EnumWindows((window, parameter) => {
+            uint windowPid;
+            Rect rect;
+            GetWindowThreadProcessId(window, out windowPid);
+            if (windowPid != ownerPid || !GetWindowRect(window, out rect)) return true;
+            long width = Math.Max(0, rect.Right - rect.Left);
+            long height = Math.Max(0, rect.Bottom - rect.Top);
+            long area = width * height;
+            if (area > largestArea) {
+                largestArea = area;
+                largestWindow = window;
+            }
+            return true;
+        }, IntPtr.Zero);
+        if (largestWindow == IntPtr.Zero) return false;
+        ShowWindowAsync(largestWindow, 5);
+        return true;
+    }
+}
+'@
+if (-not [WdioNativeWindow]::ShowLargestWindowForProcess([uint32]${appPid})) {
+    throw "The WDIO app process does not own a top-level window."
+}
+`;
+  await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { timeout: 10_000, windowsHide: true },
+  );
+}
+
+async function restoreMainWindowNatively() {
+  await showMainWindowNatively();
+  await browser.tauri.switchWindow("main");
+  await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
+    core.invoke("plugin:window|is_visible", { label: "main" })), {
+    interval: 50,
+    timeout: 5_000,
+    timeoutMsg: "native cleanup did not restore the main window",
+  });
+}
+
+async function withMainWindowRestored(probe) {
+  let probeFailed = false;
+
+  try {
+    return await probe();
+  } catch (error) {
+    probeFailed = true;
+    throw error;
+  } finally {
+    try {
+      await restoreMainWindowNatively();
+    } catch (cleanupError) {
+      if (!probeFailed) throw cleanupError;
+      console.error(
+        "Main-window restoration also failed; preserving the close-to-tray probe error:",
+        cleanupError,
+      );
+    }
+  }
+}
+
+async function closeMainToTray() {
+  await browser.tauri.switchWindow("main");
+  await browser.tauri.execute(({ core }) => core.invoke("plugin:window|close", { label: "main" }));
+  await browser.waitUntil(async () => {
+    const windows = await browser.tauri.listWindows();
+    if (!windows.includes("main")) return false;
+    const visible = await browser.tauri.execute(({ core }) =>
+      core.invoke("plugin:window|is_visible", { label: "main" }));
+    return !visible;
+  }, {
+    interval: 50,
+    timeout: 5_000,
+    timeoutMsg: "main window did not remain hidden after a close request",
+  });
+  expect(await browser.tauri.listWindows()).toContain("main");
 }
 
 async function showIdleOverlay() {
@@ -374,31 +510,39 @@ describe("Yap live overlay window", () => {
 
   it("keeps main alive when closed and restores it from the overlay", async () => {
     await showIdleOverlay();
-    await browser.tauri.switchWindow("main");
+    await withMainWindowRestored(async () => {
+      await closeMainToTray();
 
-    await browser.tauri.execute(({ core }) => core.invoke("plugin:window|close", { label: "main" }));
-    await browser.waitUntil(async () => {
-      const windows = await browser.tauri.listWindows();
-      if (!windows.includes("main")) return false;
-      const visible = await browser.tauri.execute(({ core }) =>
-        core.invoke("plugin:window|is_visible", { label: "main" }));
-      return !visible;
-    }, {
-      interval: 50,
-      timeout: 5_000,
-      timeoutMsg: "main window did not remain hidden after a close request",
+      await browser.tauri.switchWindow("live-overlay");
+      await browser.tauri.execute(({ core }) =>
+        core.invoke("show_main_workspace", { workspace: "home" }));
+      await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
+        core.invoke("plugin:window|is_visible", { label: "main" })), {
+        interval: 50,
+        timeout: 5_000,
+        timeoutMsg: "overlay command did not restore the main window",
+      });
+      expect(await browser.tauri.listWindows()).toContain("main");
     });
-    expect(await browser.tauri.listWindows()).toContain("main");
+  });
 
-    await browser.tauri.switchWindow("live-overlay");
-    await browser.tauri.execute(({ core }) =>
-      core.invoke("show_main_workspace", { workspace: "home" }));
-    await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
-      core.invoke("plugin:window|is_visible", { label: "main" })), {
-      interval: 50,
-      timeout: 5_000,
-      timeoutMsg: "overlay command did not restore the main window",
-    });
+  it("restores main and preserves the probe error after a hidden-state failure", async () => {
+    await showIdleOverlay();
+    const expectedError = new Error("simulated close-to-tray probe failure");
+    let observedError;
+
+    try {
+      await withMainWindowRestored(async () => {
+        await closeMainToTray();
+        throw expectedError;
+      });
+    } catch (error) {
+      observedError = error;
+    }
+
+    expect(observedError).toBe(expectedError);
     expect(await browser.tauri.listWindows()).toContain("main");
+    expect(await browser.tauri.execute(({ core }) =>
+      core.invoke("plugin:window|is_visible", { label: "main" }))).toBe(true);
   });
 });
