@@ -355,12 +355,11 @@ impl LiveRuntime {
         let (recording_sink, recording_rx) =
             bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
         let recording_directory = super::recordings::recordings_dir();
-        let recording_session =
+        let recording_reservation =
             crate::audio::recording::allocate_recording_session(&recording_directory)
                 .map_err(|message| LiveStartFailure::new(session, message))?;
         let recording_handle = RecordingSinkHandle::spawn_reserved(
-            recording_directory,
-            recording_session,
+            recording_reservation,
             recording_sink,
             recording_rx,
         );

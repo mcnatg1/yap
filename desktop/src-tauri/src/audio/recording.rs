@@ -266,16 +266,17 @@ impl RecordingSinkHandle {
         sink: BoundedSink<PreparedFrame>,
         receiver: BoundedReceiver<PreparedFrame>,
     ) -> Self {
-        Self::spawn_inner(directory, session_id, sink, receiver, false)
+        Self::spawn_inner(directory, session_id, sink, receiver, None)
     }
 
     pub(crate) fn spawn_reserved(
-        directory: PathBuf,
-        session_id: SessionId,
+        reservation: RecordingReservation,
         sink: BoundedSink<PreparedFrame>,
         receiver: BoundedReceiver<PreparedFrame>,
     ) -> Self {
-        Self::spawn_inner(directory, session_id, sink, receiver, true)
+        let directory = reservation.paths.directory.clone();
+        let session_id = reservation.session_id().clone();
+        Self::spawn_inner(directory, session_id, sink, receiver, Some(reservation))
     }
 
     fn spawn_inner(
@@ -283,7 +284,7 @@ impl RecordingSinkHandle {
         session_id: SessionId,
         sink: BoundedSink<PreparedFrame>,
         receiver: BoundedReceiver<PreparedFrame>,
-        reserved_wav_part: bool,
+        reservation: Option<RecordingReservation>,
     ) -> Self {
         let worker_session_id = session_id.clone();
         let abort_reason = Arc::new(Mutex::new(None));
@@ -293,7 +294,7 @@ impl RecordingSinkHandle {
                 directory,
                 worker_session_id,
                 receiver,
-                reserved_wav_part,
+                reservation,
                 worker_abort_reason,
             )
         });
@@ -460,14 +461,14 @@ fn run_recording_worker(
     directory: PathBuf,
     session_id: SessionId,
     receiver: BoundedReceiver<PreparedFrame>,
-    reserved_wav_part: bool,
+    reservation: Option<RecordingReservation>,
     abort_reason: Arc<Mutex<Option<String>>>,
 ) -> RecordingFinalizeResult {
-    let recording = match if reserved_wav_part {
-        StreamingRecording::create_reserved(&directory, session_id.clone())
-    } else {
-        StreamingRecording::create(&directory, session_id.clone())
-    } {
+    let recording = match reservation {
+        Some(reservation) => StreamingRecording::create_reserved(reservation),
+        None => StreamingRecording::create(&directory, session_id.clone()),
+    };
+    let recording = match recording {
         Ok(recording) => recording,
         Err(error) => return worker_creation_failure(session_id, error),
     };
@@ -813,6 +814,8 @@ impl DurableJournalState {
 pub struct StreamingRecording {
     paths: RecordingPaths,
     audio: Option<File>,
+    #[cfg(test)]
+    _reservation_handle_drop_signal: Option<ReservationHandleDropSignal>,
     journal_file: Option<File>,
     journal: CaptureJournal,
     journal_durable: DurableJournalState,
@@ -988,15 +991,65 @@ impl RecordingPaths {
     }
 }
 
-/// Allocates a persistent recording identity by atomically reserving its first
-/// on-disk artifact. Runtime-local counters are deliberately not part of this ID.
-pub(crate) fn allocate_recording_session(directory: &Path) -> Result<SessionId, String> {
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
-    session::allocate_recording(|session_id| reserve_wav_part(directory, session_id))
+/// The durable claim passed directly from allocation into the recording worker.
+/// Its audio handle is the only authority permitted to write the reserved WAV.
+#[derive(Debug)]
+pub(crate) struct RecordingReservation {
+    paths: RecordingPaths,
+    audio: File,
+    identity: FileIdentity,
+    #[cfg(test)]
+    handle_drop_signal: Option<ReservationHandleDropSignal>,
 }
 
-fn reserve_wav_part(directory: &Path, session_id: &SessionId) -> std::io::Result<()> {
+impl RecordingReservation {
+    pub(crate) fn session_id(&self) -> &SessionId {
+        &self.paths.session_id
+    }
+
+    #[cfg(test)]
+    fn wav_part(&self) -> &Path {
+        &self.paths.wav_part
+    }
+
+    #[cfg(test)]
+    fn watch_handle_drop_for_test(
+        &mut self,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.handle_drop_signal = Some(ReservationHandleDropSignal(dropped));
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ReservationHandleDropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(test)]
+impl Drop for ReservationHandleDropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Allocates a persistent recording identity by atomically reserving its first
+/// on-disk artifact. Runtime-local counters are deliberately not part of this ID.
+pub(crate) fn allocate_recording_session(directory: &Path) -> Result<RecordingReservation, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
+    let mut reservation = None;
+    session::allocate_recording(|session_id| {
+        let claimed = reserve_wav_part(directory, session_id)?;
+        reservation = Some(claimed);
+        Ok(())
+    })?;
+    reservation.ok_or_else(|| "recording allocation returned without a reservation".to_string())
+}
+
+fn reserve_wav_part(
+    directory: &Path,
+    session_id: &SessionId,
+) -> std::io::Result<RecordingReservation> {
     reserve_wav_part_with_before_claim(directory, session_id, || {})
 }
 
@@ -1004,7 +1057,7 @@ fn reserve_wav_part_with_before_claim<F>(
     directory: &Path,
     session_id: &SessionId,
     before_claim: F,
-) -> std::io::Result<()>
+) -> std::io::Result<RecordingReservation>
 where
     F: FnOnce(),
 {
@@ -1027,19 +1080,45 @@ where
     before_claim();
     let file = OpenOptions::new()
         .create_new(true)
+        .read(true)
         .write(true)
         .open(&paths.wav_part)?;
     file.sync_all()?;
-    Ok(())
+    let identity = file_identity(&file).map_err(std::io::Error::other)?;
+    Ok(RecordingReservation {
+        paths,
+        audio: file,
+        identity,
+        #[cfg(test)]
+        handle_drop_signal: None,
+    })
 }
 
 impl StreamingRecording {
     pub fn create(directory: &Path, session_id: SessionId) -> Result<Self, String> {
-        Self::create_inner(directory, session_id, false, None)
+        Self::create_inner(directory, session_id, None)
     }
 
-    pub(crate) fn create_reserved(directory: &Path, session_id: SessionId) -> Result<Self, String> {
-        Self::create_inner(directory, session_id, true, None)
+    pub(crate) fn create_reserved(reservation: RecordingReservation) -> Result<Self, String> {
+        let RecordingReservation {
+            paths,
+            audio,
+            identity,
+            #[cfg(test)]
+            handle_drop_signal,
+        } = reservation;
+        if file_identity(&audio)? != identity {
+            return Err(
+                "reserved recording audio handle identity changed before worker adoption".into(),
+            );
+        }
+        Self::create_from_open_audio(
+            paths,
+            audio,
+            #[cfg(test)]
+            handle_drop_signal,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -1048,7 +1127,7 @@ impl StreamingRecording {
         session_id: SessionId,
         fault: CommitFaultPoint,
     ) -> Result<Self, String> {
-        Self::create_inner(directory, session_id, false, Some(fault))
+        Self::create_inner(directory, session_id, Some(fault))
     }
 
     #[cfg(test)]
@@ -1060,7 +1139,7 @@ impl StreamingRecording {
     where
         F: FnOnce(&RecordingPaths) + Send + 'static,
     {
-        let mut recording = Self::create_inner(directory, session_id, false, None)?;
+        let mut recording = Self::create_inner(directory, session_id, None)?;
         recording.after_sidecar_publish = Some(Box::new(hook));
         Ok(recording)
     }
@@ -1075,7 +1154,7 @@ impl StreamingRecording {
     where
         F: FnMut(PublicationArtifact, PublicationBarrier, &RecordingPaths) + Send + 'static,
     {
-        let mut recording = Self::create_inner(directory, session_id, false, fault)?;
+        let mut recording = Self::create_inner(directory, session_id, fault)?;
         recording.publication_hook = Some(Box::new(hook));
         Ok(recording)
     }
@@ -1083,22 +1162,32 @@ impl StreamingRecording {
     fn create_inner(
         directory: &Path,
         session_id: SessionId,
-        reserved_wav_part: bool,
         #[cfg(test)] fault: Option<CommitFaultPoint>,
         #[cfg(not(test))] _fault: Option<()>,
     ) -> Result<Self, String> {
         fs::create_dir_all(directory)
             .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
         let paths = RecordingPaths::new(directory, session_id.clone());
-        let mut audio = if reserved_wav_part {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&paths.wav_part)
-                .map_err(|error| format!("Failed to open reserved recording audio: {error}"))?
-        } else {
-            create_new(&paths.wav_part, "recording audio")?
-        };
+        let audio = create_new(&paths.wav_part, "recording audio")?;
+        Self::create_from_open_audio(
+            paths,
+            audio,
+            #[cfg(test)]
+            None,
+            #[cfg(test)]
+            fault,
+            #[cfg(not(test))]
+            _fault,
+        )
+    }
+
+    fn create_from_open_audio(
+        paths: RecordingPaths,
+        mut audio: File,
+        #[cfg(test)] reservation_handle_drop_signal: Option<ReservationHandleDropSignal>,
+        #[cfg(test)] fault: Option<CommitFaultPoint>,
+        #[cfg(not(test))] _fault: Option<()>,
+    ) -> Result<Self, String> {
         if audio
             .metadata()
             .map_err(|error| format!("Failed to inspect recording audio: {error}"))?
@@ -1112,7 +1201,7 @@ impl StreamingRecording {
             .sync_data()
             .map_err(|error| format!("Failed to initialize live audio: {error}"))?;
         let mut journal_file = create_new(&paths.journal_part, "recording journal")?;
-        let journal = CaptureJournal::new(session_id);
+        let journal = CaptureJournal::new(paths.session_id.clone());
         let journal_bytes = write_journal_record(
             &mut journal_file,
             &JournalRecord::Header {
@@ -1125,6 +1214,8 @@ impl StreamingRecording {
         Ok(Self {
             paths,
             audio: Some(audio),
+            #[cfg(test)]
+            _reservation_handle_drop_signal: reservation_handle_drop_signal,
             journal_file: Some(journal_file),
             journal_durable: DurableJournalState::from_journal(&journal),
             journal,
@@ -2773,15 +2864,96 @@ mod tests {
     fn persistent_allocation_survives_runtime_restarts_without_reusing_numeric_names() {
         let dir = tempfile_dir("persistent-allocation-restart");
         let first = allocate_recording_session(&dir).unwrap();
-        let mut first_recording = StreamingRecording::create_reserved(&dir, first.clone()).unwrap();
+        let first_session = first.session_id().clone();
+        let mut first_recording = StreamingRecording::create_reserved(first).unwrap();
         first_recording.append_pcm16(&[1, 0]).unwrap();
         first_recording.finalize().unwrap();
 
         let second = allocate_recording_session(&dir).unwrap();
 
-        assert_ne!(first, second);
-        assert!(dir.join(format!("live-{first}.commit.json")).is_file());
-        assert!(dir.join(format!("live-{second}.wav.part")).is_file());
+        assert_ne!(first_session, *second.session_id());
+        assert!(dir
+            .join(format!("live-{first_session}.commit.json"))
+            .is_file());
+        assert!(dir
+            .join(format!("live-{}.wav.part", second.session_id()))
+            .is_file());
+    }
+
+    #[test]
+    fn reservation_handoff_never_adopts_a_replaced_wav_part_path() {
+        #[derive(Clone, Copy)]
+        enum Replacement {
+            Delete,
+            Regular,
+            HardLink,
+            Reparse,
+        }
+
+        for replacement in [
+            Replacement::Delete,
+            Replacement::Regular,
+            Replacement::HardLink,
+            Replacement::Reparse,
+        ] {
+            let dir = tempfile_dir("reservation-worker-handoff");
+            let mut reservation = allocate_recording_session(&dir).unwrap();
+            let session_id = reservation.session_id().clone();
+            let wav_part = reservation.wav_part().to_path_buf();
+            let replacement_path = dir.join("attacker-replacement");
+            let handle_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            reservation.watch_handle_drop_for_test(std::sync::Arc::clone(&handle_dropped));
+            fs::remove_file(&wav_part).unwrap();
+
+            let replacement_bytes = match replacement {
+                Replacement::Delete => None,
+                Replacement::Regular => {
+                    let bytes = b"attacker regular replacement".to_vec();
+                    fs::write(&wav_part, &bytes).unwrap();
+                    Some((wav_part.clone(), bytes))
+                }
+                Replacement::HardLink => {
+                    let bytes = b"attacker hard-link replacement".to_vec();
+                    fs::write(&replacement_path, &bytes).unwrap();
+                    fs::hard_link(&replacement_path, &wav_part).unwrap();
+                    Some((wav_part.clone(), bytes))
+                }
+                Replacement::Reparse => {
+                    let bytes = b"attacker reparse replacement".to_vec();
+                    fs::write(&replacement_path, &bytes).unwrap();
+                    if let Err(error) = create_file_symlink_for_test(&replacement_path, &wav_part) {
+                        if error.kind() == std::io::ErrorKind::PermissionDenied
+                            || error.raw_os_error() == Some(1314)
+                        {
+                            fs::write(&wav_part, &bytes).unwrap();
+                            Some((wav_part.clone(), bytes))
+                        } else {
+                            panic!("failed to install reparse replacement: {error}");
+                        }
+                    } else {
+                        Some((wav_part.clone(), bytes))
+                    }
+                }
+            };
+
+            let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+            let handle = RecordingSinkHandle::spawn_reserved(reservation, sink, receiver);
+            let result = handle.finalize().unwrap();
+
+            assert_eq!(result.status, CaptureStatus::Partial);
+            assert!(result.committed.is_none());
+            assert!(!dir.join(format!("live-{session_id}.commit.json")).exists());
+            let scan = scan_recordings(&dir).unwrap();
+            assert!(scan.complete.is_empty());
+            assert!(!scan.partial.is_empty());
+            if let Some((path, bytes)) = replacement_bytes {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            assert!(handle_dropped.load(std::sync::atomic::Ordering::SeqCst));
+            std::fs::remove_file(&wav_part).ok();
+            std::fs::remove_file(&replacement_path).ok();
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]
@@ -2854,7 +3026,7 @@ mod tests {
         barrier.wait();
         let sessions = workers
             .into_iter()
-            .map(|worker| worker.join().unwrap().to_string())
+            .map(|worker| worker.join().unwrap().session_id().to_string())
             .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(sessions.len(), 4);
