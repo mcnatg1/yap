@@ -792,9 +792,9 @@ mod tests {
         serde_json::to_value(descriptor).unwrap()
     }
 
-    fn incomplete_chunk_json(session_id: serde_json::Value) -> serde_json::Value {
+    fn incomplete_chunk_json() -> serde_json::Value {
         serde_json::json!({
-            "sessionId": session_id,
+            "sessionId": "s-test",
             "chunkId": "old-chunk-1",
             "sequenceStart": 1,
             "startMs": 0,
@@ -1043,14 +1043,23 @@ mod tests {
 
     #[test]
     fn numeric_chunk_session_ids_are_rejected() {
-        let value = incomplete_chunk_json(serde_json::json!(7));
+        let mut value = current_descriptor_json();
+        value["sessionId"] = serde_json::json!(7);
+
+        assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(value).is_err());
+    }
+
+    #[test]
+    fn numeric_replay_key_session_ids_are_rejected() {
+        let mut value = current_descriptor_json();
+        value["replayKey"]["sessionId"] = serde_json::json!(7);
 
         assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(value).is_err());
     }
 
     #[test]
     fn incomplete_chunk_payloads_are_rejected() {
-        let value = incomplete_chunk_json(serde_json::json!("s-test"));
+        let value = incomplete_chunk_json();
 
         assert!(serde_json::from_value::<super::CaptureChunkDescriptor>(value).is_err());
     }

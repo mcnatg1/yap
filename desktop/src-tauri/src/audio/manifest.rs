@@ -211,6 +211,14 @@ impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
     where
         D: serde::Deserializer<'de>,
     {
+        fn field_is_present<'de, D>(deserializer: D) -> Result<bool, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)?;
+            Ok(true)
+        }
+
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct SchemaOneEnvelope {
@@ -220,7 +228,8 @@ impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
             session_origin: SessionOrigin,
             tracks: Vec<CaptureTrackDescriptor>,
             track_configuration_revisions: Vec<TrackConfigurationRevision>,
-            source: Option<serde::de::IgnoredAny>,
+            #[serde(rename = "source", default, deserialize_with = "field_is_present")]
+            source_present: bool,
             started_at_ms: u64,
             sample_rate_hz: u32,
             chunks: Vec<CaptureChunkDescriptor>,
@@ -233,7 +242,7 @@ impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
                 "unsupported manifest schema version",
             ));
         }
-        if schema_one.source.is_some() {
+        if schema_one.source_present {
             return Err(serde::de::Error::custom(
                 "schema 1 manifests cannot use the source field",
             ));
@@ -1742,6 +1751,22 @@ mod tests {
         value["source"] = serde_json::json!("live");
 
         assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn null_old_manifest_source_field_is_rejected() {
+        let mut value = schema_one_manifest_json();
+        value["source"] = serde_json::Value::Null;
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn unrelated_unknown_manifest_fields_are_tolerated() {
+        let mut value = schema_one_manifest_json();
+        value["futureField"] = serde_json::Value::Null;
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_ok());
     }
 
     #[test]
