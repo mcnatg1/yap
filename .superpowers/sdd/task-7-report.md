@@ -262,3 +262,25 @@ DONE
 - `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` passed.
 - `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` passed.
 - `git diff --check` passed.
+
+---
+
+## Verified Task 7 Review Fixes (2026-07-11)
+
+### Implementation
+
+- Pending deletion intents now use the same bounded, per-directory rotating selection as private deletion leftovers. The shared cursor state retains at most two names for each of at most 64 directories, so permanently failing early intents cannot starve later valid intents.
+- Manual deletion holds process-wide deletion ownership from intent publication through resume completion. Reconciliation and standalone resume calls use the same ownership boundary; explicit `while_owned` helpers prevent recursive locking.
+- Fresh foreign evidence TTL handling, hash-bound deletion checks, and the non-migrated/unindexed canonical pre-release timestamp files remain unchanged.
+
+### Regression Coverage
+
+- 128 persistently failing intents followed by a valid intent resume the valid deletion on the next catalog reconciliation pass.
+- A resume waits for an existing deletion owner, and a catalog reconciliation started after a manual intent is published cannot complete until that manual deletion finishes.
+
+### Verification
+
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::recordings::tests` - pass, 68 tests.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass, 438 library tests plus 1 parity integration test.
+- `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` - pass.
+- `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.

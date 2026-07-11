@@ -22,9 +22,22 @@ const MAX_PRIVATE_DELETION_LEFTOVERS: usize = 128;
 const PRIVATE_DELETION_LEFTOVER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 static DELETION_INTENT_OWNERSHIP: OnceLock<Mutex<()>> = OnceLock::new();
-static PRIVATE_CLEANUP_CURSORS: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+static DELETION_CLEANUP_CURSORS: OnceLock<Mutex<HashMap<PathBuf, DeletionCleanupCursors>>> =
+    OnceLock::new();
 
-const MAX_PRIVATE_CLEANUP_CURSOR_DIRS: usize = 64;
+const MAX_DELETION_CLEANUP_CURSOR_DIRS: usize = 64;
+
+#[derive(Default)]
+struct DeletionCleanupCursors {
+    private_leftovers: Option<String>,
+    pending_intents: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum DeletionCleanupCursor {
+    PrivateLeftovers,
+    PendingIntents,
+}
 
 fn deletion_intent_ownership() -> MutexGuard<'static, ()> {
     DELETION_INTENT_OWNERSHIP
@@ -33,43 +46,52 @@ fn deletion_intent_ownership() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn private_cleanup_cursor(dir: &Path) -> Option<String> {
-    PRIVATE_CLEANUP_CURSORS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(dir)
-        .cloned()
-}
-
-fn update_private_cleanup_cursor(dir: &Path, cursor: Option<String>) {
-    let mut cursors = PRIVATE_CLEANUP_CURSORS
+fn deletion_cleanup_cursor(dir: &Path, kind: DeletionCleanupCursor) -> Option<String> {
+    let cursors = DELETION_CLEANUP_CURSORS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cursors = cursors.get(dir)?;
+    match kind {
+        DeletionCleanupCursor::PrivateLeftovers => cursors.private_leftovers.clone(),
+        DeletionCleanupCursor::PendingIntents => cursors.pending_intents.clone(),
+    }
+}
+
+fn update_deletion_cleanup_cursor(dir: &Path, kind: DeletionCleanupCursor, cursor: Option<String>) {
     let Some(cursor) = cursor else {
         return;
     };
-    if cursors.len() >= MAX_PRIVATE_CLEANUP_CURSOR_DIRS && !cursors.contains_key(dir) {
+    let mut cursors = DELETION_CLEANUP_CURSORS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cursors.len() >= MAX_DELETION_CLEANUP_CURSOR_DIRS && !cursors.contains_key(dir) {
         cursors.clear();
     }
-    cursors.insert(dir.to_path_buf(), cursor);
+    let cursors = cursors.entry(dir.to_path_buf()).or_default();
+    match kind {
+        DeletionCleanupCursor::PrivateLeftovers => cursors.private_leftovers = Some(cursor),
+        DeletionCleanupCursor::PendingIntents => cursors.pending_intents = Some(cursor),
+    }
 }
 
-struct RotatingPrivateCandidates {
+struct RotatingDeletionCandidates {
     cursor: Option<String>,
     after: BTreeSet<String>,
     before: BTreeSet<String>,
     overflow: bool,
+    limit: usize,
 }
 
-impl RotatingPrivateCandidates {
-    fn new(cursor: Option<String>) -> Self {
+impl RotatingDeletionCandidates {
+    fn new(cursor: Option<String>, limit: usize) -> Self {
         Self {
             cursor,
             after: BTreeSet::new(),
             before: BTreeSet::new(),
             overflow: false,
+            limit,
         }
     }
 
@@ -80,13 +102,13 @@ impl RotatingPrivateCandidates {
         } else {
             &mut self.after
         };
-        self.overflow |= push_bounded_candidate(target, name, MAX_PRIVATE_DELETION_LEFTOVERS);
+        self.overflow |= push_bounded_candidate(target, name, self.limit);
     }
 
     fn finish(self) -> (BTreeSet<String>, bool, Option<String>) {
         let mut selected = self.after;
         let mut wrapped_last = None;
-        let remaining = MAX_PRIVATE_DELETION_LEFTOVERS.saturating_sub(selected.len());
+        let remaining = self.limit.saturating_sub(selected.len());
         for name in self.before.into_iter().take(remaining) {
             wrapped_last = Some(name.clone());
             selected.insert(name);
@@ -553,11 +575,28 @@ fn delete_committed_session_in_dir(
     capture: &recording::CommittedCapture,
     reason: &str,
 ) -> Result<(), String> {
+    delete_committed_session_in_dir_with_publication_barrier(dir, capture, reason, |_| {})
+}
+
+fn delete_committed_session_in_dir_with_publication_barrier<F>(
+    dir: &Path,
+    capture: &recording::CommittedCapture,
+    reason: &str,
+    publication_barrier: F,
+) -> Result<(), String>
+where
+    F: FnMut(bool),
+{
     let intent = build_deletion_intent(dir, capture, reason)?;
     let intent_name = deletion_intent_name(&intent.session_id);
     let intent_path = dir.join(&intent_name);
-    write_deletion_intent(&intent_path, &intent)?;
-    resume_deletion_intent(dir, &intent_name)
+    let _ownership = deletion_intent_ownership();
+    write_deletion_intent_with_publication_barrier_while_owned(
+        &intent_path,
+        &intent,
+        publication_barrier,
+    )?;
+    resume_deletion_intent_while_owned(dir, &intent_name)
 }
 
 fn build_deletion_intent(
@@ -648,11 +687,25 @@ fn deletion_intent_name(session_id: &crate::audio::session::SessionId) -> String
     format!("live-{session_id}.deletion.v1.json")
 }
 
+#[cfg(test)]
 fn write_deletion_intent(path: &Path, intent: &DeletionIntent) -> Result<(), String> {
     write_deletion_intent_with_publication_barrier(path, intent, |_| {})
 }
 
+#[cfg(test)]
 fn write_deletion_intent_with_publication_barrier<F>(
+    path: &Path,
+    intent: &DeletionIntent,
+    publication_barrier: F,
+) -> Result<(), String>
+where
+    F: FnMut(bool),
+{
+    let _ownership = deletion_intent_ownership();
+    write_deletion_intent_with_publication_barrier_while_owned(path, intent, publication_barrier)
+}
+
+fn write_deletion_intent_with_publication_barrier_while_owned<F>(
     path: &Path,
     intent: &DeletionIntent,
     mut publication_barrier: F,
@@ -660,7 +713,6 @@ fn write_deletion_intent_with_publication_barrier<F>(
 where
     F: FnMut(bool),
 {
-    let _ownership = deletion_intent_ownership();
     validate_deletion_intent(intent)?;
     let dir = path
         .parent()
@@ -789,8 +841,14 @@ fn reconcile_pending_deletion_intents_while_owned(dir: &Path) -> ReconciliationW
     let Ok(entries) = std::fs::read_dir(dir) else {
         return warnings;
     };
-    let mut private_candidates = RotatingPrivateCandidates::new(private_cleanup_cursor(dir));
-    let mut intent_names = BTreeSet::new();
+    let mut private_candidates = RotatingDeletionCandidates::new(
+        deletion_cleanup_cursor(dir, DeletionCleanupCursor::PrivateLeftovers),
+        MAX_PRIVATE_DELETION_LEFTOVERS,
+    );
+    let mut intent_candidates = RotatingDeletionCandidates::new(
+        deletion_cleanup_cursor(dir, DeletionCleanupCursor::PendingIntents),
+        MAX_PRIVATE_DELETION_LEFTOVERS,
+    );
     for entry in entries {
         let Ok(entry) = entry else {
             continue;
@@ -803,22 +861,14 @@ fn reconcile_pending_deletion_intents_while_owned(dir: &Path) -> ReconciliationW
                 if process_id == std::process::id()
                     && deletion_intent_session(artifact_name).is_some()
                 {
-                    let _ = push_bounded_candidate(
-                        &mut intent_names,
-                        artifact_name.to_string(),
-                        MAX_PRIVATE_DELETION_LEFTOVERS,
-                    );
+                    intent_candidates.push(artifact_name.to_string());
                 }
             }
             match private_deletion_leftover_is_reconcilable(dir, &name, leftover) {
                 Ok(true) => {
                     if let Some((artifact_name, _)) = generic_delete_quarantine(&name) {
                         if deletion_intent_session(artifact_name).is_some() {
-                            let _ = push_bounded_candidate(
-                                &mut intent_names,
-                                artifact_name.to_string(),
-                                MAX_PRIVATE_DELETION_LEFTOVERS,
-                            );
+                            intent_candidates.push(artifact_name.to_string());
                         }
                     }
                     private_candidates.push(name.clone());
@@ -836,16 +886,32 @@ fn reconcile_pending_deletion_intents_while_owned(dir: &Path) -> ReconciliationW
             );
         }
         if deletion_intent_session(&name).is_some() {
-            let _ = push_bounded_candidate(&mut intent_names, name, MAX_PRIVATE_DELETION_LEFTOVERS);
+            intent_candidates.push(name);
         }
     }
     let (private_candidates, private_candidate_overflow, next_private_cursor) =
         private_candidates.finish();
-    update_private_cleanup_cursor(dir, next_private_cursor);
+    let (intent_names, intent_candidate_overflow, next_intent_cursor) = intent_candidates.finish();
+    update_deletion_cleanup_cursor(
+        dir,
+        DeletionCleanupCursor::PrivateLeftovers,
+        next_private_cursor,
+    );
+    update_deletion_cleanup_cursor(
+        dir,
+        DeletionCleanupCursor::PendingIntents,
+        next_intent_cursor,
+    );
     if private_candidate_overflow {
         push_maintenance_warning(
             &mut warnings.maintenance_warnings,
             "Private recording deletion cleanup scan reached its fixed budget.".into(),
+        );
+    }
+    if intent_candidate_overflow {
+        push_maintenance_warning(
+            &mut warnings.maintenance_warnings,
+            "Recording deletion intent scan reached its fixed budget.".into(),
         );
     }
     for name in &intent_names {
@@ -862,7 +928,7 @@ fn reconcile_pending_deletion_intents_while_owned(dir: &Path) -> ReconciliationW
         &mut warnings.maintenance_warnings,
     );
     for name in intent_names {
-        if let Err(error) = resume_deletion_intent(dir, &name) {
+        if let Err(error) = resume_deletion_intent_while_owned(dir, &name) {
             if let Some(session) = deletion_intent_session(&name) {
                 let warning = format!("Recording deletion is pending: {error}");
                 warnings
@@ -1135,7 +1201,13 @@ fn push_maintenance_warning(warnings: &mut Vec<String>, warning: String) {
     }
 }
 
+#[cfg(test)]
 fn resume_deletion_intent(dir: &Path, intent_name: &str) -> Result<(), String> {
+    let _ownership = deletion_intent_ownership();
+    resume_deletion_intent_while_owned(dir, intent_name)
+}
+
+fn resume_deletion_intent_while_owned(dir: &Path, intent_name: &str) -> Result<(), String> {
     let (text, intent_sha256) = recording::read_and_hash_regular_artifact(dir, intent_name)?;
     let intent: DeletionIntent = serde_json::from_str(&text)
         .map_err(|error| format!("Failed to parse recording deletion intent: {error}"))?;
@@ -3428,7 +3500,7 @@ mod tests {
             .map(|index| format!("candidate-{index:03}"))
             .collect::<Vec<_>>();
 
-        let mut first = RotatingPrivateCandidates::new(None);
+        let mut first = RotatingDeletionCandidates::new(None, MAX_PRIVATE_DELETION_LEFTOVERS);
         for name in &names {
             first.push(name.clone());
         }
@@ -3436,13 +3508,157 @@ mod tests {
         assert_eq!(first_batch.len(), MAX_PRIVATE_DELETION_LEFTOVERS);
         assert!(!first_batch.contains(names.last().unwrap()));
 
-        let mut second = RotatingPrivateCandidates::new(cursor);
+        let mut second = RotatingDeletionCandidates::new(cursor, MAX_PRIVATE_DELETION_LEFTOVERS);
         for name in &names {
             second.push(name.clone());
         }
         let (second_batch, _, _) = second.finish();
 
         assert!(second_batch.contains(names.last().unwrap()));
+    }
+
+    #[test]
+    fn pending_intent_reconciliation_rotates_past_a_failed_full_batch() {
+        let dir = test_dir("pending-intent-rotation");
+        for index in 0..MAX_PRIVATE_DELETION_LEFTOVERS {
+            let session = SessionId::new(format!("s-pending-intent-{index:03}")).unwrap();
+            let audio = format!("live-{session}.wav");
+            let intent = DeletionIntent {
+                schema_version: DELETION_INTENT_SCHEMA_VERSION,
+                session_id: session.clone(),
+                reason: "manual".into(),
+                commit_file: format!("live-{session}.commit.json"),
+                commit_sha256: "0".repeat(64),
+                artifacts: vec![DeletionArtifact {
+                    name: audio.clone(),
+                    sha256: "0".repeat(64),
+                }],
+            };
+            std::fs::write(dir.join(audio), b"retained evidence").unwrap();
+            std::fs::write(
+                dir.join(deletion_intent_name(&session)),
+                format!("{}\n", serde_json::to_string(&intent).unwrap()),
+            )
+            .unwrap();
+        }
+        let session = SessionId::new("s-pending-intent-999").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+        let intent_name = deletion_intent_name(&session);
+        write_deletion_intent(&dir.join(&intent_name), &intent).unwrap();
+
+        reconcile_pending_deletion_intents(&dir);
+        assert!(dir.join(&intent_name).is_file());
+        reconcile_pending_deletion_intents(&dir);
+
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
+        assert!(!dir.join(intent_name).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn deletion_intent_resume_waits_for_an_existing_owner() {
+        let dir = test_dir("deletion-intent-resume-ownership");
+        let session = SessionId::new("s-deletion-intent-resume-ownership").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+        let intent_name = deletion_intent_name(&session);
+        write_deletion_intent(&dir.join(&intent_name), &intent).unwrap();
+
+        let (owner_ready_tx, owner_ready_rx) = std::sync::mpsc::channel();
+        let (release_owner_tx, release_owner_rx) = std::sync::mpsc::channel();
+        let owner = std::thread::spawn(move || {
+            let _ownership = deletion_intent_ownership();
+            owner_ready_tx.send(()).unwrap();
+            release_owner_rx.recv().unwrap();
+        });
+        owner_ready_rx.recv().unwrap();
+
+        let resume_dir = dir.clone();
+        let resume_name = intent_name.clone();
+        let (resumed_tx, resumed_rx) = std::sync::mpsc::channel();
+        let resume = std::thread::spawn(move || {
+            resumed_tx
+                .send(resume_deletion_intent(&resume_dir, &resume_name))
+                .unwrap();
+        });
+
+        assert!(resumed_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        release_owner_tx.send(()).unwrap();
+        owner.join().unwrap();
+        assert!(resumed_rx.recv().unwrap().is_ok());
+        resume.join().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn catalog_reconciliation_cannot_resume_a_manual_deletion_after_publication() {
+        let dir = test_dir("manual-deletion-catalog-ownership");
+        let session = SessionId::new("s-manual-deletion-catalog-ownership").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent_name = deletion_intent_name(&session);
+
+        let (published_tx, published_rx) = std::sync::mpsc::channel();
+        let (release_manual_tx, release_manual_rx) = std::sync::mpsc::channel();
+        let manual_dir = dir.clone();
+        let manual = std::thread::spawn(move || {
+            delete_committed_session_in_dir_with_publication_barrier(
+                &manual_dir,
+                &capture,
+                "manual",
+                move |published| {
+                    if published {
+                        published_tx.send(()).unwrap();
+                        release_manual_rx.recv().unwrap();
+                    }
+                },
+            )
+        });
+        published_rx.recv().unwrap();
+        assert!(dir.join(&intent_name).is_file());
+
+        let catalog_dir = dir.clone();
+        let (catalog_started_tx, catalog_started_rx) = std::sync::mpsc::channel();
+        let (catalog_finished_tx, catalog_finished_rx) = std::sync::mpsc::channel();
+        let catalog = std::thread::spawn(move || {
+            catalog_started_tx.send(()).unwrap();
+            catalog_finished_tx
+                .send(list_session_catalog_from_dir(&catalog_dir))
+                .unwrap();
+        });
+        catalog_started_rx.recv().unwrap();
+
+        assert!(catalog_finished_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        release_manual_tx.send(()).unwrap();
+        assert!(manual.join().unwrap().is_ok());
+        assert!(catalog_finished_rx.recv().unwrap().is_ok());
+        catalog.join().unwrap();
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
+        assert!(!dir.join(intent_name).exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
