@@ -79,6 +79,27 @@ fn save_finalized_capture_to_dir(
     view: &live::state::LiveSessionView,
     capture: Option<RecordingFinalizeResult>,
 ) -> Result<Option<SavedLiveSession>, String> {
+    save_finalized_capture_to_dir_with_text_publisher(
+        dir,
+        view,
+        capture,
+        |source, destination, owned| {
+            recording::publish_no_replace(source, destination, owned, "publish live transcript")
+                .map(|_| ())
+                .map_err(std::io::Error::other)
+        },
+    )
+}
+
+fn save_finalized_capture_to_dir_with_text_publisher<P>(
+    dir: &std::path::Path,
+    view: &live::state::LiveSessionView,
+    capture: Option<RecordingFinalizeResult>,
+    publisher: P,
+) -> Result<Option<SavedLiveSession>, String>
+where
+    P: FnOnce(&std::path::Path, &std::path::Path, &std::fs::File) -> std::io::Result<()>,
+{
     let Some(capture) = capture else {
         return Ok(None);
     };
@@ -88,8 +109,13 @@ fn save_finalized_capture_to_dir(
     let transcript_path = dir.join(format!("{name}.txt"));
     let transcript = transcript_text(view)
         .unwrap_or_else(|| "Transcript unavailable for this live recording.".into());
-    write_new_text_file(&transcript_path, &format!("{transcript}\n"))
-        .map_err(|error| format!("Failed to save live transcript: {error}"))?;
+    write_new_text_file_with(
+        &transcript_path,
+        &format!("{transcript}\n"),
+        |file| file.sync_all(),
+        publisher,
+    )
+    .map_err(|error| format!("Failed to save live transcript: {error}"))?;
 
     let warning = view
         .transcription_degraded
@@ -103,8 +129,12 @@ fn save_finalized_capture_to_dir(
             ResultStatus::Complete
         };
     let revision_warning = capture
-        .capture_sidecar_sha256()
-        .ok_or_else(|| "Capture lineage is unavailable for the transcript revision".to_string())
+        .revalidate_capture_sidecar()
+        .and_then(|_| {
+            capture.capture_sidecar_sha256().ok_or_else(|| {
+                "Capture lineage is unavailable for the transcript revision".to_string()
+            })
+        })
         .and_then(|capture_sidecar_sha256| {
             write_transcript_revision(
                 dir,
@@ -507,8 +537,8 @@ fn write_new_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()
         path,
         text,
         |file| file.sync_all(),
-        |from, to| {
-            recording::publish_no_replace(from, to, "publish live transcript")
+        |from, to, owned| {
+            recording::publish_no_replace(from, to, owned, "publish live transcript")
                 .map(|_| ())
                 .map_err(std::io::Error::other)
         },
@@ -523,7 +553,7 @@ fn write_new_text_file_with<S, R>(
 ) -> std::io::Result<()>
 where
     S: FnOnce(&std::fs::File) -> std::io::Result<()>,
-    R: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    R: FnOnce(&std::path::Path, &std::path::Path, &std::fs::File) -> std::io::Result<()>,
 {
     if path.exists() {
         return Err(std::io::Error::new(
@@ -537,7 +567,6 @@ where
         .create_new(true)
         .open(&partial)?;
     let result = file.write_all(text.as_bytes()).and_then(|_| sync(&file));
-    drop(file);
     let result = result.and_then(|_| {
         if path.exists() {
             return Err(std::io::Error::new(
@@ -545,11 +574,12 @@ where
                 "live transcript already exists",
             ));
         }
-        rename(&partial, path)
+        rename(&partial, path, &file)
     });
     if result.is_err() {
-        std::fs::remove_file(&partial).ok();
+        recording::remove_owned_staging(&partial, &file, "publish live transcript");
     }
+    drop(file);
     result
 }
 
@@ -859,7 +889,7 @@ mod tests {
             &transcript,
             "hello\n",
             |_| Err(std::io::Error::other("injected transcript sync failure")),
-            |from, to| {
+            |from, to, _| {
                 renamed.set(true);
                 std::fs::rename(from, to)
             },
@@ -870,6 +900,110 @@ mod tests {
         assert!(!renamed.get());
         assert!(!transcript.exists());
         assert!(!partial_text_path(&transcript).unwrap().exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_pre_link_replacement_keeps_the_attacker_staging_file_and_writes_no_revision() {
+        let dir = test_dir("transcript-pre-link-replacement");
+        let session = SessionId::new("s-transcript-pre-link-replacement").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+        let partial = partial_text_path(&transcript).unwrap();
+
+        let error = save_finalized_capture_to_dir_with_text_publisher(
+            &dir,
+            &live_view(Some("owned transcript"), None),
+            Some(capture),
+            |source, destination, owned| {
+                let displaced = source.with_extension("displaced");
+                std::fs::rename(source, &displaced)?;
+                std::fs::write(source, b"attacker staging")?;
+                recording::publish_no_replace(source, destination, owned, "publish live transcript")
+                    .map(|_| ())
+                    .map_err(std::io::Error::other)
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("staging path no longer names the owned file"));
+        assert_eq!(std::fs::read(&partial).unwrap(), b"attacker staging");
+        assert!(!transcript.exists());
+        assert!(!transcript_revision_path(&dir, &session, 1).exists());
+        assert_eq!(recording::scan_recordings(&dir).unwrap().complete.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transcript_post_link_replacement_keeps_the_attacker_text_and_writes_no_revision() {
+        let dir = test_dir("transcript-post-link-replacement");
+        let session = SessionId::new("s-transcript-post-link-replacement").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+
+        let error = save_finalized_capture_to_dir_with_text_publisher(
+            &dir,
+            &live_view(Some("owned transcript"), None),
+            Some(capture),
+            |source, destination, owned| {
+                recording::publish_no_replace_with_after_link_for_test(
+                    source,
+                    destination,
+                    owned,
+                    "publish live transcript",
+                    || {
+                        let displaced = destination.with_extension("displaced");
+                        std::fs::rename(destination, displaced).unwrap();
+                        std::fs::write(destination, b"attacker text").unwrap();
+                    },
+                )
+                .map(|_| ())
+                .map_err(std::io::Error::other)
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("published destination does not name the owned file"));
+        assert_eq!(std::fs::read(&transcript).unwrap(), b"attacker text");
+        assert!(!transcript_revision_path(&dir, &session, 1).exists());
+        assert_eq!(recording::scan_recordings(&dir).unwrap().complete.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn replaced_capture_sidecar_preserves_text_but_blocks_transcript_revision() {
+        let dir = test_dir("transcript-sidecar-revalidation");
+        let session = SessionId::new("s-transcript-sidecar-revalidation").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        let sidecar = dir.join(format!("live-{session}.capture.json"));
+        let displaced = sidecar.with_extension("displaced");
+        std::fs::rename(&sidecar, displaced).unwrap();
+        std::fs::write(&sidecar, b"attacker sidecar").unwrap();
+
+        let saved =
+            save_finalized_capture_to_dir(&dir, &live_view(Some("survives"), None), Some(capture))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join(format!("live-{session}.txt"))).unwrap(),
+            "survives\n"
+        );
+        assert!(saved
+            .warning
+            .unwrap()
+            .contains("Transcript revision was not saved"));
+        assert!(!transcript_revision_path(&dir, &session, 1).exists());
+        assert!(recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
