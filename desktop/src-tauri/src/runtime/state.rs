@@ -39,3 +39,15 @@ pub enum JobRoute {
     ServerBatch,
     ServerLive,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ServerConnectorState;
+
+    #[test]
+    fn server_state_serializes_for_frontend() {
+        let value = serde_json::to_value(ServerConnectorState::SignInRequired).unwrap();
+
+        assert_eq!(value, "sign_in_required");
+    }
+}

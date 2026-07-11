@@ -7,7 +7,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW,
 };
 
-pub(crate) const WINDOW_LABEL: &str = "live-overlay";
+pub(crate) const WINDOW_LABEL: &str = crate::authorization::LIVE_OVERLAY_WINDOW_LABEL;
 
 const COMPACT_HEIGHT: f64 = 40.0;
 const DEFAULT_WIDTH: f64 = 104.0;

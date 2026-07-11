@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::state::LiveCaptureMode;
+use super::state::{LiveCaptureMode, LiveOverlayVisibility, LiveSessionView};
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Shift+Space";
 
@@ -37,6 +37,16 @@ pub fn load() -> LiveSettings {
 pub fn save(settings: &LiveSettings) -> Result<(), String> {
     let path = settings_path();
     save_to_path(settings, &path)
+}
+
+pub(crate) fn save_view(view: &LiveSessionView) -> Result<(), String> {
+    save(&LiveSettings {
+        overlay_enabled: view.visibility == LiveOverlayVisibility::Enabled,
+        hotkey: (!view.hotkey.is_empty()).then(|| view.hotkey.clone()),
+        paste_hotkey: (!view.paste_hotkey.is_empty()).then(|| view.paste_hotkey.clone()),
+        capture_mode: view.capture_mode,
+        input_device_id: view.input_device_id.clone(),
+    })
 }
 
 fn save_to_path(settings: &LiveSettings, path: &std::path::Path) -> Result<(), String> {

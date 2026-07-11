@@ -6,7 +6,7 @@ use std::{
 use tauri::Manager;
 use tauri_plugin_global_shortcut::Shortcut;
 
-use crate::{live, runtime, stt};
+use crate::{authorization, live, runtime, runtime_policy, stt};
 
 const INJECTION_COPIED_ERROR: &str = "Couldn't insert text here. Transcript copied; press Ctrl+V.";
 const INJECTION_FAILED_ERROR: &str = "Couldn't insert or copy this transcript.";
@@ -32,7 +32,7 @@ fn without_injection_feedback(error: Option<&str>) -> Option<String> {
 }
 
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW_LABEL) {
+    if let Some(window) = app.get_webview_window(authorization::MAIN_WINDOW_LABEL) {
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -97,16 +97,16 @@ pub(crate) fn inject_last_live_transcript(
     let view = apply_injection_result(&live, result);
     if view.error.is_some() {
         if let Err(error) = live::overlay_window::ensure_active(app) {
-            crate::log_line(&format!("live paste feedback show failed: {error}"));
+            stt::log_yap(&format!("live paste feedback show failed: {error}"));
         }
     } else if view.visibility == live::state::LiveOverlayVisibility::Enabled {
         if let Err(error) = live::overlay_window::ensure_idle(app) {
-            crate::log_line(&format!("live paste idle show failed: {error}"));
+            stt::log_yap(&format!("live paste idle show failed: {error}"));
         }
     } else if let Some(window) = app.get_webview_window(live::overlay_window::WINDOW_LABEL) {
         let _ = window.hide();
     }
-    crate::emit_live(app, &view);
+    live::events::emit_session(app, &view);
 }
 
 fn apply_injection_result(
@@ -118,7 +118,7 @@ fn apply_injection_result(
             view.error = without_injection_feedback(view.error.as_deref());
         }),
         Ok(Some(live::injection::InjectionOutcome::CopiedOnly(reason))) => {
-            crate::log_line(&format!("live injection copied fallback: {reason}"));
+            stt::log_yap(&format!("live injection copied fallback: {reason}"));
             live.update(|view| {
                 let existing = without_injection_feedback(view.error.as_deref());
                 view.error = Some(append_error(existing, INJECTION_COPIED_ERROR));
@@ -126,7 +126,7 @@ fn apply_injection_result(
         }
         Ok(Some(live::injection::InjectionOutcome::Ignored)) | Ok(None) => live.snapshot(),
         Err(error) => {
-            crate::log_line(&format!("live transcript injection failed: {error}"));
+            stt::log_yap(&format!("live transcript injection failed: {error}"));
             live.update(|view| {
                 let existing = without_injection_feedback(view.error.as_deref());
                 view.error = Some(append_error(existing, INJECTION_FAILED_ERROR));
@@ -140,6 +140,16 @@ pub(crate) fn configured_hotkey_matches_shortcut(configured: &str, shortcut: &Sh
         && live::hotkeys::parse_hotkey(configured)
             .map(|configured| configured == *shortcut)
             .unwrap_or(false)
+}
+
+pub(crate) fn warm_on_intent(app: &tauri::AppHandle, live_runtime: &live::runtime::LiveRuntime) {
+    let app = app.clone();
+    let live_runtime = live_runtime.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = live_runtime.warm(app) {
+            stt::log_yap(&format!("live warmup skipped: {error}"));
+        }
+    });
 }
 
 pub(crate) fn handle_live_shortcut_action(
@@ -212,23 +222,23 @@ pub(crate) fn start_live_runtime(
         let view = live.block_with_error(stt::error::SttError::Busy.user_message());
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
             if let Err(error) = live::overlay_window::ensure_active(&app) {
-                crate::log_line(&format!("live overlay busy show failed: {error}"));
+                stt::log_yap(&format!("live overlay busy show failed: {error}"));
             }
         }
-        crate::emit_live(&app, &view);
+        live::events::emit_session(&app, &view);
         return view;
     }
 
-    let setup = crate::current_setup_status().runtime_setup_state();
+    let setup = runtime_policy::current_setup_status().runtime_setup_state();
     orchestrator.with(|orchestrator| orchestrator.set_setup(setup));
     if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
-        let view = crate::block_live_for_setup(live, setup);
+        let view = block_for_setup(live, setup);
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
             if let Err(error) = live::overlay_window::ensure_active(&app) {
-                crate::log_line(&format!("live overlay blocked show failed: {error}"));
+                stt::log_yap(&format!("live overlay blocked show failed: {error}"));
             }
         }
-        crate::emit_live(&app, &view);
+        live::events::emit_session(&app, &view);
         return view;
     }
 
@@ -243,13 +253,13 @@ pub(crate) fn start_live_runtime(
     };
 
     if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
-        let view = live.block_with_error(&crate::runtime_error_to_stt(error).message);
+        let view = live.block_with_error(&runtime_policy::runtime_error_to_stt(error).message);
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
             if let Err(error) = live::overlay_window::ensure_active(&app) {
-                crate::log_line(&format!("live overlay route error show failed: {error}"));
+                stt::log_yap(&format!("live overlay route error show failed: {error}"));
             }
         }
-        crate::emit_live(&app, &view);
+        live::events::emit_session(&app, &view);
         return view;
     }
 
@@ -261,9 +271,9 @@ pub(crate) fn start_live_runtime(
         view
     };
     if let Err(error) = live::overlay_window::ensure_active(&app) {
-        crate::log_line(&format!("live overlay start show failed: {error}"));
+        stt::log_yap(&format!("live overlay start show failed: {error}"));
     }
-    crate::emit_live(&app, &view);
+    live::events::emit_session(&app, &view);
 
     match live_runtime.start_local(app.clone(), requested_device_id, active_capture_mode) {
         Ok(()) => live.snapshot(),
@@ -273,10 +283,17 @@ pub(crate) fn start_live_runtime(
             };
             orchestrator.with(|orchestrator| orchestrator.finish_active_work());
             let view = live.block_with_error(&message);
-            crate::emit_live(&app, &view);
+            live::events::emit_session(&app, &view);
             view
         }
     }
+}
+
+fn block_for_setup(
+    live: &live::LiveSessionState,
+    setup: runtime::state::SetupState,
+) -> live::state::LiveSessionView {
+    live.start(setup, false)
 }
 
 pub(crate) fn stop_live_runtime(
@@ -323,7 +340,7 @@ fn finalize_live_runtime(
                 view.transcription_degraded = true;
                 view.error = Some(append_error(view.error.take(), message));
             }) {
-                crate::emit_live(&app, &view);
+                live::events::emit_session(&app, &view);
                 return view;
             }
         }
@@ -331,10 +348,10 @@ fn finalize_live_runtime(
     };
     let injection_target = live::injection::capture_target();
 
-    crate::emit_live(&app, &saving);
+    live::events::emit_session(&app, &saving);
     let finish_status = live_runtime.stop_stream();
     if finish_status.should_report() {
-        crate::log_line(&format!(
+        stt::log_yap(&format!(
             "live stream stop completed with {finish_status:?}"
         ));
     }
@@ -361,10 +378,10 @@ fn finalize_live_runtime(
         });
     }
     match effects.save {
-        Ok(Some(saved)) => crate::emit_live_saved(&app, &saved),
+        Ok(Some(saved)) => live::events::emit_saved(&app, &saved),
         Ok(None) => {}
         Err(error) => {
-            crate::log_line(&format!("live save failed: {error}"));
+            stt::log_yap(&format!("live save failed: {error}"));
             live.update(|view| {
                 let save_error = "Couldn't save this recording to Home.";
                 view.error = Some(append_error(view.error.take(), save_error));
@@ -374,16 +391,16 @@ fn finalize_live_runtime(
     let view = live.finish_saving();
     if view.error.is_some() {
         if let Err(error) = live::overlay_window::ensure_active(&app) {
-            crate::log_line(&format!("live overlay feedback show failed: {error}"));
+            stt::log_yap(&format!("live overlay feedback show failed: {error}"));
         }
     } else if view.visibility == live::state::LiveOverlayVisibility::Enabled {
         if let Err(error) = live::overlay_window::ensure_idle(&app) {
-            crate::log_line(&format!("live overlay idle show failed: {error}"));
+            stt::log_yap(&format!("live overlay idle show failed: {error}"));
         }
     } else if let Some(window) = app.get_webview_window(live::overlay_window::WINDOW_LABEL) {
         let _ = window.hide();
     }
-    crate::emit_live(&app, &view);
+    live::events::emit_session(&app, &view);
     view
 }
 
@@ -391,12 +408,33 @@ fn finalize_live_runtime(
 mod tests {
     use std::cell::RefCell;
 
-    use super::{apply_injection_result, run_completion_effects_with, INJECTION_COPIED_ERROR};
+    use super::{
+        apply_injection_result, block_for_setup, run_completion_effects_with,
+        INJECTION_COPIED_ERROR,
+    };
     use crate::live::{
         injection::InjectionOutcome,
         settings::LiveSettings,
         state::{LiveSessionState, LiveSessionView},
     };
+    use crate::runtime::state::SetupState;
+
+    #[test]
+    fn start_live_setup_missing_blocks_without_claiming_server() {
+        let live = LiveSessionState::new(LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: None,
+            capture_mode: crate::live::state::LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+
+        let view = block_for_setup(&live, SetupState::FallbackMissing);
+
+        assert_eq!(view.status, crate::live::state::LiveSessionStatus::Blocked);
+        assert_eq!(view.route, crate::live::state::LiveRoute::Blocked);
+        assert_eq!(view.error.as_deref(), Some("Local fallback is not ready."));
+    }
 
     #[test]
     fn successful_retry_clears_only_injection_feedback() {

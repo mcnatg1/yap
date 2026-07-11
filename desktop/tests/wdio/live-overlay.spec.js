@@ -323,20 +323,35 @@ describe("Yap live overlay window", () => {
     expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
   });
 
-  it("rejects main-window file actions from the overlay and survives close attempts", async () => {
+  it("allows live status, rejects privileged commands, and survives close attempts", async () => {
     await showIdleOverlay();
     await browser.tauri.switchWindow("live-overlay");
 
-    const denied = await browser.tauri.execute(async ({ core }) => {
+    const authorization = await browser.tauri.execute(async ({ core }) => {
+      const live = await core.invoke("live_status");
+      let setup;
+      try {
+        await core.invoke("setup_status");
+        setup = { ok: true, message: "" };
+      } catch (error) {
+        setup = { ok: false, message: String(error) };
+      }
+      let file;
       try {
         await core.invoke("open_app_path", { path: "C:\\not-a-yap-file.txt" });
-        return { ok: true, message: "" };
+        file = { ok: true, message: "" };
       } catch (error) {
-        return { ok: false, message: String(error) };
+        file = { ok: false, message: String(error) };
       }
+      return { file, live, setup };
     });
-    expect(denied.ok).toBe(false);
-    expect(denied.message).toContain("This file action is only available from the main window.");
+    expect(typeof authorization.live.status).toBe("string");
+    expect(authorization.setup.ok).toBe(false);
+    expect(authorization.setup.message).toContain("Command is not available from this window.");
+    expect(authorization.file.ok).toBe(false);
+    expect(authorization.file.message).toContain(
+      "This file action is only available from the main window.",
+    );
 
     const closeAttempt = await browser.tauri.execute(async ({ core }) => {
       try {
@@ -355,5 +370,35 @@ describe("Yap live overlay window", () => {
     expect(await browser.tauri.execute(({ core }) =>
       core.invoke("plugin:window|is_visible", { label: "live-overlay" }))).toBe(true);
     expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
+  });
+
+  it("keeps main alive when closed and restores it from the overlay", async () => {
+    await showIdleOverlay();
+    await browser.tauri.switchWindow("main");
+
+    await browser.tauri.execute(({ core }) => core.invoke("plugin:window|close", { label: "main" }));
+    await browser.waitUntil(async () => {
+      const windows = await browser.tauri.listWindows();
+      if (!windows.includes("main")) return false;
+      const visible = await browser.tauri.execute(({ core }) =>
+        core.invoke("plugin:window|is_visible", { label: "main" }));
+      return !visible;
+    }, {
+      interval: 50,
+      timeout: 5_000,
+      timeoutMsg: "main window did not remain hidden after a close request",
+    });
+    expect(await browser.tauri.listWindows()).toContain("main");
+
+    await browser.tauri.switchWindow("live-overlay");
+    await browser.tauri.execute(({ core }) =>
+      core.invoke("show_main_workspace", { workspace: "home" }));
+    await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
+      core.invoke("plugin:window|is_visible", { label: "main" })), {
+      interval: 50,
+      timeout: 5_000,
+      timeoutMsg: "overlay command did not restore the main window",
+    });
+    expect(await browser.tauri.listWindows()).toContain("main");
   });
 });

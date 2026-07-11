@@ -221,7 +221,7 @@ fn write_clipboard(app: &tauri::AppHandle, text: &str) -> Result<(), String> {
     };
 
     let owner = app
-        .get_webview_window(crate::MAIN_WINDOW_LABEL)
+        .get_webview_window(crate::authorization::MAIN_WINDOW_LABEL)
         .ok_or_else(|| "Yap main window is unavailable for clipboard fallback.".to_string())?
         .hwnd()
         .map_err(|error| format!("Failed to read Yap clipboard owner: {error}"))?;

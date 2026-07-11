@@ -1,7 +1,7 @@
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_global_shortcut::Shortcut;
 
-use crate::live;
+use crate::{authorization, live};
 
 pub(crate) const DICTATION_UNAVAILABLE_ERROR: &str = "Live shortcut is unavailable.";
 pub(crate) const PASTE_UNAVAILABLE_ERROR: &str = "Paste shortcut is unavailable.";
@@ -118,7 +118,7 @@ fn change_live_hotkey(
     kind: LiveHotkeyKind,
     hotkey: Option<String>,
 ) -> Result<live::state::LiveSessionView, String> {
-    crate::ensure_main_command(&window)?;
+    authorization::ensure_main(&window)?;
     ensure_live_hotkey_idle(state.snapshot().status)?;
 
     let snapshot = state.snapshot();
@@ -150,14 +150,14 @@ fn change_live_hotkey(
                 .register(shortcut)
                 .map_err(|error| error.to_string())
         },
-        || crate::persist_live_view(&prospective),
+        || live::settings::save_view(&prospective),
     )?;
 
     let recovered_startup_failure = state.take_startup_shortcut_failure(kind.is_paste());
     let view = state.update(|view| {
         apply_successful_hotkey_change(view, kind, next_value, recovered_startup_failure);
     });
-    crate::emit_live(&app, &view);
+    live::events::emit_session(&app, &view);
     Ok(view)
 }
 

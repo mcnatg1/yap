@@ -14,4 +14,31 @@ describe("Yap desktop shell", () => {
     await heading.waitForDisplayed();
     expect(await heading.getText()).toContain("Welcome back");
   });
+
+  it("keeps representative native command families registered", async () => {
+    await browser.tauri.switchWindow("main");
+
+    const commands = await browser.tauri.execute(async ({ core }) => ({
+      live: await core.invoke("live_status"),
+      recordings: await core.invoke("list_saved_live_sessions"),
+      server: await core.invoke("server_connection_status"),
+      setup: await core.invoke("setup_status"),
+    }));
+
+    expect(typeof commands.setup.engineReady).toBe("boolean");
+    expect(typeof commands.setup.engineStatus).toBe("string");
+    expect([
+      "not_set",
+      "connecting",
+      "ready",
+      "offline",
+      "sign_in_required",
+      "retrying",
+      "disabled",
+    ]).toContain(commands.server);
+    expect(typeof commands.live.status).toBe("string");
+    expect(typeof commands.live.visibility).toBe("string");
+    expect(Array.isArray(commands.recordings.sessions)).toBe(true);
+    expect(Array.isArray(commands.recordings.maintenanceWarnings)).toBe(true);
+  });
 });

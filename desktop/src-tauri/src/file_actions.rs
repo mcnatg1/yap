@@ -553,7 +553,7 @@ fn reject_oversized_transcript_file(file: &std::fs::File) -> Result<(), String> 
 }
 
 pub(crate) fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == crate::MAIN_WINDOW_LABEL {
+    if crate::authorization::is_main_window(window.label()) {
         Ok(())
     } else {
         Err("This file action is only available from the main window.".into())
