@@ -25,6 +25,7 @@ use super::stream::{self, LiveStreamEngine, StreamMessage};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
+const LEVEL_QUEUE_CAPACITY: usize = 1;
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 const ASR_ADAPTER_CANCEL_GRACE: Duration = Duration::from_millis(100);
@@ -40,11 +41,15 @@ fn active_session_matches(active_session: u64, session: u64) -> bool {
 pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
+    start_generation: Arc<AtomicU64>,
     recording_finalization: Arc<RecordingFinalization>,
     stop_completion: Arc<StopCompletion>,
     transition: Arc<LifecycleGate>,
     warming: Arc<AtomicBool>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct StartIntent(u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveStopResult {
@@ -88,6 +93,7 @@ struct LiveRuntimeInner {
     session: u64,
     capture: Option<CaptureAdapter>,
     stream: Option<SessionStream>,
+    retiring_stream: Option<SessionStream>,
     asr_adapter: Option<SessionAsrAdapter>,
     recording: Option<RecordingSinkHandle>,
     level: Option<JoinHandle<()>>,
@@ -206,6 +212,8 @@ struct LifecycleOperation<'a> {
     gate: &'a LifecycleGate,
 }
 
+struct WarmupRelease(Arc<AtomicBool>);
+
 struct SessionStream {
     session: Arc<AtomicU64>,
     samples_tx: mpsc::SyncSender<StreamMessage>,
@@ -312,11 +320,18 @@ impl Drop for LifecycleOperation<'_> {
     }
 }
 
+impl Drop for WarmupRelease {
+    fn drop(&mut self) {
+        release_warmup(&self.0);
+    }
+}
+
 impl LiveRuntime {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
+            start_generation: Arc::new(AtomicU64::new(0)),
             recording_finalization: Arc::new(RecordingFinalization::new()),
             stop_completion: Arc::new(StopCompletion::new()),
             transition: Arc::new(LifecycleGate::new()),
@@ -332,13 +347,39 @@ impl LiveRuntime {
             .is_some()
     }
 
+    pub(crate) fn capture_start_intent(&self) -> StartIntent {
+        StartIntent(self.start_generation.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn start_intent_is_current(&self, intent: StartIntent) -> bool {
+        self.start_generation.load(Ordering::Acquire) == intent.0
+    }
+
+    pub(crate) fn cancel_pending_start(&self) {
+        self.start_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn run_start_lifecycle<T>(
+        &self,
+        intent: StartIntent,
+        run: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _operation = self.transition.begin_start();
+        self.start_intent_is_current(intent).then(run)
+    }
+
+    pub(crate) fn run_stop_lifecycle<T>(&self, run: impl FnOnce() -> T) -> T {
+        let _operation = self.transition.begin_stop();
+        run()
+    }
+
     pub(crate) fn start_local(
         &self,
         app: tauri::AppHandle,
         selected_device_id: Option<String>,
         capture_mode: super::state::LiveCaptureMode,
+        intent: StartIntent,
     ) -> Result<(), LiveStartFailure> {
-        let _transition = self.transition.begin_start();
         let (session, local_asr) = {
             let inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
@@ -358,28 +399,23 @@ impl LiveRuntime {
             if let Err(message) = inner.ensure_stream(self.clone(), app.clone(), session) {
                 return Err(LiveStartFailure::new(session, message));
             }
+            if !self.start_intent_is_current(intent) {
+                return Ok(());
+            }
             let local_asr = inner
                 .start_asr_adapter(session)
                 .map_err(|message| LiveStartFailure::new(session, message))?;
             (session, local_asr)
         };
 
-        let state = app.state::<LiveSessionState>();
-        let Some(view) = state.try_begin_listening_from_armed() else {
-            let _ = self.active_session.compare_exchange(
-                session,
-                0,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            );
+        if !self.start_intent_is_current(intent) {
             let _ = self
                 .inner
                 .lock()
                 .expect("live runtime poisoned")
                 .cancel_asr_adapter();
             return Ok(());
-        };
-        let _ = app.emit("live-session", &view);
+        }
 
         let resolved = match super::devices::resolve_capture_device(selected_device_id.as_deref()) {
             Ok(resolved) => resolved,
@@ -394,7 +430,7 @@ impl LiveRuntime {
         };
         let stream_config = resolved.config.config();
         let sample_format = resolved.config.sample_format();
-        let (level_tx, level) = mpsc::channel::<f32>();
+        let (level_tx, level) = level_channel();
         let capture_runtime = self.clone();
         let capture_app = app.clone();
         let capture_active_session = Arc::clone(&self.active_session);
@@ -431,6 +467,17 @@ impl LiveRuntime {
             recording_rx,
         );
         let recording_for_capture = recording_handle.sink();
+        if !self.start_intent_is_current(intent)
+            || self.active_session.load(Ordering::Acquire) != session
+        {
+            let _ = recording_handle.abort("live start cancelled before capture opened");
+            let _ = self
+                .inner
+                .lock()
+                .expect("live runtime poisoned")
+                .cancel_asr_adapter();
+            return Ok(());
+        }
         let capture = match CaptureAdapter::open(
             resolved.device,
             stream_config,
@@ -470,12 +517,14 @@ impl LiveRuntime {
             }
         };
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        if !should_install_capture(
-            session,
-            inner.session,
-            self.active_session.load(Ordering::SeqCst),
-            inner.capture.is_some(),
-        ) {
+        if !self.start_intent_is_current(intent)
+            || !should_install_capture(
+                session,
+                inner.session,
+                self.active_session.load(Ordering::SeqCst),
+                inner.capture.is_some(),
+            )
+        {
             inner.last_used = Instant::now();
             drop(inner);
             if let Err(error) = capture.shutdown() {
@@ -492,31 +541,73 @@ impl LiveRuntime {
         }
         inner.capture = Some(capture);
         inner.recording = Some(recording_handle);
-        inner.start_level_worker(app, level, session, Arc::clone(&self.active_session));
+        inner.start_level_worker(
+            app.clone(),
+            level,
+            session,
+            Arc::clone(&self.active_session),
+        );
+        drop(inner);
+
+        let state = app.state::<LiveSessionState>();
+        let Some(view) = state.try_begin_listening_from_armed() else {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            let (shutdown_errors, _) = inner.stop_capture();
+            drop(inner);
+            log_worker_shutdown_errors(shutdown_errors);
+            let _ = self.finalize_recording();
+            return Ok(());
+        };
+        let _ = app.emit("live-session", &view);
         Ok(())
     }
 
-    pub fn warm(&self, app: tauri::AppHandle) -> Result<(), String> {
-        let _transition = self.transition.begin_start();
-        if !claim_warmup(&self.warming) {
-            return Ok(());
+    pub fn request_warm(&self, app: tauri::AppHandle) -> Result<bool, String> {
+        if self
+            .inner
+            .lock()
+            .expect("live runtime poisoned")
+            .stream
+            .as_ref()
+            .is_some_and(SessionStream::is_running)
+        {
+            return Ok(false);
         }
+
+        let runtime = self.clone();
+        spawn_warm_request(&self.warming, move || {
+            thread::Builder::new()
+                .name("live-model-warmup".into())
+                .spawn(move || {
+                    let _release = WarmupRelease(Arc::clone(&runtime.warming));
+                    let _transition = runtime.transition.begin_start();
+                    if let Err(error) = runtime.warm_claimed(app) {
+                        crate::stt::log_yap(&format!("live warmup skipped: {error}"));
+                    }
+                })
+                .map(|_| ())
+                .map_err(|error| format!("Live warmup worker could not start: {error}"))
+        })
+    }
+
+    fn warm_claimed(&self, app: tauri::AppHandle) -> Result<(), String> {
         let result = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             let session = inner.session;
             inner.ensure_stream(self.clone(), app, session)
         };
-        release_warmup(&self.warming);
         result
     }
 
     pub fn stop(&self) -> LiveStopResult {
-        let stream = self.stop_stream();
-        self.finish_stop(stream)
+        self.cancel_pending_start();
+        self.run_stop_lifecycle(|| {
+            let stream = self.stop_stream();
+            self.finish_stop(stream)
+        })
     }
 
     pub(crate) fn stop_stream(&self) -> StreamFinishStatus {
-        let _transition = self.transition.begin_stop();
         let (finisher, adapter_status, shutdown_errors) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             let (shutdown_errors, adapter_status) = inner.stop_capture();
@@ -585,22 +676,25 @@ impl LiveRuntime {
     }
 
     pub fn unload_if_idle(&self, threshold: Duration) {
-        let _transition = self.transition.begin_stop();
-        let mut inner = self.inner.lock().expect("live runtime poisoned");
-        if inner.capture.is_none() && inner.last_used.elapsed() >= threshold {
-            inner.retire_stream();
-        }
+        self.run_stop_lifecycle(|| {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            if inner.capture.is_none() && inner.last_used.elapsed() >= threshold {
+                inner.retire_stream();
+            }
+        });
     }
 
     pub fn shutdown(&self) {
-        let _transition = self.transition.begin_stop();
-        let mut inner = self.inner.lock().expect("live runtime poisoned");
-        let (shutdown_errors, _) = inner.stop_capture();
-        inner.retire_stream();
-        self.active_session.store(0, Ordering::SeqCst);
-        drop(inner);
-        let _ = self.finalize_recording();
-        log_worker_shutdown_errors(shutdown_errors);
+        self.cancel_pending_start();
+        self.run_stop_lifecycle(|| {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            let (shutdown_errors, _) = inner.stop_capture();
+            inner.retire_stream();
+            self.active_session.store(0, Ordering::SeqCst);
+            drop(inner);
+            let _ = self.finalize_recording();
+            log_worker_shutdown_errors(shutdown_errors);
+        });
     }
 
     pub(crate) fn finalize_recording(&self) -> Result<Option<RecordingFinalizeResult>, String> {
@@ -743,6 +837,7 @@ impl LiveRuntimeInner {
             session: 0,
             capture: None,
             stream: None,
+            retiring_stream: None,
             asr_adapter: None,
             recording: None,
             level: None,
@@ -760,6 +855,7 @@ impl LiveRuntimeInner {
         app: tauri::AppHandle,
         session: u64,
     ) -> Result<(), String> {
+        self.reap_retiring_stream()?;
         if self.stream.as_ref().is_some_and(SessionStream::is_running) {
             if let Some(stream) = self.stream.as_ref() {
                 stream.session.store(session, Ordering::SeqCst);
@@ -892,6 +988,21 @@ impl LiveRuntimeInner {
                 crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
             }
         }
+        let retiring_finished = self.retiring_stream.as_ref().is_some_and(|stream| {
+            stream
+                .worker
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+        });
+        if retiring_finished {
+            let stream = self
+                .retiring_stream
+                .take()
+                .expect("finished retiring stream was present");
+            if let Err(error) = stream.shutdown(true) {
+                crate::stt::log_yap(&format!("retiring live stream shutdown failed: {error}"));
+            }
+        }
         #[cfg(test)]
         {
             self.has_stream_for_test = false;
@@ -903,8 +1014,11 @@ impl LiveRuntimeInner {
             crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
         }
         if let Some(stream) = self.stream.take() {
-            if let Err(error) = stream.shutdown(false) {
-                crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
+            stream.cancelled.store(true, Ordering::Release);
+            if self.retiring_stream.is_none() {
+                self.retiring_stream = Some(stream);
+            } else if let Err(error) = stream.shutdown(true) {
+                crate::stt::log_yap(&format!("extra retiring stream shutdown failed: {error}"));
             }
         }
         #[cfg(test)]
@@ -915,6 +1029,24 @@ impl LiveRuntimeInner {
 
     fn stream_finisher(&self) -> Option<StreamFinisher> {
         self.stream.as_ref().map(SessionStream::finisher)
+    }
+
+    fn reap_retiring_stream(&mut self) -> Result<(), String> {
+        let Some(stream) = self.retiring_stream.as_ref() else {
+            return Ok(());
+        };
+        if stream
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return Err("Previous live transcription is still stopping.".into());
+        }
+        let stream = self
+            .retiring_stream
+            .take()
+            .expect("retiring stream was present");
+        stream.shutdown(true)
     }
 
     fn cancel_asr_adapter(&mut self) -> Result<(), String> {
@@ -1227,7 +1359,7 @@ struct CaptureWorkerContext {
     active_session: Arc<AtomicU64>,
     recording: BoundedSink<RecordingInput>,
     local_asr: BoundedSink<PreparedFrame>,
-    level_tx: mpsc::Sender<f32>,
+    level_tx: mpsc::SyncSender<f32>,
 }
 
 fn run_capture_worker(
@@ -1286,7 +1418,7 @@ fn run_capture_worker(
                                 let view = state.mark_transcription_backpressure();
                                 let _ = packet_app.emit("live-session", &view);
                             }
-                            let _ = level_tx.send(level);
+                            publish_level(&level_tx, level);
                             false
                         }
                         Err(message) => {
@@ -1529,6 +1661,14 @@ fn mark_local_asr_degraded_once(reported: &AtomicBool) -> bool {
         .is_ok()
 }
 
+fn level_channel() -> (mpsc::SyncSender<f32>, mpsc::Receiver<f32>) {
+    mpsc::sync_channel(LEVEL_QUEUE_CAPACITY)
+}
+
+fn publish_level(levels: &mpsc::SyncSender<f32>, level: f32) -> bool {
+    levels.try_send(level).is_ok()
+}
+
 fn spawn_stream_crash_handler(
     app: tauri::AppHandle,
     runtime: LiveRuntime,
@@ -1561,6 +1701,20 @@ fn claim_warmup(warming: &AtomicBool) -> bool {
 
 fn release_warmup(warming: &AtomicBool) {
     warming.store(false, Ordering::Release);
+}
+
+fn spawn_warm_request(
+    warming: &AtomicBool,
+    spawn: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if !claim_warmup(warming) {
+        return Ok(false);
+    }
+    if let Err(error) = spawn() {
+        release_warmup(warming);
+        return Err(error);
+    }
+    Ok(true)
 }
 
 fn run_stream_worker(
@@ -2409,6 +2563,77 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_recognizer_blocks_replacement_until_its_worker_is_reaped() {
+        let mut inner = LiveRuntimeInner::for_test();
+        let release_worker = Arc::new(Barrier::new(2));
+        let worker_released = Arc::clone(&release_worker);
+        let worker = std::thread::spawn(move || {
+            worker_released.wait();
+        });
+        let (samples_tx, _samples_rx) = mpsc::sync_channel(1);
+        inner.stream = Some(SessionStream {
+            session: Arc::new(AtomicU64::new(1)),
+            samples_tx,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            worker: Some(worker),
+        });
+
+        inner.retire_stream_detached_reader();
+        assert_eq!(
+            inner.reap_retiring_stream(),
+            Err("Previous live transcription is still stopping.".into())
+        );
+
+        release_worker.wait();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while inner
+            .retiring_stream
+            .as_ref()
+            .and_then(|stream| stream.worker.as_ref())
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "retired recognizer did not finish"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(inner.reap_retiring_stream(), Ok(()));
+        assert!(inner.retiring_stream.is_none());
+    }
+
+    #[test]
+    fn idle_cleanup_does_not_join_a_still_stalled_recognizer() {
+        let mut inner = LiveRuntimeInner::for_test();
+        let release_worker = Arc::new(Barrier::new(2));
+        let worker_released = Arc::clone(&release_worker);
+        let worker = std::thread::spawn(move || {
+            worker_released.wait();
+        });
+        let (samples_tx, _samples_rx) = mpsc::sync_channel(1);
+        inner.retiring_stream = Some(SessionStream {
+            session: Arc::new(AtomicU64::new(1)),
+            samples_tx,
+            cancelled: Arc::new(AtomicBool::new(true)),
+            worker: Some(worker),
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            inner.retire_stream();
+            done_tx.send(()).unwrap();
+            inner
+        });
+
+        let completed_without_joining = done_rx.recv_timeout(Duration::from_millis(100));
+        release_worker.wait();
+        let mut inner = cleanup.join().unwrap();
+
+        assert!(completed_without_joining.is_ok());
+        assert!(inner.retiring_stream.is_some());
+        assert_eq!(inner.reap_retiring_stream(), Ok(()));
+    }
+
+    #[test]
     fn stale_start_failure_cannot_clear_a_newer_session() {
         let runtime = LiveRuntime::new();
         runtime.active_session.store(8, Ordering::SeqCst);
@@ -2426,6 +2651,16 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_a_start_intent_preserves_the_active_session_for_final_drain() {
+        let runtime = LiveRuntime::new();
+        runtime.active_session.store(7, Ordering::SeqCst);
+
+        runtime.cancel_pending_start();
+
+        assert_eq!(runtime.active_session.load(Ordering::SeqCst), 7);
+    }
+
+    #[test]
     fn warmup_latch_allows_one_in_flight_warm() {
         let warming = AtomicBool::new(false);
 
@@ -2433,6 +2668,27 @@ mod tests {
         assert!(!claim_warmup(&warming));
         release_warmup(&warming);
         assert!(claim_warmup(&warming));
+    }
+
+    #[test]
+    fn warm_request_is_coalesced_before_spawning_a_worker() {
+        let warming = AtomicBool::new(false);
+        let spawned = std::sync::atomic::AtomicUsize::new(0);
+
+        assert!(spawn_warm_request(&warming, || {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap());
+        assert!(!spawn_warm_request(&warming, || {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap());
+        assert_eq!(spawned.load(Ordering::SeqCst), 1);
+
+        release_warmup(&warming);
+        assert!(spawn_warm_request(&warming, || Ok(())).unwrap());
     }
 
     #[test]
@@ -2626,6 +2882,16 @@ mod tests {
         assert!(mark_local_asr_degraded_once(&degradation_reported));
         assert!(!mark_local_asr_degraded_once(&degradation_reported));
         assert!(degradation_reported.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn level_telemetry_is_bounded_when_the_consumer_stalls() {
+        let (levels, receiver) = level_channel();
+
+        assert!(publish_level(&levels, 0.25));
+        assert!(!publish_level(&levels, 0.75));
+        assert_eq!(receiver.recv().unwrap(), 0.25);
+        assert!(publish_level(&levels, 0.5));
     }
 
     #[test]
@@ -2898,6 +3164,57 @@ mod tests {
         starter.join().unwrap();
         recognizer.join().unwrap();
         assert_eq!(*finalized.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn stop_cancels_initializing_start_before_capture_and_clears_runtime_busy() {
+        let runtime = Arc::new(LiveRuntime::new());
+        let orchestrator = Arc::new(crate::runtime::RuntimeOrchestratorState::new());
+        orchestrator
+            .with(|state| state.set_setup(crate::runtime::state::SetupState::FallbackReady));
+        let intent = runtime.capture_start_intent();
+        let start_entered = Arc::new(Barrier::new(2));
+        let release_start = Arc::new(Barrier::new(2));
+        let capture_opened = Arc::new(AtomicBool::new(false));
+
+        let starter = {
+            let runtime = Arc::clone(&runtime);
+            let orchestrator = Arc::clone(&orchestrator);
+            let start_entered = Arc::clone(&start_entered);
+            let release_start = Arc::clone(&release_start);
+            let capture_opened = Arc::clone(&capture_opened);
+            std::thread::spawn(move || {
+                runtime.run_start_lifecycle(intent, || {
+                    orchestrator.with(|state| state.start_fallback().unwrap());
+                    start_entered.wait();
+                    release_start.wait();
+                    if runtime.start_intent_is_current(intent) {
+                        capture_opened.store(true, Ordering::SeqCst);
+                    }
+                });
+            })
+        };
+
+        start_entered.wait();
+        runtime.cancel_pending_start();
+        let stopper = {
+            let runtime = Arc::clone(&runtime);
+            let orchestrator = Arc::clone(&orchestrator);
+            std::thread::spawn(move || {
+                runtime.run_stop_lifecycle(|| {
+                    orchestrator.with(|state| state.finish_active_work());
+                });
+            })
+        };
+        release_start.wait();
+
+        starter.join().unwrap();
+        stopper.join().unwrap();
+        assert!(!capture_opened.load(Ordering::SeqCst));
+        assert_eq!(
+            orchestrator.with(|state| state.runtime()),
+            crate::runtime::state::RuntimeState::FallbackReady
+        );
     }
 
     #[test]

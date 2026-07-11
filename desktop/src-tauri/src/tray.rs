@@ -27,7 +27,7 @@ pub(crate) fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
             SHOW_APP => actions::show_main_window(app),
             START_DICTATING => actions::start_live_from_app(app),
             STOP_RECORDING => actions::stop_live_from_app(app),
-            QUIT => app.exit(0),
+            QUIT => actions::quit_from_app(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

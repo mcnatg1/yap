@@ -56,6 +56,8 @@ pub(crate) fn run() {
                     stt::log_yap(&format!("live overlay startup failed: {error}"));
                 }
             }
+            let live_runtime = app.state::<live::runtime::LiveRuntime>();
+            live::actions::warm_on_intent(app.handle(), &live_runtime);
             Ok(())
         });
 
@@ -83,6 +85,7 @@ pub(crate) fn run() {
                 api.prevent_close();
             }
             tauri::RunEvent::Exit => {
+                stt::log_yap("process exit reached degraded live shutdown fallback");
                 live_runtime_for_exit.shutdown();
             }
             _ => {}

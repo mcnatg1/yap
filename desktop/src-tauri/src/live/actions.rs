@@ -38,6 +38,71 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+pub(crate) fn quit_from_app(app: &tauri::AppHandle) {
+    let worker_app = app.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("live-semantic-quit".into())
+        .spawn(move || {
+            let result = run_quit_with(
+                || finalize_live_before_quit(&worker_app),
+                || worker_app.exit(0),
+            );
+            if let Err(error) = result {
+                stt::log_yap(&format!(
+                    "quit deferred after live finalization failed: {error}"
+                ));
+                present_quit_failure(&worker_app);
+            }
+        })
+    {
+        stt::log_yap(&format!("quit worker failed to start: {error}"));
+        present_quit_failure(app);
+    }
+}
+
+fn run_quit_with(
+    finalize: impl FnOnce() -> Result<(), String>,
+    exit: impl FnOnce(),
+) -> Result<(), String> {
+    finalize()?;
+    exit();
+    Ok(())
+}
+
+fn finalize_live_before_quit(app: &tauri::AppHandle) -> Result<(), String> {
+    let live = app.state::<live::LiveSessionState>();
+    let live_runtime = app.state::<live::runtime::LiveRuntime>();
+    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
+    live_runtime.cancel_pending_start();
+    let outcome = live_runtime.run_stop_lifecycle(|| {
+        finalize_live_runtime_with_mode(
+            app.clone(),
+            &live,
+            &live_runtime,
+            &orchestrator,
+            None,
+            None,
+            CompletionMode::Quit,
+        )
+    });
+    outcome.save_error.map_or(Ok(()), Err)
+}
+
+fn present_quit_failure(app: &tauri::AppHandle) {
+    let live = app.state::<live::LiveSessionState>();
+    let view = live.update(|view| {
+        view.error = Some(append_error(
+            view.error.take(),
+            "Yap stayed open because the current recording could not be saved.",
+        ));
+    });
+    show_main_window(app);
+    if let Err(error) = live::overlay_window::ensure_active(app) {
+        stt::log_yap(&format!("quit failure overlay show failed: {error}"));
+    }
+    live::events::emit_session(app, &view);
+}
+
 pub(crate) fn start_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
@@ -66,18 +131,43 @@ struct CompletionEffects<I, S> {
     save: Result<S, String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletionMode {
+    Normal,
+    Quit,
+}
+
+struct FinalizationOutcome {
+    view: live::state::LiveSessionView,
+    save_error: Option<String>,
+}
+
+#[cfg(test)]
 fn run_completion_effects_with<I, S>(
     view: &live::state::LiveSessionView,
     remember: impl FnOnce(&str),
     inject: impl FnOnce(&str) -> Result<I, String>,
     save: impl FnOnce() -> Result<S, String>,
 ) -> CompletionEffects<I, S> {
-    let injection = match live::recordings::completed_transcript_text(view) {
-        Some(text) => {
-            remember(&text);
-            inject(&text).map(Some)
+    run_completion_effects_with_mode(view, CompletionMode::Normal, remember, inject, save)
+}
+
+fn run_completion_effects_with_mode<I, S>(
+    view: &live::state::LiveSessionView,
+    mode: CompletionMode,
+    remember: impl FnOnce(&str),
+    inject: impl FnOnce(&str) -> Result<I, String>,
+    save: impl FnOnce() -> Result<S, String>,
+) -> CompletionEffects<I, S> {
+    let text = live::recordings::completed_transcript_text(view);
+    if let Some(text) = text.as_deref() {
+        remember(text);
+    }
+    let injection = match (mode, text) {
+        (CompletionMode::Normal, Some(text)) => inject(&text).map(Some),
+        (CompletionMode::Normal | CompletionMode::Quit, None) | (CompletionMode::Quit, Some(_)) => {
+            Ok(None)
         }
-        None => Ok(None),
     };
     CompletionEffects {
         injection,
@@ -143,13 +233,9 @@ pub(crate) fn configured_hotkey_matches_shortcut(configured: &str, shortcut: &Sh
 }
 
 pub(crate) fn warm_on_intent(app: &tauri::AppHandle, live_runtime: &live::runtime::LiveRuntime) {
-    let app = app.clone();
-    let live_runtime = live_runtime.clone();
-    std::thread::spawn(move || {
-        if let Err(error) = live_runtime.warm(app) {
-            stt::log_yap(&format!("live warmup skipped: {error}"));
-        }
-    });
+    if let Err(error) = live_runtime.request_warm(app.clone()) {
+        stt::log_yap(&format!("live warmup skipped: {error}"));
+    }
 }
 
 pub(crate) fn handle_live_shortcut_action(
@@ -214,6 +300,32 @@ pub(crate) fn start_live_runtime(
     orchestrator: &runtime::RuntimeOrchestratorState,
     active_capture_mode: live::state::LiveCaptureMode,
 ) -> live::state::LiveSessionView {
+    let intent = live_runtime.capture_start_intent();
+    live_runtime
+        .run_start_lifecycle(intent, || {
+            start_live_runtime_serialized(
+                app,
+                live,
+                live_runtime,
+                stt,
+                orchestrator,
+                active_capture_mode,
+                intent,
+            )
+        })
+        .unwrap_or_else(|| live.snapshot())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_live_runtime_serialized(
+    app: tauri::AppHandle,
+    live: &live::LiveSessionState,
+    live_runtime: &live::runtime::LiveRuntime,
+    stt: &stt::dispatch::SttState,
+    orchestrator: &runtime::RuntimeOrchestratorState,
+    active_capture_mode: live::state::LiveCaptureMode,
+    intent: live::runtime::StartIntent,
+) -> live::state::LiveSessionView {
     if live::state::is_live_session_started(live.snapshot().status) || live_runtime.is_active() {
         return live.snapshot();
     }
@@ -244,7 +356,7 @@ pub(crate) fn start_live_runtime(
 
     let requested_device_id = live.snapshot().input_device_id;
     let resolved = live::devices::resolve_input_device(requested_device_id.as_deref());
-    let Some(view) = live.try_begin_local_start(
+    let Some(_) = live.try_begin_local_start(
         active_capture_mode,
         requested_device_id.clone(),
         resolved.label.clone(),
@@ -263,26 +375,39 @@ pub(crate) fn start_live_runtime(
         return view;
     }
 
-    let view = if resolved.recovered {
-        live.update(|view| {
-            view.error = Some("Selected microphone unavailable. Using default.".into());
-        })
-    } else {
-        view
-    };
-    if let Err(error) = live::overlay_window::ensure_active(&app) {
-        stt::log_yap(&format!("live overlay start show failed: {error}"));
-    }
-    live::events::emit_session(&app, &view);
-
-    match live_runtime.start_local(app.clone(), requested_device_id, active_capture_mode) {
-        Ok(()) => live.snapshot(),
+    match live_runtime.start_local(
+        app.clone(),
+        requested_device_id,
+        active_capture_mode,
+        intent,
+    ) {
+        Ok(()) => {
+            let view = if resolved.recovered
+                && live::state::is_live_capture_active(live.snapshot().status)
+            {
+                live.update(|view| {
+                    view.error = Some("Selected microphone unavailable. Using default.".into());
+                })
+            } else {
+                live.snapshot()
+            };
+            if live::state::is_live_capture_active(view.status) {
+                if let Err(error) = live::overlay_window::ensure_active(&app) {
+                    stt::log_yap(&format!("live overlay start show failed: {error}"));
+                }
+                live::events::emit_session(&app, &view);
+            }
+            view
+        }
         Err(failure) => {
             let Some(message) = live_runtime.claim_start_failure(failure) else {
                 return live.snapshot();
             };
             orchestrator.with(|orchestrator| orchestrator.finish_active_work());
             let view = live.block_with_error(&message);
+            if let Err(error) = live::overlay_window::ensure_active(&app) {
+                stt::log_yap(&format!("live overlay start failure show failed: {error}"));
+            }
             live::events::emit_session(&app, &view);
             view
         }
@@ -302,7 +427,10 @@ pub(crate) fn stop_live_runtime(
     live_runtime: &live::runtime::LiveRuntime,
     orchestrator: &runtime::RuntimeOrchestratorState,
 ) -> live::state::LiveSessionView {
-    finalize_live_runtime(app, live, live_runtime, orchestrator, None, None)
+    live_runtime.cancel_pending_start();
+    live_runtime.run_stop_lifecycle(|| {
+        finalize_live_runtime(app, live, live_runtime, orchestrator, None, None)
+    })
 }
 
 pub(crate) fn stop_live_runtime_after_crash(
@@ -313,14 +441,16 @@ pub(crate) fn stop_live_runtime_after_crash(
     session: u64,
     message: &str,
 ) -> live::state::LiveSessionView {
-    finalize_live_runtime(
-        app,
-        live,
-        live_runtime,
-        orchestrator,
-        Some(session),
-        Some(message),
-    )
+    live_runtime.run_stop_lifecycle(|| {
+        finalize_live_runtime(
+            app,
+            live,
+            live_runtime,
+            orchestrator,
+            Some(session),
+            Some(message),
+        )
+    })
 }
 
 fn finalize_live_runtime(
@@ -331,8 +461,33 @@ fn finalize_live_runtime(
     expected_session: Option<u64>,
     completion_error: Option<&str>,
 ) -> live::state::LiveSessionView {
+    finalize_live_runtime_with_mode(
+        app,
+        live,
+        live_runtime,
+        orchestrator,
+        expected_session,
+        completion_error,
+        CompletionMode::Normal,
+    )
+    .view
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_live_runtime_with_mode(
+    app: tauri::AppHandle,
+    live: &live::LiveSessionState,
+    live_runtime: &live::runtime::LiveRuntime,
+    orchestrator: &runtime::RuntimeOrchestratorState,
+    expected_session: Option<u64>,
+    completion_error: Option<&str>,
+    mode: CompletionMode,
+) -> FinalizationOutcome {
     if expected_session.is_some_and(|session| !live_runtime.is_session_current(session)) {
-        return live.snapshot();
+        return FinalizationOutcome {
+            view: live.snapshot(),
+            save_error: None,
+        };
     }
     let Some(saving) = live.try_begin_saving(live_runtime.is_active()) else {
         if let Some(message) = completion_error {
@@ -341,12 +496,20 @@ fn finalize_live_runtime(
                 view.error = Some(append_error(view.error.take(), message));
             }) {
                 live::events::emit_session(&app, &view);
-                return view;
+                return FinalizationOutcome {
+                    view,
+                    save_error: None,
+                };
             }
         }
-        return live.snapshot();
+        return FinalizationOutcome {
+            view: live.snapshot(),
+            save_error: None,
+        };
     };
-    let injection_target = live::injection::capture_target();
+    let injection_target = (mode == CompletionMode::Normal)
+        .then(live::injection::capture_target)
+        .flatten();
 
     live::events::emit_session(&app, &saving);
     let finish_status = live_runtime.stop_stream();
@@ -361,8 +524,9 @@ fn finalize_live_runtime(
         live.snapshot()
     };
     orchestrator.with(|orchestrator| orchestrator.finish_active_work());
-    let effects = run_completion_effects_with(
+    let effects = run_completion_effects_with_mode(
         &before_stop,
+        mode,
         |text| live.remember_completed_transcript(text),
         |text| live::injection::inject_text(&app, injection_target, text),
         || {
@@ -386,8 +550,17 @@ fn finalize_live_runtime(
                 let save_error = "Couldn't save this recording to Home.";
                 view.error = Some(append_error(view.error.take(), save_error));
             });
+            return finish_live_finalization(app, live, Some(error));
         }
     }
+    finish_live_finalization(app, live, None)
+}
+
+fn finish_live_finalization(
+    app: tauri::AppHandle,
+    live: &live::LiveSessionState,
+    save_error: Option<String>,
+) -> FinalizationOutcome {
     let view = live.finish_saving();
     if view.error.is_some() {
         if let Err(error) = live::overlay_window::ensure_active(&app) {
@@ -401,7 +574,7 @@ fn finalize_live_runtime(
         let _ = window.hide();
     }
     live::events::emit_session(&app, &view);
-    view
+    FinalizationOutcome { view, save_error }
 }
 
 #[cfg(test)]
@@ -410,7 +583,7 @@ mod tests {
 
     use super::{
         apply_injection_result, block_for_setup, run_completion_effects_with,
-        INJECTION_COPIED_ERROR,
+        run_completion_effects_with_mode, run_quit_with, CompletionMode, INJECTION_COPIED_ERROR,
     };
     use crate::live::{
         injection::InjectionOutcome,
@@ -526,6 +699,63 @@ mod tests {
             events.into_inner(),
             vec!["remember:Finished words", "inject:Finished words", "save"]
         );
+    }
+
+    #[test]
+    fn quit_completion_remembers_and_saves_without_injecting() {
+        let mut view = LiveSessionView::from_settings(&LiveSettings::default());
+        view.final_text = Some("Finished words".into());
+        let events = RefCell::new(Vec::<String>::new());
+
+        let effects = run_completion_effects_with_mode(
+            &view,
+            CompletionMode::Quit,
+            |text| events.borrow_mut().push(format!("remember:{text}")),
+            |_| -> Result<(), String> {
+                events.borrow_mut().push("inject".into());
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("save".into());
+                Ok(())
+            },
+        );
+
+        assert_eq!(effects.injection, Ok(None));
+        assert_eq!(effects.save, Ok(()));
+        assert_eq!(events.into_inner(), vec!["remember:Finished words", "save"]);
+    }
+
+    #[test]
+    fn quit_does_not_exit_when_finalization_fails() {
+        let events = RefCell::new(Vec::new());
+
+        let result = run_quit_with(
+            || {
+                events.borrow_mut().push("finalize");
+                Err("save failed".to_string())
+            },
+            || events.borrow_mut().push("exit"),
+        );
+
+        assert_eq!(result, Err("save failed".into()));
+        assert_eq!(events.into_inner(), vec!["finalize"]);
+    }
+
+    #[test]
+    fn quit_exits_only_after_successful_finalization() {
+        let events = RefCell::new(Vec::new());
+
+        let result = run_quit_with(
+            || {
+                events.borrow_mut().push("finalize");
+                Ok(())
+            },
+            || events.borrow_mut().push("exit"),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(events.into_inner(), vec!["finalize", "exit"]);
     }
 
     #[test]
