@@ -29,6 +29,7 @@ const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 const ASR_ADAPTER_CANCEL_GRACE: Duration = Duration::from_millis(100);
 const CAPTURE_LOSS_FINAL_DRAIN_ATTEMPTS: usize = 64;
+const CAPTURE_WORKER_FAILURE: &str = "Live capture worker stopped unexpectedly.";
 const CRASH_CLAIM_BIT: u64 = 1 << 63;
 
 fn active_session_matches(active_session: u64, session: u64) -> bool {
@@ -403,12 +404,13 @@ impl LiveRuntime {
         let recording_reservation =
             crate::audio::recording::allocate_recording_session(&recording_directory)
                 .map_err(|message| LiveStartFailure::new(session, message))?;
+        let recording_session_id = recording_reservation.session_id().clone();
         let trigger_mode = match capture_mode {
             super::state::LiveCaptureMode::PushToTalk => TriggerMode::PushToTalk,
             super::state::LiveCaptureMode::Toggle => TriggerMode::Toggle,
         };
         let session_metadata = SessionMetadata::new(
-            recording_reservation.session_id().clone(),
+            recording_session_id.clone(),
             SessionMode::Dictation,
             SessionOrigin::LiveCapture,
             trigger_mode,
@@ -441,6 +443,7 @@ impl LiveRuntime {
                         runtime: capture_runtime,
                         app: capture_app,
                         session,
+                        recording_session_id,
                         active_session: capture_active_session,
                         recording: recording_for_capture,
                         local_asr,
@@ -1220,6 +1223,7 @@ struct CaptureWorkerContext {
     runtime: LiveRuntime,
     app: tauri::AppHandle,
     session: u64,
+    recording_session_id: SessionId,
     active_session: Arc<AtomicU64>,
     recording: BoundedSink<RecordingInput>,
     local_asr: BoundedSink<PreparedFrame>,
@@ -1235,6 +1239,7 @@ fn run_capture_worker(
         runtime,
         app,
         session,
+        recording_session_id,
         active_session,
         recording,
         local_asr,
@@ -1246,21 +1251,18 @@ fn run_capture_worker(
     let error_app = app.clone();
     let loss_runtime = runtime.clone();
     let loss_app = app.clone();
-    let coordinator = Arc::new(Mutex::new(Coordinator::new(
-        SessionId::new(format!("live-{session}")).expect("live session IDs are valid"),
-        TrackId::new("live-microphone").expect("static live track ID is valid"),
-        CoordinatorPorts {
-            recording,
-            local_asr: Some(local_asr),
-            speaker_evidence: None,
-            server_transport: None,
-        },
+    let recording_guard = recording.clone();
+    let coordinator = Arc::new(Mutex::new(capture_worker_coordinator(
+        recording_session_id,
+        recording,
+        local_asr,
     )));
     let transcription_degraded = Arc::new(AtomicBool::new(false));
     let packet_coordinator = Arc::clone(&coordinator);
     let packet_degraded = Arc::clone(&transcription_degraded);
     let loss_coordinator = Arc::clone(&coordinator);
     run_guarded_capture_packet_worker(
+        &recording_guard,
         || {
             run_capture_packet_loop(
                 ports,
@@ -1338,13 +1340,34 @@ fn run_capture_worker(
     };
 }
 
-fn run_guarded_capture_packet_worker<R, C>(run: R, process_crash: C)
-where
+fn capture_worker_coordinator(
+    recording_session_id: SessionId,
+    recording: BoundedSink<RecordingInput>,
+    local_asr: BoundedSink<PreparedFrame>,
+) -> Coordinator {
+    Coordinator::new(
+        recording_session_id,
+        TrackId::new("live-microphone").expect("static live track ID is valid"),
+        CoordinatorPorts {
+            recording,
+            local_asr: Some(local_asr),
+            speaker_evidence: None,
+            server_transport: None,
+        },
+    )
+}
+
+fn run_guarded_capture_packet_worker<R, C>(
+    recording: &BoundedSink<RecordingInput>,
+    run: R,
+    process_crash: C,
+) where
     R: FnOnce(),
     C: FnOnce(String),
 {
     if catch_unwind(AssertUnwindSafe(run)).is_err() {
-        process_crash("Live capture worker stopped unexpectedly.".to_string());
+        recording.degrade(CAPTURE_WORKER_FAILURE);
+        process_crash(CAPTURE_WORKER_FAILURE.to_string());
     }
 }
 
@@ -1785,9 +1808,12 @@ impl LiveRuntimeInner {
 mod tests {
     use super::*;
     use crate::audio::capture::{new_callback_boundary, CapturePacket, CapturePorts};
-    use crate::audio::frame::{AudioFrame, PreparedFrame};
+    use crate::audio::frame::{AudioFrame, GapCause, PreparedFrame};
+    use crate::audio::recording::{
+        allocate_recording_session, scan_recordings, CaptureStatus, RecordingSinkHandle,
+    };
     use crate::audio::session::{SessionId, TrackId};
-    use crate::audio::timeline::LossAccumulator;
+    use crate::audio::timeline::{LossAccumulator, LossSnapshot};
     use std::sync::Barrier;
 
     fn capture_loss_coordinator() -> (
@@ -1807,6 +1833,104 @@ mod tests {
             },
         );
         (Arc::new(Mutex::new(coordinator)), recording, receiver)
+    }
+
+    #[test]
+    fn reserved_recording_session_is_canonical_for_worker_frames_gaps_and_commit() {
+        let directory = std::env::temp_dir().join(format!(
+            "yap-runtime-reserved-session-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let reservation = allocate_recording_session(&directory).unwrap();
+        let recording_session_id = reservation.session_id().clone();
+        let (recording_sink, recording_rx) =
+            bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
+        let recording =
+            RecordingSinkHandle::spawn_reserved(reservation, recording_sink.clone(), recording_rx);
+        let (local_asr, local_asr_rx) = bounded_sink(SinkKind::LocalAsr, 8);
+        let coordinator = Arc::new(Mutex::new(capture_worker_coordinator(
+            recording_session_id.clone(),
+            recording_sink,
+            local_asr,
+        )));
+
+        coordinator
+            .lock()
+            .unwrap()
+            .consume(
+                &CapturePacket {
+                    source_position_frames: 0,
+                    channels: 1,
+                    sample_rate_hz: 16_000,
+                    samples: vec![0.0; 4_000],
+                },
+                &LossAccumulator::new(),
+            )
+            .unwrap();
+        let prepared = local_asr_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(prepared.metadata.session_id, recording_session_id);
+
+        let mut crash_messages = Vec::new();
+        assert!(!process_capture_loss(
+            &coordinator,
+            Ok(LossSnapshot {
+                first_source_position_frames: 4_000,
+                dropped_frames: 1_600,
+                cause: GapCause::DeviceDiscontinuity,
+                generation: 7,
+            }),
+            |message| crash_messages.push(message),
+        ));
+        assert!(crash_messages.is_empty());
+        coordinator
+            .lock()
+            .unwrap()
+            .consume(
+                &CapturePacket {
+                    source_position_frames: 5_600,
+                    channels: 1,
+                    sample_rate_hz: 16_000,
+                    samples: vec![0.0; 400],
+                },
+                &LossAccumulator::new(),
+            )
+            .unwrap();
+        coordinator.lock().unwrap().close();
+
+        let result = recording.finalize().unwrap();
+        assert_eq!(result.status, CaptureStatus::Complete, "{:?}", result.error);
+        assert_eq!(result.session_id, recording_session_id);
+        let commit: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join(format!("live-{recording_session_id}.commit.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join(format!("live-{recording_session_id}.capture.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(commit["sessionId"], recording_session_id.as_str());
+        assert_eq!(sidecar["sessionId"], recording_session_id.as_str());
+        assert_eq!(sidecar["sequenceCoverage"][0]["firstSequence"], 0);
+        assert_eq!(sidecar["sequenceCoverage"][0]["lastSequence"], 1);
+        assert_eq!(sidecar["timelineGaps"].as_array().unwrap().len(), 1);
+        let gap = &sidecar["timelineGaps"][0];
+        assert_eq!(gap["sessionId"], recording_session_id.as_str());
+        assert_eq!(gap["trackId"], "live-microphone");
+        assert_eq!(gap["startMs"], 250);
+        assert_eq!(gap["durationMs"], 100);
+        assert_eq!(gap["sourcePositionFrames"], 4_000);
+        assert_eq!(gap["droppedFrames"], 1_600);
+        assert_eq!(gap["cause"], "device_discontinuity");
+        assert_eq!(gap["generation"], 7);
+        let scan = scan_recordings(&directory).unwrap();
+        assert_eq!(scan.complete.len(), 1);
+        assert_eq!(scan.complete[0].manifest.session_id, recording_session_id);
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2158,8 +2282,11 @@ mod tests {
     #[test]
     fn guarded_capture_packet_worker_reports_a_synthetic_panic_and_exits() {
         let (crash_tx, crash_rx) = mpsc::channel();
+        let (recording, _recording_rx) = bounded_sink(SinkKind::Recording, 1);
+        let recording_for_worker = recording.clone();
         let worker = std::thread::spawn(move || {
             run_guarded_capture_packet_worker(
+                &recording_for_worker,
                 || panic!("synthetic packet worker panic"),
                 move |message| crash_tx.send(message).unwrap(),
             );
@@ -2167,9 +2294,79 @@ mod tests {
 
         assert_eq!(
             crash_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "Live capture worker stopped unexpectedly."
+            CAPTURE_WORKER_FAILURE
+        );
+        assert_eq!(
+            recording.outcome().error.as_deref(),
+            Some(CAPTURE_WORKER_FAILURE)
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn guarded_capture_worker_panic_after_pcm_is_a_stable_partial_capture() {
+        let directory =
+            std::env::temp_dir().join(format!("yap-runtime-guarded-panic-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        let session_id = SessionId::new("s-runtime-guarded-panic").unwrap();
+        let (recording_sink, recording_rx) =
+            bounded_sink(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
+        let recording = RecordingSinkHandle::spawn(
+            directory.clone(),
+            session_id.clone(),
+            recording_sink.clone(),
+            recording_rx,
+        );
+        let (local_asr, _local_asr_rx) = bounded_sink(SinkKind::LocalAsr, 8);
+        let mut coordinator =
+            capture_worker_coordinator(session_id.clone(), recording_sink.clone(), local_asr);
+        let (crash_tx, crash_rx) = mpsc::channel();
+
+        run_guarded_capture_packet_worker(
+            &recording_sink,
+            || {
+                coordinator
+                    .consume(
+                        &CapturePacket {
+                            source_position_frames: 0,
+                            channels: 1,
+                            sample_rate_hz: 16_000,
+                            samples: vec![0.25; 400],
+                        },
+                        &LossAccumulator::new(),
+                    )
+                    .unwrap();
+                panic!("synthetic packet worker panic after accepted PCM");
+            },
+            move |message| crash_tx.send(message).unwrap(),
+        );
+        coordinator.close();
+
+        let result = recording.finalize().unwrap();
+        let worker_failure = CAPTURE_WORKER_FAILURE;
+        assert_eq!(
+            crash_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            worker_failure
+        );
+        assert_eq!(
+            recording_sink.outcome().error.as_deref(),
+            Some(worker_failure)
+        );
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert_eq!(result.error.as_deref(), Some(worker_failure));
+        assert!(result.committed.is_none());
+        assert_eq!(
+            std::fs::metadata(directory.join(format!("live-{session_id}.wav.part")))
+                .unwrap()
+                .len(),
+            844
+        );
+        let scan = scan_recordings(&directory).unwrap();
+        assert!(scan.complete.is_empty());
+        assert_eq!(scan.partial.len(), 1);
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

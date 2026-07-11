@@ -65,6 +65,74 @@ fn sidecar_json(directory: &std::path::Path, session_id: &SessionId) -> serde_js
     .unwrap()
 }
 
+#[derive(Default)]
+struct DurableJournalTruth {
+    session_id: Option<String>,
+    track_configurations: Vec<serde_json::Value>,
+    clock_mappings: Vec<serde_json::Value>,
+    timeline_gaps: Vec<serde_json::Value>,
+    sequence_coverage: Vec<serde_json::Value>,
+    sink_degraded: bool,
+    overflow_reason: Option<String>,
+}
+
+fn replay_journal(directory: &std::path::Path, session_id: &SessionId) -> DurableJournalTruth {
+    let journal_path = directory.join(format!("live-{session_id}.capture.journal.part"));
+    let text = fs::read_to_string(journal_path).unwrap();
+    let mut truth = DurableJournalTruth::default();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let record: serde_json::Value = serde_json::from_str(line).unwrap();
+        match record["kind"].as_str().unwrap() {
+            "header" => {
+                let journal = &record["journal"];
+                truth.session_id = journal["sessionId"].as_str().map(str::to_string);
+                truth.track_configurations =
+                    journal["trackConfigurations"].as_array().unwrap().clone();
+                truth.clock_mappings = journal["clockMappings"].as_array().unwrap().clone();
+                truth.timeline_gaps = journal["timelineGaps"].as_array().unwrap().clone();
+                truth.sequence_coverage = journal["sequenceCoverage"].as_array().unwrap().clone();
+                truth.sink_degraded = journal["sinkDegraded"].as_bool().unwrap();
+            }
+            "delta" => {
+                let delta = &record["delta"];
+                assert_eq!(delta["sessionId"], session_id.as_str());
+                for transition in delta["revisionTransitions"].as_array().unwrap() {
+                    truth
+                        .track_configurations
+                        .push(transition["configuration"].clone());
+                    truth
+                        .clock_mappings
+                        .push(transition["clockMapping"].clone());
+                }
+                let gap_start = delta["timelineGapStartIndex"].as_u64().unwrap() as usize;
+                truth.timeline_gaps.truncate(gap_start);
+                truth
+                    .timeline_gaps
+                    .extend(delta["timelineGaps"].as_array().unwrap().iter().cloned());
+                for coverage in delta["sequenceCoverage"].as_array().unwrap() {
+                    let track_id = coverage["trackId"].as_str().unwrap();
+                    if let Some(existing) = truth
+                        .sequence_coverage
+                        .iter_mut()
+                        .find(|existing| existing["trackId"] == track_id)
+                    {
+                        *existing = coverage.clone();
+                    } else {
+                        truth.sequence_coverage.push(coverage.clone());
+                    }
+                }
+                truth.sink_degraded |= delta["sinkDegraded"].as_bool().unwrap();
+            }
+            "overflow" => {
+                assert_eq!(record["session_id"], session_id.as_str());
+                truth.overflow_reason = record["reason"].as_str().map(str::to_string);
+            }
+            kind => panic!("unexpected recording journal record: {kind}"),
+        }
+    }
+    truth
+}
+
 fn fixture_tone_wav() -> Vec<u8> {
     const SAMPLE_RATE: u32 = 16_000;
     const SAMPLE_COUNT: usize = 4_000;
@@ -276,6 +344,10 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
     assert_eq!(result.status, CaptureStatus::Partial);
     assert!(result.committed.is_none());
     assert_eq!(
+        result.error.as_deref(),
+        Some("recording journal durability stopped: journal size limit reached")
+    );
+    assert_eq!(
         fs::metadata(directory.join(format!("live-{session_id}.wav.part")))
             .unwrap()
             .len(),
@@ -287,6 +359,75 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
             .len()
             <= 512 * 1024
     );
+    let truth = replay_journal(&directory, &session_id);
+    assert_eq!(truth.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(truth.track_configurations.len(), 1);
+    assert_eq!(truth.track_configurations[0]["trackId"], "live-microphone");
+    assert_eq!(truth.track_configurations[0]["revision"], 1);
+    assert_eq!(truth.track_configurations[0]["effectiveAtMs"], 0);
+    assert_eq!(truth.track_configurations[0]["sampleRateHz"], 16_000);
+    assert_eq!(truth.clock_mappings.len(), 1);
+    assert_eq!(truth.clock_mappings[0]["trackId"], "live-microphone");
+    assert_eq!(truth.clock_mappings[0]["revision"], 1);
+    assert_eq!(truth.clock_mappings[0]["sourcePositionFrames"], 0);
+    assert_eq!(truth.clock_mappings[0]["sessionTimeMs"], 0);
+    assert_eq!(truth.sequence_coverage.len(), 1);
+    assert_eq!(truth.sequence_coverage[0]["firstSequence"], 0);
+    assert_eq!(truth.sequence_coverage[0]["lastSequence"], 0);
+    assert!(!truth.sink_degraded);
+    assert_eq!(
+        truth.overflow_reason.as_deref(),
+        Some("journal size limit reached")
+    );
+
+    assert_eq!(truth.timeline_gaps.len(), 1_014);
+    let frames_per_loss_ms = frames_per_loss * 1_000 / 16_000;
+    let prefix = &truth.timeline_gaps[0];
+    assert_eq!(prefix["sessionId"], session_id.as_str());
+    assert_eq!(prefix["trackId"], "live-microphone");
+    assert_eq!(prefix["startMs"], 1);
+    assert_eq!(prefix["durationMs"], frames_per_loss_ms * COALESCED_PREFIX);
+    assert_eq!(prefix["sourcePositionFrames"], 16);
+    assert_eq!(prefix["droppedFrames"], frames_per_loss * COALESCED_PREFIX);
+    assert_eq!(prefix["cause"], "callback_pool_exhausted");
+    assert_eq!(prefix["generation"], COALESCED_PREFIX);
+
+    for (gap_index, gap) in truth.timeline_gaps.iter().enumerate().skip(1) {
+        let loss_index = COALESCED_PREFIX + gap_index as u64 - 1;
+        let expected_source = 16 + loss_index * frames_per_loss;
+        let expected_start_ms = 1 + loss_index * frames_per_loss_ms;
+        let expected_cause = if loss_index.is_multiple_of(2) {
+            "device_discontinuity"
+        } else {
+            "sink_unavailable"
+        };
+        assert_eq!(gap["sessionId"], session_id.as_str());
+        assert_eq!(gap["trackId"], "live-microphone");
+        assert_eq!(gap["startMs"], expected_start_ms);
+        assert_eq!(gap["durationMs"], frames_per_loss_ms);
+        assert_eq!(gap["sourcePositionFrames"], expected_source);
+        assert_eq!(gap["droppedFrames"], frames_per_loss);
+        assert_eq!(gap["cause"], expected_cause);
+        assert_eq!(gap["generation"], loss_index + 1);
+    }
+
+    let lineage = result.partial_lineage.as_ref().unwrap();
+    let partial_sidecar_path = directory.join(&lineage.capture_sidecar_file);
+    let partial_sidecar = fs::read(&partial_sidecar_path).unwrap();
+    let partial_hash = Sha256::digest(&partial_sidecar)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(partial_hash, lineage.capture_sidecar_sha256);
+    let partial_sidecar: serde_json::Value = serde_json::from_slice(&partial_sidecar).unwrap();
+    assert_eq!(partial_sidecar["sessionId"], session_id.as_str());
+    assert_eq!(partial_sidecar["status"], "partial");
+    assert!(!directory
+        .join(format!("live-{session_id}.capture.json"))
+        .exists());
+    assert!(!directory
+        .join(format!("live-{session_id}.commit.json"))
+        .exists());
     let scan = scan_recordings(&directory).unwrap();
     assert!(scan.complete.is_empty());
     assert_eq!(scan.partial.len(), 1);

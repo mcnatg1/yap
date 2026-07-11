@@ -799,6 +799,7 @@ fn validate_sequence_metadata(
     sequence_gap_overflow: Option<&SequenceGapOverflow>,
     sink_degraded: bool,
 ) -> Result<(), String> {
+    validate_initial_sequence_coverage(sequence_coverage)?;
     let track_ids = tracks
         .iter()
         .map(|track| track.track_id.as_str())
@@ -852,6 +853,18 @@ fn validate_sequence_metadata(
     }
     if sink_degraded || !sequence_gaps.is_empty() || sequence_gap_overflow.is_some() {
         return Err("degraded recording metadata cannot be complete".into());
+    }
+    Ok(())
+}
+
+fn validate_initial_sequence_coverage(
+    sequence_coverage: &[SequenceCoverage],
+) -> Result<(), String> {
+    if sequence_coverage
+        .iter()
+        .any(|coverage| coverage.first_sequence != 0)
+    {
+        return Err("recording track sequence must start at zero".into());
     }
     Ok(())
 }
@@ -1738,6 +1751,18 @@ impl StreamingRecording {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
+        if frame.metadata.session_id != self.journal.session_id {
+            return self.fail("recording prepared frame session does not match".into());
+        }
+        if frame.metadata.sequence != 0
+            && !self
+                .journal
+                .sequence_coverage
+                .iter()
+                .any(|coverage| coverage.track_id == frame.metadata.track_id.as_str())
+        {
+            return self.fail("recording track sequence must start at zero".into());
+        }
         self.observe_frame_metadata(
             frame.metadata.track_id.as_str(),
             frame.metadata.sample_rate_hz,
@@ -2494,6 +2519,7 @@ fn parse_journal_append_log(text: &str) -> Result<CaptureJournal, String> {
             &snapshot.clock_mappings,
             &snapshot.timeline_gaps,
         )?;
+        validate_initial_sequence_coverage(&snapshot.sequence_coverage)?;
         return Ok(snapshot);
     }
     let mut journal = None;
@@ -2538,6 +2564,7 @@ fn parse_journal_append_log(text: &str) -> Result<CaptureJournal, String> {
         &journal.clock_mappings,
         &journal.timeline_gaps,
     )?;
+    validate_initial_sequence_coverage(&journal.sequence_coverage)?;
     Ok(journal)
 }
 
@@ -2552,6 +2579,7 @@ fn apply_journal_delta(journal: &mut CaptureJournal, delta: JournalDelta) -> Res
     if delta.schema_version != CAPTURE_SCHEMA_VERSION || delta.session_id != journal.session_id {
         return Err("recording journal delta does not match the session".into());
     }
+    validate_initial_sequence_coverage(&delta.sequence_coverage)?;
     for track in delta.tracks {
         journal.tracks.insert(track.track_id.clone(), track);
     }
@@ -3780,6 +3808,14 @@ mod tests {
     }
 
     #[test]
+    fn scanner_rejects_hash_bound_sequence_coverage_that_starts_after_zero() {
+        assert_hash_bound_sidecar_mutation_is_damaged("sequence-prefix", |sidecar| {
+            sidecar["sequenceCoverage"][0]["firstSequence"] = serde_json::Value::from(5);
+            sidecar["sequenceCoverage"][0]["lastSequence"] = serde_json::Value::from(5);
+        });
+    }
+
+    #[test]
     fn scanner_rejects_hash_bound_mismatched_revision_transition_timestamp() {
         assert_hash_bound_sidecar_mutation_is_damaged("revision-timestamp", |sidecar| {
             sidecar["clockMappings"][0]["sessionTimeMs"] = serde_json::Value::from(1);
@@ -4058,6 +4094,93 @@ mod tests {
         let scan = scan_recordings(&dir).unwrap();
         assert!(scan.complete.is_empty());
         assert_eq!(scan.partial.len(), 1);
+    }
+
+    #[test]
+    fn prepared_frame_session_must_match_the_recording_session() {
+        let dir = tempfile_dir("prepared-frame-session");
+        let session = SessionId::new("s-prepared-frame-session").unwrap();
+        let other_session = SessionId::new("s-other-prepared-frame-session").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session).unwrap();
+        recording
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
+            .unwrap();
+
+        let error = recording
+            .append_input(RecordingInput::PreparedFrame(prepared_frame(
+                &other_session,
+            )))
+            .unwrap_err();
+        let result = recording.finalize().unwrap();
+
+        assert_eq!(error, "recording prepared frame session does not match");
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert_eq!(result.error.as_deref(), Some(error.as_str()));
+        assert!(result.committed.is_none());
+    }
+
+    #[test]
+    fn first_prepared_frame_sequence_must_be_zero() {
+        let dir = tempfile_dir("prepared-frame-sequence-prefix");
+        let session = SessionId::new("s-prepared-frame-sequence-prefix").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording
+            .append_input(recording_revision(&track, 1, 0, 16_000, 0))
+            .unwrap();
+
+        let error = recording
+            .append_input(RecordingInput::PreparedFrame(prepared_frame_at(
+                &session, 5, 0,
+            )))
+            .unwrap_err();
+        let result = recording.finalize().unwrap();
+
+        assert_eq!(error, "recording track sequence must start at zero");
+        assert_eq!(result.status, CaptureStatus::Partial);
+        assert_eq!(result.error.as_deref(), Some(error.as_str()));
+        assert!(result.committed.is_none());
+    }
+
+    #[test]
+    fn journal_replay_rejects_sequence_coverage_that_starts_after_zero() {
+        let session = SessionId::new("s-replay-sequence-prefix").unwrap();
+        let track = TrackId::new("live-microphone").unwrap();
+        let header = JournalRecord::Header {
+            journal: CaptureJournal::new(session.clone()),
+        };
+        let delta = JournalRecord::Delta {
+            delta: JournalDelta {
+                schema_version: CAPTURE_SCHEMA_VERSION,
+                session_id: session,
+                tracks: vec![JournalTrack {
+                    track_id: track.as_str().to_string(),
+                    sample_rate_hz: 16_000,
+                    channels: 1,
+                    first_start_ms: 0,
+                }],
+                revision_transitions: vec![revision_transition(&track, 1, 0, 16_000, 0)],
+                timeline_gap_start_index: 0,
+                timeline_gaps: Vec::new(),
+                sequence_coverage: vec![SequenceCoverage {
+                    track_id: track.as_str().to_string(),
+                    first_sequence: 5,
+                    last_sequence: 5,
+                }],
+                gap_start_index: 0,
+                sequence_gaps: Vec::new(),
+                sequence_gap_overflow: None,
+                sink_degraded: false,
+            },
+        };
+        let mut bytes = serialize_journal_record(&header).unwrap();
+        bytes.extend(serialize_journal_record(&delta).unwrap());
+        let text = String::from_utf8(bytes).unwrap();
+
+        let error = parse_journal_append_log(&text).unwrap_err();
+
+        assert_eq!(error, "recording track sequence must start at zero");
     }
 
     #[test]
@@ -4914,7 +5037,16 @@ mod tests {
         recording
             .append_input(recording_revision(&track, 1, 0, 16_000, 0))
             .unwrap();
-        recording.observe_frame_metadata("live-microphone", 16_000, 1, 4, 0, 100);
+        for sequence in 0..=4 {
+            recording.observe_frame_metadata(
+                "live-microphone",
+                16_000,
+                1,
+                sequence,
+                sequence * 100,
+                100,
+            );
+        }
         recording.persist_journal_for_test().unwrap();
         let journal = recording.paths.journal_part.clone();
         drop(recording);
