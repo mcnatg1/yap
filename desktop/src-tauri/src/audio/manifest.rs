@@ -4,8 +4,8 @@ use crate::audio::frame::{
     TrackConfigurationRevision, VadSegment,
 };
 use crate::audio::session::{
-    CaptureSource, CaptureTrackDescriptor, ImportedTrackProvenance, OwnerNamespace, SessionId,
-    SessionMode, SessionOrigin, TrackId, TrackSource,
+    CaptureSource, CaptureTrackDescriptor, OwnerNamespace, SessionId, SessionMode, SessionOrigin,
+    TrackSource,
 };
 use crate::audio::vad::{VadDecision, VadKind};
 
@@ -181,7 +181,6 @@ impl AudioSessionEnvelopeBuilder {
             )
         });
         validate_chunk_references(
-            true,
             &self.session_id,
             self.session_mode,
             self.session_origin,
@@ -207,190 +206,71 @@ impl AudioSessionEnvelopeBuilder {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AudioSessionEnvelopeWire {
-    schema_version: Option<u16>,
-    session_id: LegacySessionId,
-    session_mode: Option<SessionMode>,
-    session_origin: Option<SessionOrigin>,
-    tracks: Option<Vec<CaptureTrackDescriptor>>,
-    track_configuration_revisions: Option<Vec<TrackConfigurationRevision>>,
-    source: Option<LegacyAudioSource>,
-    started_at_ms: Option<u64>,
-    sample_rate_hz: Option<u32>,
-    chunks: Option<Vec<CaptureChunkDescriptor>>,
-    degraded: Option<bool>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum LegacySessionId {
-    Current(SessionId),
-    Numeric(u64),
-}
-
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum LegacyAudioSource {
-    Live,
-    Recording,
-}
-
 impl<'de> serde::Deserialize<'de> for AudioSessionEnvelope {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = AudioSessionEnvelopeWire::deserialize(deserializer)?;
-        let (
-            schema_version,
-            session_id,
-            session_mode,
-            session_origin,
-            tracks,
-            track_configuration_revisions,
-            started_at_ms,
-            sample_rate_hz,
-            chunks,
-            degraded,
-        ) = match wire.schema_version {
-            Some(MANIFEST_SCHEMA_VERSION) => {
-                let session_id = match wire.session_id {
-                    LegacySessionId::Current(session_id) => session_id,
-                    LegacySessionId::Numeric(_) => {
-                        return Err(serde::de::Error::custom(
-                            "current manifests cannot use numeric session IDs",
-                        ));
-                    }
-                };
-                if wire.source.is_some() {
-                    return Err(serde::de::Error::custom(
-                        "current manifests cannot use the legacy source field",
-                    ));
-                }
-                (
-                    MANIFEST_SCHEMA_VERSION,
-                    session_id,
-                    wire.session_mode
-                        .ok_or_else(|| serde::de::Error::missing_field("sessionMode"))?,
-                    wire.session_origin
-                        .ok_or_else(|| serde::de::Error::missing_field("sessionOrigin"))?,
-                    wire.tracks
-                        .ok_or_else(|| serde::de::Error::missing_field("tracks"))?,
-                    wire.track_configuration_revisions.ok_or_else(|| {
-                        serde::de::Error::missing_field("trackConfigurationRevisions")
-                    })?,
-                    wire.started_at_ms
-                        .ok_or_else(|| serde::de::Error::missing_field("startedAtMs"))?,
-                    wire.sample_rate_hz
-                        .ok_or_else(|| serde::de::Error::missing_field("sampleRateHz"))?,
-                    wire.chunks
-                        .ok_or_else(|| serde::de::Error::missing_field("chunks"))?,
-                    wire.degraded
-                        .ok_or_else(|| serde::de::Error::missing_field("degraded"))?,
-                )
-            }
-            None | Some(0) => match wire.session_id {
-                LegacySessionId::Numeric(value) => {
-                    if wire.session_mode.is_some()
-                        || wire.session_origin.is_some()
-                        || wire.tracks.is_some()
-                        || wire.track_configuration_revisions.is_some()
-                    {
-                        return Err(serde::de::Error::custom(
-                            "legacy manifests cannot mix typed manifest fields",
-                        ));
-                    }
-                    let source = wire
-                        .source
-                        .ok_or_else(|| serde::de::Error::missing_field("source"))?;
-                    let session_origin = match source {
-                        LegacyAudioSource::Live => SessionOrigin::LiveCapture,
-                        LegacyAudioSource::Recording => SessionOrigin::ImportedFile,
-                    };
-                    (
-                        0,
-                        SessionId::new(format!("legacy-{value}"))
-                            .map_err(serde::de::Error::custom)?,
-                        SessionMode::Dictation,
-                        session_origin,
-                        vec![legacy_track_descriptor(session_origin)],
-                        Vec::new(),
-                        wire.started_at_ms
-                            .ok_or_else(|| serde::de::Error::missing_field("startedAtMs"))?,
-                        wire.sample_rate_hz
-                            .ok_or_else(|| serde::de::Error::missing_field("sampleRateHz"))?,
-                        wire.chunks
-                            .ok_or_else(|| serde::de::Error::missing_field("chunks"))?,
-                        wire.degraded
-                            .ok_or_else(|| serde::de::Error::missing_field("degraded"))?,
-                    )
-                }
-                LegacySessionId::Current(session_id) => {
-                    if wire.source.is_some() || wire.track_configuration_revisions.is_some() {
-                        return Err(serde::de::Error::custom(
-                            "current manifests require a schema version",
-                        ));
-                    }
-                    (
-                        0,
-                        session_id,
-                        wire.session_mode
-                            .ok_or_else(|| serde::de::Error::missing_field("sessionMode"))?,
-                        wire.session_origin
-                            .ok_or_else(|| serde::de::Error::missing_field("sessionOrigin"))?,
-                        wire.tracks
-                            .ok_or_else(|| serde::de::Error::missing_field("tracks"))?,
-                        Vec::new(),
-                        wire.started_at_ms
-                            .ok_or_else(|| serde::de::Error::missing_field("startedAtMs"))?,
-                        wire.sample_rate_hz
-                            .ok_or_else(|| serde::de::Error::missing_field("sampleRateHz"))?,
-                        wire.chunks
-                            .ok_or_else(|| serde::de::Error::missing_field("chunks"))?,
-                        wire.degraded
-                            .ok_or_else(|| serde::de::Error::missing_field("degraded"))?,
-                    )
-                }
-            },
-            Some(_) => {
-                return Err(serde::de::Error::custom(
-                    "unsupported manifest schema version",
-                ));
-            }
-        };
-        validate_track_sources(session_origin, &tracks).map_err(serde::de::Error::custom)?;
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SchemaOneEnvelope {
+            schema_version: u16,
+            session_id: SessionId,
+            session_mode: SessionMode,
+            session_origin: SessionOrigin,
+            tracks: Vec<CaptureTrackDescriptor>,
+            track_configuration_revisions: Vec<TrackConfigurationRevision>,
+            source: Option<serde::de::IgnoredAny>,
+            started_at_ms: u64,
+            sample_rate_hz: u32,
+            chunks: Vec<CaptureChunkDescriptor>,
+            degraded: bool,
+        }
 
+        let schema_one = SchemaOneEnvelope::deserialize(deserializer)?;
+        if schema_one.schema_version != MANIFEST_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(
+                "unsupported manifest schema version",
+            ));
+        }
+        if schema_one.source.is_some() {
+            return Err(serde::de::Error::custom(
+                "schema 1 manifests cannot use the source field",
+            ));
+        }
+
+        let manifest = Self {
+            schema_version: schema_one.schema_version,
+            session_id: schema_one.session_id,
+            session_mode: schema_one.session_mode,
+            session_origin: schema_one.session_origin,
+            tracks: schema_one.tracks,
+            track_configuration_revisions: schema_one.track_configuration_revisions,
+            started_at_ms: schema_one.started_at_ms,
+            sample_rate_hz: schema_one.sample_rate_hz,
+            chunks: schema_one.chunks,
+            degraded: schema_one.degraded,
+        };
+
+        validate_track_sources(manifest.session_origin, &manifest.tracks)
+            .map_err(serde::de::Error::custom)?;
         validate_chunk_references(
-            schema_version == MANIFEST_SCHEMA_VERSION,
-            &session_id,
-            session_mode,
-            session_origin,
-            &tracks,
-            sample_rate_hz,
-            &track_configuration_revisions,
-            &chunks,
+            &manifest.session_id,
+            manifest.session_mode,
+            manifest.session_origin,
+            &manifest.tracks,
+            manifest.sample_rate_hz,
+            &manifest.track_configuration_revisions,
+            &manifest.chunks,
         )
         .map_err(serde::de::Error::custom)?;
-        if chunks.iter().any(|chunk| !chunk.gaps.is_empty()) && !degraded {
+        if manifest.chunks.iter().any(|chunk| !chunk.gaps.is_empty()) && !manifest.degraded {
             return Err(serde::de::Error::custom(
                 "manifests containing gaps must be degraded",
             ));
         }
 
-        Ok(Self {
-            schema_version,
-            session_id,
-            session_mode,
-            session_origin,
-            tracks,
-            track_configuration_revisions,
-            started_at_ms,
-            sample_rate_hz,
-            chunks,
-            degraded,
-        })
+        Ok(manifest)
     }
 }
 
@@ -414,7 +294,6 @@ fn validate_track_sources(
 
 #[allow(clippy::too_many_arguments)]
 fn validate_chunk_references(
-    current_manifest: bool,
     session_id: &SessionId,
     session_mode: SessionMode,
     session_origin: SessionOrigin,
@@ -428,11 +307,7 @@ fn validate_chunk_references(
     }
     validate_track_configuration_revisions(tracks, track_configuration_revisions)?;
     for chunk in chunks {
-        if current_manifest {
-            crate::audio::frame::validate_current_descriptor(chunk)?;
-        } else if chunk.replay_key.schema_version != 0 {
-            return Err(ManifestError::SessionTrackReferenceMismatch);
-        }
+        crate::audio::frame::validate_current_descriptor(chunk)?;
         if chunk.session_id != *session_id || chunk.replay_key.session_id != *session_id {
             return Err(ManifestError::SessionMismatch);
         }
@@ -580,22 +455,6 @@ fn validate_cross_chunk_sample_rates(
         }
     }
     Ok(())
-}
-
-fn legacy_track_descriptor(origin: SessionOrigin) -> CaptureTrackDescriptor {
-    let source = match origin {
-        SessionOrigin::LiveCapture => TrackSource::Captured {
-            source: CaptureSource::Microphone,
-        },
-        SessionOrigin::ImportedFile => TrackSource::Imported {
-            provenance: ImportedTrackProvenance::Unknown,
-        },
-    };
-    CaptureTrackDescriptor {
-        track_id: TrackId::new("legacy-0").expect("static legacy track ID is valid"),
-        source,
-        device_id: "dev-legacy".into(),
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1060,6 +919,22 @@ mod tests {
             "install-id",
             "0:Built-in Microphone",
         )
+    }
+
+    fn schema_one_manifest_json() -> serde_json::Value {
+        serde_json::to_value(AudioSessionEnvelope {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            session_id: session_id(7),
+            session_mode: SessionMode::Dictation,
+            session_origin: SessionOrigin::LiveCapture,
+            tracks: vec![track_descriptor()],
+            track_configuration_revisions: Vec::new(),
+            started_at_ms: 0,
+            sample_rate_hz: 16_000,
+            chunks: Vec::new(),
+            degraded: false,
+        })
+        .unwrap()
     }
 
     fn chunk_context<'a>(
@@ -1822,66 +1697,71 @@ mod tests {
     }
 
     #[test]
-    fn missing_schema_rejects_current_manifest_shape_but_typed_base_manifest_reads() {
-        let session = AudioSessionEnvelope {
-            schema_version: MANIFEST_SCHEMA_VERSION,
-            session_id: session_id(7),
-            session_mode: SessionMode::Dictation,
-            session_origin: SessionOrigin::LiveCapture,
-            tracks: vec![track_descriptor()],
-            track_configuration_revisions: Vec::new(),
-            started_at_ms: 0,
-            sample_rate_hz: 16_000,
-            chunks: Vec::new(),
-            degraded: false,
-        };
-        let mut current = serde_json::to_value(session).unwrap();
-        current.as_object_mut().unwrap().remove("schemaVersion");
-        assert!(serde_json::from_value::<AudioSessionEnvelope>(current).is_err());
+    fn schema_one_manifest_round_trips_unchanged() {
+        let value = schema_one_manifest_json();
+        let manifest = serde_json::from_value::<AudioSessionEnvelope>(value.clone()).unwrap();
 
-        let typed_base = serde_json::json!({
-            "sessionId": "s-7",
-            "sessionMode": "dictation",
-            "sessionOrigin": "live_capture",
-            "tracks": [{
-                "trackId": "mic-1",
-                "source": { "kind": "captured", "source": "microphone" },
-                "deviceId": "dev-opaque"
-            }],
-            "startedAtMs": 0,
-            "sampleRateHz": 16_000,
-            "chunks": [],
-            "degraded": false
-        });
-        assert!(serde_json::from_value::<AudioSessionEnvelope>(typed_base).is_ok());
+        assert_eq!(serde_json::to_value(manifest).unwrap(), value);
     }
 
     #[test]
-    fn legacy_live_audio_source_deserializes_as_live_capture() {
-        let manifest: AudioSessionEnvelope = serde_json::from_value(serde_json::json!({
+    fn missing_manifest_schema_version_is_rejected() {
+        let mut value = schema_one_manifest_json();
+        value.as_object_mut().unwrap().remove("schemaVersion");
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn manifest_schema_zero_is_rejected() {
+        let mut value = schema_one_manifest_json();
+        value["schemaVersion"] = serde_json::json!(0);
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn unknown_manifest_schema_version_is_rejected() {
+        let mut value = schema_one_manifest_json();
+        value["schemaVersion"] = serde_json::json!(2);
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn numeric_manifest_session_ids_are_rejected() {
+        let mut value = schema_one_manifest_json();
+        value["sessionId"] = serde_json::json!(7);
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn old_manifest_source_field_is_rejected() {
+        let mut value = schema_one_manifest_json();
+        value["source"] = serde_json::json!("live");
+
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
+    }
+
+    #[test]
+    fn schema_zero_compatibility_shape_is_rejected() {
+        let value = serde_json::json!({
+            "schemaVersion": 0,
             "sessionId": 7,
             "source": "live",
             "startedAtMs": 0,
             "sampleRateHz": 16_000,
             "chunks": [],
             "degraded": false
-        }))
-        .unwrap();
+        });
 
-        assert_eq!(
-            manifest.session_origin,
-            crate::audio::session::SessionOrigin::LiveCapture
-        );
-        assert_eq!(manifest.tracks.len(), 1);
-        assert!(matches!(
-            manifest.tracks[0].source,
-            crate::audio::session::TrackSource::Captured { .. }
-        ));
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
     }
 
     #[test]
-    fn legacy_manifest_with_numeric_nested_chunk_session_ids_deserializes() {
-        let manifest: AudioSessionEnvelope = serde_json::from_value(serde_json::json!({
+    fn unversioned_manifest_with_incomplete_numeric_chunk_is_rejected() {
+        let value = serde_json::json!({
             "sessionId": 7,
             "source": "live",
             "startedAtMs": 0,
@@ -1903,18 +1783,15 @@ mod tests {
                 }
             }],
             "degraded": false
-        }))
-        .unwrap();
+        });
 
-        assert_eq!(manifest.session_id.as_str(), "legacy-7");
-        assert_eq!(manifest.chunks[0].session_id.as_str(), "legacy-7");
-        assert_eq!(manifest.chunks[0].track_id.as_str(), "legacy-0");
-        assert_eq!(manifest.chunks[0].sequence_end, 1);
+        assert!(serde_json::from_value::<AudioSessionEnvelope>(value).is_err());
     }
 
     #[test]
     fn manifest_deserialization_rejects_origin_and_track_source_mismatch() {
-        let result = serde_json::from_value::<AudioSessionEnvelope>(serde_json::json!({
+        let error = serde_json::from_value::<AudioSessionEnvelope>(serde_json::json!({
+            "schemaVersion": MANIFEST_SCHEMA_VERSION,
             "sessionId": "s-imported",
             "sessionMode": "dictation",
             "sessionOrigin": "imported_file",
@@ -1923,13 +1800,17 @@ mod tests {
                 "source": { "kind": "captured", "source": "microphone" },
                 "deviceId": "dev-opaque"
             }],
+            "trackConfigurationRevisions": [],
             "startedAtMs": 0,
             "sampleRateHz": 16_000,
             "chunks": [],
             "degraded": false
-        }));
+        }))
+        .unwrap_err();
 
-        assert!(result.is_err());
+        assert!(error
+            .to_string()
+            .contains("ImportedFile sessions must contain only imported tracks"));
     }
 
     #[test]
@@ -1970,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn current_manifest_chunk_missing_identity_fields_is_rejected_not_projected_as_legacy() {
+    fn manifest_chunk_missing_identity_fields_is_rejected() {
         let mut builder = chunk_builder(55, AudioPurpose::CaptureEnvelope);
         builder.push(frame(55, 1, 0, 20, 16_000)).unwrap();
         let session = AudioSessionEnvelope {
@@ -1995,7 +1876,7 @@ mod tests {
     }
 
     #[test]
-    fn current_string_id_chunk_cannot_fall_through_to_legacy_projection() {
+    fn manifest_chunk_missing_modern_fields_is_rejected() {
         let mut builder = chunk_builder(55, AudioPurpose::CaptureEnvelope);
         builder.push(frame(55, 1, 0, 20, 16_000)).unwrap();
         let session = AudioSessionEnvelope {
