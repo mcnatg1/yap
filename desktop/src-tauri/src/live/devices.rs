@@ -1,16 +1,17 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{sync::mpsc, time::Duration};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::state::LiveInputDeviceView;
 
 const MICROPHONE_PERMISSION_DENIED_PREFIX: &str = "Microphone permission denied:";
+const PREFLIGHT_INPUT_DEADLINE: Duration = Duration::from_millis(160);
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreflightEvent {
+    Input,
+    StreamError(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MicrophoneOperation {
@@ -117,8 +118,8 @@ fn resolve_input_device_from_infos(
 
 pub fn preflight_input_device(selected_id: Option<&str>) -> Result<ResolvedInputDevice, String> {
     let resolved = resolve_capture_device(selected_id)?;
-    let heard_input = Arc::new(AtomicBool::new(false));
-    let heard_input_for_callback = Arc::clone(&heard_input);
+    let (events, receiver) = mpsc::sync_channel(1);
+    let input_events = events.clone();
     let stream = resolved
         .device
         .build_input_stream_raw(
@@ -126,20 +127,37 @@ pub fn preflight_input_device(selected_id: Option<&str>) -> Result<ResolvedInput
             resolved.config.sample_format(),
             move |data, _| {
                 if data.len() > 0 {
-                    heard_input_for_callback.store(true, Ordering::Relaxed);
+                    let _ = input_events.try_send(PreflightEvent::Input);
                 }
             },
-            |_| {},
+            move |error| {
+                let _ = events.try_send(PreflightEvent::StreamError(microphone_error(
+                    MicrophoneOperation::InputStreamPlayback,
+                    error,
+                )));
+            },
             Some(Duration::from_millis(250)),
         )
         .map_err(|error| microphone_error(MicrophoneOperation::InputStreamBuild, error))?;
     microphone_result(MicrophoneOperation::InputStreamPlayback, stream.play())?;
-    std::thread::sleep(Duration::from_millis(160));
+    let preflight = wait_for_preflight_event(receiver, PREFLIGHT_INPUT_DEADLINE);
     drop(stream);
-    if !heard_input.load(Ordering::Relaxed) {
-        return Err("No input detected.".into());
-    }
+    preflight?;
     Ok(resolved.selection)
+}
+
+fn wait_for_preflight_event(
+    receiver: mpsc::Receiver<PreflightEvent>,
+    deadline: Duration,
+) -> Result<(), String> {
+    match receiver.recv_timeout(deadline) {
+        Ok(PreflightEvent::Input) => Ok(()),
+        Ok(PreflightEvent::StreamError(error)) => Err(error),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("No input detected.".into()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("Microphone preflight stopped before input was detected.".into())
+        }
+    }
 }
 
 pub(crate) fn resolve_capture_device(
@@ -220,6 +238,76 @@ fn select_input_device(devices: &[DeviceInfo], selected_id: Option<&str>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_accepts_input_before_a_stream_error() {
+        let (events, receiver) = std::sync::mpsc::sync_channel(1);
+        events.try_send(PreflightEvent::Input).unwrap();
+        assert!(matches!(
+            events.try_send(PreflightEvent::StreamError("too late".into())),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+
+        assert_eq!(
+            wait_for_preflight_event(receiver, Duration::from_millis(10)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn preflight_returns_the_first_actionable_stream_error() {
+        for (detail, expected) in [
+            (
+                "E_ACCESSDENIED",
+                "Microphone permission denied: E_ACCESSDENIED",
+            ),
+            (
+                "device invalidated",
+                "Microphone input stream playback failed: device invalidated",
+            ),
+        ] {
+            let (events, receiver) = std::sync::mpsc::sync_channel(1);
+            events
+                .try_send(PreflightEvent::StreamError(microphone_error(
+                    MicrophoneOperation::InputStreamPlayback,
+                    detail,
+                )))
+                .unwrap();
+            assert!(matches!(
+                events.try_send(PreflightEvent::Input),
+                Err(std::sync::mpsc::TrySendError::Full(_))
+            ));
+
+            assert_eq!(
+                wait_for_preflight_event(receiver, Duration::from_millis(10)),
+                Err(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_reports_no_input_only_after_the_deadline() {
+        let (_events, receiver) = std::sync::mpsc::sync_channel(1);
+
+        assert_eq!(
+            wait_for_preflight_event(receiver, Duration::from_millis(1)),
+            Err("No input detected.".into())
+        );
+    }
+
+    #[test]
+    fn preflight_ignores_a_callback_after_the_deadline() {
+        let (events, receiver) = std::sync::mpsc::sync_channel(1);
+
+        assert_eq!(
+            wait_for_preflight_event(receiver, Duration::ZERO),
+            Err("No input detected.".into())
+        );
+        assert!(matches!(
+            events.try_send(PreflightEvent::Input),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_))
+        ));
+    }
 
     #[test]
     fn native_microphone_failures_name_the_exact_operation() {
