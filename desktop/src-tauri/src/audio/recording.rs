@@ -130,6 +130,54 @@ pub struct RecordingFinalizeResult {
     sidecar_receipt: Option<PublicationReceipt>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedTranscriptReceipt {
+    file_name: String,
+    sha256: String,
+    path: PathBuf,
+    file: Arc<File>,
+}
+
+impl PublishedTranscriptReceipt {
+    pub(crate) fn from_verified_destination(
+        destination: &Path,
+        mut file: File,
+    ) -> Result<Self, String> {
+        let file_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "published transcript has no valid file name".to_string())?
+            .to_string();
+        validate_artifact_name(&file_name)?;
+        let sha256 = sha256_open_file(&mut file)?;
+        Ok(Self {
+            file_name,
+            sha256,
+            path: destination.to_path_buf(),
+            file: Arc::new(file),
+        })
+    }
+
+    pub(crate) fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    pub(crate) fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), String> {
+        let mut current = open_regular_path(&self.path)?;
+        if !same_file_identity(&self.file, &current)? {
+            return Err("transcript path no longer names the verified destination".into());
+        }
+        if sha256_open_file(&mut current)? != self.sha256 {
+            return Err("transcript path no longer matches the verified destination hash".into());
+        }
+        Ok(())
+    }
+}
+
 impl PartialEq for RecordingFinalizeResult {
     fn eq(&self, other: &Self) -> bool {
         self.session_id == other.session_id
@@ -1793,11 +1841,6 @@ fn write_json_file_open<T: serde::Serialize>(
 pub fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file =
         File::open(path).map_err(|error| format!("Failed to hash recording artifact: {error}"))?;
-    sha256_open_file(&mut file)
-}
-
-pub(crate) fn sha256_regular_artifact(directory: &Path, name: &str) -> Result<String, String> {
-    let mut file = open_regular_artifact(directory, name)?;
     sha256_open_file(&mut file)
 }
 
