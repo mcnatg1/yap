@@ -7,6 +7,15 @@ test("main app renders the home surface", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Home" })).toBeVisible();
 });
 
+test("browser preview keeps its startup status and auth labels", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.getByText("Preview", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open settings" }).click();
+  await page.getByRole("button", { name: "About", exact: true }).click();
+  await expect(page.getByText("Tauri bridge", { exact: true })).toBeVisible();
+});
+
 test("history keeps committed review actions separate from recoverable capture actions", async ({ context, page }) => {
   const committedName = "live-s-18f001122334455-2a-0";
   const recoverableName = "live-s-18f001122334455-2a-1";

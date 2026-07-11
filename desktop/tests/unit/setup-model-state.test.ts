@@ -9,6 +9,7 @@ import {
 } from "@/lib/app-types";
 import {
   fallbackStatusText,
+  projectFallbackModelState,
   shouldOpenSetupPrompt,
   unblockFallbackReadyQueue,
 } from "@/lib/setup-model-state";
@@ -101,5 +102,151 @@ describe("setup model state", () => {
       status: "queued_local_fallback",
       pipeline: { transcription: "notStarted" },
     });
+  });
+
+  it.each([
+    {
+      currentEnabled: false,
+      currentInstalled: false,
+      expected: {
+        auth: "Ready",
+        engineReady: true,
+        fallbackEnabled: true,
+        modelInstalled: true,
+        requestQueueUnblock: true,
+        setupState: "fallback_ready",
+        status: "Transcription engine ready",
+      },
+      modelStatus: "ready" as const,
+    },
+    {
+      currentEnabled: true,
+      currentInstalled: false,
+      expected: {
+        auth: "Setup",
+        engineReady: false,
+        fallbackEnabled: false,
+        modelInstalled: true,
+        requestQueueUnblock: false,
+        setupState: "fallback_disabled",
+        status: "Local fallback disabled",
+      },
+      modelStatus: "disabled" as const,
+    },
+    {
+      currentEnabled: true,
+      currentInstalled: true,
+      expected: {
+        auth: "Setup",
+        engineReady: false,
+        fallbackEnabled: true,
+        modelInstalled: false,
+        requestQueueUnblock: false,
+        setupState: "fallback_missing",
+        status: "Local fallback model missing",
+      },
+      modelStatus: "missing" as const,
+    },
+    {
+      currentEnabled: false,
+      currentInstalled: false,
+      expected: {
+        auth: "Setup",
+        engineReady: false,
+        fallbackEnabled: false,
+        modelInstalled: true,
+        requestQueueUnblock: false,
+        setupState: "fallback_disabled",
+        status: "Local fallback disabled",
+      },
+      modelStatus: "corrupted" as const,
+    },
+    {
+      currentEnabled: false,
+      currentInstalled: true,
+      expected: {
+        auth: "Setup",
+        engineReady: false,
+        fallbackEnabled: false,
+        modelInstalled: true,
+        requestQueueUnblock: false,
+        setupState: "fallback_disabled",
+        status: "Fetching model",
+      },
+      modelStatus: "downloading" as const,
+    },
+  ])(
+    "projects $modelStatus with current-value precedence",
+    ({ currentEnabled, currentInstalled, expected, modelStatus }) => {
+      expect(
+        projectFallbackModelState({
+          alreadyPrompted: true,
+          currentFallbackEnabled: currentEnabled,
+          currentModelInstalled: currentInstalled,
+          skipped: false,
+          view: fallbackView(modelStatus, modelStatus === "downloading" ? "Fetching model" : undefined),
+        }),
+      ).toMatchObject(expected);
+    },
+  );
+
+  it("applies explicit setup overrides before model-derived values", () => {
+    expect(
+      projectFallbackModelState({
+        alreadyPrompted: true,
+        currentFallbackEnabled: false,
+        currentModelInstalled: false,
+        overrides: {
+          authText: "Checking native setup",
+          engineReady: false,
+          fallbackEnabled: false,
+          modelInstalled: false,
+          statusText: "Native setup pending",
+        },
+        skipped: false,
+        view: fallbackView("ready"),
+      }),
+    ).toMatchObject({
+      auth: "Checking native setup",
+      engineReady: false,
+      fallbackEnabled: false,
+      modelInstalled: false,
+      requestQueueUnblock: false,
+      setupState: "fallback_disabled",
+      status: "Native setup pending",
+    });
+  });
+
+  it("requests setup once and carries the prompted state forward", () => {
+    const first = projectFallbackModelState({
+      alreadyPrompted: false,
+      currentFallbackEnabled: true,
+      currentModelInstalled: false,
+      skipped: false,
+      view: fallbackView("missing"),
+    });
+    const second = projectFallbackModelState({
+      alreadyPrompted: first.setupPrompted,
+      currentFallbackEnabled: first.fallbackEnabled,
+      currentModelInstalled: first.modelInstalled,
+      skipped: false,
+      view: fallbackView("missing"),
+    });
+
+    expect(first.requestSetupPrompt).toBe(true);
+    expect(first.setupPrompted).toBe(true);
+    expect(second.requestSetupPrompt).toBe(false);
+  });
+
+  it("keeps setup prompting suppressed after Skip", () => {
+    expect(
+      projectFallbackModelState({
+        alreadyPrompted: false,
+        currentFallbackEnabled: true,
+        currentModelInstalled: false,
+        skipped: true,
+        view: fallbackView("missing"),
+      }),
+    ).toMatchObject({ requestSetupPrompt: false, setupPrompted: false });
   });
 });

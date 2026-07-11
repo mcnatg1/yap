@@ -132,3 +132,10 @@ export async function listenLiveLevel(onUpdate: (view: LiveLevelView) => void): 
   if (!isTauri()) return () => undefined;
   return listen<LiveLevelView>("live-level", (event) => onUpdate(event.payload));
 }
+
+export async function listenLiveSessionSaved(
+  onSaved: (session: SavedLiveSession) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<SavedLiveSession>("live-session-saved", (event) => onSaved(event.payload));
+}

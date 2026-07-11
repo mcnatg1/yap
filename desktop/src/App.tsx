@@ -1,5 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -17,44 +16,34 @@ import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog"
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
-import { useLocalComputeTargets } from "@/hooks/use-local-compute-targets";
-import { useLiveControl } from "@/hooks/use-live-control";
+import { useHistoryActions } from "@/hooks/use-history-actions";
+import { useLiveHistorySync } from "@/hooks/use-live-history-sync";
 import { useRecordingSelection } from "@/hooks/use-recording-selection";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
-import { useServerConnection } from "@/hooks/use-server-connection";
+import { useSettingsControl } from "@/hooks/use-settings-control";
 import { useTranscriptFileActions } from "@/hooks/use-transcript-file-actions";
 import { useTranscriptPreview } from "@/hooks/use-transcript-preview";
 import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
-import {
-  savedSessionToTranscriptHistoryEntry,
-  type TranscriptHistoryEntry,
-} from "@/history";
+import { type TranscriptHistoryEntry } from "@/history";
 import {
   acceptedFormats,
   acceptedRecordingDrops,
   audioExtensions,
-  deriveSetupStateFromFallbackModel,
-  isFallbackModelBusy,
   isRecordingActive,
   isRecordingFinished,
   isRecordingRetryable,
   isRecordingRunnable,
   recordingStatusForStartFailure,
-  type FallbackModelView,
   type RecordingJobView,
   workspaceCopy,
 } from "@/lib/app-types";
 import {
   allowRecordingPlaybackPath,
 } from "@/lib/playback-registry";
-import {
-  fallbackStatusText,
-  shouldOpenSetupPrompt,
-  unblockFallbackReadyQueue,
-} from "@/lib/setup-model-state";
+import { unblockFallbackReadyQueue } from "@/lib/setup-model-state";
 import { cn } from "@/lib/utils";
 import {
   availableQueuedServerSlots,
@@ -63,38 +52,8 @@ import {
   readRecordingQueue,
   writeRecordingQueue,
 } from "@/recording-queue";
-import {
-  deleteRecoverableLiveSession,
-  deleteSavedLiveSession,
-  listRecoverableLiveSessions,
-  listSavedLiveSessions,
-  recoverLiveSession,
-  type SavedLiveSession,
-} from "@/live";
-import {
-  cancelFallbackModelInstall,
-  fallbackModelStatus,
-  installFallbackModel,
-  listenFallbackModelProgress,
-  listenFallbackModelStatus,
-  openFallbackModelFolder,
-  removeFallbackModel,
-  setFallbackModelEnabled,
-  verifyFallbackModel,
-} from "@/settings";
 import { SttInvokeError, startTranscribe } from "@/stt";
 
-type SetupStatus = {
-  model: string;
-  root: string;
-  engineReady: boolean;
-  engineBinaryStatus: string;
-  fallbackEnabled: boolean;
-  modelInstalled: boolean;
-  engineStatus: string;
-};
-
-const setupSkipKey = "yap-local-fallback-setup-skipped";
 const batchServerQueuedMessage = "Queued until a transcription server is connected.";
 
 export default function App() {
@@ -104,31 +63,10 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const [auth, setAuth] = useState("Checking");
-  const [, setEngineReady] = useState(false);
-  const [fallbackEnabled, setFallbackEnabled] = useState(true);
-  const [fallbackModel, setFallbackModel] = useState<FallbackModelView | null>(null);
-  const [modelInstalled, setModelInstalled] = useState(false);
-  const [fallbackCommandPending, setFallbackCommandPending] = useState(false);
-  const { refreshServerState, serverLabel } = useServerConnection();
-  const {
-    clearLivePasteShortcut,
-    clearLiveShortcut,
-    liveBusy,
-    liveInputDevices,
-    liveSettingsError,
-    liveView,
-    preflightLiveInput,
-    refreshLiveState,
-    resetLiveHotkey,
-    startLive,
-    stopLive,
-    updateInputDevice,
-    updateLiveCaptureMode,
-    updateLiveHotkey,
-    updateLiveOverlay,
-    updateLivePasteHotkey,
-  } = useLiveControl();
+  const unblockFallbackReady = useCallback(() => {
+    setQueue(unblockFallbackReadyQueue);
+  }, []);
+  const settingsRefreshRef = useRef<() => Promise<void>>(async () => undefined);
   const {
     clearTranscriptText,
     forgetTranscriptText,
@@ -166,10 +104,6 @@ export default function App() {
     selectedId,
     selectedItem,
   } = useRecordingSelection({ history, historyPlaybackPaths, queue });
-  const setupPrompted = useRef(false);
-  const fallbackEnabledRef = useRef(fallbackEnabled);
-  const modelInstalledRef = useRef(modelInstalled);
-  const maintenanceWarningShownRef = useRef(false);
   const queueRef = useRef(queue);
   const recordingDrop = useRecordingDrop(addPaths);
 
@@ -194,32 +128,50 @@ export default function App() {
     showDetails,
     workspaceView,
   } = useWorkspaceNavigation({
-    onOpenDetails: () => void loadStatus(),
+    onOpenDetails: () => void settingsRefreshRef.current(),
     onOpenPolish: () => {
       setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
     },
   });
+  const onLiveSessionSaved = useCallback((entry: TranscriptHistoryEntry) => {
+    selectHistoryEntry(entry);
+    openWorkspace("home");
+    setStatus("Ready");
+    void loadTranscriptText(entry.outputPath).catch(() => undefined);
+    if (entry.warning) {
+      toast.warning(entry.warning);
+    } else {
+      toast.success("Live transcript saved");
+    }
+  }, [loadTranscriptText, openWorkspace, selectHistoryEntry]);
+  useLiveHistorySync({
+    onSaved: onLiveSessionSaved,
+    reconcileHiddenHistory,
+    reconcileNativeHistoryEntries,
+    recordVisibleHistoryEntries,
+  });
+  const historyActions = useHistoryActions({
+    clearHistorySelectionIf,
+    forgetHistoryEntry,
+    forgetTranscriptText,
+    recordVisibleHistoryEntries,
+    rememberHiddenHistoryEntry,
+    selectHistoryEntry,
+  });
+  const settings = useSettingsControl({
+    onFallbackReady: unblockFallbackReady,
+    onStatusChange: setStatus,
+  });
+  settingsRefreshRef.current = settings.refresh;
   const workspace = workspaceCopy[workspaceView];
   const showQueue = workspaceView === "transcribe";
   const showHistory = workspaceView === "home";
   const showTranscript = workspaceView === "transcribe" || workspaceView === "polish";
   const showPolish = workspaceView === "polish";
-  const fallbackModelBusy = isFallbackModelBusy(fallbackModel, fallbackCommandPending);
-  const {
-    computeTargetPending,
-    loadComputeTargets,
-    localComputeTargets,
-    updateLocalComputeTarget,
-  } = useLocalComputeTargets(fallbackModelBusy);
-  const setupBusy = fallbackModelBusy || computeTargetPending;
 
   useEffect(() => {
-    fallbackEnabledRef.current = fallbackEnabled;
-  }, [fallbackEnabled]);
-
-  useEffect(() => {
-    modelInstalledRef.current = modelInstalled;
-  }, [modelInstalled]);
+    if (settings.setupPromptRequest) showDetails();
+  }, [settings.setupPromptRequest, showDetails]);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -232,310 +184,10 @@ export default function App() {
   }, [queue]);
 
   useEffect(() => {
-    if (!isTauri()) return;
-
-    let cancelled = false;
-    let unlistenLiveSaved: (() => void) | undefined;
-    let unlistenFallbackProgress: (() => void) | undefined;
-    let unlistenFallbackStatus: (() => void) | undefined;
-
-    void listen<SavedLiveSession>("live-session-saved", (event) => {
-      const entry = savedSessionToTranscriptHistoryEntry(event.payload);
-      const recorded = recordVisibleHistoryEntries([entry], "Transcript history could not be saved.");
-      if (!recorded) return;
-      selectHistoryEntry(entry);
-      openWorkspace("home");
-      setStatus("Ready");
-      void loadTranscriptText(entry.outputPath).catch(() => undefined);
-      if (entry.warning) {
-        toast.warning(entry.warning);
-      } else {
-        toast.success("Live transcript saved");
-      }
-    }).then((stop) => {
-      if (cancelled) {
-        stop();
-        return;
-      }
-      unlistenLiveSaved = stop;
-    });
-
-    void listenFallbackModelProgress((view) => {
-      applyFallbackModelView(view);
-    }).then((stop) => {
-      if (cancelled) {
-        stop();
-        return;
-      }
-      unlistenFallbackProgress = stop;
-    });
-
-    void listenFallbackModelStatus((view) => {
-      applyFallbackModelView(view);
-    }).then((stop) => {
-      if (cancelled) {
-        stop();
-        return;
-      }
-      unlistenFallbackStatus = stop;
-    });
-
-    void reconcileHiddenHistory()
-      .then(async () => {
-        const [catalog, recoverable] = await Promise.all([
-          listSavedLiveSessions(),
-          listRecoverableLiveSessions(),
-        ]);
-        return {
-          maintenanceWarning: catalog.maintenanceWarnings[0],
-          sessions: [
-            ...catalog.sessions,
-            ...recoverable.map((session): SavedLiveSession => ({
-              createdAtMs: Math.max(0, session.expiresAtMs - 24 * 60 * 60 * 1000),
-              name: session.name,
-              outputPath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
-              sourcePath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
-              warning: session.reason,
-              recoveryState: "recoverable",
-            })),
-          ],
-        };
-      })
-      .then(({ maintenanceWarning, sessions }) => {
-        if (cancelled) return;
-        if (maintenanceWarning && !maintenanceWarningShownRef.current) {
-          maintenanceWarningShownRef.current = true;
-          toast.warning(maintenanceWarning);
-        }
-        reconcileNativeHistoryEntries(
-          sessions.map(savedSessionToTranscriptHistoryEntry),
-          "Live transcript history could not be synced.",
-        );
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-      unlistenLiveSaved?.();
-      unlistenFallbackProgress?.();
-      unlistenFallbackStatus?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    void loadStatus();
-
-    if (!isTauri()) {
-      setStatus("Preview");
-      setAuth("Tauri bridge");
-    }
-  }, []);
-
-  useEffect(() => {
     if (selectedItem?.output && !Object.prototype.hasOwnProperty.call(transcriptText, selectedItem.output)) {
       void loadTranscriptText(selectedItem.output).catch(() => toast.error("Preview unavailable"));
     }
   }, [selectedItem?.output, transcriptText]);
-
-  async function loadStatus() {
-    if (!isTauri()) return;
-
-    try {
-      const [setup, view] = await Promise.all([
-        invoke<SetupStatus>("setup_status"),
-        fallbackModelStatus(),
-        refreshServerState(),
-      ]);
-      applySetupStatus(setup);
-      applyFallbackModelView(view, {
-        authText: setup.engineReady ? "Ready" : "Setup",
-        engineReady: setup.engineReady,
-        fallbackEnabled: setup.fallbackEnabled,
-        modelInstalled: setup.modelInstalled,
-      });
-      await Promise.all([refreshLiveState(), loadComputeTargets()]);
-    } catch (error) {
-      setStatus("Setup check failed");
-      setAuth(String(error));
-    }
-  }
-
-  function maybeOpenSetupPrompt(nextSetupState: ReturnType<typeof deriveSetupStateFromFallbackModel>, nextFallbackEnabled: boolean) {
-    if (!shouldOpenSetupPrompt({
-      alreadyPrompted: setupPrompted.current,
-      fallbackEnabled: nextFallbackEnabled,
-      setupState: nextSetupState,
-      skipped: localStorage.getItem(setupSkipKey) === "true",
-    })) {
-      return;
-    }
-
-    setupPrompted.current = true;
-    showDetails();
-  }
-
-  function applyFallbackModelView(
-    view: FallbackModelView,
-    overrides: {
-      authText?: string;
-      engineReady?: boolean;
-      fallbackEnabled?: boolean;
-      modelInstalled?: boolean;
-      statusText?: string;
-    } = {},
-  ) {
-    const nextFallbackEnabled = overrides.fallbackEnabled
-      ?? (view.status === "ready" ? true : view.status === "disabled" ? false : fallbackEnabledRef.current);
-    const nextModelInstalled = overrides.modelInstalled
-      ?? (
-        view.status === "ready" || view.status === "disabled" || view.status === "corrupted"
-          ? true
-          : view.status === "missing"
-            ? false
-            : modelInstalledRef.current
-      );
-    const nextEngineReady = overrides.engineReady ?? (view.status === "ready");
-    const nextSetupState = deriveSetupStateFromFallbackModel(view.status, nextFallbackEnabled);
-
-    fallbackEnabledRef.current = nextFallbackEnabled;
-    modelInstalledRef.current = nextModelInstalled;
-    setFallbackModel(view);
-    setStatus(overrides.statusText ?? fallbackStatusText(view, nextFallbackEnabled));
-    setAuth(overrides.authText ?? (nextEngineReady ? "Ready" : "Setup"));
-    setEngineReady(nextEngineReady);
-    setFallbackEnabled(nextFallbackEnabled);
-    setModelInstalled(nextModelInstalled);
-    maybeOpenSetupPrompt(nextSetupState, nextFallbackEnabled);
-
-    if (nextSetupState === "fallback_ready") {
-      setQueue(unblockFallbackReadyQueue);
-    }
-  }
-
-  function applySetupStatus(setup: SetupStatus) {
-    fallbackEnabledRef.current = setup.fallbackEnabled;
-    modelInstalledRef.current = setup.modelInstalled;
-    setStatus(setup.engineReady ? setup.engineStatus : "Setup");
-    setAuth(setup.engineReady ? "Ready" : "Setup");
-    setEngineReady(setup.engineReady);
-    setFallbackEnabled(setup.fallbackEnabled);
-    setModelInstalled(setup.modelInstalled);
-  }
-
-  async function installFallback(options: { force?: boolean } = {}) {
-    if (!isTauri() || fallbackModelBusy) return;
-
-    setFallbackCommandPending(true);
-    fallbackEnabledRef.current = true;
-    setFallbackEnabled(true);
-    setStatus("Installing local fallback");
-    try {
-      const view = await installFallbackModel({ force: options.force });
-      localStorage.removeItem(setupSkipKey);
-      applyFallbackModelView(view, { fallbackEnabled: true });
-      if (view.status === "ready") {
-        toast.success(options.force ? "Local fallback reinstalled" : "Local fallback installed");
-      } else {
-        toast.info(view.message ?? "Local fallback install did not complete");
-      }
-    } catch (error) {
-      toast.error(`Install failed: ${String(error)}`);
-      await loadStatus();
-    } finally {
-      setFallbackCommandPending(false);
-    }
-  }
-
-  async function removeFallback() {
-    if (!isTauri() || fallbackModelBusy) return;
-
-    setFallbackCommandPending(true);
-    try {
-      localStorage.setItem(setupSkipKey, "true");
-      const view = await removeFallbackModel();
-      applyFallbackModelView(view, {
-        engineReady: false,
-        fallbackEnabled: false,
-        modelInstalled: false,
-      });
-      toast.success("Local fallback files removed");
-    } catch (error) {
-      toast.error(`Remove failed: ${String(error)}`);
-      await loadStatus();
-    } finally {
-      setFallbackCommandPending(false);
-    }
-  }
-
-  async function setFallbackEnabledSetting(enabled: boolean) {
-    if (!isTauri() || fallbackModelBusy) return;
-
-    setFallbackCommandPending(true);
-    try {
-      const view = await setFallbackModelEnabled(enabled);
-      if (!enabled) localStorage.setItem(setupSkipKey, "true");
-      applyFallbackModelView(view, {
-        engineReady: enabled && view.status === "ready",
-        fallbackEnabled: enabled,
-        modelInstalled: enabled && view.status === "missing" ? false : modelInstalledRef.current,
-      });
-      toast.success(enabled ? "Local fallback enabled" : "Local fallback disabled");
-    } catch (error) {
-      toast.error(`Update failed: ${String(error)}`);
-      await loadStatus();
-    } finally {
-      setFallbackCommandPending(false);
-    }
-  }
-
-  async function cancelFallbackInstall() {
-    if (!isTauri() || fallbackModel?.status !== "downloading") return;
-    setFallbackCommandPending(true);
-    try {
-      const view = await cancelFallbackModelInstall();
-      applyFallbackModelView(view, { fallbackEnabled: true });
-      if (view.status !== "missing" && view.status !== "error") {
-        applyFallbackModelView(await fallbackModelStatus(), { fallbackEnabled: true });
-      }
-      toast.success("Local fallback cancellation requested");
-    } catch (error) {
-      toast.error(`Cancel failed: ${String(error)}`);
-      await loadStatus();
-    } finally {
-      setFallbackCommandPending(false);
-    }
-  }
-
-  async function verifyFallback() {
-    if (!isTauri() || fallbackModelBusy) return;
-
-    setFallbackCommandPending(true);
-    try {
-      const view = await verifyFallbackModel();
-      applyFallbackModelView(view);
-      toast.success("Local fallback verified");
-    } catch (error) {
-      toast.error(`Verify failed: ${String(error)}`);
-      await loadStatus();
-    } finally {
-      setFallbackCommandPending(false);
-    }
-  }
-
-  async function openFallbackFolder() {
-    if (!isTauri()) return;
-
-    try {
-      await openFallbackModelFolder();
-    } catch (error) {
-      toast.error(`Open failed: ${String(error)}`);
-    }
-  }
-
-  function skipSetup() {
-    localStorage.setItem(setupSkipKey, "true");
-    closeDetails();
-  }
 
   async function addPaths(paths: string[]) {
     const firstId = nextRecordingId.current;
@@ -736,55 +388,6 @@ export default function App() {
     previewText,
   } = useTranscriptPreview(loadHistoryPreviewText);
 
-  function hideHistoryEntry(outputPath: string) {
-    if (!rememberHiddenHistoryEntry(outputPath)) return;
-    if (!forgetHistoryEntry(outputPath)) return;
-    clearHistorySelectionIf(outputPath);
-    toast.success("Hidden from history");
-  }
-
-  async function deleteHistoryEntry(entry: TranscriptHistoryEntry) {
-    const sessionId = entry.name.replace(/^live-/, "");
-    try {
-      await deleteSavedLiveSession(sessionId);
-      if (!rememberHiddenHistoryEntry(entry.outputPath)) return;
-      if (!forgetHistoryEntry(entry.outputPath)) return;
-      clearHistorySelectionIf(entry.outputPath);
-      forgetTranscriptText(entry.outputPath);
-      toast.success("Deleted from device");
-    } catch (error) {
-      toast.error(String(error || "Delete failed"));
-    }
-  }
-
-  async function recoverHistoryEntry(entry: TranscriptHistoryEntry) {
-    const sessionId = entry.name.replace(/^live-/, "");
-    try {
-      const saved = await recoverLiveSession(sessionId);
-      const recovered = savedSessionToTranscriptHistoryEntry(saved);
-      if (!recordVisibleHistoryEntries([recovered], "Transcript history could not be saved.")) return;
-      forgetHistoryEntry(entry.outputPath);
-      clearHistorySelectionIf(entry.outputPath);
-      selectHistoryEntry(recovered);
-      toast.success("Partial recording recovered");
-    } catch (error) {
-      toast.error(String(error || "Recovery failed"));
-    }
-  }
-
-  async function deleteRecoverableHistoryEntry(entry: TranscriptHistoryEntry) {
-    const sessionId = entry.name.replace(/^live-/, "");
-    try {
-      await deleteRecoverableLiveSession(sessionId);
-      if (!forgetHistoryEntry(entry.outputPath)) return;
-      clearHistorySelectionIf(entry.outputPath);
-      forgetTranscriptText(entry.outputPath);
-      toast.success("Partial recording deleted");
-    } catch (error) {
-      toast.error(String(error || "Delete failed"));
-    }
-  }
-
   function openHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
     selectHistoryEntry(entry, origin);
     openWorkspace("home");
@@ -815,15 +418,15 @@ export default function App() {
         <HistoryPanel
           entries={history}
           onCopy={(entry) => void copyTranscript(historyJob(entry))}
-          onDelete={(entry) => void deleteHistoryEntry(entry)}
-          onDeleteRecoverable={(entry) => void deleteRecoverableHistoryEntry(entry)}
-          onHide={hideHistoryEntry}
+          onDelete={(entry) => void historyActions.deleteHistoryEntry(entry)}
+          onDeleteRecoverable={(entry) => void historyActions.deleteRecoverableHistoryEntry(entry)}
+          onHide={historyActions.hideHistoryEntry}
           onLoadPreviewText={loadHistoryPreviewText}
           onOpen={(entry) => void openAppPath(entry.outputPath)}
           onOpenHelp={() => openWorkspace("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
           onReveal={(entry) => void revealPath(entry.outputPath)}
-          onRecover={(entry) => void recoverHistoryEntry(entry)}
+          onRecover={(entry) => void historyActions.recoverHistoryEntry(entry)}
           onSelect={openHistoryEntry}
           selectedOutputPath={selectedHistoryOutput}
         />
@@ -876,7 +479,7 @@ export default function App() {
   const appWorkspace = (
     <section className="surface-workspace scrollbar-none h-full min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-card p-4">
       <WorkspaceHeader
-        auth={auth}
+        auth={settings.auth}
         description={workspace.description}
         historyCount={history.length}
         onOpenDetails={() => openWorkspace("details")}
@@ -916,37 +519,40 @@ export default function App() {
         </div>
       </SidebarInset>
       <SettingsSheet
-        auth={auth}
-        busy={setupBusy}
-        fallbackActionPending={fallbackCommandPending}
-        fallbackModel={fallbackModel}
-        liveBusy={liveBusy}
-        liveInputDevices={liveInputDevices}
-        liveSettingsError={liveSettingsError}
-        liveView={liveView}
-        localComputeTargets={localComputeTargets}
-        onCancelFallbackInstall={() => void cancelFallbackInstall()}
-        onClearLiveHotkey={clearLiveShortcut}
-        onClearLivePasteHotkey={clearLivePasteShortcut}
-        onInstallFallback={(options) => void installFallback(options)}
-        onOpenFallbackFolder={() => void openFallbackFolder()}
-        onPreflightLiveInput={preflightLiveInput}
-        onResetLiveHotkey={resetLiveHotkey}
+        auth={settings.auth}
+        busy={settings.busy}
+        fallbackActionPending={settings.fallback.actionPending}
+        fallbackModel={settings.fallback.model}
+        liveBusy={settings.live.busy}
+        liveInputDevices={settings.live.inputDevices}
+        liveSettingsError={settings.live.settingsError}
+        liveView={settings.live.view}
+        localComputeTargets={settings.compute.targets}
+        onCancelFallbackInstall={() => void settings.fallback.cancelInstall()}
+        onClearLiveHotkey={settings.live.clearShortcut}
+        onClearLivePasteHotkey={settings.live.clearPasteShortcut}
+        onInstallFallback={(options) => void settings.fallback.install(options)}
+        onOpenFallbackFolder={() => void settings.fallback.openFolder()}
+        onPreflightLiveInput={settings.live.preflightInput}
+        onResetLiveHotkey={settings.live.resetHotkey}
         onOpenChange={onDetailsOpenChange}
-        onRemoveFallback={() => void removeFallback()}
-        onSetInputDevice={updateInputDevice}
-        onSetFallbackEnabled={(enabled) => void setFallbackEnabledSetting(enabled)}
-        onVerifyFallback={() => void verifyFallback()}
-        onSetLiveCaptureMode={updateLiveCaptureMode}
-        onSetLiveHotkey={updateLiveHotkey}
-        onSetLiveOverlayEnabled={updateLiveOverlay}
-        onSetLivePasteHotkey={updateLivePasteHotkey}
-        onSetLocalComputeTarget={(targetId) => void updateLocalComputeTarget(targetId)}
-        onSkipSetup={skipSetup}
-        onStartLive={startLive}
-        onStopLive={stopLive}
+        onRemoveFallback={() => void settings.fallback.remove()}
+        onSetInputDevice={settings.live.updateInputDevice}
+        onSetFallbackEnabled={(enabled) => void settings.fallback.setEnabled(enabled)}
+        onVerifyFallback={() => void settings.fallback.verify()}
+        onSetLiveCaptureMode={settings.live.updateCaptureMode}
+        onSetLiveHotkey={settings.live.updateHotkey}
+        onSetLiveOverlayEnabled={settings.live.updateOverlay}
+        onSetLivePasteHotkey={settings.live.updatePasteHotkey}
+        onSetLocalComputeTarget={(targetId) => void settings.compute.updateTarget(targetId)}
+        onSkipSetup={() => {
+          settings.skipSetup();
+          closeDetails();
+        }}
+        onStartLive={settings.live.start}
+        onStopLive={settings.live.stop}
         open={detailsOpen}
-        serverLabel={serverLabel}
+        serverLabel={settings.serverLabel}
         status={status}
       />
       <HelpSheet

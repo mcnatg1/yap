@@ -1,4 +1,9 @@
-import type { FallbackModelView, RecordingJobView, SetupState } from "@/lib/app-types";
+import {
+  deriveSetupStateFromFallbackModel,
+  type FallbackModelView,
+  type RecordingJobView,
+  type SetupState,
+} from "@/lib/app-types";
 
 export function fallbackStatusText(view: FallbackModelView, enabled: boolean) {
   switch (view.status) {
@@ -30,6 +35,61 @@ export function shouldOpenSetupPrompt({
   skipped: boolean;
 }) {
   return fallbackEnabled && setupState !== "fallback_ready" && !alreadyPrompted && !skipped;
+}
+
+export type FallbackModelStateOverrides = {
+  authText?: string;
+  engineReady?: boolean;
+  fallbackEnabled?: boolean;
+  modelInstalled?: boolean;
+  statusText?: string;
+};
+
+export function projectFallbackModelState({
+  alreadyPrompted,
+  currentFallbackEnabled,
+  currentModelInstalled,
+  overrides = {},
+  skipped,
+  view,
+}: {
+  alreadyPrompted: boolean;
+  currentFallbackEnabled: boolean;
+  currentModelInstalled: boolean;
+  overrides?: FallbackModelStateOverrides;
+  skipped: boolean;
+  view: FallbackModelView;
+}) {
+  const fallbackEnabled = overrides.fallbackEnabled
+    ?? (view.status === "ready" ? true : view.status === "disabled" ? false : currentFallbackEnabled);
+  const modelInstalled = overrides.modelInstalled
+    ?? (
+      view.status === "ready" || view.status === "disabled" || view.status === "corrupted"
+        ? true
+        : view.status === "missing"
+          ? false
+          : currentModelInstalled
+    );
+  const engineReady = overrides.engineReady ?? view.status === "ready";
+  const setupState = deriveSetupStateFromFallbackModel(view.status, fallbackEnabled);
+  const requestSetupPrompt = shouldOpenSetupPrompt({
+    alreadyPrompted,
+    fallbackEnabled,
+    setupState,
+    skipped,
+  });
+
+  return {
+    auth: overrides.authText ?? (engineReady ? "Ready" : "Setup"),
+    engineReady,
+    fallbackEnabled,
+    modelInstalled,
+    requestQueueUnblock: setupState === "fallback_ready",
+    requestSetupPrompt,
+    setupPrompted: alreadyPrompted || requestSetupPrompt,
+    setupState,
+    status: overrides.statusText ?? fallbackStatusText(view, fallbackEnabled),
+  };
 }
 
 export function unblockFallbackReadyQueue(items: RecordingJobView[]) {
