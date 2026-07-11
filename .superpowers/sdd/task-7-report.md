@@ -151,6 +151,39 @@ DONE
 
 ---
 
+## Damaged-State And Lifecycle Repair (2026-07-11)
+
+### Status
+
+DONE
+
+### Implementation
+
+- `RecordingScan` now separates hash-valid complete captures, current-writer partials, hash-valid recovered-partial commits, and damaged complete commits. Damaged commits carry a bounded validation reason and cannot become recoverable/TTL cleanup targets; the catalog retains every artifact and surfaces a bounded maintenance warning.
+- Recovered-partial commits are validated against their exact WAV, partial sidecar, hashes, size, session identity, and timestamp. They remain recoverable/deleteable outside the ordinary 24-hour private-partial cleanup path.
+- Private deletion leftovers use strict staging/quarantine grammars, a 128-entry scan budget, age and current-process checks, and the existing no-follow/identity-aware remove primitive. Unknown, malformed, active, too-new, and nonregular entries are retained with bounded warnings.
+- Corrupt-final intent replacement now writes and syncs staging before quarantine. The quarantine retains a verified identity/hash receipt; successful publication removes that exact object, while publication failure restores it when the destination is free or retains evidence otherwise.
+- Removed `RECEIPT_HANDLE_COUNT` and `ReceiptHandleProbe`. Direct behavior tests move/replace sidecar and transcript paths after receipt creation and prove revalidation fails closed.
+
+### Regression Coverage
+
+- Corrupt complete-commit JSON, audio hash mismatch, sidecar corruption, residual journal, expired private residue, damaged catalog warning visibility, and recovery/delete preservation for a valid old recovered-partial commit.
+- Old foreign private staging/quarantine collection, active-process and malformed-file preservation, corrupt-intent repeated retry cleanup, corrupt-final success cleanup, and existing pre/post publication replacement failures.
+
+### Verification
+
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml audio::recording` passed three default-parallel runs: 44 tests each.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml live::recordings` passed three default-parallel runs: 56 tests each.
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` passed: 426 library tests and 1 parity integration test.
+- `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` passed.
+- `cargo clippy --locked --all-targets --manifest-path .\desktop\src-tauri\Cargo.toml -- -D warnings` passed.
+
+### Residual
+
+- The same-user filesystem mutation boundary remains unchanged. The repair retains uncertain evidence rather than deleting it, and external mutation after final path-only OS dispatch validation remains outside this local authorization boundary.
+
+---
+
 ## Final Deletion And Authorization Repair
 
 ### Status

@@ -39,33 +39,6 @@ static DELETE_QUARANTINE_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
-static RECEIPT_HANDLE_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-struct ReceiptHandleProbe;
-
-#[cfg(test)]
-impl ReceiptHandleProbe {
-    fn new() -> Self {
-        RECEIPT_HANDLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Self
-    }
-}
-
-#[cfg(test)]
-impl Drop for ReceiptHandleProbe {
-    fn drop(&mut self) {
-        RECEIPT_HANDLE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn receipt_handle_count_for_test() -> usize {
-    RECEIPT_HANDLE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(test)]
 type SidecarPublishHook = Box<dyn FnOnce(&RecordingPaths) + Send>;
 #[cfg(test)]
 type PublicationHook =
@@ -135,19 +108,71 @@ pub struct PartialCapture {
     pub directory: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredPartialCapture {
+    pub session_id: SessionId,
+    pub directory: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DamagedCommittedCapture {
+    pub session_id: SessionId,
+    pub directory: PathBuf,
+    pub reason: String,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RecordingScan {
     pub complete: Vec<CommittedCapture>,
     pub partial: Vec<PartialCapture>,
+    pub recovered_partial: Vec<RecoveredPartialCapture>,
+    pub damaged: Vec<DamagedCommittedCapture>,
 }
 
 impl RecordingScan {
     pub fn is_empty(&self) -> bool {
-        self.complete.is_empty() && self.partial.is_empty()
+        self.complete.is_empty()
+            && self.partial.is_empty()
+            && self.recovered_partial.is_empty()
+            && self.damaged.is_empty()
     }
 
     pub fn len(&self) -> usize {
         self.complete.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialRecoveryCommit {
+    pub schema_version: u16,
+    pub session_id: SessionId,
+    pub status: CaptureStatus,
+    pub audio_file: String,
+    pub audio_sha256: String,
+    pub audio_bytes: u64,
+    pub capture_sidecar_file: String,
+    pub capture_sidecar_sha256: String,
+    pub committed_at_utc: String,
+}
+
+impl PartialRecoveryCommit {
+    fn validate(&self) -> Result<(), String> {
+        if self.schema_version != CAPTURE_SCHEMA_VERSION
+            || self.status != CaptureStatus::Partial
+            || self.audio_file != format!("live-{}.wav", self.session_id)
+            || self.capture_sidecar_file != format!("live-{}.capture.partial.json", self.session_id)
+            || self.audio_bytes < WAV_HEADER_BYTES
+        {
+            return Err("partial recovery commit has an unsupported shape".into());
+        }
+        validate_artifact_name(&self.audio_file)?;
+        validate_artifact_name(&self.capture_sidecar_file)?;
+        validate_sha256(&self.audio_sha256)?;
+        validate_sha256(&self.capture_sidecar_sha256)?;
+        OffsetDateTime::parse(&self.committed_at_utc, &Rfc3339)
+            .map_err(|_| "partial recovery commit has an invalid commit timestamp")?;
+        Ok(())
     }
 }
 
@@ -180,8 +205,6 @@ impl PublishedTranscriptReceipt {
         destination: &Path,
         mut file: File,
     ) -> Result<Self, String> {
-        #[cfg(test)]
-        let _handle_probe = ReceiptHandleProbe::new();
         let file_name = destination
             .file_name()
             .and_then(|name| name.to_str())
@@ -950,6 +973,13 @@ struct FileIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(not(any(unix, windows)))]
 struct FileIdentity;
+
+#[derive(Debug, Clone)]
+pub(crate) struct QuarantinedArtifact {
+    path: PathBuf,
+    sha256: String,
+    identity: FileIdentity,
+}
 
 #[derive(Debug, Clone)]
 struct RecordingPaths {
@@ -2130,8 +2160,6 @@ fn receipt_from_published_sidecar(
     path: PathBuf,
     expected: &CaptureSidecar,
 ) -> Result<PublicationReceipt, String> {
-    #[cfg(test)]
-    let _handle_probe = ReceiptHandleProbe::new();
     validate_artifact_name(&file_name)?;
     let sha256 = sha256_open_file(&mut file)?;
     let text = read_open_file(&mut file)?;
@@ -2155,8 +2183,6 @@ fn receipt_from_published_partial_sidecar(
     path: PathBuf,
     expected: &PartialCaptureSidecar,
 ) -> Result<PublicationReceipt, String> {
-    #[cfg(test)]
-    let _handle_probe = ReceiptHandleProbe::new();
     validate_artifact_name(&file_name)?;
     let sha256 = sha256_open_file(&mut file)?;
     let text = read_open_file(&mut file)?;
@@ -2275,13 +2301,26 @@ pub fn scan_recordings(directory: &Path) -> Result<RecordingScan, String> {
             }
             continue;
         }
-        if !name.starts_with("live-") || !name.ends_with(".commit.json") {
+        let Some(session) = session_from_commit_artifact(name) else {
             continue;
-        }
-        if let Ok(committed) = read_manifest(directory, name)
+        };
+        match read_manifest(directory, name)
             .and_then(|manifest| validate_committed_capture(directory, manifest))
         {
-            scan.complete.push(committed);
+            Ok(committed) => scan.complete.push(committed),
+            Err(complete_error) => {
+                match read_recovered_partial_capture(directory, name, &session) {
+                    Ok(()) => scan.recovered_partial.push(RecoveredPartialCapture {
+                        session_id: session,
+                        directory: directory.to_path_buf(),
+                    }),
+                    Err(_) => scan.damaged.push(DamagedCommittedCapture {
+                        session_id: session,
+                        directory: directory.to_path_buf(),
+                        reason: bounded_scan_reason(&complete_error),
+                    }),
+                }
+            }
         }
     }
     for session in partial_ids {
@@ -2291,6 +2330,14 @@ pub fn scan_recordings(directory: &Path) -> Result<RecordingScan, String> {
             .complete
             .iter()
             .any(|capture| capture.manifest.session_id == session_id)
+            && !scan
+                .recovered_partial
+                .iter()
+                .any(|capture| capture.session_id == session_id)
+            && !scan
+                .damaged
+                .iter()
+                .any(|capture| capture.session_id == session_id)
         {
             scan.partial.push(PartialCapture {
                 session_id: Some(session_id),
@@ -2299,6 +2346,59 @@ pub fn scan_recordings(directory: &Path) -> Result<RecordingScan, String> {
         }
     }
     Ok(scan)
+}
+
+fn session_from_commit_artifact(name: &str) -> Option<SessionId> {
+    name.strip_prefix("live-")
+        .and_then(|value| value.strip_suffix(".commit.json"))
+        .and_then(|session| SessionId::new(session.to_string()).ok())
+}
+
+fn bounded_scan_reason(error: &str) -> String {
+    let detail = error.chars().take(160).collect::<String>();
+    format!("Damaged complete capture commit: {detail}")
+}
+
+fn read_recovered_partial_capture(
+    directory: &Path,
+    name: &str,
+    expected_session: &SessionId,
+) -> Result<(), String> {
+    let text = read_regular_artifact(directory, name)
+        .map_err(|error| format!("Failed to read partial recovery commit: {error}"))?;
+    let commit: PartialRecoveryCommit = serde_json::from_str(&text)
+        .map_err(|error| format!("Failed to parse partial recovery commit: {error}"))?;
+    commit.validate()?;
+    if &commit.session_id != expected_session {
+        return Err("partial recovery commit session does not match its file name".into());
+    }
+    let mut audio = open_regular_artifact(directory, &commit.audio_file)?;
+    let mut sidecar = open_regular_artifact(directory, &commit.capture_sidecar_file)?;
+    if audio
+        .metadata()
+        .map_err(|error| format!("Failed to inspect recovered partial audio: {error}"))?
+        .len()
+        != commit.audio_bytes
+        || sha256_open_file(&mut audio)? != commit.audio_sha256
+        || sha256_open_file(&mut sidecar)? != commit.capture_sidecar_sha256
+    {
+        return Err("partial recovery artifact hash does not match the commit".into());
+    }
+    let sidecar = read_open_file(&mut sidecar)
+        .map_err(|error| format!("Failed to read partial recovery sidecar: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&sidecar)
+        .map_err(|error| format!("Failed to parse partial recovery sidecar: {error}"))?;
+    if value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || value.get("sessionId").and_then(serde_json::Value::as_str)
+            != Some(expected_session.as_str())
+        || value.get("status").and_then(serde_json::Value::as_str) != Some("partial")
+    {
+        return Err("partial recovery sidecar does not match the commit".into());
+    }
+    Ok(())
 }
 
 fn validate_committed_capture(
@@ -2404,9 +2504,74 @@ pub(crate) fn remove_regular_artifact(directory: &Path, name: &str) -> Result<()
     remove_open_regular_artifact(directory, name, &owned, || {})
 }
 
-pub(crate) fn quarantine_regular_artifact(directory: &Path, name: &str) -> Result<PathBuf, String> {
-    let owned = open_regular_artifact(directory, name)?;
-    quarantine_open_regular_artifact(directory, name, &owned)
+pub(crate) fn quarantine_regular_artifact(
+    directory: &Path,
+    name: &str,
+) -> Result<QuarantinedArtifact, String> {
+    let mut owned = open_regular_artifact(directory, name)?;
+    let sha256 = sha256_open_file(&mut owned)?;
+    let identity = file_identity(&owned)?;
+    let path = quarantine_open_regular_artifact(directory, name, &owned)?;
+    Ok(QuarantinedArtifact {
+        path,
+        sha256,
+        identity,
+    })
+}
+
+pub(crate) fn remove_verified_quarantined_artifact(
+    artifact: &QuarantinedArtifact,
+) -> Result<(), String> {
+    let mut current = open_regular_path(&artifact.path)?;
+    if file_identity(&current)? != artifact.identity
+        || sha256_open_file(&mut current)? != artifact.sha256
+    {
+        return Err(
+            "quarantined recording artifact no longer matches its verified identity or hash".into(),
+        );
+    }
+    let directory = artifact
+        .path
+        .parent()
+        .ok_or_else(|| "quarantined recording artifact has no parent directory".to_string())?;
+    let name = artifact
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "quarantined recording artifact has no valid file name".to_string())?;
+    remove_open_regular_artifact(directory, name, &current, || {})
+}
+
+pub(crate) fn restore_verified_quarantined_artifact(
+    artifact: &QuarantinedArtifact,
+    destination: &Path,
+) -> Result<(), String> {
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "recording artifact has no valid restore destination".to_string())?;
+    validate_artifact_name(name)?;
+    if destination.exists() {
+        return Err("recording artifact restore destination is already occupied".into());
+    }
+    let mut current = open_regular_path(&artifact.path)?;
+    if file_identity(&current)? != artifact.identity
+        || sha256_open_file(&mut current)? != artifact.sha256
+    {
+        return Err(
+            "quarantined recording artifact no longer matches its verified identity or hash".into(),
+        );
+    }
+    fs::hard_link(&artifact.path, destination)
+        .map_err(|error| format!("Failed to restore quarantined recording artifact: {error}"))?;
+    let restored = open_regular_path(destination)?;
+    if file_identity(&restored)? != artifact.identity {
+        let _ = fs::remove_file(destination);
+        return Err("restored recording artifact no longer matches its verified identity".into());
+    }
+    drop(restored);
+    drop(current);
+    remove_verified_quarantined_artifact(artifact)
 }
 
 pub(crate) fn remove_regular_artifact_if_hash(
@@ -2864,7 +3029,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_finalization_receipts_drop_handles_and_revalidate_current_identity() {
+    fn cached_finalization_receipts_allow_sidecar_replacement_and_revalidate_identity() {
         let dir = tempfile_dir("receipt-handle-lifetime");
         let session = SessionId::new("s-receipt-handle-lifetime").unwrap();
         let paths = RecordingPaths::new(&dir, session.clone());
@@ -2874,19 +3039,78 @@ mod tests {
         let first = recording.finalize().unwrap();
         let second = recording.finalize().unwrap();
 
-        assert_eq!(receipt_handle_count_for_test(), 0);
         first.revalidate_capture_sidecar().unwrap();
         second.revalidate_capture_sidecar().unwrap();
         let displaced = paths.sidecar.with_extension("displaced");
-        fs::rename(&paths.sidecar, displaced).unwrap();
+        fs::rename(&paths.sidecar, &displaced).unwrap();
         fs::write(&paths.sidecar, b"replacement sidecar").unwrap();
+        assert!(displaced.is_file());
+        assert!(paths.sidecar.is_file());
         assert!(first.revalidate_capture_sidecar().is_err());
         assert!(recording
             .finalize()
             .unwrap()
             .revalidate_capture_sidecar()
             .is_err());
-        assert_eq!(receipt_handle_count_for_test(), 0);
+    }
+
+    #[test]
+    fn scanner_reports_damaged_complete_commit_with_residual_private_artifacts() {
+        let dir = tempfile_dir("damaged-commit-scan");
+        let session = SessionId::new("s-damaged-commit-scan").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        fs::write(
+            dir.join(format!("live-{session}.capture.journal.part")),
+            b"residual journal",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(format!("live-{session}.commit.json")),
+            b"{not json",
+        )
+        .unwrap();
+
+        let scan = scan_recordings(&dir).unwrap();
+
+        assert!(scan.complete.is_empty());
+        assert!(scan.partial.is_empty());
+        assert_eq!(scan.damaged.len(), 1);
+        assert_eq!(scan.damaged[0].session_id, session);
+        assert!(scan.damaged[0].reason.contains("parse"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn scanner_reports_audio_hash_and_sidecar_damage_separately() {
+        for (label, corrupt) in [
+            ("damaged-audio-hash", "audio"),
+            ("damaged-sidecar", "sidecar"),
+        ] {
+            let dir = tempfile_dir(label);
+            let session = SessionId::new(format!("s-{label}")).unwrap();
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+            recording.finalize().unwrap();
+            let name = match corrupt {
+                "audio" => format!("live-{session}.wav"),
+                _ => format!("live-{session}.capture.json"),
+            };
+            fs::write(dir.join(name), b"corrupted").unwrap();
+
+            let scan = scan_recordings(&dir).unwrap();
+
+            assert!(scan.complete.is_empty());
+            assert!(scan.partial.is_empty());
+            assert_eq!(scan.damaged.len(), 1, "{label}");
+            assert_eq!(scan.damaged[0].session_id, session, "{label}");
+            assert!(
+                scan.damaged[0].reason.contains("Damaged complete"),
+                "{label}"
+            );
+            fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]

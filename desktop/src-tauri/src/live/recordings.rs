@@ -17,6 +17,8 @@ const PARTIAL_RECOVERY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DELETION_INTENT_SCHEMA_VERSION: u16 = 1;
 const MAX_DELETION_ARTIFACTS: usize = 128;
 const MAX_MAINTENANCE_WARNINGS: usize = 8;
+const MAX_PRIVATE_DELETION_LEFTOVERS: usize = 128;
+const PRIVATE_DELETION_LEFTOVER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,20 +66,6 @@ pub struct RecoverableLiveSession {
     pub journal_partial_path: Option<String>,
     pub reason: String,
     pub expires_at_ms: u64,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PartialRecoveryCommit {
-    schema_version: u16,
-    session_id: crate::audio::session::SessionId,
-    status: recording::CaptureStatus,
-    audio_file: String,
-    audio_sha256: String,
-    audio_bytes: u64,
-    capture_sidecar_file: String,
-    capture_sidecar_sha256: String,
-    committed_at_utc: String,
 }
 
 pub fn save_session_files(
@@ -358,6 +346,8 @@ fn list_session_catalog_from_dir_at(
 
     let pending = reconcile_pending_deletion_intents(dir);
     let scan = recording::scan_recordings(dir)?;
+    let recoverable = list_recoverable_live_sessions_from_scan(dir, &scan, now)?;
+    let maintenance_warnings = damaged_commit_warnings(&scan, pending.maintenance_warnings);
     let (retention_deleted, retention_warnings) =
         reconcile_expired_committed_meetings(dir, &scan.complete, now);
     let mut sessions = scan
@@ -399,7 +389,7 @@ fn list_session_catalog_from_dir_at(
             }
         })
         .collect::<Vec<_>>();
-    for recoverable in list_recoverable_live_sessions_from_dir(dir)? {
+    for recoverable in recoverable {
         let session_id = crate::audio::session::SessionId::new(recoverable.session_id.clone())?;
         if let Some(saved) = saved_recovered_session(dir, &session_id)? {
             sessions.push(saved);
@@ -413,7 +403,7 @@ fn list_session_catalog_from_dir_at(
     });
     Ok(SavedLiveSessionCatalog {
         sessions,
-        maintenance_warnings: pending.maintenance_warnings,
+        maintenance_warnings,
     })
 }
 
@@ -605,7 +595,7 @@ where
     if name != deletion_intent_name(&intent.session_id) {
         return Err("recording deletion intent name does not match its session".into());
     }
-    if physical_entry_exists(dir, name)? {
+    let replace_corrupt_final = if physical_entry_exists(dir, name)? {
         let existing = recording::read_regular_artifact(dir, name)
             .ok()
             .and_then(|text| {
@@ -619,49 +609,58 @@ where
         if !intent_originals_are_intact(dir, intent)? {
             return Err("recording deletion intent is corrupt and deletion may have started; evidence was retained".into());
         }
-        let quarantine = recording::quarantine_regular_artifact(dir, name)?;
-        crate::stt::log_yap(&format!(
-            "Quarantined corrupt recording deletion intent at {} before retrying publication",
-            quarantine.display()
-        ));
-    }
+        true
+    } else {
+        false
+    };
 
     let (staging, mut file) = create_unique_deletion_intent_staging(dir, &intent.session_id)?;
-    let result = serde_json::to_writer(&mut file, intent)
-        .map_err(|error| format!("Failed to serialize recording deletion intent: {error}"))
-        .and_then(|_| {
-            file.write_all(b"\n")
-                .and_then(|_| file.sync_all())
-                .map_err(|error| format!("Failed to persist recording deletion intent: {error}"))
-        })
-        .and_then(|_| {
-            publication_barrier(false);
-            recording::publish_no_replace(
-                &staging,
-                path,
-                &file,
-                "publish recording deletion intent",
-            )
-            .map(|published| {
-                drop(published);
-                publication_barrier(true);
-                let published = recording::read_regular_artifact(dir, name)?;
-                let published: DeletionIntent =
-                    serde_json::from_str(&published).map_err(|error| {
-                        format!("Failed to re-read published recording deletion intent: {error}")
-                    })?;
-                if published != *intent {
-                    return Err(
-                        "published recording deletion intent changed before verification".into(),
-                    );
-                }
-                let _ = recording::sync_recordings_parent(dir);
-                Ok(())
-            })
-            .and_then(|result| result)
-        });
-    if result.is_err() {
+    let mut quarantined = None;
+    let result = (|| {
+        serde_json::to_writer(&mut file, intent)
+            .map_err(|error| format!("Failed to serialize recording deletion intent: {error}"))?;
+        file.write_all(b"\n")
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("Failed to persist recording deletion intent: {error}"))?;
+        if replace_corrupt_final {
+            quarantined = Some(recording::quarantine_regular_artifact(dir, name)?);
+        }
+        publication_barrier(false);
+        let published = recording::publish_no_replace(
+            &staging,
+            path,
+            &file,
+            "publish recording deletion intent",
+        )?;
+        drop(published);
+        publication_barrier(true);
+        let published = recording::read_regular_artifact(dir, name)?;
+        let published: DeletionIntent = serde_json::from_str(&published).map_err(|error| {
+            format!("Failed to re-read published recording deletion intent: {error}")
+        })?;
+        if published != *intent {
+            return Err("published recording deletion intent changed before verification".into());
+        }
+        if let Some(quarantined) = quarantined.as_ref() {
+            recording::remove_verified_quarantined_artifact(quarantined)?;
+        }
+        let _ = recording::sync_recordings_parent(dir);
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        if let Some(quarantined) = quarantined.as_ref() {
+            if let Err(restore_error) =
+                recording::restore_verified_quarantined_artifact(quarantined, path)
+            {
+                crate::stt::log_yap(&format!(
+                    "Retained quarantined recording deletion intent after publication failure: {restore_error}"
+                ));
+            }
+        }
         recording::remove_owned_staging(&staging, &file, "publish recording deletion intent");
+        crate::stt::log_yap(&format!(
+            "Failed to publish recording deletion intent: {error}"
+        ));
     }
     drop(file);
     result
@@ -707,10 +706,25 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return warnings;
     };
-    for entry in entries.filter_map(Result::ok) {
+    let mut names = Vec::new();
+    for entry in entries {
+        if names.len() == MAX_PRIVATE_DELETION_LEFTOVERS {
+            push_maintenance_warning(
+                &mut warnings.maintenance_warnings,
+                "Private recording deletion cleanup scan reached its fixed budget.".into(),
+            );
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
+        names.push(name);
+    }
+    reconcile_private_deletion_leftovers(dir, &names, &mut warnings.maintenance_warnings);
+    for name in names {
         if !name.starts_with("live-") || !name.ends_with(".deletion.v1.json") {
             continue;
         }
@@ -733,6 +747,82 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
         }
     }
     warnings
+}
+
+#[derive(Clone, Copy)]
+enum PrivateDeletionLeftover {
+    Staging { process_id: u32 },
+    Quarantine,
+}
+
+fn reconcile_private_deletion_leftovers(dir: &Path, names: &[String], warnings: &mut Vec<String>) {
+    for name in names {
+        match private_deletion_leftover(name) {
+            Some(PrivateDeletionLeftover::Staging { process_id })
+                if process_id == std::process::id() => {}
+            Some(_) => {
+                match private_deletion_leftover_is_old(dir, name) {
+                    Ok(true) => {
+                        if let Err(error) = recording::remove_regular_artifact(dir, name) {
+                            push_maintenance_warning(
+                            warnings,
+                            format!("Private recording deletion cleanup was retained: {name}: {error}"),
+                        );
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => push_maintenance_warning(
+                        warnings,
+                        format!("Private recording deletion cleanup was retained: {name}: {error}"),
+                    ),
+                }
+            }
+            None if looks_like_private_deletion_artifact(name) => push_maintenance_warning(
+                warnings,
+                format!("Unknown private deletion artifact was retained: {name}"),
+            ),
+            None => {}
+        }
+    }
+}
+
+fn private_deletion_leftover(name: &str) -> Option<PrivateDeletionLeftover> {
+    let stem = name.strip_prefix(".live-")?;
+    if let Some((session, suffix)) = stem
+        .strip_suffix(".part")
+        .and_then(|value| value.split_once(".deletion.v1."))
+    {
+        crate::audio::session::SessionId::new(session.to_string()).ok()?;
+        let (process_id, nonce) = suffix.split_once('-')?;
+        process_id.parse::<u32>().ok()?;
+        nonce.parse::<u64>().ok()?;
+        return Some(PrivateDeletionLeftover::Staging {
+            process_id: process_id.parse().ok()?,
+        });
+    }
+    let (session, suffix) = stem.split_once(".deletion.v1.json.delete-")?;
+    crate::audio::session::SessionId::new(session.to_string()).ok()?;
+    let (process_id, nonce) = suffix.split_once('-')?;
+    process_id.parse::<u32>().ok()?;
+    nonce.parse::<u64>().ok()?;
+    Some(PrivateDeletionLeftover::Quarantine)
+}
+
+fn looks_like_private_deletion_artifact(name: &str) -> bool {
+    name.starts_with(".live-") && name.contains(".deletion.v1.")
+}
+
+fn private_deletion_leftover_is_old(dir: &Path, name: &str) -> Result<bool, String> {
+    let file = recording::open_regular_artifact(dir, name)?;
+    let modified = file
+        .metadata()
+        .map_err(|error| format!("Failed to inspect private deletion artifact: {error}"))?
+        .modified()
+        .map_err(|error| format!("Failed to inspect private deletion artifact age: {error}"))?;
+    let modified = system_time_to_unix_millis(modified)
+        .ok_or_else(|| "Private deletion artifact has an invalid modification time".to_string())?;
+    let now = unix_millis_now()?;
+    Ok(now.saturating_sub(modified) >= PRIVATE_DELETION_LEFTOVER_TTL.as_millis() as u64)
 }
 
 fn push_maintenance_warning(warnings: &mut Vec<String>, warning: String) {
@@ -1003,13 +1093,47 @@ fn validated_transcript_sha256(
 fn list_recoverable_live_sessions_from_dir(
     dir: &Path,
 ) -> Result<Vec<RecoverableLiveSession>, String> {
+    list_recoverable_live_sessions_from_scan(
+        dir,
+        &recording::scan_recordings(dir)?,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+fn list_recoverable_live_sessions_from_scan(
+    dir: &Path,
+    scan: &recording::RecordingScan,
+    now: OffsetDateTime,
+) -> Result<Vec<RecoverableLiveSession>, String> {
     let mut sessions = Vec::new();
-    for partial in recording::scan_recordings(dir)?.partial {
-        let Some(session_id) = partial.session_id else {
+    for recovered in &scan.recovered_partial {
+        if let Some(saved) = saved_recovered_session(dir, &recovered.session_id)? {
+            sessions.push(RecoverableLiveSession {
+                session_id: recovered.session_id.to_string(),
+                name: saved.name,
+                audio_partial_path: Some(saved.source_path),
+                journal_partial_path: regular_artifact_exists(
+                    dir,
+                    &format!("live-{}.capture.journal.part", recovered.session_id),
+                )
+                .then(|| {
+                    stable_existing_path_string(&dir.join(format!(
+                        "live-{}.capture.journal.part",
+                        recovered.session_id
+                    )))
+                }),
+                reason: "Recovered partial recording is retained for recovery or deletion.".into(),
+                expires_at_ms: u64::MAX,
+            });
+        }
+    }
+    for partial in &scan.partial {
+        let Some(session_id) = partial.session_id.as_ref() else {
             continue;
         };
-        let candidate = recoverable_session_from_dir(dir, &session_id)?;
-        if candidate.expires_at_ms <= unix_millis_now()? {
+        let candidate = recoverable_session_from_dir(dir, session_id)?;
+        let now_ms = u64::try_from(now.unix_timestamp_nanos() / 1_000_000).unwrap_or(u64::MAX);
+        if candidate.expires_at_ms <= now_ms {
             if let Err(error) = delete_recoverable_live_session_in_dir(dir, session_id.to_string())
             {
                 sessions.push(RecoverableLiveSession {
@@ -1022,6 +1146,22 @@ fn list_recoverable_live_sessions_from_dir(
         sessions.push(candidate);
     }
     Ok(sessions)
+}
+
+fn damaged_commit_warnings(
+    scan: &recording::RecordingScan,
+    mut warnings: Vec<String>,
+) -> Vec<String> {
+    for damaged in &scan.damaged {
+        push_maintenance_warning(
+            &mut warnings,
+            format!(
+                "Damaged live recording {} was preserved: {}",
+                damaged.session_id, damaged.reason
+            ),
+        );
+    }
+    warnings
 }
 
 fn recoverable_session_from_dir(
@@ -1095,7 +1235,7 @@ fn recover_live_session_in_dir(dir: &Path, session_id: String) -> Result<SavedLi
         }
     };
     let commit_file = format!("live-{session_id}.commit.json");
-    let commit = PartialRecoveryCommit {
+    let commit = recording::PartialRecoveryCommit {
         schema_version: 1,
         session_id: session_id.clone(),
         status: recording::CaptureStatus::Partial,
@@ -1156,11 +1296,16 @@ fn ensure_recoverable_session(
     session_id: &crate::audio::session::SessionId,
 ) -> Result<(), String> {
     let scan = recording::scan_recordings(dir)?;
-    scan.partial
+    (scan
+        .partial
         .into_iter()
         .any(|partial| partial.session_id.as_ref() == Some(session_id))
-        .then_some(())
-        .ok_or_else(|| "Live recording is not a recoverable Yap session.".into())
+        || scan
+            .recovered_partial
+            .into_iter()
+            .any(|recovered| recovered.session_id == *session_id))
+    .then_some(())
+    .ok_or_else(|| "Live recording is not a recoverable Yap session.".into())
 }
 
 fn saved_recovered_session(
@@ -1171,7 +1316,7 @@ fn saved_recovered_session(
     let Ok((text, _)) = recording::read_and_hash_regular_artifact(dir, &commit_name) else {
         return Ok(None);
     };
-    let Ok(commit) = serde_json::from_str::<PartialRecoveryCommit>(&text) else {
+    let Ok(commit) = serde_json::from_str::<recording::PartialRecoveryCommit>(&text) else {
         return Ok(None);
     };
     if commit.schema_version != 1
@@ -1762,6 +1907,18 @@ mod tests {
         }
     }
 
+    fn set_old_modified_time(path: &Path) {
+        let old = std::time::SystemTime::now()
+            .checked_sub(PARTIAL_RECOVERY_TTL + Duration::from_secs(60))
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
+
     #[test]
     fn transcript_text_prefers_final_then_partial() {
         let mut view = live_view(Some("final"), Some("partial"));
@@ -1769,6 +1926,68 @@ mod tests {
         assert_eq!(transcript_text(&view).as_deref(), Some("final"));
         view.final_text = None;
         assert_eq!(transcript_text(&view).as_deref(), Some("partial"));
+    }
+
+    #[test]
+    fn damaged_complete_commit_past_partial_ttl_is_preserved_and_warned() {
+        let dir = test_dir("damaged-commit-ttl");
+        let session = SessionId::new("s-damaged-commit-ttl").unwrap();
+        let mut capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+        capture.append_pcm16(&[1, 0]).unwrap();
+        capture.finalize().unwrap();
+        let journal = dir.join(format!("live-{session}.capture.journal.part"));
+        std::fs::write(&journal, b"residual journal").unwrap();
+        std::fs::write(dir.join(format!("live-{session}.commit.json")), b"{broken").unwrap();
+        set_old_modified_time(&dir.join(format!("live-{session}.wav")));
+        set_old_modified_time(&journal);
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        assert!(catalog.sessions.is_empty());
+        assert!(catalog
+            .maintenance_warnings
+            .iter()
+            .any(|warning| warning.contains("damaged")));
+        assert!(dir.join(format!("live-{session}.wav")).is_file());
+        assert!(journal.is_file());
+        assert!(list_recoverable_live_sessions_from_dir(&dir)
+            .unwrap()
+            .is_empty());
+        assert!(recover_live_session_in_dir(&dir, session.to_string()).is_err());
+        assert!(delete_recoverable_live_session_in_dir(&dir, session.to_string()).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn valid_recovered_partial_commit_past_partial_ttl_remains_recoverable() {
+        let dir = test_dir("recovered-partial-ttl");
+        let session = SessionId::new("s-recovered-partial-ttl").unwrap();
+        {
+            let mut capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+            capture.append_pcm16(&[1, 0]).unwrap();
+        }
+        recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+        for name in [
+            format!("live-{session}.wav"),
+            format!("live-{session}.capture.journal.part"),
+            format!("live-{session}.capture.partial.json"),
+            format!("live-{session}.commit.json"),
+        ] {
+            set_old_modified_time(&dir.join(name));
+        }
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        assert!(catalog
+            .sessions
+            .iter()
+            .any(|saved| saved.recovery_state.as_deref() == Some("recoverable")));
+        assert!(dir.join(format!("live-{session}.wav")).is_file());
+        assert!(dir.join(format!("live-{session}.commit.json")).is_file());
+        delete_recoverable_live_session_in_dir(&dir, session.to_string()).unwrap();
+        assert!(!dir.join(format!("live-{session}.wav")).exists());
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2356,16 +2575,20 @@ mod tests {
     }
 
     #[test]
-    fn transcript_receipt_drops_its_destination_handle_after_save() {
+    fn transcript_receipt_allows_destination_move_and_revalidates_identity() {
         let dir = test_dir("transcript-receipt-handle-lifetime");
         let session = SessionId::new("s-transcript-receipt-handle-lifetime").unwrap();
         let transcript = dir.join(format!("live-{session}.txt"));
 
         let receipt = write_new_text_file(&transcript, "owned transcript\n").unwrap();
 
-        assert_eq!(recording::receipt_handle_count_for_test(), 0);
         receipt.revalidate().unwrap();
-        assert_eq!(recording::receipt_handle_count_for_test(), 0);
+        let displaced = transcript.with_extension("displaced");
+        std::fs::rename(&transcript, &displaced).unwrap();
+        std::fs::write(&transcript, "replacement transcript\n").unwrap();
+        assert!(displaced.is_file());
+        assert!(transcript.is_file());
+        assert!(receipt.revalidate().is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2407,7 +2630,6 @@ mod tests {
             std::fs::read_to_string(&transcript).unwrap(),
             "replacement transcript\n"
         );
-        assert_eq!(recording::receipt_handle_count_for_test(), 0);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2453,7 +2675,6 @@ mod tests {
         let sessions = list_session_files_from_dir(&dir).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].output_path, sessions[0].source_path);
-        assert_eq!(recording::receipt_handle_count_for_test(), 0);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2760,13 +2981,71 @@ mod tests {
 
         assert!(!dir.join(format!("live-{session}.commit.json")).exists());
         assert!(!dir.join(&intent_name).exists());
-        assert!(std::fs::read_dir(&dir)
+        assert!(!std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry
                 .file_name()
                 .to_string_lossy()
                 .contains("deletion.v1.json.delete-")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reconciliation_collects_only_old_foreign_private_deletion_leftovers() {
+        let dir = test_dir("private-deletion-leftovers");
+        let stale_staging = dir.join(".live-s-stale-leftover.deletion.v1.999999-0.part");
+        let stale_quarantine = dir.join(".live-s-stale-leftover.deletion.v1.json.delete-999999-0");
+        let active_staging = dir.join(format!(
+            ".live-s-active-leftover.deletion.v1.{}-0.part",
+            std::process::id()
+        ));
+        let unknown = dir.join(".live-s-unknown-leftover.deletion.v1.invalid.part");
+        for path in [&stale_staging, &stale_quarantine, &active_staging, &unknown] {
+            std::fs::write(path, b"leftover").unwrap();
+            set_old_modified_time(path);
+        }
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        assert!(!stale_staging.exists());
+        assert!(!stale_quarantine.exists());
+        assert!(active_staging.is_file());
+        assert!(unknown.is_file());
+        assert!(catalog
+            .maintenance_warnings
+            .iter()
+            .any(|warning| warning.contains("Unknown private deletion artifact")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn corrupt_intent_retries_remove_each_verified_quarantine() {
+        let dir = test_dir("corrupt-intent-retry-cleanup");
+        let session = SessionId::new("s-corrupt-intent-retry-cleanup").unwrap();
+        let mut capture = StreamingRecording::create(&dir, session.clone()).unwrap();
+        capture.append_pcm16(&[1, 0]).unwrap();
+        capture.finalize().unwrap();
+        let committed = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &committed, "manual").unwrap();
+        let intent_path = dir.join(deletion_intent_name(&session));
+
+        for _ in 0..3 {
+            std::fs::write(&intent_path, b"{corrupt").unwrap();
+            write_deletion_intent(&intent_path, &intent).unwrap();
+            assert!(!std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("deletion.v1.json.delete-")));
+            std::fs::remove_file(&intent_path).unwrap();
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2838,8 +3117,10 @@ mod tests {
         let catalog = list_session_catalog_from_dir(&dir).unwrap();
 
         assert!(catalog.sessions.is_empty());
-        assert_eq!(catalog.maintenance_warnings.len(), 1);
-        assert!(catalog.maintenance_warnings[0].contains("pending"));
+        assert!(catalog
+            .maintenance_warnings
+            .iter()
+            .any(|warning| warning.contains("pending")));
         assert!(dir.join(&intent_name).is_file());
         assert!(dir.join(format!("live-{session}.capture.json")).is_file());
         std::fs::remove_dir_all(dir).ok();
