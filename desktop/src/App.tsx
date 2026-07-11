@@ -64,7 +64,10 @@ import {
   writeRecordingQueue,
 } from "@/recording-queue";
 import {
+  deleteRecoverableLiveSession,
+  listRecoverableLiveSessions,
   listSavedLiveSessions,
+  recoverLiveSession,
   type SavedLiveSession,
 } from "@/live";
 import {
@@ -275,7 +278,23 @@ export default function App() {
     });
 
     void reconcileHiddenHistory()
-      .then(() => listSavedLiveSessions())
+      .then(async () => {
+        const [saved, recoverable] = await Promise.all([
+          listSavedLiveSessions(),
+          listRecoverableLiveSessions(),
+        ]);
+        return [
+          ...saved,
+          ...recoverable.map((session): SavedLiveSession => ({
+            createdAtMs: Math.max(0, session.expiresAtMs - 24 * 60 * 60 * 1000),
+            name: session.name,
+            outputPath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
+            sourcePath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
+            warning: session.reason,
+            recoveryState: "recoverable",
+          })),
+        ];
+      })
       .then((sessions) => {
         if (cancelled) return;
         recordVisibleHistoryEntries(
@@ -729,6 +748,34 @@ export default function App() {
     }
   }
 
+  async function recoverHistoryEntry(entry: TranscriptHistoryEntry) {
+    const sessionId = entry.name.replace(/^live-/, "");
+    try {
+      const saved = await recoverLiveSession(sessionId);
+      const recovered = savedSessionToTranscriptHistoryEntry(saved);
+      if (!recordVisibleHistoryEntries([recovered], "Transcript history could not be saved.")) return;
+      forgetHistoryEntry(entry.outputPath);
+      clearHistorySelectionIf(entry.outputPath);
+      selectHistoryEntry(recovered);
+      toast.success("Partial recording recovered");
+    } catch (error) {
+      toast.error(String(error || "Recovery failed"));
+    }
+  }
+
+  async function deleteRecoverableHistoryEntry(entry: TranscriptHistoryEntry) {
+    const sessionId = entry.name.replace(/^live-/, "");
+    try {
+      await deleteRecoverableLiveSession(sessionId);
+      if (!forgetHistoryEntry(entry.outputPath)) return;
+      clearHistorySelectionIf(entry.outputPath);
+      forgetTranscriptText(entry.outputPath);
+      toast.success("Partial recording deleted");
+    } catch (error) {
+      toast.error(String(error || "Delete failed"));
+    }
+  }
+
   function openHistoryEntry(entry: TranscriptHistoryEntry, origin?: DOMRect) {
     selectHistoryEntry(entry, origin);
     openWorkspace("home");
@@ -760,12 +807,14 @@ export default function App() {
           entries={history}
           onCopy={(entry) => void copyTranscript(historyJob(entry))}
           onDelete={(entry) => void deleteHistoryEntry(entry)}
+          onDeleteRecoverable={(entry) => void deleteRecoverableHistoryEntry(entry)}
           onHide={hideHistoryEntry}
           onLoadPreviewText={loadHistoryPreviewText}
           onOpen={(entry) => void openAppPath(entry.outputPath)}
           onOpenHelp={() => openWorkspace("help")}
           onPreview={(entry) => void previewHistoryEntry(entry)}
           onReveal={(entry) => void revealPath(entry.outputPath)}
+          onRecover={(entry) => void recoverHistoryEntry(entry)}
           onSelect={openHistoryEntry}
           selectedOutputPath={selectedHistoryOutput}
         />

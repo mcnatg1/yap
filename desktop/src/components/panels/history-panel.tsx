@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Copy } from "@phosphor-icons/react/Copy";
+import { ArrowClockwise as Recover } from "@phosphor-icons/react/ArrowClockwise";
 import { EyeSlash } from "@phosphor-icons/react/EyeSlash";
 import { FileText } from "@phosphor-icons/react/FileText";
 import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
@@ -63,21 +64,26 @@ function HistoryActionMenu({
   entry,
   onCopy,
   onDelete,
+  onDeleteRecoverable,
   onHide,
   onOpen,
   onPreview,
+  onRecover,
   onReveal,
 }: {
   entry: TranscriptHistoryEntry;
   onCopy: (entry: TranscriptHistoryEntry) => void;
   onDelete: (entry: TranscriptHistoryEntry) => void;
+  onDeleteRecoverable: (entry: TranscriptHistoryEntry) => void;
   onHide: (outputPath: string) => void;
   onOpen: (entry: TranscriptHistoryEntry) => void;
   onPreview: (entry: TranscriptHistoryEntry) => void;
+  onRecover: (entry: TranscriptHistoryEntry) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const canDelete = canDeleteTranscriptHistoryEntry(entry);
+  const recoverable = entry.recoveryState === "recoverable";
 
   return (
     <>
@@ -94,31 +100,46 @@ function HistoryActionMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
-          <DropdownMenuLabel>Transcript</DropdownMenuLabel>
-          <DropdownMenuGroup>
-            <DropdownMenuItem onSelect={() => onPreview(entry)}>
-              <FileText />
-              Preview
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onCopy(entry)}>
-              <Copy />
-              Copy transcript
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onOpen(entry)}>
-              <FileText />
-              Open file
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onReveal(entry)}>
-              <FolderOpen />
-              Reveal in Explorer
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
-            <EyeSlash />
-            Hide
-          </DropdownMenuItem>
-          {canDelete ? (
+          <DropdownMenuLabel>{recoverable ? "Partial" : "Transcript"}</DropdownMenuLabel>
+          {recoverable ? (
+            <DropdownMenuGroup>
+              <DropdownMenuItem onSelect={() => onRecover(entry)}>
+                <Recover />
+                Recover
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onDeleteRecoverable(entry)} variant="destructive">
+                <Trash2 />
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          ) : (
+            <>
+              <DropdownMenuGroup>
+                <DropdownMenuItem onSelect={() => onPreview(entry)}>
+                  <FileText />
+                  Preview
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onCopy(entry)}>
+                  <Copy />
+                  Copy transcript
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onOpen(entry)}>
+                  <FileText />
+                  Open file
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onReveal(entry)}>
+                  <FolderOpen />
+                  Reveal in Explorer
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
+                <EyeSlash />
+                Hide
+              </DropdownMenuItem>
+            </>
+          )}
+          {!recoverable && canDelete ? (
             <DropdownMenuItem
               onSelect={(event) => {
                 event.preventDefault();
@@ -161,11 +182,13 @@ export function HistoryPanel({
   entries,
   onCopy,
   onDelete,
+  onDeleteRecoverable,
   onHide,
   onLoadPreviewText,
   onOpen,
   onOpenHelp,
   onPreview,
+  onRecover,
   onReveal,
   onSelect,
   selectedOutputPath,
@@ -173,11 +196,13 @@ export function HistoryPanel({
   entries: TranscriptHistoryEntry[];
   onCopy: (entry: TranscriptHistoryEntry) => void;
   onDelete: (entry: TranscriptHistoryEntry) => void;
+  onDeleteRecoverable: (entry: TranscriptHistoryEntry) => void;
   onHide: (outputPath: string) => void;
   onLoadPreviewText?: (entry: TranscriptHistoryEntry) => Promise<string>;
   onOpen: (entry: TranscriptHistoryEntry) => void;
   onOpenHelp?: () => void;
   onPreview: (entry: TranscriptHistoryEntry) => void;
+  onRecover: (entry: TranscriptHistoryEntry) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
   onSelect: (entry: TranscriptHistoryEntry, origin?: DOMRect) => void;
   selectedOutputPath?: string;
@@ -347,11 +372,16 @@ export function HistoryPanel({
                                   className="max-w-0 cursor-pointer whitespace-normal align-top"
                                   onClick={selectEntry}
                                 >
-                                  <HistoryEntryPreview
-                                    entry={entry}
-                                    onLoadPreviewText={loadPreviewText}
-                                    onReview={(origin) => onSelect(entry, origin)}
-                                  />
+                                  <div className="flex min-w-0 items-start gap-2">
+                                    <HistoryEntryPreview
+                                      entry={entry}
+                                      onLoadPreviewText={loadPreviewText}
+                                      onReview={(origin) => onSelect(entry, origin)}
+                                    />
+                                    {entry.recoveryState === "recoverable" ? (
+                                      <span className="shrink-0 text-xs font-medium text-muted-foreground">Partial</span>
+                                    ) : null}
+                                  </div>
                                 </TableCell>
                                 <TableCell className="w-[4.5rem] align-top text-right">
                                   <div className="flex items-center justify-end gap-0.5">
@@ -376,10 +406,12 @@ export function HistoryPanel({
                                     <HistoryActionMenu
                                       entry={entry}
                                       onCopy={onCopy}
-                                      onDelete={onDelete}
+                              onDelete={onDelete}
+                              onDeleteRecoverable={onDeleteRecoverable}
                                       onHide={onHide}
                                       onOpen={onOpen}
-                                      onPreview={onPreview}
+                              onPreview={onPreview}
+                              onRecover={onRecover}
                                       onReveal={onReveal}
                                     />
                                   </div>

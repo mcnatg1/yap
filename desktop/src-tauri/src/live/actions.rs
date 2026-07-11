@@ -332,7 +332,7 @@ fn finalize_live_runtime(
     let injection_target = live::injection::capture_target();
 
     crate::emit_live(&app, &saving);
-    let finish_status = live_runtime.stop();
+    let finish_status = live_runtime.stop_stream();
     if finish_status.should_report() {
         crate::log_line(&format!(
             "live stream stop completed with {finish_status:?}"
@@ -348,7 +348,10 @@ fn finalize_live_runtime(
         &before_stop,
         |text| live.remember_completed_transcript(text),
         |text| live::injection::inject_text(&app, injection_target, text),
-        || live::recordings::save_session_files(live_runtime, &before_stop),
+        || {
+            let stop = live_runtime.finish_stop(finish_status);
+            live::recordings::save_stop_result(&stop, &before_stop)
+        },
     );
     apply_injection_result(live, effects.injection);
     if let Some(message) = completion_error {
@@ -485,6 +488,34 @@ mod tests {
             events.into_inner(),
             vec!["remember:Finished words", "inject:Finished words", "save"]
         );
+    }
+
+    #[test]
+    fn only_the_saving_claim_holder_runs_completion_effects() {
+        let state = LiveSessionState::new(LiveSettings::default());
+        state
+            .try_begin_local_start(crate::live::state::LiveCaptureMode::PushToTalk, None, None)
+            .unwrap();
+        state.try_begin_listening_from_armed().unwrap();
+        state.update_final("Finished words");
+        let first = state.try_begin_saving(true).unwrap();
+        assert!(state.try_begin_saving(true).is_none());
+        let effects = RefCell::new(Vec::new());
+
+        let _ = run_completion_effects_with(
+            &first,
+            |_| effects.borrow_mut().push("remember"),
+            |_| {
+                effects.borrow_mut().push("inject");
+                Ok(())
+            },
+            || {
+                effects.borrow_mut().push("save");
+                Ok(())
+            },
+        );
+
+        assert_eq!(effects.into_inner(), vec!["remember", "inject", "save"]);
     }
 
     #[test]

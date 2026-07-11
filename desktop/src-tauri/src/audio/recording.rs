@@ -2236,6 +2236,57 @@ pub(crate) fn open_regular_artifact(directory: &Path, name: &str) -> Result<File
     Ok(file)
 }
 
+pub(crate) fn recover_partial_wav(
+    directory: &Path,
+    session_id: &SessionId,
+) -> Result<(String, u64, String), String> {
+    let source_name = format!("live-{session_id}.wav.part");
+    let destination_name = format!("live-{session_id}.wav");
+    let source = directory.join(&source_name);
+    let destination = directory.join(&destination_name);
+    let mut audio = open_regular_artifact_for_update(directory, &source_name)?;
+    let length = audio
+        .metadata()
+        .map_err(|error| format!("Failed to inspect partial live audio: {error}"))?
+        .len();
+    let data_bytes = length
+        .checked_sub(WAV_HEADER_BYTES)
+        .ok_or_else(|| "partial live audio is shorter than a WAV header".to_string())?;
+    write_wav_header(&mut audio, data_bytes)?;
+    audio
+        .sync_all()
+        .map_err(|error| format!("Failed to sync recovered live audio: {error}"))?;
+    let mut published = publish_no_replace(
+        &source,
+        &destination,
+        &audio,
+        "publish recovered live audio",
+    )?;
+    let published_bytes = published
+        .metadata()
+        .map_err(|error| format!("Failed to inspect recovered live audio: {error}"))?
+        .len();
+    let hash = sha256_open_file(&mut published)?;
+    Ok((destination_name, published_bytes, hash))
+}
+
+pub(crate) fn remove_regular_artifact(directory: &Path, name: &str) -> Result<(), String> {
+    let path = directory.join(name);
+    let owned = open_regular_artifact(directory, name)?;
+    let current = open_regular_path(&path)?;
+    if !same_file_identity(&owned, &current)? {
+        return Err("recording artifact path no longer names the verified file".into());
+    }
+    drop(current);
+    std::fs::remove_file(path)
+        .map_err(|error| format!("Failed to remove recording artifact: {error}"))
+}
+
+pub(crate) fn sha256_regular_artifact(directory: &Path, name: &str) -> Result<String, String> {
+    let mut file = open_regular_artifact(directory, name)?;
+    sha256_open_file(&mut file)
+}
+
 fn open_regular_path(path: &Path) -> Result<File, String> {
     let directory = path
         .parent()
@@ -2245,6 +2296,23 @@ fn open_regular_path(path: &Path) -> Result<File, String> {
         .and_then(|value| value.to_str())
         .ok_or_else(|| "recording artifact has no valid file name".to_string())?;
     open_regular_artifact(directory, name)
+}
+
+fn open_regular_artifact_for_update(directory: &Path, name: &str) -> Result<File, String> {
+    validate_artifact_name(name)?;
+    let file = open_no_follow_update(&directory.join(name))
+        .map_err(|error| format!("Failed to open recording artifact for update: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Failed to inspect recording artifact: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("recording artifact is not a regular file".into());
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x400 != 0 {
+        return Err("recording artifact is a reparse point".into());
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -2330,6 +2398,30 @@ fn open_no_follow(path: &Path) -> std::io::Result<File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
+}
+
+#[cfg(unix)]
+fn open_no_follow_update(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_no_follow_update(path: &Path) -> std::io::Result<File> {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_no_follow_update(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(path)
 }
 
 #[cfg(windows)]

@@ -4,17 +4,28 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionStatus, LiveSessionView, WorkspaceView } from "@/lib/app-types";
 
 export type SavedLiveSession = {
+  captureCommitPath?: string | null;
   createdAtMs: number;
   name: string;
   sourcePath: string;
   outputPath: string;
   warning?: string | null;
+  recoveryState?: "recoverable" | "recovered" | null;
 };
 
 export type OwnedLiveTranscriptPathResolution = {
   requestedPath: string;
   canonicalPath?: string | null;
   missing: boolean;
+};
+
+export type RecoverableLiveSession = {
+  audioPartialPath?: string | null;
+  expiresAtMs: number;
+  journalPartialPath?: string | null;
+  name: string;
+  reason: string;
+  sessionId: string;
 };
 
 export type LiveLevelView = {
@@ -76,6 +87,18 @@ export function stopLiveSession(): Promise<LiveSessionView> {
 
 export function listSavedLiveSessions(): Promise<SavedLiveSession[]> {
   return invoke<SavedLiveSession[]>("list_saved_live_sessions");
+}
+
+export function listRecoverableLiveSessions(): Promise<RecoverableLiveSession[]> {
+  return invoke<RecoverableLiveSession[]>("list_recoverable_live_sessions");
+}
+
+export function recoverLiveSession(sessionId: string): Promise<SavedLiveSession> {
+  return invoke<SavedLiveSession>("recover_live_session", { sessionId });
+}
+
+export function deleteRecoverableLiveSession(sessionId: string): Promise<void> {
+  return invoke<void>("delete_recoverable_live_session", { sessionId });
 }
 
 export function resolveOwnedLiveTranscriptPaths(

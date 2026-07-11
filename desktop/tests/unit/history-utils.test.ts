@@ -59,4 +59,19 @@ describe("history job projection", () => {
 
     expect(job.playbackPath).toBe(restoredPath);
   });
+
+  it("projects recoverable history rows as partial without offering playback", () => {
+    const job = historyEntryToRecordingJob({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-recoverable",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
+      recoveryState: "recoverable",
+    } as Parameters<typeof historyEntryToRecordingJob>[0] & {
+      recoveryState?: "recoverable";
+    });
+
+    expect(job.status).toBe("partial");
+    expect(job.playbackPath).toBeUndefined();
+  });
 });

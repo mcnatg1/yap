@@ -1,4 +1,6 @@
 use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
 
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -9,6 +11,7 @@ use crate::{file_actions, live};
 
 const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
 const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Audio was saved.";
+const PARTIAL_RECOVERY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +21,33 @@ pub struct SavedLiveSession {
     pub output_path: String,
     pub created_at_ms: u64,
     pub warning: Option<String>,
+    pub capture_commit_path: Option<String>,
+    pub recovery_state: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverableLiveSession {
+    pub session_id: String,
+    pub name: String,
+    pub audio_partial_path: Option<String>,
+    pub journal_partial_path: Option<String>,
+    pub reason: String,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialRecoveryCommit {
+    schema_version: u16,
+    session_id: crate::audio::session::SessionId,
+    status: recording::CaptureStatus,
+    audio_file: String,
+    audio_sha256: String,
+    audio_bytes: u64,
+    capture_sidecar_file: String,
+    capture_sidecar_sha256: String,
+    committed_at_utc: String,
 }
 
 pub fn save_session_files(
@@ -25,6 +55,16 @@ pub fn save_session_files(
     view: &live::state::LiveSessionView,
 ) -> Result<Option<SavedLiveSession>, String> {
     save_session_files_to_dir(live_runtime, view, &recordings_dir())
+}
+
+pub(crate) fn save_stop_result(
+    stop: &live::runtime::LiveStopResult,
+    view: &live::state::LiveSessionView,
+) -> Result<Option<SavedLiveSession>, String> {
+    match &stop.recording {
+        Ok(capture) => save_finalized_capture_to_dir(&recordings_dir(), view, capture.clone()),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 fn save_session_files_to_dir(
@@ -71,6 +111,8 @@ fn save_unavailable_capture_transcript_to_dir(
             warning,
             format!("Capture finalization failed: {capture_error}"),
         ),
+        capture_commit_path: None,
+        recovery_state: None,
     }))
 }
 
@@ -159,6 +201,8 @@ where
                     )
                 },
             ),
+            capture_commit_path: None,
+            recovery_state: None,
         }));
     };
     let audio_path = dir.join(&committed.manifest.audio_file);
@@ -173,6 +217,10 @@ where
                 format!("Transcript revision was not saved: {error}"),
             )
         }),
+        capture_commit_path: Some(stable_existing_path_string(
+            &dir.join(format!("live-{}.commit.json", capture.session_id)),
+        )),
+        recovery_state: None,
     }))
 }
 
@@ -189,6 +237,18 @@ fn combine_warning(base: Option<String>, next: impl AsRef<str>) -> Option<String
 
 pub fn list_session_files() -> Result<Vec<SavedLiveSession>, String> {
     list_session_files_from_dir(&recordings_dir())
+}
+
+pub fn list_recoverable_live_sessions() -> Result<Vec<RecoverableLiveSession>, String> {
+    list_recoverable_live_sessions_from_dir(&recordings_dir())
+}
+
+pub fn recover_live_session(session_id: String) -> Result<SavedLiveSession, String> {
+    recover_live_session_in_dir(&recordings_dir(), session_id)
+}
+
+pub fn delete_recoverable_live_session(session_id: String) -> Result<(), String> {
+    delete_recoverable_live_session_in_dir(&recordings_dir(), session_id)
 }
 
 fn recordings_dir_from<F>(env: F) -> std::path::PathBuf
@@ -232,6 +292,11 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
                 },
                 created_at_ms: committed_at_ms(&committed.manifest.committed_at_utc),
                 warning: None,
+                capture_commit_path: Some(stable_existing_path_string(&dir.join(format!(
+                    "live-{}.commit.json",
+                    committed.manifest.session_id
+                )))),
+                recovery_state: None,
             }
         })
         .collect::<Vec<_>>();
@@ -272,7 +337,16 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             output_path: stable_existing_path_string(&path),
             created_at_ms,
             warning: None,
+            capture_commit_path: None,
+            recovery_state: None,
         });
+    }
+
+    for recoverable in list_recoverable_live_sessions_from_dir(dir)? {
+        let session_id = crate::audio::session::SessionId::new(recoverable.session_id.clone())?;
+        if let Some(saved) = saved_recovered_session(dir, &session_id)? {
+            sessions.push(saved);
+        }
     }
 
     sessions.sort_by(|a, b| {
@@ -281,6 +355,225 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             .then_with(|| b.name.cmp(&a.name))
     });
     Ok(sessions)
+}
+
+fn list_recoverable_live_sessions_from_dir(
+    dir: &Path,
+) -> Result<Vec<RecoverableLiveSession>, String> {
+    let mut sessions = Vec::new();
+    for partial in recording::scan_recordings(dir)?.partial {
+        let Some(session_id) = partial.session_id else {
+            continue;
+        };
+        let candidate = recoverable_session_from_dir(dir, &session_id)?;
+        if candidate.expires_at_ms <= unix_millis_now()? {
+            if let Err(error) = delete_recoverable_live_session_in_dir(dir, session_id.to_string())
+            {
+                sessions.push(RecoverableLiveSession {
+                    reason: format!("{} Cleanup is pending: {error}", candidate.reason),
+                    ..candidate
+                });
+            }
+            continue;
+        }
+        sessions.push(candidate);
+    }
+    Ok(sessions)
+}
+
+fn recoverable_session_from_dir(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<RecoverableLiveSession, String> {
+    let name = format!("live-{session_id}");
+    let audio_name = format!("{name}.wav.part");
+    let journal_name = format!("{name}.capture.journal.part");
+    let audio = regular_artifact_exists(dir, &audio_name)
+        .then(|| stable_existing_path_string(&dir.join(&audio_name)));
+    let journal = regular_artifact_exists(dir, &journal_name)
+        .then(|| stable_existing_path_string(&dir.join(&journal_name)));
+    let recorded_at = [audio_name.as_str(), journal_name.as_str()]
+        .into_iter()
+        .filter_map(|artifact| artifact_modified_at_ms(dir, artifact))
+        .min()
+        .unwrap_or_else(|| unix_millis_now().unwrap_or(0));
+    let expires_at_ms = recorded_at.saturating_add(PARTIAL_RECOVERY_TTL.as_millis() as u64);
+    Ok(RecoverableLiveSession {
+        session_id: session_id.to_string(),
+        name,
+        audio_partial_path: audio,
+        journal_partial_path: journal,
+        reason: "Recording did not finish and can be recovered or deleted.".into(),
+        expires_at_ms,
+    })
+}
+
+fn recover_live_session_in_dir(dir: &Path, session_id: String) -> Result<SavedLiveSession, String> {
+    let session_id = crate::audio::session::SessionId::new(session_id)?;
+    ensure_recoverable_session(dir, &session_id)?;
+    let candidate = recoverable_session_from_dir(dir, &session_id)?;
+    if candidate.expires_at_ms <= unix_millis_now()? {
+        return Err("Recoverable live recording has expired.".into());
+    }
+    if candidate.audio_partial_path.is_none() {
+        return Err("Recoverable live recording has no safe partial WAV to repair.".into());
+    }
+    let (audio_file, audio_bytes, audio_sha256) = recording::recover_partial_wav(dir, &session_id)?;
+    let sidecar_file = format!("live-{session_id}.capture.partial.json");
+    let sidecar_sha256 = match recording::read_and_hash_regular_artifact(dir, &sidecar_file) {
+        Ok((text, hash)) if valid_partial_sidecar(&text, &session_id) => hash,
+        Ok(_) => return Err("Partial capture sidecar does not match the recovery session.".into()),
+        Err(_) => {
+            let sidecar = serde_json::json!({
+                "schemaVersion": 1u16,
+                "sessionId": session_id,
+                "status": "partial",
+            });
+            let receipt = write_new_text_file(
+                &dir.join(&sidecar_file),
+                &format!(
+                    "{}\n",
+                    serde_json::to_string(&sidecar).map_err(|error| error.to_string())?
+                ),
+            )?;
+            receipt.sha256().to_string()
+        }
+    };
+    let commit_file = format!("live-{session_id}.commit.json");
+    let commit = PartialRecoveryCommit {
+        schema_version: 1,
+        session_id: session_id.clone(),
+        status: recording::CaptureStatus::Partial,
+        audio_file: audio_file.clone(),
+        audio_sha256,
+        audio_bytes,
+        capture_sidecar_file: sidecar_file,
+        capture_sidecar_sha256: sidecar_sha256,
+        committed_at_utc: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|_| "Failed to format recovery timestamp")?,
+    };
+    write_new_text_file(
+        &dir.join(&commit_file),
+        &format!(
+            "{}\n",
+            serde_json::to_string(&commit).map_err(|error| error.to_string())?
+        ),
+    )?;
+    saved_recovered_session(dir, &session_id)?
+        .ok_or_else(|| "Recovered live recording was not verifiable.".into())
+}
+
+fn delete_recoverable_live_session_in_dir(dir: &Path, session_id: String) -> Result<(), String> {
+    let session_id = crate::audio::session::SessionId::new(session_id)?;
+    ensure_recoverable_session(dir, &session_id)?;
+    let recovered = saved_recovered_session(dir, &session_id)?.is_some();
+    for suffix in [
+        ".wav.part",
+        ".capture.journal.part",
+        ".capture.json.part",
+        ".capture.partial.json.part",
+        ".commit.json.part",
+    ] {
+        let name = format!("live-{session_id}{suffix}");
+        if regular_artifact_exists(dir, &name) {
+            recording::remove_regular_artifact(dir, &name)?;
+        }
+    }
+    let sidecar_name = format!("live-{session_id}.capture.partial.json");
+    if let Ok(text) = recording::read_regular_artifact(dir, &sidecar_name) {
+        if valid_partial_sidecar(&text, &session_id) {
+            recording::remove_regular_artifact(dir, &sidecar_name)?;
+        }
+    }
+    if recovered {
+        for suffix in [".commit.json", ".wav"] {
+            recording::remove_regular_artifact(dir, &format!("live-{session_id}{suffix}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_recoverable_session(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<(), String> {
+    let scan = recording::scan_recordings(dir)?;
+    scan.partial
+        .into_iter()
+        .any(|partial| partial.session_id.as_ref() == Some(session_id))
+        .then_some(())
+        .ok_or_else(|| "Live recording is not a recoverable Yap session.".into())
+}
+
+fn saved_recovered_session(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<Option<SavedLiveSession>, String> {
+    let commit_name = format!("live-{session_id}.commit.json");
+    let Ok((text, _)) = recording::read_and_hash_regular_artifact(dir, &commit_name) else {
+        return Ok(None);
+    };
+    let Ok(commit) = serde_json::from_str::<PartialRecoveryCommit>(&text) else {
+        return Ok(None);
+    };
+    if commit.schema_version != 1
+        || commit.status != recording::CaptureStatus::Partial
+        || commit.session_id != *session_id
+        || !is_expected_recovery_name(&commit.audio_file, session_id, ".wav")
+        || !is_expected_recovery_name(
+            &commit.capture_sidecar_file,
+            session_id,
+            ".capture.partial.json",
+        )
+        || recording::sha256_regular_artifact(dir, &commit.audio_file)? != commit.audio_sha256
+        || recording::sha256_regular_artifact(dir, &commit.capture_sidecar_file)?
+            != commit.capture_sidecar_sha256
+    {
+        return Ok(None);
+    }
+    let audio = recording::open_regular_artifact(dir, &commit.audio_file)?;
+    if audio.metadata().map_err(|error| error.to_string())?.len() != commit.audio_bytes {
+        return Ok(None);
+    }
+    let sidecar = recording::read_regular_artifact(dir, &commit.capture_sidecar_file)?;
+    if !valid_partial_sidecar(&sidecar, session_id) {
+        return Ok(None);
+    }
+    Ok(Some(SavedLiveSession {
+        name: format!("live-{session_id}"),
+        source_path: stable_existing_path_string(&dir.join(&commit.audio_file)),
+        output_path: stable_existing_path_string(&dir.join(&commit.audio_file)),
+        created_at_ms: committed_at_ms(&commit.committed_at_utc),
+        warning: Some("Recovered partial recording.".into()),
+        capture_commit_path: Some(stable_existing_path_string(&dir.join(commit_name))),
+        recovery_state: Some("recovered".into()),
+    }))
+}
+
+fn valid_partial_sidecar(text: &str, session_id: &crate::audio::session::SessionId) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        == Some(1)
+        && value.get("sessionId").and_then(serde_json::Value::as_str) == Some(session_id.as_str())
+        && value.get("status").and_then(serde_json::Value::as_str) == Some("partial")
+}
+
+fn is_expected_recovery_name(
+    name: &str,
+    session_id: &crate::audio::session::SessionId,
+    suffix: &str,
+) -> bool {
+    recording::validate_artifact_name(name).is_ok() && name == format!("live-{session_id}{suffix}")
+}
+
+fn artifact_modified_at_ms(dir: &Path, name: &str) -> Option<u64> {
+    let file = recording::open_regular_artifact(dir, name).ok()?;
+    system_time_to_unix_millis(file.metadata().ok()?.modified().ok()?)
 }
 
 fn regular_artifact_exists(dir: &std::path::Path, name: &str) -> bool {
@@ -848,6 +1141,50 @@ mod tests {
     }
 
     #[test]
+    fn recovery_patches_a_private_wav_and_publishes_only_partial_metadata() {
+        let dir = test_dir("recover-private-wav");
+        let session = SessionId::new("s-recover-private-wav").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0, 2, 0]).unwrap();
+        }
+
+        let recoverable = list_recoverable_live_sessions_from_dir(&dir).unwrap();
+        assert_eq!(recoverable.len(), 1);
+        let saved = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+
+        assert_eq!(saved.recovery_state.as_deref(), Some("recovered"));
+        assert!(dir.join(format!("live-{session}.wav")).is_file());
+        let commit =
+            std::fs::read_to_string(dir.join(format!("live-{session}.commit.json"))).unwrap();
+        assert!(commit.contains("\"status\":\"partial\""));
+        assert!(list_session_files_from_dir(&dir)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.recovery_state.as_deref() == Some("recovered")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_delete_rejects_unknown_sessions_and_preserves_unrelated_files() {
+        let dir = test_dir("recover-delete-boundary");
+        let session = SessionId::new("s-recover-delete-boundary").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        let unrelated = dir.join("not-yap.txt");
+        std::fs::write(&unrelated, "keep").unwrap();
+
+        assert!(delete_recoverable_live_session_in_dir(&dir, "../outside".into()).is_err());
+        delete_recoverable_live_session_in_dir(&dir, session.to_string()).unwrap();
+
+        assert!(unrelated.is_file());
+        assert!(!dir.join(format!("live-{session}.wav.part")).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn committed_capture_is_listed_only_after_manifest_validation() {
         let dir = test_dir("committed-history");
         let session = SessionId::new("s-history").unwrap();
@@ -863,6 +1200,30 @@ mod tests {
         assert_eq!(sessions[0].name, format!("live-{session}"));
         assert!(sessions[0].source_path.ends_with(".wav"));
         assert!(sessions[0].created_at_ms > 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn committed_history_exposes_its_hash_validated_commit_path() {
+        let dir = test_dir("committed-history-commit-path");
+        let session_id = SessionId::new("s-history-commit-path").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session_id.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        save_finalized_capture_to_dir(&dir, &live_view(Some("hello"), None), Some(capture))
+            .unwrap();
+
+        let saved = list_session_files_from_dir(&dir).unwrap().pop().unwrap();
+        let serialized = serde_json::to_value(saved).unwrap();
+
+        assert_eq!(
+            serialized["captureCommitPath"],
+            serde_json::Value::String(
+                dir.join(format!("live-{session_id}.commit.json"))
+                    .display()
+                    .to_string()
+            )
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

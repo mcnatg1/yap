@@ -411,6 +411,45 @@ describe("transcript history storage", () => {
     });
   });
 
+  it("preserves old localStorage rows while retaining native recovery metadata", () => {
+    const storage = {
+      getItem: () => JSON.stringify([
+        {
+          createdAt: "2026-01-01T00:00:00.000Z",
+          name: "legacy-live",
+          outputPath: "legacy-live.txt",
+          sourcePath: "legacy-live.wav",
+        },
+      ]),
+      setItem: () => undefined,
+    };
+
+    expect(readTranscriptHistory(storage)).toEqual([
+      {
+        createdAt: "2026-01-01T00:00:00.000Z",
+        name: "legacy-live",
+        outputPath: "legacy-live.txt",
+        sourcePath: "legacy-live.wav",
+      },
+    ]);
+
+    const entry = savedSessionToTranscriptHistoryEntry({
+      createdAtMs: Date.UTC(2026, 0, 2),
+      name: "live-recoverable",
+      outputPath: "live-recoverable.wav.part",
+      sourcePath: "live-recoverable.wav.part",
+      warning: null,
+      captureCommitPath: undefined,
+      recoveryState: "recoverable",
+    } as SavedTranscriptSession & {
+      captureCommitPath?: string;
+      recoveryState?: "recoverable";
+    });
+
+    expect(entry.recoveryState).toBe("recoverable");
+    expect(entry.captureCommitPath).toBeUndefined();
+  });
+
   it("only exposes delete for Yap-owned live history entries", () => {
     expect(canDeleteTranscriptHistoryEntry({
       createdAt: "2026-01-01T00:00:00.000Z",

@@ -36,8 +36,47 @@ pub struct LiveRuntime {
     inner: Arc<Mutex<LiveRuntimeInner>>,
     active_session: Arc<AtomicU64>,
     recording_finalization: Arc<RecordingFinalization>,
+    stop_completion: Arc<StopCompletion>,
     transition: Arc<LifecycleGate>,
     warming: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveStopResult {
+    pub stream: StreamFinishStatus,
+    pub recording: Result<Option<RecordingFinalizeResult>, String>,
+}
+
+struct StopCompletion {
+    state: Mutex<StopCompletionState>,
+    completed: Condvar,
+}
+
+enum StopCompletionState {
+    Pending,
+    Finalizing,
+    Finalized(Box<LiveStopResult>),
+}
+
+impl StopCompletion {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(StopCompletionState::Pending),
+            completed: Condvar::new(),
+        }
+    }
+
+    fn reset(&self) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "live stop completion state became unavailable")?;
+        if matches!(*state, StopCompletionState::Finalizing) {
+            return Err("Previous live stop is still finalizing.".into());
+        }
+        *state = StopCompletionState::Pending;
+        Ok(())
+    }
 }
 
 struct LiveRuntimeInner {
@@ -274,6 +313,7 @@ impl LiveRuntime {
             inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
             active_session: Arc::new(AtomicU64::new(0)),
             recording_finalization: Arc::new(RecordingFinalization::new()),
+            stop_completion: Arc::new(StopCompletion::new()),
             transition: Arc::new(LifecycleGate::new()),
             warming: Arc::new(AtomicBool::new(false)),
         }
@@ -442,7 +482,12 @@ impl LiveRuntime {
         result
     }
 
-    pub fn stop(&self) -> StreamFinishStatus {
+    pub fn stop(&self) -> LiveStopResult {
+        let stream = self.stop_stream();
+        self.finish_stop(stream)
+    }
+
+    pub(crate) fn stop_stream(&self) -> StreamFinishStatus {
         let _transition = self.transition.begin_stop();
         let (finisher, adapter_status, shutdown_errors) = {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
@@ -470,6 +515,45 @@ impl LiveRuntime {
         self.active_session.store(0, Ordering::SeqCst);
         inner.last_used = Instant::now();
         finish_status
+    }
+
+    pub(crate) fn finish_stop(&self, stream: StreamFinishStatus) -> LiveStopResult {
+        let should_finalize = {
+            let mut state = self
+                .stop_completion
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            loop {
+                match &*state {
+                    StopCompletionState::Finalized(result) => return (**result).clone(),
+                    StopCompletionState::Pending => {
+                        *state = StopCompletionState::Finalizing;
+                        break true;
+                    }
+                    StopCompletionState::Finalizing => {
+                        state = self
+                            .stop_completion
+                            .completed
+                            .wait(state)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                }
+            }
+        };
+        debug_assert!(should_finalize);
+        let result = LiveStopResult {
+            stream,
+            recording: self.finalize_recording(),
+        };
+        let mut state = self
+            .stop_completion
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = StopCompletionState::Finalized(Box::new(result.clone()));
+        self.stop_completion.completed.notify_all();
+        result
     }
 
     pub fn unload_if_idle(&self, threshold: Duration) {
@@ -553,7 +637,8 @@ impl LiveRuntime {
         if prior_recording {
             return Err("Previous live recording must be finalized before starting again.".into());
         }
-        self.recording_finalization.prepare_for_new_recording()
+        self.recording_finalization.prepare_for_new_recording()?;
+        self.stop_completion.reset()
     }
 
     #[cfg(test)]
@@ -1962,6 +2047,50 @@ mod tests {
             .join(format!("live-{session_id}.commit.json"))
             .is_file());
         assert_eq!(runtime.finalize_recording().unwrap(), left);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn racing_stops_share_one_live_stop_result_and_one_recording_finalization() {
+        let runtime = LiveRuntime::new();
+        let directory =
+            std::env::temp_dir().join(format!("yap-runtime-stop-race-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        let session_id = SessionId::new("runtime-stop-race").unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        let (recording, finalization_count) =
+            RecordingSinkHandle::spawn_with_finalization_counter_for_test(
+                directory.clone(),
+                session_id,
+                sink,
+                receiver,
+            );
+        runtime.inner.lock().unwrap().recording = Some(recording);
+        let barrier = Arc::new(Barrier::new(3));
+        let left_runtime = runtime.clone();
+        let left_barrier = Arc::clone(&barrier);
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            left_runtime.stop()
+        });
+        let right_runtime = runtime.clone();
+        let right_barrier = Arc::clone(&barrier);
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            right_runtime.stop()
+        });
+
+        barrier.wait();
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+
+        assert_eq!(left, right);
+        assert_eq!(
+            finalization_count.load(Ordering::SeqCst),
+            1,
+            "racing stops must share the finalization lease"
+        );
+        assert_eq!(runtime.stop(), left);
         std::fs::remove_dir_all(directory).ok();
     }
 

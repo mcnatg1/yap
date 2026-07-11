@@ -1,17 +1,21 @@
 export type TranscriptHistoryEntry = {
+  captureCommitPath?: string;
   name: string;
   sourcePath: string;
   outputPath: string;
   createdAt: string;
   warning?: string;
+  recoveryState?: "recoverable" | "recovered";
 };
 
 export type SavedTranscriptSession = {
+  captureCommitPath?: string | null;
   createdAtMs: number;
   name: string;
   sourcePath: string;
   outputPath: string;
   warning?: string | null;
+  recoveryState?: "recoverable" | "recovered" | null;
 };
 
 const transcriptHistoryKey = "yap.transcriptHistory.v1";
@@ -36,7 +40,9 @@ function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
     typeof entry.sourcePath === "string" &&
     typeof entry.outputPath === "string" &&
     typeof entry.createdAt === "string" &&
-    (entry.warning === undefined || typeof entry.warning === "string")
+    (entry.warning === undefined || typeof entry.warning === "string") &&
+    (entry.captureCommitPath === undefined || typeof entry.captureCommitPath === "string") &&
+    (entry.recoveryState === undefined || entry.recoveryState === "recoverable" || entry.recoveryState === "recovered")
   );
 }
 
@@ -278,10 +284,12 @@ export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSes
     : new Date().toISOString();
 
   return {
+    captureCommitPath: session.captureCommitPath ?? undefined,
     createdAt,
     name: session.name,
     outputPath: session.outputPath,
     sourcePath: session.sourcePath,
     warning: session.warning ?? undefined,
+    recoveryState: session.recoveryState ?? undefined,
   };
 }

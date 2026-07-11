@@ -381,6 +381,32 @@ fn list_saved_live_sessions(
 }
 
 #[tauri::command]
+fn list_recoverable_live_sessions(
+    window: tauri::WebviewWindow,
+) -> Result<Vec<live::recordings::RecoverableLiveSession>, String> {
+    file_actions::ensure_main_window(&window)?;
+    live::recordings::list_recoverable_live_sessions()
+}
+
+#[tauri::command]
+fn recover_live_session(
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<live::recordings::SavedLiveSession, String> {
+    file_actions::ensure_main_window(&window)?;
+    live::recordings::recover_live_session(session_id)
+}
+
+#[tauri::command]
+fn delete_recoverable_live_session(
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<(), String> {
+    file_actions::ensure_main_window(&window)?;
+    live::recordings::delete_recoverable_live_session(session_id)
+}
+
+#[tauri::command]
 fn show_main_workspace(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -884,6 +910,9 @@ pub fn run() {
             start_live_session,
             stop_live_session,
             list_saved_live_sessions,
+            list_recoverable_live_sessions,
+            recover_live_session,
+            delete_recoverable_live_session,
             show_main_workspace,
             polish_num_gpu,
             start_transcribe,

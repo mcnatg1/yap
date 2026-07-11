@@ -16,10 +16,10 @@ export function historyEntryToRecordingJob(
       ...createInitialPipelineState(),
       intake: "done",
       transcription: "done",
-      postprocessing: entry.warning ? "error" : "done",
+      postprocessing: entry.warning || entry.recoveryState ? "error" : "done",
     },
     route: "localFallback",
-    error: entry.warning,
-    status: entry.warning ? "partial" : "complete",
+    error: entry.warning ?? (entry.recoveryState ? "Partial recording available for recovery." : undefined),
+    status: entry.warning || entry.recoveryState ? "partial" : "complete",
   };
 }
