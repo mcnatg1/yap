@@ -53,6 +53,7 @@ function writeCanonicalBundle(recordingRoot, name = "live-s-18c13f2a28c8be80-d01
     createdAtMs: 2_000,
     name,
     outputPath: path.join(recordingRoot, `${name}.txt`),
+    sessionId: name.slice("live-".length),
     sourcePath: path.join(recordingRoot, `${name}.wav`),
   };
 }
@@ -355,7 +356,7 @@ describe("Task 8b canonical saved-session ownership", () => {
     expect(() => assertOwnedSavedSession({ ...saved, name: "live-s-1-2-3" }, recordingRoot, {
       nowMs: 2_500,
       runStartedAtMs: 1_500,
-    })).toThrow(/name\/session relationship/i);
+    })).toThrow(/opaque session ID/i);
 
     writeFileSync(path.join(recordingRoot, `${saved.name}.unexpected`), "unexpected");
     expect(() => assertOwnedSavedSession(saved, recordingRoot, {

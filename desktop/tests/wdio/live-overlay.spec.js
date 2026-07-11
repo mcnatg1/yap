@@ -298,8 +298,12 @@ async function cleanupLifecycle(runStartedAtMs) {
     });
     await browser.tauri.switchWindow("main");
     await browser.tauri.execute(
-      ({ core }, sessionId) => core.invoke("delete_saved_live_session", { sessionId }),
-      owned.sessionId,
+      ({ core }, identity) => core.invoke("delete_saved_live_session", identity),
+      {
+        expectedCaptureCommitPath: candidate.captureCommitPath,
+        expectedOutputPath: candidate.outputPath,
+        sessionId: owned.sessionId,
+      },
     );
   });
 

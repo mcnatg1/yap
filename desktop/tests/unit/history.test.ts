@@ -447,6 +447,7 @@ describe("transcript history storage", () => {
       createdAtMs: Date.UTC(2026, 0, 1),
       name: "live-1",
       outputPath: "live-1.txt",
+      sessionId: "1",
       sourcePath: "live-1.wav",
       warning: null,
     });
@@ -455,6 +456,7 @@ describe("transcript history storage", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-1",
       outputPath: "live-1.txt",
+      sessionId: "1",
       sourcePath: "live-1.wav",
       warning: undefined,
     });
@@ -486,6 +488,7 @@ describe("transcript history storage", () => {
       createdAtMs: Date.UTC(2026, 0, 2),
       name: "live-recoverable",
       outputPath: "live-recoverable.wav.part",
+      sessionId: "recoverable",
       sourcePath: "live-recoverable.wav.part",
       warning: null,
       captureCommitPath: undefined,
@@ -555,6 +558,7 @@ describe("transcript history storage", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
+      sessionId: "123",
       sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav",
     })).toBe(true);
 
@@ -576,7 +580,17 @@ describe("transcript history storage", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
+      sessionId: "123",
       sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-999.wav",
+    })).toBe(false);
+
+    expect(canDeleteTranscriptHistoryEntry({
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-999",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
+      sessionId: "999",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav",
     })).toBe(false);
   });
 
@@ -589,6 +603,7 @@ describe("transcript history storage", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath,
+      sessionId: "123",
       sourcePath,
     })).toBe(sourcePath);
 

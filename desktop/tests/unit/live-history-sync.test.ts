@@ -23,11 +23,13 @@ const dayMs = 24 * 60 * 60 * 1000;
 
 function savedSession(overrides: Partial<SavedLiveSession> = {}): SavedLiveSession {
   const name = overrides.name ?? "live-100";
+  const sessionId = overrides.sessionId ?? name.replace(/^live-/, "");
   return {
     captureCommitPath: `C:/Yap/${name}.commit.json`,
     createdAtMs: Date.UTC(2026, 6, 11, 12),
     name,
     outputPath: `C:/Yap/${name}.txt`,
+    sessionId,
     sourcePath: `C:/Yap/${name}.wav`,
     ...overrides,
   };
@@ -149,6 +151,7 @@ describe("live history sync projections", () => {
       name: "live-200",
       outputPath: "C:/Yap/live-200.wav.part",
       recoveryState: "recoverable",
+      sessionId: "200",
       sourcePath: "C:/Yap/live-200.wav.part",
       warning: "Interrupted recording",
     });
@@ -227,8 +230,11 @@ describe("live history synchronization", () => {
     sync.recoverable.resolve([]);
     await sync.synchronizing;
 
-    expect(history.persistedHistory().map((entry) => entry.name)).toEqual([
-      "live-concurrent",
+    expect(history.persistedHistory()).toEqual([
+      expect.objectContaining({
+        name: "live-concurrent",
+        sessionId: "concurrent",
+      }),
     ]);
     expect(sync.listSavedSessions).toHaveBeenCalledTimes(1);
     expect(sync.listRecoverableSessions).toHaveBeenCalledTimes(1);

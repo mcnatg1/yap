@@ -9,7 +9,13 @@ const tauri = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => tauri);
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 
-import { listenLiveSessionSaved, resolveOwnedLiveTranscriptPaths } from "@/live";
+import {
+  deleteRecoverableLiveSession,
+  deleteSavedLiveSession,
+  listenLiveSessionSaved,
+  recoverLiveSession,
+  resolveOwnedLiveTranscriptPaths,
+} from "@/live";
 
 describe("live native bridge", () => {
   beforeEach(() => {
@@ -36,6 +42,30 @@ describe("live native bridge", () => {
     expect(tauri.invoke).not.toHaveBeenCalled();
   });
 
+  it("binds history mutations to the expected native artifact identity", async () => {
+    tauri.invoke.mockResolvedValue(undefined);
+
+    await deleteSavedLiveSession("123", "C:/Yap/live-123.txt", "C:/Yap/live-123.commit.json");
+    await deleteRecoverableLiveSession("partial", "C:/Yap/live-partial.wav.part");
+    await recoverLiveSession("partial", "C:/Yap/live-partial.wav.part");
+
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["delete_saved_live_session", {
+        expectedCaptureCommitPath: "C:/Yap/live-123.commit.json",
+        expectedOutputPath: "C:/Yap/live-123.txt",
+        sessionId: "123",
+      }],
+      ["delete_recoverable_live_session", {
+        expectedArtifactPath: "C:/Yap/live-partial.wav.part",
+        sessionId: "partial",
+      }],
+      ["recover_live_session", {
+        expectedArtifactPath: "C:/Yap/live-partial.wav.part",
+        sessionId: "partial",
+      }],
+    ]);
+  });
+
   it("forwards saved-session payloads and returns the native unlistener", async () => {
     const stop = vi.fn();
     const onSaved = vi.fn();
@@ -43,6 +73,7 @@ describe("live native bridge", () => {
       createdAtMs: 123,
       name: "live-123",
       outputPath: "C:/Yap/live-123.txt",
+      sessionId: "123",
       sourcePath: "C:/Yap/live-123.wav",
     };
     tauri.listen.mockResolvedValue(stop);

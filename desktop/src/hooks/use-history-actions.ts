@@ -2,7 +2,9 @@ import { useCallback, useRef } from "react";
 import { toast } from "sonner";
 
 import {
+  recoverableLiveSessionActionIdentity,
   savedSessionToTranscriptHistoryEntry,
+  savedLiveSessionActionIdentity,
   type TranscriptHistoryEntry,
 } from "@/history";
 import {
@@ -24,9 +26,13 @@ export type HistoryActionPorts = {
 };
 
 export type HistoryActionRuntime = {
-  deleteRecoverableLiveSession: (sessionId: string) => Promise<void>;
-  deleteSavedLiveSession: (sessionId: string) => Promise<void>;
-  recoverLiveSession: (sessionId: string) => Promise<SavedLiveSession>;
+  deleteRecoverableLiveSession: (sessionId: string, expectedArtifactPath: string) => Promise<void>;
+  deleteSavedLiveSession: (
+    sessionId: string,
+    expectedOutputPath: string,
+    expectedCaptureCommitPath: string,
+  ) => Promise<void>;
+  recoverLiveSession: (sessionId: string, expectedArtifactPath: string) => Promise<SavedLiveSession>;
   showError: (message: string) => void;
   showSuccess: (message: string) => void;
 };
@@ -39,9 +45,7 @@ const nativeHistoryActionRuntime: HistoryActionRuntime = {
   showSuccess: (message) => toast.success(message),
 };
 
-function historySessionId(entry: TranscriptHistoryEntry) {
-  return entry.name.replace(/^live-/, "");
-}
+const staleHistoryIdentityMessage = "Recording identity is no longer current. Refresh history and try again.";
 
 export function runHideHistoryEntry(
   outputPath: string,
@@ -59,8 +63,17 @@ export async function runDeleteSavedHistoryEntry(
   ports: HistoryActionPorts,
   runtime: HistoryActionRuntime = nativeHistoryActionRuntime,
 ) {
+  const identity = savedLiveSessionActionIdentity(entry);
+  if (!identity) {
+    runtime.showError(staleHistoryIdentityMessage);
+    return;
+  }
   try {
-    await runtime.deleteSavedLiveSession(historySessionId(entry));
+    await runtime.deleteSavedLiveSession(
+      identity.sessionId,
+      identity.expectedOutputPath,
+      identity.expectedCaptureCommitPath,
+    );
     if (!ports.rememberHiddenHistoryEntry(entry.outputPath)) return;
     if (!ports.forgetHistoryEntry(entry.outputPath)) return;
     ports.clearHistorySelectionIf(entry.outputPath);
@@ -76,8 +89,13 @@ export async function runRecoverHistoryEntry(
   ports: HistoryActionPorts,
   runtime: HistoryActionRuntime = nativeHistoryActionRuntime,
 ) {
+  const identity = recoverableLiveSessionActionIdentity(entry);
+  if (!identity) {
+    runtime.showError(staleHistoryIdentityMessage);
+    return;
+  }
   try {
-    const saved = await runtime.recoverLiveSession(historySessionId(entry));
+    const saved = await runtime.recoverLiveSession(identity.sessionId, identity.expectedArtifactPath);
     const recovered = savedSessionToTranscriptHistoryEntry(saved);
     if (!ports.recordVisibleHistoryEntries([recovered], historySaveWarning)) return;
     ports.forgetHistoryEntry(entry.outputPath);
@@ -94,8 +112,13 @@ export async function runDeleteRecoverableHistoryEntry(
   ports: HistoryActionPorts,
   runtime: HistoryActionRuntime = nativeHistoryActionRuntime,
 ) {
+  const identity = recoverableLiveSessionActionIdentity(entry);
+  if (!identity) {
+    runtime.showError(staleHistoryIdentityMessage);
+    return;
+  }
   try {
-    await runtime.deleteRecoverableLiveSession(historySessionId(entry));
+    await runtime.deleteRecoverableLiveSession(identity.sessionId, identity.expectedArtifactPath);
     if (!ports.forgetHistoryEntry(entry.outputPath)) return;
     ports.clearHistorySelectionIf(entry.outputPath);
     ports.forgetTranscriptText(entry.outputPath);

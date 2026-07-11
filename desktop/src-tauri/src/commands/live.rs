@@ -242,27 +242,35 @@ pub(super) fn list_recoverable_live_sessions(
 pub(super) fn recover_live_session(
     window: tauri::WebviewWindow,
     session_id: String,
+    expected_artifact_path: String,
 ) -> Result<live::recordings::SavedLiveSession, String> {
     file_actions::ensure_main_window(&window)?;
-    live::recordings::recover_live_session(session_id)
+    live::recordings::recover_live_session(session_id, expected_artifact_path)
 }
 
 #[tauri::command]
 pub(super) fn delete_recoverable_live_session(
     window: tauri::WebviewWindow,
     session_id: String,
+    expected_artifact_path: String,
 ) -> Result<(), String> {
     file_actions::ensure_main_window(&window)?;
-    live::recordings::delete_recoverable_live_session(session_id)
+    live::recordings::delete_recoverable_live_session(session_id, expected_artifact_path)
 }
 
 #[tauri::command]
 pub(super) fn delete_saved_live_session(
     window: tauri::WebviewWindow,
     session_id: String,
+    expected_output_path: String,
+    expected_capture_commit_path: String,
 ) -> Result<(), String> {
     file_actions::ensure_main_window(&window)?;
-    live::recordings::delete_saved_live_session(session_id)
+    live::recordings::delete_saved_live_session(
+        session_id,
+        expected_output_path,
+        expected_capture_commit_path,
+    )
 }
 
 #[tauri::command]

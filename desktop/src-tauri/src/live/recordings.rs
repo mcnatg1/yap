@@ -139,6 +139,7 @@ struct DeletionIntent {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedLiveSession {
+    pub session_id: String,
     pub name: String,
     pub source_path: String,
     pub output_path: String,
@@ -219,6 +220,7 @@ fn save_unavailable_capture_transcript_to_dir(
         AUDIO_SAVE_FAILED_WARNING,
     );
     Ok(Some(SavedLiveSession {
+        session_id: session_id.to_string(),
         name,
         source_path: output_path.clone(),
         output_path,
@@ -329,6 +331,7 @@ where
         .err();
     let Some(committed) = capture.committed else {
         return Ok(Some(SavedLiveSession {
+            session_id: capture.session_id.to_string(),
             name,
             source_path: output_path.clone(),
             output_path,
@@ -348,6 +351,7 @@ where
     };
     let audio_path = dir.join(&committed.manifest.audio_file);
     Ok(Some(SavedLiveSession {
+        session_id: capture.session_id.to_string(),
         name,
         source_path: stable_existing_path_string(&audio_path),
         output_path,
@@ -388,16 +392,31 @@ pub fn list_recoverable_live_sessions() -> Result<Vec<RecoverableLiveSession>, S
     list_recoverable_live_sessions_from_dir(&recordings_dir())
 }
 
-pub fn recover_live_session(session_id: String) -> Result<SavedLiveSession, String> {
-    recover_live_session_in_dir(&recordings_dir(), session_id)
+pub fn recover_live_session(
+    session_id: String,
+    expected_artifact_path: String,
+) -> Result<SavedLiveSession, String> {
+    recover_live_session_in_dir(&recordings_dir(), session_id, expected_artifact_path)
 }
 
-pub fn delete_recoverable_live_session(session_id: String) -> Result<(), String> {
-    delete_recoverable_live_session_in_dir(&recordings_dir(), session_id)
+pub fn delete_recoverable_live_session(
+    session_id: String,
+    expected_artifact_path: String,
+) -> Result<(), String> {
+    delete_recoverable_live_session_in_dir(&recordings_dir(), session_id, expected_artifact_path)
 }
 
-pub fn delete_saved_live_session(session_id: String) -> Result<(), String> {
-    delete_saved_live_session_in_dir(&recordings_dir(), session_id)
+pub fn delete_saved_live_session(
+    session_id: String,
+    expected_output_path: String,
+    expected_capture_commit_path: String,
+) -> Result<(), String> {
+    delete_saved_live_session_in_dir(
+        &recordings_dir(),
+        session_id,
+        expected_output_path,
+        expected_capture_commit_path,
+    )
 }
 
 fn recordings_dir_from<F>(env: F) -> std::path::PathBuf
@@ -454,21 +473,14 @@ fn list_session_catalog_from_dir_at(
         .filter(|committed| !retention_deleted.contains(committed.manifest.session_id.as_str()))
         .map(|committed| {
             let name = format!("live-{}", committed.manifest.session_id);
-            let transcript = dir.join(format!("{name}.txt"));
             let audio = dir.join(&committed.manifest.audio_file);
             SavedLiveSession {
+                session_id: committed.manifest.session_id.to_string(),
                 name,
                 source_path: stable_existing_path_string(&audio),
-                output_path: if has_valid_transcript_revision(
-                    dir,
-                    &committed.manifest.session_id,
-                    &committed.manifest.capture_sidecar_sha256,
-                ) && recording::is_regular_artifact(&transcript)
-                {
-                    stable_existing_path_string(&transcript)
-                } else {
-                    stable_existing_path_string(&audio)
-                },
+                output_path: stable_existing_path_string(&committed_session_output_path(
+                    dir, &committed,
+                )),
                 created_at_ms: committed_at_ms(&committed.manifest.committed_at_utc),
                 warning: pending
                     .session_warnings
@@ -559,7 +571,44 @@ fn delete_expired_committed_meeting(
     delete_committed_session_in_dir(dir, capture, "expired-meeting-retention")
 }
 
-fn delete_saved_live_session_in_dir(dir: &Path, session_id: String) -> Result<(), String> {
+fn committed_session_output_path(dir: &Path, committed: &recording::CommittedCapture) -> PathBuf {
+    let transcript = dir.join(format!("live-{}.txt", committed.manifest.session_id));
+    if has_valid_transcript_revision(
+        dir,
+        &committed.manifest.session_id,
+        &committed.manifest.capture_sidecar_sha256,
+    ) && recording::is_regular_artifact(&transcript)
+    {
+        transcript
+    } else {
+        dir.join(&committed.manifest.audio_file)
+    }
+}
+
+fn ensure_expected_artifact_identity(
+    actual_path: &Path,
+    expected_path: &str,
+) -> Result<(), String> {
+    let actual = std::fs::canonicalize(actual_path).map_err(|_| {
+        "Live recording identity is no longer current. Refresh history and try again.".to_string()
+    })?;
+    let expected = std::fs::canonicalize(expected_path).map_err(|_| {
+        "Live recording identity is no longer current. Refresh history and try again.".to_string()
+    })?;
+    if actual != expected {
+        return Err(
+            "Live recording identity is no longer current. Refresh history and try again.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn delete_saved_live_session_in_dir(
+    dir: &Path,
+    session_id: String,
+    expected_output_path: String,
+    expected_capture_commit_path: String,
+) -> Result<(), String> {
     let session_id = crate::audio::session::SessionId::new(session_id)?;
     let scan = recording::scan_recordings(dir)?;
     let capture = scan
@@ -567,6 +616,14 @@ fn delete_saved_live_session_in_dir(dir: &Path, session_id: String) -> Result<()
         .iter()
         .find(|capture| capture.manifest.session_id == session_id)
         .ok_or_else(|| "Live recording is not a hash-valid committed Yap session.".to_string())?;
+    ensure_expected_artifact_identity(
+        &committed_session_output_path(dir, capture),
+        &expected_output_path,
+    )?;
+    ensure_expected_artifact_identity(
+        &dir.join(format!("live-{session_id}.commit.json")),
+        &expected_capture_commit_path,
+    )?;
     delete_committed_session_in_dir(dir, capture, "manual")
 }
 
@@ -1510,8 +1567,7 @@ fn list_recoverable_live_sessions_from_scan(
         let candidate = recoverable_session_from_dir(dir, session_id)?;
         let now_ms = u64::try_from(now.unix_timestamp_nanos() / 1_000_000).unwrap_or(u64::MAX);
         if candidate.expires_at_ms <= now_ms {
-            if let Err(error) = delete_recoverable_live_session_in_dir(dir, session_id.to_string())
-            {
+            if let Err(error) = delete_recoverable_session_artifacts_in_dir(dir, session_id) {
                 sessions.push(RecoverableLiveSession {
                     reason: format!("{} Cleanup is pending: {error}", candidate.reason),
                     ..candidate
@@ -1577,13 +1633,29 @@ fn recoverable_session_from_dir(
     })
 }
 
-fn recover_live_session_in_dir(dir: &Path, session_id: String) -> Result<SavedLiveSession, String> {
+fn recoverable_session_artifact_path(session: &RecoverableLiveSession) -> Option<&str> {
+    session
+        .audio_partial_path
+        .as_deref()
+        .or(session.journal_partial_path.as_deref())
+}
+
+fn recover_live_session_in_dir(
+    dir: &Path,
+    session_id: String,
+    expected_artifact_path: String,
+) -> Result<SavedLiveSession, String> {
     let session_id = crate::audio::session::SessionId::new(session_id)?;
     if let Some(saved) = saved_recovered_session(dir, &session_id)? {
+        ensure_expected_artifact_identity(Path::new(&saved.output_path), &expected_artifact_path)?;
         return Ok(saved);
     }
     ensure_recoverable_session(dir, &session_id)?;
     let candidate = recoverable_session_from_dir(dir, &session_id)?;
+    let artifact_path = recoverable_session_artifact_path(&candidate).ok_or_else(|| {
+        "Recoverable live recording has no authoritative artifact identity.".to_string()
+    })?;
+    ensure_expected_artifact_identity(Path::new(artifact_path), &expected_artifact_path)?;
     if candidate.expires_at_ms <= unix_millis_now()? {
         return Err("Recoverable live recording has expired.".into());
     }
@@ -1636,10 +1708,27 @@ fn recover_live_session_in_dir(dir: &Path, session_id: String) -> Result<SavedLi
         .ok_or_else(|| "Recovered live recording was not verifiable.".into())
 }
 
-fn delete_recoverable_live_session_in_dir(dir: &Path, session_id: String) -> Result<(), String> {
+fn delete_recoverable_live_session_in_dir(
+    dir: &Path,
+    session_id: String,
+    expected_artifact_path: String,
+) -> Result<(), String> {
     let session_id = crate::audio::session::SessionId::new(session_id)?;
     ensure_recoverable_session(dir, &session_id)?;
-    let recovered = saved_recovered_session(dir, &session_id)?.is_some();
+    let candidate = recoverable_session_from_dir(dir, &session_id)?;
+    let artifact_path = recoverable_session_artifact_path(&candidate).ok_or_else(|| {
+        "Recoverable live recording has no authoritative artifact identity.".to_string()
+    })?;
+    ensure_expected_artifact_identity(Path::new(artifact_path), &expected_artifact_path)?;
+    delete_recoverable_session_artifacts_in_dir(dir, &session_id)
+}
+
+fn delete_recoverable_session_artifacts_in_dir(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<(), String> {
+    ensure_recoverable_session(dir, session_id)?;
+    let recovered = saved_recovered_session(dir, session_id)?.is_some();
     for suffix in [
         ".wav.part",
         ".capture.journal.part",
@@ -1654,7 +1743,7 @@ fn delete_recoverable_live_session_in_dir(dir: &Path, session_id: String) -> Res
     }
     let sidecar_name = format!("live-{session_id}.capture.partial.json");
     if let Ok(text) = recording::read_regular_artifact(dir, &sidecar_name) {
-        if valid_partial_sidecar(&text, &session_id) {
+        if valid_partial_sidecar(&text, session_id) {
             recording::remove_regular_artifact(dir, &sidecar_name)?;
         }
     }
@@ -1720,6 +1809,7 @@ fn saved_recovered_session(
         return Ok(None);
     }
     Ok(Some(SavedLiveSession {
+        session_id: session_id.to_string(),
         name: format!("live-{session_id}"),
         source_path: stable_existing_path_string(&dir.join(&commit.audio_file)),
         output_path: stable_existing_path_string(&dir.join(&commit.audio_file)),
@@ -2284,6 +2374,41 @@ mod tests {
         }
     }
 
+    fn recover_session_for_test(
+        dir: &Path,
+        session_id: &SessionId,
+    ) -> Result<SavedLiveSession, String> {
+        let candidate = recoverable_session_from_dir(dir, session_id)?;
+        let expected = recoverable_session_artifact_path(&candidate)
+            .ok_or_else(|| "missing recoverable test artifact".to_string())?;
+        recover_live_session_in_dir(dir, session_id.to_string(), expected.to_string())
+    }
+
+    fn delete_recoverable_session_for_test(
+        dir: &Path,
+        session_id: &SessionId,
+    ) -> Result<(), String> {
+        let candidate = recoverable_session_from_dir(dir, session_id)?;
+        let expected = recoverable_session_artifact_path(&candidate)
+            .ok_or_else(|| "missing recoverable test artifact".to_string())?;
+        delete_recoverable_live_session_in_dir(dir, session_id.to_string(), expected.to_string())
+    }
+
+    fn delete_saved_session_for_test(dir: &Path, session_id: &SessionId) -> Result<(), String> {
+        let saved = list_session_files_from_dir(dir)?
+            .into_iter()
+            .find(|saved| saved.session_id == session_id.as_str())
+            .ok_or_else(|| "missing saved test session".to_string())?;
+        delete_saved_live_session_in_dir(
+            dir,
+            session_id.to_string(),
+            saved.output_path,
+            saved
+                .capture_commit_path
+                .ok_or_else(|| "missing saved test commit".to_string())?,
+        )
+    }
+
     fn set_old_modified_time(path: &Path) {
         let old = std::time::SystemTime::now()
             .checked_sub(PARTIAL_RECOVERY_TTL + Duration::from_secs(60))
@@ -2343,8 +2468,8 @@ mod tests {
         assert!(list_recoverable_live_sessions_from_dir(&dir)
             .unwrap()
             .is_empty());
-        assert!(recover_live_session_in_dir(&dir, session.to_string()).is_err());
-        assert!(delete_recoverable_live_session_in_dir(&dir, session.to_string()).is_err());
+        assert!(recover_session_for_test(&dir, &session).is_err());
+        assert!(delete_recoverable_session_for_test(&dir, &session).is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2356,7 +2481,7 @@ mod tests {
             let mut capture = StreamingRecording::create(&dir, session.clone()).unwrap();
             capture.append_pcm16(&[1, 0]).unwrap();
         }
-        recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+        recover_session_for_test(&dir, &session).unwrap();
         for name in [
             format!("live-{session}.wav"),
             format!("live-{session}.capture.journal.part"),
@@ -2374,7 +2499,7 @@ mod tests {
             .any(|saved| saved.recovery_state.as_deref() == Some("recoverable")));
         assert!(dir.join(format!("live-{session}.wav")).is_file());
         assert!(dir.join(format!("live-{session}.commit.json")).is_file());
-        delete_recoverable_live_session_in_dir(&dir, session.to_string()).unwrap();
+        delete_recoverable_session_for_test(&dir, &session).unwrap();
         assert!(!dir.join(format!("live-{session}.wav")).exists());
         assert!(!dir.join(format!("live-{session}.commit.json")).exists());
         std::fs::remove_dir_all(dir).ok();
@@ -2503,7 +2628,7 @@ mod tests {
 
         let recoverable = list_recoverable_live_sessions_from_dir(&dir).unwrap();
         assert_eq!(recoverable.len(), 1);
-        let saved = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+        let saved = recover_session_for_test(&dir, &session).unwrap();
 
         assert_eq!(saved.recovery_state.as_deref(), Some("recoverable"));
         assert!(dir.join(format!("live-{session}.wav")).is_file());
@@ -2526,8 +2651,8 @@ mod tests {
             recording.append_pcm16(&[1, 0, 2, 0]).unwrap();
         }
 
-        let first = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
-        let retry = recover_live_session_in_dir(&dir, session.to_string()).unwrap();
+        let first = recover_session_for_test(&dir, &session).unwrap();
+        let retry = recover_session_for_test(&dir, &session).unwrap();
 
         assert_eq!(retry.capture_commit_path, first.capture_commit_path);
         assert_eq!(retry.source_path, first.source_path);
@@ -2579,7 +2704,7 @@ mod tests {
         let invalid_sidecar = dir.join(format!("live-{session}.capture.partial.json"));
         std::fs::write(&invalid_sidecar, "invalid sidecar").unwrap();
 
-        assert!(recover_live_session_in_dir(&dir, session.to_string()).is_err());
+        assert!(recover_session_for_test(&dir, &session).is_err());
         assert!(dir.join(format!("live-{session}.wav")).is_file());
         let partial = list_recoverable_live_sessions_from_dir(&dir).unwrap();
         assert_eq!(partial.len(), 1);
@@ -2589,7 +2714,7 @@ mod tests {
             .unwrap()
             .ends_with(".wav"));
 
-        delete_recoverable_live_session_in_dir(&dir, session.to_string()).unwrap();
+        delete_recoverable_session_for_test(&dir, &session).unwrap();
         assert!(!dir.join(format!("live-{session}.wav")).exists());
         std::fs::remove_file(&invalid_sidecar).ok();
 
@@ -2601,7 +2726,7 @@ mod tests {
         .unwrap();
         retry.append_pcm16(&[1, 0]).unwrap();
         retry.finalize().unwrap();
-        assert!(recover_live_session_in_dir(&dir, session.to_string()).is_ok());
+        assert!(recover_session_for_test(&dir, &session).is_ok());
         assert!(dir.join(format!("live-{session}.commit.json")).is_file());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -2617,11 +2742,45 @@ mod tests {
         let unrelated = dir.join("not-yap.txt");
         std::fs::write(&unrelated, "keep").unwrap();
 
-        assert!(delete_recoverable_live_session_in_dir(&dir, "../outside".into()).is_err());
-        delete_recoverable_live_session_in_dir(&dir, session.to_string()).unwrap();
+        assert!(delete_recoverable_live_session_in_dir(
+            &dir,
+            "../outside".into(),
+            unrelated.display().to_string(),
+        )
+        .is_err());
+        delete_recoverable_session_for_test(&dir, &session).unwrap();
 
         assert!(unrelated.is_file());
         assert!(!dir.join(format!("live-{session}.wav.part")).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_actions_reject_a_mismatched_expected_artifact_without_mutation() {
+        let dir = test_dir("recover-expected-identity");
+        let session = SessionId::new("s-recover-expected-identity").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        let unrelated = dir.join("unrelated.wav.part");
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        assert!(recover_live_session_in_dir(
+            &dir,
+            session.to_string(),
+            unrelated.display().to_string(),
+        )
+        .is_err());
+        assert!(delete_recoverable_live_session_in_dir(
+            &dir,
+            session.to_string(),
+            unrelated.display().to_string(),
+        )
+        .is_err());
+
+        assert!(dir.join(format!("live-{session}.wav.part")).is_file());
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2665,6 +2824,7 @@ mod tests {
                     .to_string()
             )
         );
+        assert_eq!(serialized["sessionId"], session_id.as_str());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -3282,7 +3442,14 @@ mod tests {
         let polished = dir.join(format!("live-{session}.polished.txt"));
         std::fs::write(&polished, "polished\n").unwrap();
 
-        delete_saved_live_session_in_dir(&dir, session.to_string()).unwrap();
+        let saved = list_session_files_from_dir(&dir).unwrap().pop().unwrap();
+        delete_saved_live_session_in_dir(
+            &dir,
+            session.to_string(),
+            saved.output_path,
+            saved.capture_commit_path.unwrap(),
+        )
+        .unwrap();
 
         for name in [
             format!("live-{session}.wav"),
@@ -3296,6 +3463,37 @@ mod tests {
         ] {
             assert!(!dir.join(name).exists());
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saved_delete_rejects_mismatched_expected_paths_without_mutation() {
+        let dir = test_dir("manual-session-identity-mismatch");
+        let session = SessionId::new("s-manual-identity-mismatch").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        save_finalized_capture_to_dir(&dir, &live_view(Some("keep me"), None), Some(capture))
+            .unwrap();
+        let saved = list_session_files_from_dir(&dir).unwrap().pop().unwrap();
+
+        assert!(delete_saved_live_session_in_dir(
+            &dir,
+            session.to_string(),
+            saved.source_path.clone(),
+            saved.capture_commit_path.clone().unwrap(),
+        )
+        .is_err());
+        assert!(delete_saved_live_session_in_dir(
+            &dir,
+            session.to_string(),
+            saved.output_path.clone(),
+            saved.output_path,
+        )
+        .is_err());
+
+        assert!(dir.join(format!("live-{session}.wav")).is_file());
+        assert!(dir.join(format!("live-{session}.commit.json")).is_file());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -3367,7 +3565,7 @@ mod tests {
         let intent_name = deletion_intent_name(&session);
         std::fs::write(dir.join(&intent_name), b"{\"truncated\"").unwrap();
 
-        delete_saved_live_session_in_dir(&dir, session.to_string()).unwrap();
+        delete_saved_session_for_test(&dir, &session).unwrap();
 
         assert!(!dir.join(format!("live-{session}.commit.json")).exists());
         assert!(!dir.join(&intent_name).exists());
@@ -4004,7 +4202,7 @@ mod tests {
         recording.append_pcm16(&[1, 0]).unwrap();
         recording.finalize().unwrap();
 
-        delete_saved_live_session_in_dir(&dir, session.to_string()).unwrap();
+        delete_saved_session_for_test(&dir, &session).unwrap();
 
         assert!(!dir.join(format!("live-{session}.wav")).exists());
         assert!(!dir.join(format!("live-{session}.commit.json")).exists());

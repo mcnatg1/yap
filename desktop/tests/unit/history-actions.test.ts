@@ -13,9 +13,11 @@ import type { SavedLiveSession } from "@/live";
 
 function historyEntry(overrides: Partial<TranscriptHistoryEntry> = {}): TranscriptHistoryEntry {
   return {
+    captureCommitPath: "C:/Yap/live-123.commit.json",
     createdAt: "2026-07-11T12:00:00.000Z",
     name: "live-123",
     outputPath: "C:/Yap/live-123.txt",
+    sessionId: "123",
     sourcePath: "C:/Yap/live-123.wav",
     ...overrides,
   };
@@ -26,6 +28,7 @@ function savedSession(): SavedLiveSession {
     createdAtMs: Date.UTC(2026, 6, 11, 13),
     name: "live-123-recovered",
     outputPath: "C:/Yap/live-123-recovered.txt",
+    sessionId: "123-recovered",
     sourcePath: "C:/Yap/live-123-recovered.wav",
     recoveryState: "recovered",
   };
@@ -52,14 +55,14 @@ function actionHarness(overrides: Partial<HistoryActionPorts> = {}) {
     ...overrides,
   };
   const runtime: HistoryActionRuntime = {
-    deleteRecoverableLiveSession: vi.fn(async (id) => {
-      calls.push(`delete-recoverable:${id}`);
+    deleteRecoverableLiveSession: vi.fn(async (...args: string[]) => {
+      calls.push(`delete-recoverable:${args.join("|")}`);
     }),
-    deleteSavedLiveSession: vi.fn(async (id) => {
-      calls.push(`delete-saved:${id}`);
+    deleteSavedLiveSession: vi.fn(async (...args: string[]) => {
+      calls.push(`delete-saved:${args.join("|")}`);
     }),
-    recoverLiveSession: vi.fn(async (id) => {
-      calls.push(`recover:${id}`);
+    recoverLiveSession: vi.fn(async (...args: string[]) => {
+      calls.push(`recover:${args.join("|")}`);
       return savedSession();
     }),
     showError: vi.fn((message) => calls.push(`error:${message}`)),
@@ -101,7 +104,7 @@ describe("history action ordering", () => {
     await runDeleteSavedHistoryEntry(historyEntry(), ports, runtime);
 
     expect(calls).toEqual([
-      "delete-saved:123",
+      "delete-saved:123|C:/Yap/live-123.txt|C:/Yap/live-123.commit.json",
       "hide:C:/Yap/live-123.txt",
       "forget:C:/Yap/live-123.txt",
       "clear:C:/Yap/live-123.txt",
@@ -120,7 +123,20 @@ describe("history action ordering", () => {
 
     await runDeleteSavedHistoryEntry(historyEntry(), ports, runtime);
 
-    expect(calls).toEqual(["delete-saved:123", "hide:failed"]);
+    expect(calls).toEqual([
+      "delete-saved:123|C:/Yap/live-123.txt|C:/Yap/live-123.commit.json",
+      "hide:failed",
+    ]);
+  });
+
+  it("uses the opaque session identity when the display name disagrees", async () => {
+    const { calls, ports, runtime } = actionHarness();
+
+    await runDeleteSavedHistoryEntry(historyEntry({ name: "live-999" }), ports, runtime);
+
+    expect(calls[0]).toBe(
+      "delete-saved:123|C:/Yap/live-123.txt|C:/Yap/live-123.commit.json",
+    );
   });
 
   it("records recovery before old-row cleanup and continues when old cleanup fails", async () => {
@@ -133,19 +149,22 @@ describe("history action ordering", () => {
 
     await runRecoverHistoryEntry(
       historyEntry({
+        captureCommitPath: undefined,
         name: "live-partial-9",
-        outputPath: "C:/Yap/live-partial-9.partial.json",
+        outputPath: "C:/Yap/live-partial-9.wav.part",
         recoveryState: "recoverable",
+        sessionId: "partial-9",
+        sourcePath: "C:/Yap/live-partial-9.wav.part",
       }),
       ports,
       runtime,
     );
 
     expect(calls).toEqual([
-      "recover:partial-9",
+      "recover:partial-9|C:/Yap/live-partial-9.wav.part",
       "record:C:/Yap/live-123-recovered.txt:Transcript history could not be saved.",
-      "forget-failed:C:/Yap/live-partial-9.partial.json",
-      "clear:C:/Yap/live-partial-9.partial.json",
+      "forget-failed:C:/Yap/live-partial-9.wav.part",
+      "clear:C:/Yap/live-partial-9.wav.part",
       "select:C:/Yap/live-123-recovered.txt",
       "success:Partial recording recovered",
     ]);
@@ -159,22 +178,70 @@ describe("history action ordering", () => {
       }),
     });
 
-    await runRecoverHistoryEntry(historyEntry(), ports, runtime);
+    await runRecoverHistoryEntry(historyEntry({
+      captureCommitPath: undefined,
+      outputPath: "C:/Yap/live-123.wav.part",
+      recoveryState: "recoverable",
+      sourcePath: "C:/Yap/live-123.wav.part",
+    }), ports, runtime);
 
-    expect(calls).toEqual(["recover:123", "record:failed"]);
+    expect(calls).toEqual(["recover:123|C:/Yap/live-123.wav.part", "record:failed"]);
   });
 
   it("deletes a recoverable session before row, selection, and text cleanup", async () => {
     const { calls, ports, runtime } = actionHarness();
 
-    await runDeleteRecoverableHistoryEntry(historyEntry(), ports, runtime);
+    await runDeleteRecoverableHistoryEntry(historyEntry({
+      captureCommitPath: undefined,
+      outputPath: "C:/Yap/live-123.wav.part",
+      recoveryState: "recoverable",
+      sourcePath: "C:/Yap/live-123.wav.part",
+    }), ports, runtime);
 
     expect(calls).toEqual([
-      "delete-recoverable:123",
-      "forget:C:/Yap/live-123.txt",
-      "clear:C:/Yap/live-123.txt",
-      "text:C:/Yap/live-123.txt",
+      "delete-recoverable:123|C:/Yap/live-123.wav.part",
+      "forget:C:/Yap/live-123.wav.part",
+      "clear:C:/Yap/live-123.wav.part",
+      "text:C:/Yap/live-123.wav.part",
       "success:Partial recording deleted",
+    ]);
+  });
+
+  it("does not invoke native actions for a legacy row without an opaque identity", async () => {
+    const { calls, ports, runtime } = actionHarness();
+    const legacy = historyEntry({ sessionId: undefined });
+
+    await runDeleteSavedHistoryEntry(legacy, ports, runtime);
+    await runRecoverHistoryEntry(legacy, ports, runtime);
+    await runDeleteRecoverableHistoryEntry(legacy, ports, runtime);
+
+    expect(calls).toEqual([
+      "error:Recording identity is no longer current. Refresh history and try again.",
+      "error:Recording identity is no longer current. Refresh history and try again.",
+      "error:Recording identity is no longer current. Refresh history and try again.",
+    ]);
+  });
+
+  it("does not invoke native actions when the opaque identity disagrees with the artifacts", async () => {
+    const { calls, ports, runtime } = actionHarness();
+    const mismatched = historyEntry({ sessionId: "999" });
+
+    await runDeleteSavedHistoryEntry(mismatched, ports, runtime);
+    await runRecoverHistoryEntry({
+      ...mismatched,
+      captureCommitPath: undefined,
+      recoveryState: "recoverable",
+    }, ports, runtime);
+    await runDeleteRecoverableHistoryEntry({
+      ...mismatched,
+      captureCommitPath: undefined,
+      recoveryState: "recoverable",
+    }, ports, runtime);
+
+    expect(calls).toEqual([
+      "error:Recording identity is no longer current. Refresh history and try again.",
+      "error:Recording identity is no longer current. Refresh history and try again.",
+      "error:Recording identity is no longer current. Refresh history and try again.",
     ]);
   });
 
@@ -188,7 +255,12 @@ describe("history action ordering", () => {
     });
 
     await runDeleteSavedHistoryEntry(historyEntry(), ports, runtime);
-    await runRecoverHistoryEntry(historyEntry(), ports, runtime);
+    await runRecoverHistoryEntry(historyEntry({
+      captureCommitPath: undefined,
+      outputPath: "C:/Yap/live-123.wav.part",
+      recoveryState: "recoverable",
+      sourcePath: "C:/Yap/live-123.wav.part",
+    }), ports, runtime);
 
     expect(calls).toEqual(["error:Delete failed", "error:Recovery failed"]);
   });

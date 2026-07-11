@@ -9,6 +9,7 @@ export type SavedLiveSession = {
   name: string;
   sourcePath: string;
   outputPath: string;
+  sessionId: string;
   warning?: string | null;
   recoveryState?: "recoverable" | "recovered" | null;
 };
@@ -98,16 +99,30 @@ export function listRecoverableLiveSessions(): Promise<RecoverableLiveSession[]>
   return invoke<RecoverableLiveSession[]>("list_recoverable_live_sessions");
 }
 
-export function recoverLiveSession(sessionId: string): Promise<SavedLiveSession> {
-  return invoke<SavedLiveSession>("recover_live_session", { sessionId });
+export function recoverLiveSession(
+  sessionId: string,
+  expectedArtifactPath: string,
+): Promise<SavedLiveSession> {
+  return invoke<SavedLiveSession>("recover_live_session", { expectedArtifactPath, sessionId });
 }
 
-export function deleteRecoverableLiveSession(sessionId: string): Promise<void> {
-  return invoke<void>("delete_recoverable_live_session", { sessionId });
+export function deleteRecoverableLiveSession(
+  sessionId: string,
+  expectedArtifactPath: string,
+): Promise<void> {
+  return invoke<void>("delete_recoverable_live_session", { expectedArtifactPath, sessionId });
 }
 
-export function deleteSavedLiveSession(sessionId: string): Promise<void> {
-  return invoke<void>("delete_saved_live_session", { sessionId });
+export function deleteSavedLiveSession(
+  sessionId: string,
+  expectedOutputPath: string,
+  expectedCaptureCommitPath: string,
+): Promise<void> {
+  return invoke<void>("delete_saved_live_session", {
+    expectedCaptureCommitPath,
+    expectedOutputPath,
+    sessionId,
+  });
 }
 
 export function resolveOwnedLiveTranscriptPaths(

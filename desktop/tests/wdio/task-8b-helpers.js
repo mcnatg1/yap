@@ -252,6 +252,10 @@ export function assertOwnedSavedSession(saved, recordingRoot, options = {}) {
   if (!saved || typeof saved !== "object" || !canonicalSessionName.test(saved.name ?? "")) {
     throw new Error("Saved event has no canonical live-s-* name/session relationship.");
   }
+  const expectedSessionId = saved.name.slice("live-".length);
+  if (saved.sessionId !== expectedSessionId) {
+    throw new Error("Saved event opaque session ID does not match its canonical artifacts.");
+  }
   if (!Number.isFinite(runStartedAtMs)
     || !Number.isFinite(saved.createdAtMs)
     || saved.createdAtMs < runStartedAtMs
@@ -303,7 +307,7 @@ export function assertOwnedSavedSession(saved, recordingRoot, options = {}) {
 
   return {
     artifactNames,
-    sessionId: saved.name.slice("live-".length),
+    sessionId: saved.sessionId,
   };
 }
 

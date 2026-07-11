@@ -3,6 +3,7 @@ export type TranscriptHistoryEntry = {
   name: string;
   sourcePath: string;
   outputPath: string;
+  sessionId?: string;
   createdAt: string;
   warning?: string;
   recoveryState?: "recoverable" | "recovered";
@@ -14,6 +15,7 @@ export type SavedTranscriptSession = {
   name: string;
   sourcePath: string;
   outputPath: string;
+  sessionId: string;
   warning?: string | null;
   recoveryState?: "recoverable" | "recovered" | null;
 };
@@ -30,6 +32,17 @@ export type OwnedLiveTranscriptPathResolution = {
   missing: boolean;
 };
 
+export type SavedLiveSessionActionIdentity = {
+  expectedCaptureCommitPath: string;
+  expectedOutputPath: string;
+  sessionId: string;
+};
+
+export type RecoverableLiveSessionActionIdentity = {
+  expectedArtifactPath: string;
+  sessionId: string;
+};
+
 const hiddenPruneBatchSize = 200;
 
 function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
@@ -40,6 +53,7 @@ function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
     typeof entry.sourcePath === "string" &&
     typeof entry.outputPath === "string" &&
     typeof entry.createdAt === "string" &&
+    (entry.sessionId === undefined || typeof entry.sessionId === "string") &&
     (entry.warning === undefined || typeof entry.warning === "string") &&
     (entry.captureCommitPath === undefined || typeof entry.captureCommitPath === "string") &&
     (entry.recoveryState === undefined || entry.recoveryState === "recoverable" || entry.recoveryState === "recovered")
@@ -293,36 +307,66 @@ export function hideTranscriptHistory(outputPaths: string[], outputPath: string)
   return normalizeHiddenTranscriptHistory([outputPath, ...outputPaths]);
 }
 
+function validHistorySessionId(entry: TranscriptHistoryEntry) {
+  const sessionId = entry.sessionId;
+  return sessionId && /^[a-z0-9_-]{1,128}$/i.test(sessionId) ? sessionId : undefined;
+}
+
+function historyArtifactPath(path: string) {
+  const normalized = path.replace(/\\/g, "/").toLowerCase();
+  const name = normalized.split("/").pop() ?? "";
+  return { directory: normalized.slice(0, -name.length), name };
+}
+
+export function savedLiveSessionActionIdentity(
+  entry: TranscriptHistoryEntry,
+): SavedLiveSessionActionIdentity | undefined {
+  const sessionId = validHistorySessionId(entry);
+  const expectedCaptureCommitPath = entry.captureCommitPath;
+  if (!sessionId || !expectedCaptureCommitPath || isRecoverableTranscriptHistoryEntry(entry)) {
+    return undefined;
+  }
+
+  const stem = `live-${sessionId}`.toLowerCase();
+  const output = historyArtifactPath(entry.outputPath);
+  const source = historyArtifactPath(entry.sourcePath);
+  const commit = historyArtifactPath(expectedCaptureCommitPath);
+  if (
+    output.name !== `${stem}.txt`
+    || source.name !== `${stem}.wav`
+    || commit.name !== `${stem}.commit.json`
+    || source.directory !== output.directory
+    || commit.directory !== output.directory
+  ) return undefined;
+
+  return {
+    expectedCaptureCommitPath,
+    expectedOutputPath: entry.outputPath,
+    sessionId,
+  };
+}
+
+export function recoverableLiveSessionActionIdentity(
+  entry: TranscriptHistoryEntry,
+): RecoverableLiveSessionActionIdentity | undefined {
+  const sessionId = validHistorySessionId(entry);
+  if (!sessionId || entry.sourcePath !== entry.outputPath || !isRecoverableTranscriptHistoryEntry(entry)) {
+    return undefined;
+  }
+  const artifact = historyArtifactPath(entry.sourcePath);
+  const stem = `live-${sessionId}`.toLowerCase();
+  if (![`${stem}.wav.part`, `${stem}.capture.journal.part`, `${stem}.wav`].includes(artifact.name)) {
+    return undefined;
+  }
+  return { expectedArtifactPath: entry.sourcePath, sessionId };
+}
+
 export function canDeleteTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
-  if (!entry.captureCommitPath || isRecoverableTranscriptHistoryEntry(entry)) return false;
-  const output = entry.outputPath.replace(/\\/g, "/").toLowerCase();
-  const source = entry.sourcePath.replace(/\\/g, "/").toLowerCase();
-  const outputName = output.split("/").pop() ?? "";
-  const sourceName = source.split("/").pop() ?? "";
-  const outputDir = output.slice(0, -outputName.length);
-  const sourceDir = source.slice(0, -sourceName.length);
-  const stem = outputName.endsWith(".txt") ? outputName.slice(0, -4) : "";
-  return (
-    stem.startsWith("live-") &&
-    output.includes("/yap/live-recordings/") &&
-    entry.name.toLowerCase().startsWith("live-") &&
-    (source === output || (sourceDir === outputDir && sourceName === `${stem}.wav`))
-  );
+  return savedLiveSessionActionIdentity(entry) !== undefined;
 }
 
 export function historyEntryPlaybackPath(entry: TranscriptHistoryEntry) {
-  if (!canDeleteTranscriptHistoryEntry(entry)) return undefined;
-  const output = entry.outputPath.replace(/\\/g, "/").toLowerCase();
-  const source = entry.sourcePath.replace(/\\/g, "/").toLowerCase();
-  const outputName = output.split("/").pop() ?? "";
-  const sourceName = source.split("/").pop() ?? "";
-  const outputDir = output.slice(0, -outputName.length);
-  const sourceDir = source.slice(0, -sourceName.length);
-  const stem = outputName.endsWith(".txt") ? outputName.slice(0, -4) : "";
-
-  return stem && sourceDir === outputDir && sourceName === `${stem}.wav`
-    ? entry.sourcePath
-    : undefined;
+  return savedLiveSessionActionIdentity(entry) ? entry.sourcePath : undefined;
 }
 
 export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSession): TranscriptHistoryEntry {
@@ -335,6 +379,7 @@ export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSes
     createdAt,
     name: session.name,
     outputPath: session.outputPath,
+    sessionId: session.sessionId,
     sourcePath: session.sourcePath,
     warning: session.warning ?? undefined,
     recoveryState: session.recoveryState ?? undefined,

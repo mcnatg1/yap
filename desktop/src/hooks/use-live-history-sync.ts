@@ -38,6 +38,7 @@ export function projectNativeLiveHistory(
       createdAtMs: Math.max(0, session.expiresAtMs - recoveryWindowMs),
       name: session.name,
       outputPath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
+      sessionId: session.sessionId,
       sourcePath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
       warning: session.reason,
       recoveryState: "recoverable" as const,
