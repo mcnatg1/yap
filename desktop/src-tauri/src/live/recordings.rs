@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -16,15 +16,16 @@ const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Au
 const PARTIAL_RECOVERY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DELETION_INTENT_SCHEMA_VERSION: u16 = 1;
 const MAX_DELETION_ARTIFACTS: usize = 128;
+const MAX_MAINTENANCE_WARNINGS: usize = 8;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeletionArtifact {
     name: String,
     sha256: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeletionIntent {
     schema_version: u16,
@@ -45,6 +46,13 @@ pub struct SavedLiveSession {
     pub warning: Option<String>,
     pub capture_commit_path: Option<String>,
     pub recovery_state: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedLiveSessionCatalog {
+    pub sessions: Vec<SavedLiveSession>,
+    pub maintenance_warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -153,6 +161,31 @@ fn save_finalized_capture_to_dir(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn save_finalized_capture_to_dir_for_test(
+    dir: &std::path::Path,
+    text: &str,
+    capture: RecordingFinalizeResult,
+) -> Result<(), String> {
+    let view = live::state::LiveSessionView {
+        visibility: live::state::LiveOverlayVisibility::Enabled,
+        status: live::state::LiveSessionStatus::Idle,
+        route: live::state::LiveRoute::None,
+        capture_mode: live::state::LiveCaptureMode::PushToTalk,
+        active_capture_mode: None,
+        hotkey: String::new(),
+        paste_hotkey: String::new(),
+        input_device_id: None,
+        input_device_label: None,
+        level: None,
+        partial_text: None,
+        final_text: Some(text.to_string()),
+        transcription_degraded: false,
+        error: None,
+    };
+    save_finalized_capture_to_dir(dir, &view, Some(capture)).map(|_| ())
+}
+
 fn save_finalized_capture_to_dir_with_text_publisher<P>(
     dir: &std::path::Path,
     view: &live::state::LiveSessionView,
@@ -258,7 +291,11 @@ fn combine_warning(base: Option<String>, next: impl AsRef<str>) -> Option<String
 }
 
 pub fn list_session_files() -> Result<Vec<SavedLiveSession>, String> {
-    list_session_files_from_dir(&recordings_dir())
+    Ok(list_session_catalog()?.sessions)
+}
+
+pub fn list_session_catalog() -> Result<SavedLiveSessionCatalog, String> {
+    list_session_catalog_from_dir(&recordings_dir())
 }
 
 pub fn list_recoverable_live_sessions() -> Result<Vec<RecoverableLiveSession>, String> {
@@ -291,19 +328,35 @@ pub(crate) fn recordings_dir() -> std::path::PathBuf {
     recordings_dir_from(|key| std::env::var(key).ok())
 }
 
+#[cfg(test)]
 fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSession>, String> {
-    list_session_files_from_dir_at(dir, OffsetDateTime::now_utc())
+    Ok(list_session_catalog_from_dir_at(dir, OffsetDateTime::now_utc())?.sessions)
 }
 
+#[cfg(test)]
 fn list_session_files_from_dir_at(
     dir: &std::path::Path,
     now: OffsetDateTime,
 ) -> Result<Vec<SavedLiveSession>, String> {
+    Ok(list_session_catalog_from_dir_at(dir, now)?.sessions)
+}
+
+fn list_session_catalog_from_dir(dir: &std::path::Path) -> Result<SavedLiveSessionCatalog, String> {
+    list_session_catalog_from_dir_at(dir, OffsetDateTime::now_utc())
+}
+
+fn list_session_catalog_from_dir_at(
+    dir: &std::path::Path,
+    now: OffsetDateTime,
+) -> Result<SavedLiveSessionCatalog, String> {
     if !dir.exists() {
-        return Ok(Vec::new());
+        return Ok(SavedLiveSessionCatalog {
+            sessions: Vec::new(),
+            maintenance_warnings: Vec::new(),
+        });
     }
 
-    let pending_warnings = reconcile_pending_deletion_intents(dir);
+    let pending = reconcile_pending_deletion_intents(dir);
     let scan = recording::scan_recordings(dir)?;
     let (retention_deleted, retention_warnings) =
         reconcile_expired_committed_meetings(dir, &scan.complete, now);
@@ -329,7 +382,8 @@ fn list_session_files_from_dir_at(
                     stable_existing_path_string(&audio)
                 },
                 created_at_ms: committed_at_ms(&committed.manifest.committed_at_utc),
-                warning: pending_warnings
+                warning: pending
+                    .session_warnings
                     .get(committed.manifest.session_id.as_str())
                     .cloned()
                     .or_else(|| {
@@ -357,7 +411,10 @@ fn list_session_files_from_dir_at(
             .cmp(&a.created_at_ms)
             .then_with(|| b.name.cmp(&a.name))
     });
-    Ok(sessions)
+    Ok(SavedLiveSessionCatalog {
+        sessions,
+        maintenance_warnings: pending.maintenance_warnings,
+    })
 }
 
 fn reconcile_expired_committed_meetings(
@@ -433,9 +490,7 @@ fn delete_committed_session_in_dir(
     let intent = build_deletion_intent(dir, capture, reason)?;
     let intent_name = deletion_intent_name(&intent.session_id);
     let intent_path = dir.join(&intent_name);
-    if !intent_path.exists() {
-        write_deletion_intent(&intent_path, &intent)?;
-    }
+    write_deletion_intent(&intent_path, &intent)?;
     resume_deletion_intent(dir, &intent_name)
 }
 
@@ -466,6 +521,18 @@ fn build_deletion_intent(
             sha256: manifest.capture_sidecar_sha256.clone(),
         },
     ];
+    let journal = format!("live-{}.capture.journal.part", manifest.session_id);
+    if recording::is_regular_artifact(&dir.join(&journal)) {
+        let (journal_text, journal_sha256) =
+            recording::read_and_hash_regular_artifact(dir, &journal)?;
+        let parsed = recording::parse_journal_for_session(&journal_text, &manifest.session_id)?;
+        if parsed {
+            artifacts.push(DeletionArtifact {
+                name: journal,
+                sha256: journal_sha256,
+            });
+        }
+    }
     let transcript_names = transcript_artifact_names(dir, &manifest.session_id)?;
     if !transcript_names.is_empty() {
         let highest = highest_transcript_revision(dir, &manifest.session_id).ok_or_else(|| {
@@ -516,20 +583,127 @@ fn deletion_intent_name(session_id: &crate::audio::session::SessionId) -> String
 }
 
 fn write_deletion_intent(path: &Path, intent: &DeletionIntent) -> Result<(), String> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| format!("Failed to publish recording deletion intent: {error}"))?;
-    serde_json::to_writer(&mut file, intent)
-        .map_err(|error| format!("Failed to serialize recording deletion intent: {error}"))?;
-    file.write_all(b"\n")
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Failed to persist recording deletion intent: {error}"))
+    write_deletion_intent_with_publication_barrier(path, intent, |_| {})
 }
 
-fn reconcile_pending_deletion_intents(dir: &Path) -> HashMap<String, String> {
-    let mut warnings = HashMap::new();
+fn write_deletion_intent_with_publication_barrier<F>(
+    path: &Path,
+    intent: &DeletionIntent,
+    mut publication_barrier: F,
+) -> Result<(), String>
+where
+    F: FnMut(bool),
+{
+    validate_deletion_intent(intent)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "recording deletion intent has no parent directory".to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "recording deletion intent has no valid file name".to_string())?;
+    if name != deletion_intent_name(&intent.session_id) {
+        return Err("recording deletion intent name does not match its session".into());
+    }
+    if physical_entry_exists(dir, name)? {
+        let existing = recording::read_regular_artifact(dir, name)
+            .ok()
+            .and_then(|text| {
+                serde_json::from_str::<DeletionIntent>(&text)
+                    .ok()
+                    .filter(|existing| validate_deletion_intent(existing).is_ok())
+            });
+        if existing.as_ref() == Some(intent) {
+            return Ok(());
+        }
+        if !intent_originals_are_intact(dir, intent)? {
+            return Err("recording deletion intent is corrupt and deletion may have started; evidence was retained".into());
+        }
+        let quarantine = recording::quarantine_regular_artifact(dir, name)?;
+        crate::stt::log_yap(&format!(
+            "Quarantined corrupt recording deletion intent at {} before retrying publication",
+            quarantine.display()
+        ));
+    }
+
+    let (staging, mut file) = create_unique_deletion_intent_staging(dir, &intent.session_id)?;
+    let result = serde_json::to_writer(&mut file, intent)
+        .map_err(|error| format!("Failed to serialize recording deletion intent: {error}"))
+        .and_then(|_| {
+            file.write_all(b"\n")
+                .and_then(|_| file.sync_all())
+                .map_err(|error| format!("Failed to persist recording deletion intent: {error}"))
+        })
+        .and_then(|_| {
+            publication_barrier(false);
+            recording::publish_no_replace(
+                &staging,
+                path,
+                &file,
+                "publish recording deletion intent",
+            )
+            .map(|published| {
+                drop(published);
+                publication_barrier(true);
+                let published = recording::read_regular_artifact(dir, name)?;
+                let published: DeletionIntent =
+                    serde_json::from_str(&published).map_err(|error| {
+                        format!("Failed to re-read published recording deletion intent: {error}")
+                    })?;
+                if published != *intent {
+                    return Err(
+                        "published recording deletion intent changed before verification".into(),
+                    );
+                }
+                let _ = recording::sync_recordings_parent(dir);
+                Ok(())
+            })
+            .and_then(|result| result)
+        });
+    if result.is_err() {
+        recording::remove_owned_staging(&staging, &file, "publish recording deletion intent");
+    }
+    drop(file);
+    result
+}
+
+fn create_unique_deletion_intent_staging(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Result<(std::path::PathBuf, std::fs::File), String> {
+    for nonce in 0..128_u64 {
+        let path = dir.join(format!(
+            ".live-{session_id}.deletion.v1.{}-{nonce}.part",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create recording deletion intent staging file: {error}"
+                ))
+            }
+        }
+    }
+    Err("Failed to allocate a private recording deletion intent staging file".into())
+}
+
+struct ReconciliationWarnings {
+    session_warnings: HashMap<String, String>,
+    maintenance_warnings: Vec<String>,
+}
+
+fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
+    let mut warnings = ReconciliationWarnings {
+        session_warnings: HashMap::new(),
+        maintenance_warnings: Vec::new(),
+    };
     let Ok(entries) = std::fs::read_dir(dir) else {
         return warnings;
     };
@@ -545,16 +719,26 @@ fn reconcile_pending_deletion_intents(dir: &Path) -> HashMap<String, String> {
                 .trim_start_matches("live-")
                 .trim_end_matches(".deletion.v1.json");
             if crate::audio::session::SessionId::new(session.to_string()).is_ok() {
-                warnings.insert(
-                    session.to_string(),
-                    format!("Recording deletion is pending: {error}"),
-                );
+                let warning = format!("Recording deletion is pending: {error}");
+                warnings
+                    .session_warnings
+                    .insert(session.to_string(), warning.clone());
+                push_maintenance_warning(&mut warnings.maintenance_warnings, warning);
             } else {
-                eprintln!("orphaned pending recording deletion intent {name}: {error}");
+                push_maintenance_warning(
+                    &mut warnings.maintenance_warnings,
+                    format!("Recording cleanup evidence was retained: {name}: {error}"),
+                );
             }
         }
     }
     warnings
+}
+
+fn push_maintenance_warning(warnings: &mut Vec<String>, warning: String) {
+    if warnings.len() < MAX_MAINTENANCE_WARNINGS && !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
 }
 
 fn resume_deletion_intent(dir: &Path, intent_name: &str) -> Result<(), String> {
@@ -565,22 +749,108 @@ fn resume_deletion_intent(dir: &Path, intent_name: &str) -> Result<(), String> {
     if intent_name != deletion_intent_name(&intent.session_id) {
         return Err("recording deletion intent name does not match its session".into());
     }
-    for artifact in &intent.artifacts {
-        let path = dir.join(&artifact.name);
-        if !path.exists() {
-            continue;
+    if physical_entry_exists(dir, &intent.commit_file)? {
+        prove_intent_against_current_commit(dir, &intent, OffsetDateTime::now_utc())?;
+        for artifact in &intent.artifacts {
+            remove_regular_artifact_if_present(dir, &artifact.name, &artifact.sha256)?;
         }
-        recording::remove_regular_artifact_if_hash(dir, &artifact.name, &artifact.sha256)?;
-    }
-    let commit_path = dir.join(&intent.commit_file);
-    if commit_path.exists() {
         recording::remove_regular_artifact_if_hash(
             dir,
             &intent.commit_file,
             &intent.commit_sha256,
         )?;
+    } else {
+        ensure_intent_artifacts_are_absent(dir, &intent)?;
     }
     recording::remove_regular_artifact_if_hash(dir, intent_name, &intent_sha256)
+}
+
+fn prove_intent_against_current_commit(
+    dir: &Path,
+    intent: &DeletionIntent,
+    now: OffsetDateTime,
+) -> Result<(), String> {
+    let (commit_text, commit_sha256) =
+        recording::read_and_hash_regular_artifact(dir, &intent.commit_file)?;
+    if commit_sha256 != intent.commit_sha256 {
+        return Err("recording deletion commit no longer matches the published intent".into());
+    }
+    let manifest: recording::CaptureCommitManifest = serde_json::from_str(&commit_text)
+        .map_err(|error| format!("Failed to parse committed recording manifest: {error}"))?;
+    manifest.validate()?;
+    if manifest.session_id != intent.session_id
+        || !intent_has_artifact(intent, &manifest.audio_file, &manifest.audio_sha256)
+        || !intent_has_artifact(
+            intent,
+            &manifest.capture_sidecar_file,
+            &manifest.capture_sidecar_sha256,
+        )
+    {
+        return Err(
+            "recording deletion intent does not match the current committed session".into(),
+        );
+    }
+    if intent.reason == "expired-meeting-retention" && !committed_meeting_is_expired(&manifest, now)
+    {
+        return Err(
+            "expired-meeting deletion is no longer authorized by the committed metadata".into(),
+        );
+    }
+    Ok(())
+}
+
+fn intent_has_artifact(intent: &DeletionIntent, name: &str, sha256: &str) -> bool {
+    intent
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.name == name && artifact.sha256 == sha256)
+}
+
+fn intent_originals_are_intact(dir: &Path, intent: &DeletionIntent) -> Result<bool, String> {
+    if !physical_entry_exists(dir, &intent.commit_file)? {
+        return Ok(false);
+    }
+    if prove_intent_against_current_commit(dir, intent, OffsetDateTime::now_utc()).is_err() {
+        return Ok(false);
+    }
+    for artifact in &intent.artifacts {
+        if !physical_entry_exists(dir, &artifact.name)?
+            || recording::sha256_regular_artifact(dir, &artifact.name)? != artifact.sha256
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn remove_regular_artifact_if_present(dir: &Path, name: &str, sha256: &str) -> Result<(), String> {
+    if physical_entry_exists(dir, name)? {
+        recording::remove_regular_artifact_if_hash(dir, name, sha256)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_intent_artifacts_are_absent(dir: &Path, intent: &DeletionIntent) -> Result<(), String> {
+    for artifact in &intent.artifacts {
+        if physical_entry_exists(dir, &artifact.name)? {
+            return Err(
+                "recording deletion commit is missing but an intended artifact remains".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn physical_entry_exists(dir: &Path, name: &str) -> Result<bool, String> {
+    recording::validate_artifact_name(name)?;
+    match std::fs::symlink_metadata(dir.join(name)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "Failed to inspect recording deletion artifact: {error}"
+        )),
+    }
 }
 
 fn validate_deletion_intent(intent: &DeletionIntent) -> Result<(), String> {
@@ -625,6 +895,7 @@ fn is_deletion_artifact_for_session(
     let stem = format!("live-{session_id}");
     name == format!("{stem}.wav")
         || name == format!("{stem}.capture.json")
+        || name == format!("{stem}.capture.journal.part")
         || name == format!("{stem}.txt")
         || name == format!("{stem}.polished.txt")
         || name
@@ -667,6 +938,66 @@ pub(crate) fn canonical_committed_live_path_from_dir(
         }
     }
     Err("Yap recording is not a canonical committed session artifact.".into())
+}
+
+pub(crate) fn open_committed_live_transcript_from_dir(
+    requested: &Path,
+    owned_dir: &Path,
+) -> Result<std::fs::File, String> {
+    let owned_dir = owned_dir
+        .canonicalize()
+        .map_err(|_| "Yap recordings directory is unavailable.".to_string())?;
+    let parent = requested
+        .parent()
+        .ok_or_else(|| "Yap recording is unavailable.".to_string())?
+        .canonicalize()
+        .map_err(|_| "Yap recording is unavailable.".to_string())?;
+    let name = requested
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Yap recording is unavailable.".to_string())?;
+    if parent != owned_dir || !file_actions::is_transcript_path(std::path::Path::new(name)) {
+        return Err("Yap recording is not a canonical committed session artifact.".into());
+    }
+    let mut file = recording::open_regular_artifact(&owned_dir, name)?;
+    let handle_sha256 = recording::sha256_open_regular_file(&mut file)?;
+    let scan = recording::scan_recordings(&owned_dir)?;
+    for capture in scan.complete {
+        let session_id = &capture.manifest.session_id;
+        if name != format!("live-{session_id}.txt")
+            || !has_valid_transcript_revision(
+                &owned_dir,
+                session_id,
+                &capture.manifest.capture_sidecar_sha256,
+            )
+        {
+            continue;
+        }
+        let Some(expected_sha256) = validated_transcript_sha256(&owned_dir, session_id) else {
+            continue;
+        };
+        if expected_sha256 == handle_sha256 {
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| format!("Failed to rewind validated Yap transcript: {error}"))?;
+            return Ok(file);
+        }
+        return Err("Yap transcript changed after validation.".into());
+    }
+    Err("Yap recording is not a canonical committed session artifact.".into())
+}
+
+fn validated_transcript_sha256(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Option<String> {
+    let highest = highest_transcript_revision(dir, session_id)?;
+    let revision_name = format!("live-{session_id}.transcript.r{highest}.json");
+    let (text, _) = recording::read_and_hash_regular_artifact(dir, &revision_name).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("textSha256")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn list_recoverable_live_sessions_from_dir(
@@ -2331,7 +2662,10 @@ mod tests {
         let session = SessionId::new("s-manual-delete").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
         recording.append_pcm16(&[1, 0]).unwrap();
+        let journal = std::fs::read(recording.journal_path_for_test()).unwrap();
         let capture = recording.finalize().unwrap();
+        let journal_name = format!("live-{session}.capture.journal.part");
+        std::fs::write(dir.join(&journal_name), journal).unwrap();
         save_finalized_capture_to_dir(&dir, &live_view(Some("delete me"), None), Some(capture))
             .unwrap();
         let polished = dir.join(format!("live-{session}.polished.txt"));
@@ -2345,6 +2679,7 @@ mod tests {
             format!("live-{session}.txt"),
             format!("live-{session}.transcript.r1.json"),
             format!("live-{session}.polished.txt"),
+            journal_name,
             format!("live-{session}.commit.json"),
             format!("live-{session}.deletion.v1.json"),
         ] {
@@ -2412,6 +2747,105 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_final_intent_is_quarantined_only_before_deletion_has_started() {
+        let dir = test_dir("corrupt-intent-recovery");
+        let session = SessionId::new("s-corrupt-intent-recovery").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let intent_name = deletion_intent_name(&session);
+        std::fs::write(dir.join(&intent_name), b"{\"truncated\"").unwrap();
+
+        delete_saved_live_session_in_dir(&dir, session.to_string()).unwrap();
+
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
+        assert!(!dir.join(&intent_name).exists());
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("deletion.v1.json.delete-")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn deletion_intent_publication_rejects_injected_pre_and_post_publication_replacements() {
+        let dir = test_dir("intent-publication-barriers");
+        let session = SessionId::new("s-intent-publication-barriers").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+        let intent_path = dir.join(deletion_intent_name(&session));
+
+        let before = intent_path.clone();
+        assert!(write_deletion_intent_with_publication_barrier(
+            &intent_path,
+            &intent,
+            move |after| {
+                if !after {
+                    std::fs::write(&before, b"competing intent").unwrap();
+                }
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&intent_path).unwrap(), b"competing intent");
+        std::fs::remove_file(&intent_path).unwrap();
+
+        let after = intent_path.clone();
+        assert!(write_deletion_intent_with_publication_barrier(
+            &intent_path,
+            &intent,
+            move |published| {
+                if published {
+                    std::fs::remove_file(&after).unwrap();
+                    std::fs::write(&after, b"replacement intent").unwrap();
+                }
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&intent_path).unwrap(), b"replacement intent");
+        assert!(dir.join(format!("live-{session}.commit.json")).is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn truncated_final_intent_after_progress_is_retained_as_a_catalog_warning() {
+        let dir = test_dir("truncated-intent-after-progress");
+        let session = SessionId::new("s-truncated-intent-after-progress").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+        let intent_name = deletion_intent_name(&session);
+        write_deletion_intent(&dir.join(&intent_name), &intent).unwrap();
+        let audio = &intent.artifacts[0];
+        recording::remove_regular_artifact_if_hash(&dir, &audio.name, &audio.sha256).unwrap();
+        std::fs::write(dir.join(&intent_name), b"{\"truncated\"").unwrap();
+
+        let catalog = list_session_catalog_from_dir(&dir).unwrap();
+
+        assert!(catalog.sessions.is_empty());
+        assert_eq!(catalog.maintenance_warnings.len(), 1);
+        assert!(catalog.maintenance_warnings[0].contains("pending"));
+        assert!(dir.join(&intent_name).is_file());
+        assert!(dir.join(format!("live-{session}.capture.json")).is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn forged_deletion_intent_cannot_name_another_session_or_arbitrary_file() {
         let dir = test_dir("forged-deletion-intent");
         let session = SessionId::new("s-forged-intent").unwrap();
@@ -2439,13 +2873,17 @@ mod tests {
                 },
             ],
         };
-        write_deletion_intent(&dir.join(&intent_name), &forged).unwrap();
+        std::fs::write(
+            dir.join(&intent_name),
+            format!("{}\n", serde_json::to_string(&forged).unwrap()),
+        )
+        .unwrap();
 
         let warnings = reconcile_pending_deletion_intents(&dir);
 
         assert!(arbitrary.is_file());
         assert!(dir.join(intent_name).is_file());
-        assert!(warnings.contains_key("s-forged-intent"));
+        assert!(warnings.session_warnings.contains_key("s-forged-intent"));
         std::fs::remove_dir_all(dir).ok();
     }
 

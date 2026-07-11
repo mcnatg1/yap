@@ -169,6 +169,7 @@ export default function App() {
   const setupPrompted = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
+  const maintenanceWarningShownRef = useRef(false);
   const queueRef = useRef(queue);
   const recordingDrop = useRecordingDrop(addPaths);
 
@@ -281,24 +282,31 @@ export default function App() {
 
     void reconcileHiddenHistory()
       .then(async () => {
-        const [saved, recoverable] = await Promise.all([
+        const [catalog, recoverable] = await Promise.all([
           listSavedLiveSessions(),
           listRecoverableLiveSessions(),
         ]);
-        return [
-          ...saved,
-          ...recoverable.map((session): SavedLiveSession => ({
-            createdAtMs: Math.max(0, session.expiresAtMs - 24 * 60 * 60 * 1000),
-            name: session.name,
-            outputPath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
-            sourcePath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
-            warning: session.reason,
-            recoveryState: "recoverable",
-          })),
-        ];
+        return {
+          maintenanceWarning: catalog.maintenanceWarnings[0],
+          sessions: [
+            ...catalog.sessions,
+            ...recoverable.map((session): SavedLiveSession => ({
+              createdAtMs: Math.max(0, session.expiresAtMs - 24 * 60 * 60 * 1000),
+              name: session.name,
+              outputPath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
+              sourcePath: session.audioPartialPath ?? session.journalPartialPath ?? session.name,
+              warning: session.reason,
+              recoveryState: "recoverable",
+            })),
+          ],
+        };
       })
-      .then((sessions) => {
+      .then(({ maintenanceWarning, sessions }) => {
         if (cancelled) return;
+        if (maintenanceWarning && !maintenanceWarningShownRef.current) {
+          maintenanceWarningShownRef.current = true;
+          toast.warning(maintenanceWarning);
+        }
         reconcileNativeHistoryEntries(
           sessions.map(savedSessionToTranscriptHistoryEntry),
           "Live transcript history could not be synced.",

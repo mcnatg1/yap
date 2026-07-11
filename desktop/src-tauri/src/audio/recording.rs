@@ -1446,7 +1446,6 @@ impl StreamingRecording {
             .map_err(|error| format!("Failed to sync finalized live audio: {error}"))?;
 
         self.persist_journal()?;
-        drop(self.journal_file.take());
 
         self.hit_fault(CommitFaultPoint::FinalArtifactRename)?;
         let wav_part = self.paths.wav_part.clone();
@@ -1545,8 +1544,34 @@ impl StreamingRecording {
         )?;
         let manifest = manifest_from_published_commit(&mut published_commit, &manifest)?;
         self.revalidate_sidecar_receipt()?;
+        self.remove_owned_journal_after_commit();
         let _ = sync_parent_directory(&self.paths.directory);
         Ok(manifest)
+    }
+
+    // The journal is recovery state. Keep its original handle until publication so a
+    // pathname replacement cannot cause us to remove somebody else's file.
+    fn remove_owned_journal_after_commit(&mut self) {
+        let Some(journal) = self.journal_file.take() else {
+            return;
+        };
+        let name = self
+            .paths
+            .journal_part
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let result = if name.is_empty() {
+            Err("recording journal has no valid file name".to_string())
+        } else {
+            remove_open_regular_artifact(&self.paths.directory, name, &journal, || {})
+        };
+        drop(journal);
+        if let Err(error) = result {
+            crate::stt::log_yap(&format!(
+                "Published capture commit, but journal cleanup is pending: {error}"
+            ));
+        }
     }
 
     fn partial_result(&mut self) -> RecordingFinalizeResult {
@@ -1826,6 +1851,11 @@ impl StreamingRecording {
     }
 
     #[cfg(test)]
+    pub(crate) fn journal_path_for_test(&self) -> &Path {
+        &self.paths.journal_part
+    }
+
+    #[cfg(test)]
     fn persist_journal_for_test(&mut self) -> Result<(), String> {
         self.persist_journal()
     }
@@ -2002,6 +2032,13 @@ fn parse_journal_append_log(text: &str) -> Result<CaptureJournal, String> {
     journal.ok_or_else(|| "recording journal has no valid header".into())
 }
 
+pub(crate) fn parse_journal_for_session(
+    text: &str,
+    session_id: &SessionId,
+) -> Result<bool, String> {
+    Ok(parse_journal_append_log(text)?.session_id == *session_id)
+}
+
 fn apply_journal_delta(journal: &mut CaptureJournal, delta: JournalDelta) -> Result<(), String> {
     if delta.schema_version != CAPTURE_SCHEMA_VERSION || delta.session_id != journal.session_id {
         return Err("recording journal delta does not match the session".into());
@@ -2081,6 +2118,10 @@ fn sha256_open_file(file: &mut File) -> Result<String, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+pub(crate) fn sha256_open_regular_file(file: &mut File) -> Result<String, String> {
+    sha256_open_file(file)
 }
 
 fn receipt_from_published_sidecar(
@@ -2168,6 +2209,10 @@ fn sync_parent_directory(directory: &Path) -> bool {
             .and_then(|file| file.sync_all())
             .is_ok()
     }
+}
+
+pub(crate) fn sync_recordings_parent(directory: &Path) -> bool {
+    sync_parent_directory(directory)
 }
 
 pub fn validate_artifact_name(value: &str) -> Result<(), String> {
@@ -2359,6 +2404,11 @@ pub(crate) fn remove_regular_artifact(directory: &Path, name: &str) -> Result<()
     remove_open_regular_artifact(directory, name, &owned, || {})
 }
 
+pub(crate) fn quarantine_regular_artifact(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    let owned = open_regular_artifact(directory, name)?;
+    quarantine_open_regular_artifact(directory, name, &owned)
+}
+
 pub(crate) fn remove_regular_artifact_if_hash(
     directory: &Path,
     name: &str,
@@ -2393,9 +2443,19 @@ fn remove_open_regular_artifact<F>(
 where
     F: FnOnce(),
 {
+    before_quarantine();
+    let quarantine = quarantine_open_regular_artifact(directory, name, owned)?;
+    fs::remove_file(&quarantine)
+        .map_err(|error| format!("Failed to remove quarantined recording artifact: {error}"))
+}
+
+fn quarantine_open_regular_artifact(
+    directory: &Path,
+    name: &str,
+    owned: &File,
+) -> Result<PathBuf, String> {
     validate_artifact_name(name)?;
     let path = directory.join(name);
-    before_quarantine();
     let quarantine = unique_delete_quarantine_path(directory, name)?;
     fs::rename(&path, &quarantine).map_err(|error| {
         format!("Failed to quarantine recording artifact for deletion: {error}")
@@ -2413,8 +2473,7 @@ where
         return Err("recording artifact path no longer names the verified file".into());
     }
     drop(quarantined);
-    fs::remove_file(&quarantine)
-        .map_err(|error| format!("Failed to remove quarantined recording artifact: {error}"))
+    Ok(quarantine)
 }
 
 fn unique_delete_quarantine_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
@@ -3408,6 +3467,59 @@ mod tests {
             );
             std::fs::remove_dir_all(dir).ok();
         }
+    }
+
+    #[test]
+    fn successful_commit_removes_its_owned_journal_but_partial_finalization_keeps_it() {
+        let complete_dir = tempfile_dir("journal-cleanup-complete");
+        let complete_session = SessionId::new("s-journal-cleanup-complete").unwrap();
+        let mut complete =
+            StreamingRecording::create(&complete_dir, complete_session.clone()).unwrap();
+        complete.append_pcm16(&[1, 0]).unwrap();
+        assert_eq!(complete.finalize().unwrap().status, CaptureStatus::Complete);
+        assert!(!complete_dir
+            .join(format!("live-{complete_session}.capture.journal.part"))
+            .exists());
+
+        let partial_dir = tempfile_dir("journal-cleanup-partial");
+        let partial_session = SessionId::new("s-journal-cleanup-partial").unwrap();
+        let mut partial = StreamingRecording::create_with_fault(
+            &partial_dir,
+            partial_session.clone(),
+            CommitFaultPoint::CommitRename,
+        )
+        .unwrap();
+        partial.append_pcm16(&[1, 0]).unwrap();
+        assert_eq!(partial.finalize().unwrap().status, CaptureStatus::Partial);
+        assert!(partial_dir
+            .join(format!("live-{partial_session}.capture.journal.part"))
+            .is_file());
+        std::fs::remove_dir_all(complete_dir).ok();
+        std::fs::remove_dir_all(partial_dir).ok();
+    }
+
+    #[test]
+    fn valid_committed_session_suppresses_a_crash_residue_journal_from_recovery() {
+        let dir = tempfile_dir("journal-committed-residue");
+        let session = SessionId::new("s-journal-committed-residue").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let journal = std::fs::read(&recording.paths.journal_part).unwrap();
+        assert_eq!(
+            recording.finalize().unwrap().status,
+            CaptureStatus::Complete
+        );
+        std::fs::write(
+            dir.join(format!("live-{session}.capture.journal.part")),
+            journal,
+        )
+        .unwrap();
+
+        let scan = scan_recordings(&dir).unwrap();
+
+        assert_eq!(scan.complete.len(), 1);
+        assert!(scan.partial.is_empty());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

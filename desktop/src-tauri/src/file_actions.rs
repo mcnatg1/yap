@@ -32,6 +32,7 @@ pub fn allow_recording_playback_path(
 ) -> Result<String, String> {
     ensure_main_window(&window)?;
     let path = register_playback_path_at(path, &recording_playback_registry_path())?;
+    revalidate_owned_playback_path(&path)?;
     allow_asset_playback_path(&app, &path)?;
     Ok(path.display().to_string())
 }
@@ -43,14 +44,21 @@ pub fn restore_recording_playback_path(
     path: String,
 ) -> Result<String, String> {
     ensure_main_window(&window)?;
-    let path = registered_playback_path_at(path, &recording_playback_registry_path())?;
-    if path_is_inside_owned_live_directory(&path, &crate::live::recordings::recordings_dir()) {
-        crate::live::recordings::canonical_committed_live_path_from_dir(
-            &path,
-            &crate::live::recordings::recordings_dir(),
-            false,
-        )?;
-    }
+    let path = std::path::PathBuf::from(path);
+    let path =
+        if path_is_inside_owned_live_directory(&path, &crate::live::recordings::recordings_dir()) {
+            crate::live::recordings::canonical_committed_live_path_from_dir(
+                &path,
+                &crate::live::recordings::recordings_dir(),
+                false,
+            )?
+        } else {
+            registered_playback_path_at(
+                path.display().to_string(),
+                &recording_playback_registry_path(),
+            )?
+        };
+    revalidate_owned_playback_path(&path)?;
     allow_asset_playback_path(&app, &path)?;
     Ok(path.display().to_string())
 }
@@ -159,9 +167,12 @@ fn read_text_file_at(path: String) -> Result<String, String> {
 
 fn read_text_file_at_from_dir(path: String, owned_dir: &std::path::Path) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
-    let path = owned_live_transcript_path_from_dir(&path, "read", owned_dir)?;
-    reject_oversized_transcript(&path)?;
-    std::fs::read_to_string(&path).map_err(|err| format!("Failed to read transcript: {err}"))
+    let mut file = owned_live_transcript_file_from_dir(&path, "read", owned_dir)?;
+    reject_oversized_transcript_file(&file)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|err| format!("Failed to read transcript: {err}"))?;
+    Ok(text)
 }
 
 fn read_text_preview_at(path: String, max_chars: usize) -> Result<String, String> {
@@ -176,9 +187,7 @@ fn read_text_preview_at_from_dir(
     let path = std::path::PathBuf::from(path);
 
     let max_chars = max_chars.clamp(1, 4_000);
-    let path = owned_live_transcript_path_from_dir(&path, "read", owned_dir)?;
-    let file =
-        std::fs::File::open(&path).map_err(|err| format!("Failed to read transcript: {err}"))?;
+    let file = owned_live_transcript_file_from_dir(&path, "read", owned_dir)?;
     let mut bytes = Vec::new();
     std::io::Read::take(file, (max_chars.saturating_mul(4).saturating_add(4)) as u64)
         .read_to_end(&mut bytes)
@@ -208,6 +217,11 @@ fn write_polished_text_at_from_dir(
 ) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
     let path = owned_live_transcript_path_from_dir(&path, "polished", owned_dir)?;
+    let _source =
+        crate::live::recordings::open_committed_live_transcript_from_dir(&path, owned_dir)
+            .map_err(|_| {
+                "Only Yap-owned canonical live transcripts can be polished.".to_string()
+            })?;
     let output = polished_path(&path)?;
     write_text_atomically(&output, &text)
         .map_err(|err| format!("Failed to save polished transcript: {err}"))?;
@@ -339,7 +353,9 @@ fn register_playback_path_at_from_owned_dir(
 ) -> Result<std::path::PathBuf, String> {
     let path = playable_recording_path(path)?;
     if path_is_inside_owned_live_directory(&path, owned_dir) {
-        crate::live::recordings::canonical_committed_live_path_from_dir(&path, owned_dir, false)?;
+        return crate::live::recordings::canonical_committed_live_path_from_dir(
+            &path, owned_dir, false,
+        );
     }
     let _guard = playback_registry_lock()
         .lock()
@@ -493,6 +509,27 @@ fn owned_live_transcript_path_from_dir(
         .map_err(|_| format!("Only Yap-owned canonical live transcripts can be {action}."))
 }
 
+fn owned_live_transcript_file_from_dir(
+    path: &std::path::Path,
+    action: &str,
+    owned_dir: &std::path::Path,
+) -> Result<std::fs::File, String> {
+    let path = canonical_transcript_path(path, action)?;
+    crate::live::recordings::open_committed_live_transcript_from_dir(&path, owned_dir)
+        .map_err(|_| format!("Only Yap-owned canonical live transcripts can be {action}."))
+}
+
+fn revalidate_owned_playback_path(path: &std::path::Path) -> Result<(), String> {
+    if path_is_inside_owned_live_directory(path, &crate::live::recordings::recordings_dir()) {
+        crate::live::recordings::canonical_committed_live_path_from_dir(
+            path,
+            &crate::live::recordings::recordings_dir(),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
 fn path_is_inside_owned_live_directory(
     path: &std::path::Path,
     owned_dir: &std::path::Path,
@@ -502,8 +539,9 @@ fn path_is_inside_owned_live_directory(
         .is_ok_and(|owned| path.starts_with(owned))
 }
 
-fn reject_oversized_transcript(path: &std::path::Path) -> Result<(), String> {
-    let length = std::fs::metadata(path)
+fn reject_oversized_transcript_file(file: &std::fs::File) -> Result<(), String> {
+    let length = file
+        .metadata()
         .map_err(|err| format!("Failed to inspect transcript: {err}"))?
         .len();
     if length > MAX_TRANSCRIPT_READ_BYTES {
@@ -550,6 +588,7 @@ fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{recording::StreamingRecording, session::SessionId};
 
     static TEMP_TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
@@ -705,6 +744,32 @@ mod tests {
         std::fs::write(&transcript, "abcdef").unwrap();
 
         assert!(read_text_preview_at_from_dir(transcript.display().to_string(), 3, &dir).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn canonical_transcript_read_and_preview_consume_the_validated_handle() {
+        let dir = temp_test_dir("validated-transcript-handle");
+        let session = SessionId::new("s-validated-transcript-handle").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let capture = recording.finalize().unwrap();
+        crate::live::recordings::save_finalized_capture_to_dir_for_test(
+            &dir,
+            "verified text",
+            capture,
+        )
+        .unwrap();
+        let transcript = dir.join(format!("live-{session}.txt"));
+
+        assert_eq!(
+            read_text_file_at_from_dir(transcript.display().to_string(), &dir).unwrap(),
+            "verified text\n"
+        );
+        assert_eq!(
+            read_text_preview_at_from_dir(transcript.display().to_string(), 8, &dir).unwrap(),
+            "verified"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

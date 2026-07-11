@@ -13,6 +13,11 @@ export type SavedLiveSession = {
   recoveryState?: "recoverable" | "recovered" | null;
 };
 
+export type SavedLiveSessionCatalog = {
+  maintenanceWarnings: string[];
+  sessions: SavedLiveSession[];
+};
+
 export type OwnedLiveTranscriptPathResolution = {
   requestedPath: string;
   canonicalPath?: string | null;
@@ -85,8 +90,8 @@ export function stopLiveSession(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("stop_live_session");
 }
 
-export function listSavedLiveSessions(): Promise<SavedLiveSession[]> {
-  return invoke<SavedLiveSession[]>("list_saved_live_sessions");
+export function listSavedLiveSessions(): Promise<SavedLiveSessionCatalog> {
+  return invoke<SavedLiveSessionCatalog>("list_saved_live_sessions");
 }
 
 export function listRecoverableLiveSessions(): Promise<RecoverableLiveSession[]> {

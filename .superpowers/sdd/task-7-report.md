@@ -119,8 +119,35 @@ DONE
 - `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` - pass.
 - `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.
 - `pnpm --dir desktop build` - pass.
-- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass (414 library tests plus 1 parity integration test, default parallel execution).
-- `pnpm --dir desktop test` - pass (100 tests).
+
+---
+
+## Durability Follow-up
+
+### Implementation
+
+- Successful commits now remove only their owned private append journal after publication. Partial finalization retains it, and a valid commit continues to suppress a residual journal from partial recovery.
+- Manual and retention deletion intents now publish from a unique synced private staging file through no-replace publication. Resume re-proves the current commit hash, manifest session, required names/hashes, and retention metadata before deleting; commit absence permits only intent cleanup after all listed physical entries are absent.
+- Corrupt final intents are quarantined only when all original evidence remains hash-valid. Truncated/corrupt intents after deletion progress remain on disk, fail closed, and are surfaced via the bounded saved-session catalog maintenance warnings.
+- Canonical transcript reads and previews consume validated no-follow handles. Canonical owned audio bypasses the external playback registry; path-only open/reveal/asset flows revalidate immediately before dispatch. Same-user mutation after that final pathname check remains a documented residual because that actor can directly alter the file.
+
+### Focused Evidence
+
+- `audio::recording`: successful journal retirement, partial retention, and committed-residue suppression.
+- `live::recordings`: corrupt-intent quarantine before deletion, truncated-final retention after progress, catalog warning persistence, and the existing replacement/crash resume coverage.
+
+### Verification
+
+- `cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml` - pass (420 library tests plus 1 parity integration test, default parallel execution).
+- `cargo fmt --all --check --manifest-path .\desktop\src-tauri\Cargo.toml` - pass.
+- `cargo clippy --locked --manifest-path .\desktop\src-tauri\Cargo.toml --all-targets -- -D warnings` - pass.
+- `pnpm --dir desktop test` - pass (101 tests).
+- `pnpm --dir desktop build` - pass.
+- `git diff --check` - pass.
+
+### Residual
+
+- Same-user filesystem access is not a security boundary. The implementation rejects malformed, cross-session, path-replacement, reparse, and stale intent inputs, but cannot prevent that same user from directly deleting or replacing their own recording after pathname validation for OS-owned dispatch APIs.
 
 ---
 

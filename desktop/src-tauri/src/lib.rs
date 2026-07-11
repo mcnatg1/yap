@@ -375,9 +375,9 @@ fn stop_live_session(
 #[tauri::command]
 fn list_saved_live_sessions(
     window: tauri::WebviewWindow,
-) -> Result<Vec<live::recordings::SavedLiveSession>, String> {
+) -> Result<live::recordings::SavedLiveSessionCatalog, String> {
     file_actions::ensure_main_window(&window)?;
-    live::recordings::list_session_files()
+    live::recordings::list_session_catalog()
 }
 
 #[tauri::command]
