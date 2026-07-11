@@ -387,7 +387,13 @@ impl LiveRuntime {
         ) {
             Ok(capture) => capture,
             Err(error) => {
-                let _ = recording_handle.finalize();
+                if let Err(finalize_error) =
+                    recording_handle.abort(format!("capture adapter failed to open: {error}"))
+                {
+                    crate::stt::log_yap(&format!(
+                        "live recording abort after capture-open failure failed: {finalize_error}"
+                    ));
+                }
                 let _ = self
                     .inner
                     .lock()

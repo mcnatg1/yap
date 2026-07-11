@@ -206,17 +206,21 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
         std::fs::read_dir(dir).map_err(|err| format!("Failed to read live recordings: {err}"))?
     {
         let entry = entry.map_err(|err| format!("Failed to read live recording: {err}"))?;
-        let path = entry.path();
+        let name = entry.file_name();
+        let Some(file_name) = name.to_str() else {
+            continue;
+        };
+        let path = dir.join(file_name);
         if !recording::is_regular_artifact(&path) || !is_primary_live_transcript_path(&path) {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        if dir.join(format!("{stem}.capture.journal.part")).exists()
-            || dir.join(format!("{stem}.capture.json")).exists()
-            || dir.join(format!("{stem}.capture.partial.json")).exists()
-            || dir.join(format!("{stem}.commit.json")).exists()
+        if regular_artifact_exists(dir, &format!("{stem}.capture.journal.part"))
+            || regular_artifact_exists(dir, &format!("{stem}.capture.json"))
+            || regular_artifact_exists(dir, &format!("{stem}.capture.partial.json"))
+            || regular_artifact_exists(dir, &format!("{stem}.commit.json"))
         {
             continue;
         }
@@ -244,6 +248,10 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
             .then_with(|| b.name.cmp(&a.name))
     });
     Ok(sessions)
+}
+
+fn regular_artifact_exists(dir: &std::path::Path, name: &str) -> bool {
+    recording::open_regular_artifact(dir, name).is_ok()
 }
 
 fn committed_at_ms(value: &str) -> u64 {
@@ -277,19 +285,17 @@ fn write_transcript_revision(
             vec![model],
         )
     } else {
-        let previous_path = transcript_revision_path(dir, session_id, revision - 1);
-        if !recording::is_regular_artifact(&previous_path) {
-            return Err("Prior transcript revision is not a regular same-directory file".into());
-        }
-        let previous_text = std::fs::read_to_string(&previous_path)
-            .map_err(|error| format!("Failed to read prior transcript revision: {error}"))?;
+        let previous_name = format!("live-{session_id}.transcript.r{}.json", revision - 1);
+        let (previous_text, previous_sha256) =
+            recording::read_and_hash_regular_artifact(dir, &previous_name)
+                .map_err(|error| format!("Failed to read prior transcript revision: {error}"))?;
         let previous: TranscriptResultRevision = serde_json::from_str(&previous_text)
             .map_err(|error| format!("Failed to parse prior transcript revision: {error}"))?;
         previous.next_revision(
             revision,
             ResultAuthority::LocalProvisional,
             capture_sidecar_sha256,
-            recording::sha256_file(&previous_path)?,
+            previous_sha256,
             status,
             transcript,
             Vec::new(),
@@ -317,9 +323,9 @@ fn transcript_result_value(
     capture_sidecar_sha256: &str,
     transcript_path: &std::path::Path,
 ) -> Result<serde_json::Value, String> {
-    if !recording::is_regular_artifact(transcript_path) {
-        return Err("Transcript is not a regular same-directory file".into());
-    }
+    let transcript_dir = transcript_path
+        .parent()
+        .ok_or_else(|| "Transcript path has no parent directory".to_string())?;
     let text_file = transcript_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -334,7 +340,10 @@ fn transcript_result_value(
     object.insert("textFile".into(), serde_json::Value::from(text_file));
     object.insert(
         "textSha256".into(),
-        serde_json::Value::from(recording::sha256_file(transcript_path)?),
+        serde_json::Value::from(recording::sha256_regular_artifact(
+            transcript_dir,
+            text_file,
+        )?),
     );
     object.insert(
         "modelId".into(),
@@ -392,8 +401,7 @@ fn transcript_revision_path(
 }
 
 pub(crate) fn stable_existing_path_string(path: &std::path::Path) -> String {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    stable_path_string(&canonical)
+    stable_path_string(path)
 }
 
 #[cfg(target_os = "windows")]

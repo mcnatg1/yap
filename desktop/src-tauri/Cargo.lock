@@ -6051,6 +6051,7 @@ name = "yap-desktop"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
