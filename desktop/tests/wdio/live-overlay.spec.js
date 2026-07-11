@@ -11,6 +11,9 @@ import {
 } from "./task-8b-helpers.js";
 
 const execFileAsync = promisify(execFile);
+const mainWindowTitle = "Yap";
+const minMainWindowWidth = Math.floor(1122 * 0.7);
+const minMainWindowHeight = Math.floor(740 * 0.7);
 
 const lifecycleAssertions = [
   "overlay-context start and stop without main-window UI interaction",
@@ -54,7 +57,9 @@ async function showMainWindowNatively() {
 $ErrorActionPreference = "Stop"
 Add-Type @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class WdioNativeWindow {
     [StructLayout(LayoutKind.Sequential)]
@@ -77,33 +82,60 @@ public static class WdioNativeWindow {
     private static extern bool GetWindowRect(IntPtr window, out Rect rect);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr window, uint command);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLongW(IntPtr window, int index);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int maxCount);
+
+    [DllImport("user32.dll")]
     private static extern bool ShowWindowAsync(IntPtr window, int command);
 
-    public static bool ShowLargestWindowForProcess(uint ownerPid) {
-        IntPtr largestWindow = IntPtr.Zero;
-        long largestArea = 0;
-        EnumWindows((window, parameter) => {
+    private const uint GetOwner = 4;
+    private const int ExtendedStyle = -20;
+    private const int ToolWindowStyle = 0x00000080;
+
+    public static int ShowMainWindowForProcess(
+        uint ownerPid,
+        string expectedTitle,
+        int minWidth,
+        int minHeight
+    ) {
+        var candidates = new List<IntPtr>();
+        bool enumerated = EnumWindows((window, parameter) => {
             uint windowPid;
             Rect rect;
             GetWindowThreadProcessId(window, out windowPid);
-            if (windowPid != ownerPid || !GetWindowRect(window, out rect)) return true;
+            if (windowPid != ownerPid || GetWindow(window, GetOwner) != IntPtr.Zero) return true;
+            if ((GetWindowLongW(window, ExtendedStyle) & ToolWindowStyle) != 0) return true;
+
+            var title = new StringBuilder(256);
+            GetWindowTextW(window, title, title.Capacity);
+            if (!String.Equals(title.ToString(), expectedTitle, StringComparison.Ordinal)) return true;
+            if (!GetWindowRect(window, out rect)) return true;
+
             long width = Math.Max(0, rect.Right - rect.Left);
             long height = Math.Max(0, rect.Bottom - rect.Top);
-            long area = width * height;
-            if (area > largestArea) {
-                largestArea = area;
-                largestWindow = window;
-            }
+            if (width < minWidth || height < minHeight) return true;
+            candidates.Add(window);
             return true;
         }, IntPtr.Zero);
-        if (largestWindow == IntPtr.Zero) return false;
-        ShowWindowAsync(largestWindow, 5);
-        return true;
+        if (!enumerated) throw new InvalidOperationException("Failed to enumerate WDIO app windows.");
+        if (candidates.Count == 1) ShowWindowAsync(candidates[0], 5);
+        return candidates.Count;
     }
 }
 '@
-if (-not [WdioNativeWindow]::ShowLargestWindowForProcess([uint32]${appPid})) {
-    throw "The WDIO app process does not own a top-level window."
+$candidateCount = [WdioNativeWindow]::ShowMainWindowForProcess(
+    [uint32]${appPid},
+    ${JSON.stringify(mainWindowTitle)},
+    ${minMainWindowWidth},
+    ${minMainWindowHeight}
+)
+if ($candidateCount -ne 1) {
+    throw "Expected exactly one main Yap window for WDIO app PID ${appPid}; found $candidateCount."
 }
 `;
   await execFileAsync(

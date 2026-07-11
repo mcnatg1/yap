@@ -1,5 +1,6 @@
 describe("Yap desktop shell", () => {
   it("opens the main window and exposes the WDIO Tauri bridge", async () => {
+    await browser.tauri.switchWindow("main");
     await browser.pause(500);
 
     expect(typeof browser.tauri.execute).toBe("function");
