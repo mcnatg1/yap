@@ -46,7 +46,12 @@ import {
   TableCell,
   TableRow,
 } from "@/components/ui/table";
-import { canDeleteTranscriptHistoryEntry, maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
+import {
+  canDeleteTranscriptHistoryEntry,
+  isRecoverableTranscriptHistoryEntry,
+  maxTranscriptHistoryEntries,
+  type TranscriptHistoryEntry,
+} from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
 import {
@@ -83,7 +88,7 @@ function HistoryActionMenu({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const canDelete = canDeleteTranscriptHistoryEntry(entry);
-  const recoverable = entry.recoveryState === "recoverable";
+  const recoverable = isRecoverableTranscriptHistoryEntry(entry);
 
   return (
     <>
@@ -346,8 +351,10 @@ export function HistoryPanel({
                         <TableBody>
                           {group.entries.map((entry) => {
                             const selected = entry.outputPath === selectedOutputPath;
+                            const recoverable = isRecoverableTranscriptHistoryEntry(entry);
 
                             function selectEntry(event: MouseEvent<HTMLElement>) {
+                              if (recoverable) return;
                               const row = event.currentTarget.closest("[data-history-entry-row]");
                               onSelect(entry, row?.getBoundingClientRect());
                             }
@@ -363,46 +370,52 @@ export function HistoryPanel({
                                 data-history-entry-row
                               >
                                 <TableCell
-                                  className="w-24 cursor-pointer align-top text-xs tabular-nums text-muted-foreground"
-                                  onClick={selectEntry}
+                                  className={cn(
+                                    "w-24 align-top text-xs tabular-nums text-muted-foreground",
+                                    !recoverable && "cursor-pointer",
+                                  )}
+                                  onClick={recoverable ? undefined : selectEntry}
                                 >
                                   {formatHistoryTime(entry.createdAt)}
                                 </TableCell>
                                 <TableCell
-                                  className="max-w-0 cursor-pointer whitespace-normal align-top"
-                                  onClick={selectEntry}
+                                  className={cn("max-w-0 whitespace-normal align-top", !recoverable && "cursor-pointer")}
+                                  onClick={recoverable ? undefined : selectEntry}
                                 >
                                   <div className="flex min-w-0 items-start gap-2">
-                                    <HistoryEntryPreview
-                                      entry={entry}
-                                      onLoadPreviewText={loadPreviewText}
-                                      onReview={(origin) => onSelect(entry, origin)}
-                                    />
-                                    {entry.recoveryState === "recoverable" ? (
+                                    {recoverable ? (
                                       <span className="shrink-0 text-xs font-medium text-muted-foreground">Partial</span>
-                                    ) : null}
+                                    ) : (
+                                      <HistoryEntryPreview
+                                        entry={entry}
+                                        onLoadPreviewText={loadPreviewText}
+                                        onReview={(origin) => onSelect(entry, origin)}
+                                      />
+                                    )}
                                   </div>
                                 </TableCell>
                                 <TableCell className="w-[4.5rem] align-top text-right">
                                   <div className="flex items-center justify-end gap-0.5">
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <Button
-                                          aria-label={`Copy transcript for ${entry.name}`}
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            onCopy(entry);
-                                          }}
-                                          size="icon-xs"
-                                          title="Copy"
-                                          type="button"
-                                          variant="ghost"
-                                        >
-                                          <Copy />
-                                        </Button>
-                                      </TooltipTrigger>
-                                      <TooltipContent>Copy</TooltipContent>
-                                    </Tooltip>
+                                    {!recoverable ? (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <Button
+                                            aria-label={`Copy transcript for ${entry.name}`}
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              onCopy(entry);
+                                            }}
+                                            size="icon-xs"
+                                            title="Copy"
+                                            type="button"
+                                            variant="ghost"
+                                          >
+                                            <Copy />
+                                          </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Copy</TooltipContent>
+                                      </Tooltip>
+                                    ) : null}
                                     <HistoryActionMenu
                                       entry={entry}
                                       onCopy={onCopy}

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -7,6 +8,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use crate::audio::evidence::ModelRevision;
 use crate::audio::recording::{self, PublishedTranscriptReceipt, RecordingFinalizeResult};
 use crate::audio::results::{ResultAuthority, ResultStatus, TranscriptResultRevision};
+use crate::audio::session::{SessionMode, SessionOrigin};
 use crate::{file_actions, live};
 
 const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
@@ -266,13 +268,24 @@ pub(crate) fn recordings_dir() -> std::path::PathBuf {
 }
 
 fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSession>, String> {
+    list_session_files_from_dir_at(dir, OffsetDateTime::now_utc())
+}
+
+fn list_session_files_from_dir_at(
+    dir: &std::path::Path,
+    now: OffsetDateTime,
+) -> Result<Vec<SavedLiveSession>, String> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut sessions = recording::scan_recordings(dir)?
+    let scan = recording::scan_recordings(dir)?;
+    let (retention_deleted, retention_warnings) =
+        reconcile_expired_committed_meetings(dir, &scan.complete, now);
+    let mut sessions = scan
         .complete
         .into_iter()
+        .filter(|committed| !retention_deleted.contains(committed.manifest.session_id.as_str()))
         .map(|committed| {
             let name = format!("live-{}", committed.manifest.session_id);
             let transcript = dir.join(format!("{name}.txt"));
@@ -291,7 +304,9 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
                     stable_existing_path_string(&audio)
                 },
                 created_at_ms: committed_at_ms(&committed.manifest.committed_at_utc),
-                warning: None,
+                warning: retention_warnings
+                    .get(committed.manifest.session_id.as_str())
+                    .cloned(),
                 capture_commit_path: Some(stable_existing_path_string(&dir.join(format!(
                     "live-{}.commit.json",
                     committed.manifest.session_id
@@ -357,6 +372,100 @@ fn list_session_files_from_dir(dir: &std::path::Path) -> Result<Vec<SavedLiveSes
     Ok(sessions)
 }
 
+fn reconcile_expired_committed_meetings(
+    dir: &Path,
+    committed: &[recording::CommittedCapture],
+    now: OffsetDateTime,
+) -> (HashSet<String>, HashMap<String, String>) {
+    let mut deleted = HashSet::new();
+    let mut warnings = HashMap::new();
+    for capture in committed {
+        if !committed_meeting_is_expired(&capture.manifest, now) {
+            continue;
+        }
+        match delete_expired_committed_meeting(dir, capture) {
+            Ok(()) => {
+                deleted.insert(capture.manifest.session_id.to_string());
+            }
+            Err(error) => {
+                warnings.insert(
+                    capture.manifest.session_id.to_string(),
+                    format!("Expired meeting cleanup is pending: {error}"),
+                );
+            }
+        }
+    }
+    (deleted, warnings)
+}
+
+fn committed_meeting_is_expired(
+    manifest: &recording::CaptureCommitManifest,
+    now: OffsetDateTime,
+) -> bool {
+    let Some(metadata) = &manifest.session_metadata else {
+        return false;
+    };
+    if metadata.session_id != manifest.session_id
+        || metadata.mode != SessionMode::Meeting
+        || metadata.origin != SessionOrigin::LiveCapture
+    {
+        return false;
+    }
+    let Some(expiry) = metadata.retention_expires_at_utc.as_deref() else {
+        return false;
+    };
+    OffsetDateTime::parse(expiry, &Rfc3339)
+        .map(|expiry| expiry <= now)
+        .unwrap_or(false)
+}
+
+fn delete_expired_committed_meeting(
+    dir: &Path,
+    capture: &recording::CommittedCapture,
+) -> Result<(), String> {
+    let manifest = &capture.manifest;
+    let commit_name = format!("live-{}.commit.json", manifest.session_id);
+    let (commit_text, commit_sha256) =
+        recording::read_and_hash_regular_artifact(dir, &commit_name)?;
+    let current_manifest: recording::CaptureCommitManifest = serde_json::from_str(&commit_text)
+        .map_err(|error| format!("Failed to parse committed meeting cleanup manifest: {error}"))?;
+    if current_manifest != *manifest {
+        return Err("committed meeting manifest changed before retention cleanup".into());
+    }
+
+    let mut artifacts = vec![
+        (manifest.audio_file.clone(), manifest.audio_sha256.clone()),
+        (
+            manifest.capture_sidecar_file.clone(),
+            manifest.capture_sidecar_sha256.clone(),
+        ),
+    ];
+    if let Some(highest) = highest_transcript_revision(dir, &manifest.session_id) {
+        if has_valid_transcript_revision(
+            dir,
+            &manifest.session_id,
+            &manifest.capture_sidecar_sha256,
+        ) {
+            let text_name = format!("live-{}.txt", manifest.session_id);
+            artifacts.push((
+                text_name.clone(),
+                recording::sha256_regular_artifact(dir, &text_name)?,
+            ));
+            for revision in 1..=highest {
+                let name = format!("live-{}.transcript.r{revision}.json", manifest.session_id);
+                artifacts.push((
+                    name.clone(),
+                    recording::sha256_regular_artifact(dir, &name)?,
+                ));
+            }
+        }
+    }
+    for (name, sha256) in artifacts {
+        recording::remove_regular_artifact_if_hash(dir, &name, &sha256)?;
+    }
+    recording::remove_regular_artifact_if_hash(dir, &commit_name, &commit_sha256)
+}
+
 fn list_recoverable_live_sessions_from_dir(
     dir: &Path,
 ) -> Result<Vec<RecoverableLiveSession>, String> {
@@ -388,15 +497,24 @@ fn recoverable_session_from_dir(
     let name = format!("live-{session_id}");
     let audio_name = format!("{name}.wav.part");
     let journal_name = format!("{name}.capture.journal.part");
+    let orphan_audio_name = format!("{name}.wav");
     let audio = regular_artifact_exists(dir, &audio_name)
-        .then(|| stable_existing_path_string(&dir.join(&audio_name)));
+        .then(|| stable_existing_path_string(&dir.join(&audio_name)))
+        .or_else(|| {
+            regular_artifact_exists(dir, &orphan_audio_name)
+                .then(|| stable_existing_path_string(&dir.join(&orphan_audio_name)))
+        });
     let journal = regular_artifact_exists(dir, &journal_name)
         .then(|| stable_existing_path_string(&dir.join(&journal_name)));
-    let recorded_at = [audio_name.as_str(), journal_name.as_str()]
-        .into_iter()
-        .filter_map(|artifact| artifact_modified_at_ms(dir, artifact))
-        .min()
-        .unwrap_or_else(|| unix_millis_now().unwrap_or(0));
+    let recorded_at = [
+        audio_name.as_str(),
+        orphan_audio_name.as_str(),
+        journal_name.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|artifact| artifact_modified_at_ms(dir, artifact))
+    .min()
+    .unwrap_or_else(|| unix_millis_now().unwrap_or(0));
     let expires_at_ms = recorded_at.saturating_add(PARTIAL_RECOVERY_TTL.as_millis() as u64);
     Ok(RecoverableLiveSession {
         session_id: session_id.to_string(),
@@ -487,9 +605,11 @@ fn delete_recoverable_live_session_in_dir(dir: &Path, session_id: String) -> Res
         }
     }
     if recovered {
-        for suffix in [".commit.json", ".wav"] {
-            recording::remove_regular_artifact(dir, &format!("live-{session_id}{suffix}"))?;
-        }
+        recording::remove_regular_artifact(dir, &format!("live-{session_id}.commit.json"))?;
+    }
+    let orphan_audio = format!("live-{session_id}.wav");
+    if regular_artifact_exists(dir, &orphan_audio) {
+        recording::remove_regular_artifact(dir, &orphan_audio)?;
     }
     Ok(())
 }
@@ -723,78 +843,86 @@ fn has_valid_transcript_revision(
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    entries.filter_map(Result::ok).any(|entry| {
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            return false;
-        };
-        let Some(revision) = name
-            .strip_prefix(&revision_prefix)
-            .and_then(|value| value.strip_suffix(".json"))
-            .and_then(|value| value.parse::<u64>().ok())
-        else {
-            return false;
-        };
-        revision > 0
-            && transcript_revision_matches_receipt(
-                dir,
-                &name,
-                session_id,
-                revision,
-                &text_name,
-                capture_sidecar_sha256,
-            )
-    })
+    let highest = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str().map(str::to_owned)?;
+            name.strip_prefix(&revision_prefix)
+                .and_then(|value| value.strip_suffix(".json"))
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|revision| *revision > 0)
+        })
+        .max();
+    let Some(highest) = highest else {
+        return false;
+    };
+    transcript_revision_chain_matches_receipt(
+        dir,
+        session_id,
+        highest,
+        &text_name,
+        capture_sidecar_sha256,
+    )
 }
 
-fn transcript_revision_matches_receipt(
+fn transcript_revision_chain_matches_receipt(
     dir: &std::path::Path,
-    revision_name: &str,
     session_id: &crate::audio::session::SessionId,
-    revision: u64,
+    highest_revision: u64,
     text_name: &str,
     capture_sidecar_sha256: &str,
 ) -> bool {
-    let Ok((revision_text, _)) = recording::read_and_hash_regular_artifact(dir, revision_name)
-    else {
-        return false;
-    };
-    let Ok(_revision) = serde_json::from_str::<TranscriptResultRevision>(&revision_text) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&revision_text) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    let Some(revision_text_name) = object.get("textFile").and_then(|value| value.as_str()) else {
-        return false;
-    };
-    let Some(revision_text_sha256) = object.get("textSha256").and_then(|value| value.as_str())
-    else {
-        return false;
-    };
-    let Some(revision_sidecar_sha256) = object
-        .get("captureSidecarSha256")
-        .and_then(|value| value.as_str())
-    else {
-        return false;
-    };
-    let Some(revision_session_id) = object.get("sessionId").and_then(|value| value.as_str()) else {
-        return false;
-    };
-    let Some(revision_number) = object.get("revision").and_then(|value| value.as_u64()) else {
-        return false;
-    };
     let Ok((_, current_text_sha256)) = recording::read_and_hash_regular_artifact(dir, text_name)
     else {
         return false;
     };
-    revision_text_name == text_name
-        && revision_sidecar_sha256 == capture_sidecar_sha256
-        && revision_session_id == session_id.as_str()
-        && revision_number == revision
-        && revision_text_sha256 == current_text_sha256
+    let mut previous_hash = None;
+    for revision in 1..=highest_revision {
+        let revision_name = format!("live-{session_id}.transcript.r{revision}.json");
+        let Ok((revision_text, revision_hash)) =
+            recording::read_and_hash_regular_artifact(dir, &revision_name)
+        else {
+            return false;
+        };
+        if serde_json::from_str::<TranscriptResultRevision>(&revision_text).is_err() {
+            return false;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&revision_text) else {
+            return false;
+        };
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        let previous_matches = match previous_hash.as_deref() {
+            Some(previous_hash) => {
+                object
+                    .get("previousResultSha256")
+                    .and_then(|value| value.as_str())
+                    == Some(previous_hash)
+            }
+            None => {
+                object.get("previousResultSha256").is_none()
+                    || object
+                        .get("previousResultSha256")
+                        .is_some_and(serde_json::Value::is_null)
+            }
+        };
+        if object.get("textFile").and_then(|value| value.as_str()) != Some(text_name)
+            || object.get("textSha256").and_then(|value| value.as_str())
+                != Some(current_text_sha256.as_str())
+            || object
+                .get("captureSidecarSha256")
+                .and_then(|value| value.as_str())
+                != Some(capture_sidecar_sha256)
+            || object.get("sessionId").and_then(|value| value.as_str()) != Some(session_id.as_str())
+            || object.get("revision").and_then(|value| value.as_u64()) != Some(revision)
+            || !previous_matches
+        {
+            return false;
+        }
+        previous_hash = Some(revision_hash);
+    }
+    true
 }
 
 fn transcript_result_value(
@@ -861,6 +989,24 @@ fn next_transcript_revision(
     highest
         .checked_add(1)
         .ok_or_else(|| "Transcript revision overflowed".into())
+}
+
+fn highest_transcript_revision(
+    dir: &std::path::Path,
+    session_id: &crate::audio::session::SessionId,
+) -> Option<u64> {
+    let prefix = format!("live-{session_id}.transcript.r");
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter_map(|name| {
+            name.strip_prefix(&prefix)
+                .and_then(|value| value.strip_suffix(".json"))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .filter(|revision| *revision > 0)
+        .max()
 }
 
 fn transcript_revision_path(
@@ -1042,7 +1188,9 @@ fn partial_text_path(path: &std::path::Path) -> std::io::Result<std::path::PathB
 mod tests {
     use super::*;
     use crate::audio::recording::{CommitFaultPoint, StreamingRecording};
-    use crate::audio::session::SessionId;
+    use crate::audio::session::{
+        SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode,
+    };
 
     fn live_view(
         final_text: Option<&str>,
@@ -1162,6 +1310,48 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry.recovery_state.as_deref() == Some("recovered")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn orphan_audio_after_sidecar_failure_is_visible_retryable_and_deletable() {
+        let dir = test_dir("orphan-audio-retry");
+        let session = SessionId::new("s-orphan-audio-retry").unwrap();
+        let mut recording = StreamingRecording::create_with_fault(
+            &dir,
+            session.clone(),
+            CommitFaultPoint::AudioSync,
+        )
+        .unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let invalid_sidecar = dir.join(format!("live-{session}.capture.partial.json"));
+        std::fs::write(&invalid_sidecar, "invalid sidecar").unwrap();
+
+        assert!(recover_live_session_in_dir(&dir, session.to_string()).is_err());
+        assert!(dir.join(format!("live-{session}.wav")).is_file());
+        let partial = list_recoverable_live_sessions_from_dir(&dir).unwrap();
+        assert_eq!(partial.len(), 1);
+        assert!(partial[0]
+            .audio_partial_path
+            .as_deref()
+            .unwrap()
+            .ends_with(".wav"));
+
+        delete_recoverable_live_session_in_dir(&dir, session.to_string()).unwrap();
+        assert!(!dir.join(format!("live-{session}.wav")).exists());
+        std::fs::remove_file(&invalid_sidecar).ok();
+
+        let mut retry = StreamingRecording::create_with_fault(
+            &dir,
+            session.clone(),
+            CommitFaultPoint::AudioSync,
+        )
+        .unwrap();
+        retry.append_pcm16(&[1, 0]).unwrap();
+        retry.finalize().unwrap();
+        assert!(recover_live_session_in_dir(&dir, session.to_string()).is_ok());
+        assert!(dir.join(format!("live-{session}.commit.json")).is_file());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1698,6 +1888,88 @@ mod tests {
         let sessions = list_session_files_from_dir(&dir).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].output_path, text_path.display().to_string());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn highest_corrupt_revision_does_not_fall_back_to_a_valid_lower_revision() {
+        let dir = test_dir("highest-corrupt-revision");
+        let session = SessionId::new("s-highest-corrupt-revision").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let manifest = recording.finalize().unwrap().committed.unwrap().manifest;
+        let transcript = dir.join(format!("live-{session}.txt"));
+        let receipt = write_new_text_file(&transcript, "first\n").unwrap();
+        write_transcript_revision(
+            &dir,
+            &session,
+            &manifest.capture_sidecar_sha256,
+            &receipt,
+            "first",
+            ResultStatus::Complete,
+        )
+        .unwrap();
+        write_transcript_revision(
+            &dir,
+            &session,
+            &manifest.capture_sidecar_sha256,
+            &receipt,
+            "second",
+            ResultStatus::Complete,
+        )
+        .unwrap();
+        std::fs::write(transcript_revision_path(&dir, &session, 2), "tampered").unwrap();
+
+        assert!(!has_valid_transcript_revision(
+            &dir,
+            &session,
+            &manifest.capture_sidecar_sha256,
+        ));
+        let saved = list_session_files_from_dir(&dir).unwrap().pop().unwrap();
+        assert_eq!(saved.output_path, saved.source_path);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn expired_live_meeting_is_deleted_but_future_and_non_live_origins_survive() {
+        let dir = test_dir("meeting-retention");
+        let start = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let make = |id: &str, origin: SessionOrigin, expiry: u64| {
+            let session = SessionId::new(id).unwrap();
+            let metadata = SessionMetadata::new(
+                session.clone(),
+                SessionMode::Meeting,
+                origin,
+                TriggerMode::Toggle,
+                start,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(expiry)),
+            )
+            .unwrap();
+            let mut recording =
+                StreamingRecording::create_with_session_metadata(&dir, metadata).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+            recording.finalize().unwrap().committed.unwrap().manifest
+        };
+        let expired = make("s-expired-meeting", SessionOrigin::LiveCapture, 1_010);
+        let future = make("s-future-meeting", SessionOrigin::LiveCapture, 2_000);
+        let imported = make("s-imported-meeting", SessionOrigin::ImportedFile, 1_010);
+        let now = OffsetDateTime::from_unix_timestamp(1_020).unwrap();
+
+        let sessions = list_session_files_from_dir_at(&dir, now).unwrap();
+        assert!(!dir
+            .join(format!("live-{}.commit.json", expired.session_id))
+            .exists());
+        assert!(dir
+            .join(format!("live-{}.commit.json", future.session_id))
+            .exists());
+        assert!(dir
+            .join(format!("live-{}.commit.json", imported.session_id))
+            .exists());
+        assert_eq!(sessions.len(), 2);
         std::fs::remove_dir_all(dir).ok();
     }
 

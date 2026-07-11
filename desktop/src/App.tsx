@@ -147,6 +147,7 @@ export default function App() {
     forgetHistoryEntry,
     history,
     reconcileHiddenHistory,
+    reconcileNativeHistoryEntries,
     recordVisibleHistoryEntries,
     rememberHiddenHistoryEntry,
   } = useTranscriptHistory();
@@ -297,7 +298,7 @@ export default function App() {
       })
       .then((sessions) => {
         if (cancelled) return;
-        recordVisibleHistoryEntries(
+        reconcileNativeHistoryEntries(
           sessions.map(savedSessionToTranscriptHistoryEntry),
           "Live transcript history could not be synced.",
         );

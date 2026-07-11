@@ -15,7 +15,9 @@ use crate::audio::coordinator::{
 };
 use crate::audio::frame::PreparedFrame;
 use crate::audio::recording::{RecordingFinalizeResult, RecordingSinkHandle};
-use crate::audio::session::{SessionId, TrackId};
+use crate::audio::session::{
+    SessionId, SessionMetadata, SessionMode, SessionOrigin, TrackId, TriggerMode,
+};
 
 use super::state::{LiveLevelView, LiveSessionState};
 use super::stream::{self, LiveStreamEngine, StreamMessage};
@@ -331,6 +333,7 @@ impl LiveRuntime {
         &self,
         app: tauri::AppHandle,
         selected_device_id: Option<String>,
+        capture_mode: super::state::LiveCaptureMode,
     ) -> Result<(), LiveStartFailure> {
         let _transition = self.transition.begin_start();
         let (session, local_asr) = {
@@ -398,6 +401,26 @@ impl LiveRuntime {
         let recording_reservation =
             crate::audio::recording::allocate_recording_session(&recording_directory)
                 .map_err(|message| LiveStartFailure::new(session, message))?;
+        let trigger_mode = match capture_mode {
+            super::state::LiveCaptureMode::PushToTalk => TriggerMode::PushToTalk,
+            super::state::LiveCaptureMode::Toggle => TriggerMode::Toggle,
+        };
+        let session_metadata = SessionMetadata::new(
+            recording_reservation.session_id().clone(),
+            SessionMode::Dictation,
+            SessionOrigin::LiveCapture,
+            trigger_mode,
+            std::time::SystemTime::now(),
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+        )
+        .map_err(|message| LiveStartFailure::new(session, message))?;
+        let recording_reservation = recording_reservation
+            .with_session_metadata(session_metadata)
+            .map_err(|message| LiveStartFailure::new(session, message))?;
         let recording_handle = RecordingSinkHandle::spawn_reserved(
             recording_reservation,
             recording_sink,

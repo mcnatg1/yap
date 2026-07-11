@@ -238,6 +238,31 @@ export function recordVisibleTranscriptHistoryEntries(
   return visibleEntries.reduce(recordTranscriptHistory, visibleHistory);
 }
 
+export function isNativeLiveTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  return Boolean(entry.captureCommitPath || entry.recoveryState);
+}
+
+export function isRecoverableTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  return entry.recoveryState === "recoverable";
+}
+
+export function reconcileNativeTranscriptHistoryEntries(
+  current: TranscriptHistoryEntry[],
+  nativeEntries: TranscriptHistoryEntry[],
+  hiddenOutputPaths: string[],
+) {
+  const hidden = new Set(
+    normalizeHiddenTranscriptHistory(hiddenOutputPaths).map(transcriptPathIdentity),
+  );
+  const visibleNative = nativeEntries.filter(
+    (entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)),
+  );
+  return normalizeTranscriptHistory([
+    ...visibleNative,
+    ...current.filter((entry) => !isNativeLiveTranscriptHistoryEntry(entry)),
+  ]);
+}
+
 export function removeTranscriptHistory(entries: TranscriptHistoryEntry[], outputPath: string) {
   const identity = transcriptPathIdentity(outputPath);
   return entries.filter((entry) => transcriptPathIdentity(entry.outputPath) !== identity);
@@ -248,6 +273,7 @@ export function hideTranscriptHistory(outputPaths: string[], outputPath: string)
 }
 
 export function canDeleteTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  if (isRecoverableTranscriptHistoryEntry(entry)) return false;
   const output = entry.outputPath.replace(/\\/g, "/").toLowerCase();
   const source = entry.sourcePath.replace(/\\/g, "/").toLowerCase();
   const outputName = output.split("/").pop() ?? "";

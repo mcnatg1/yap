@@ -4,9 +4,11 @@ import { toast } from "sonner";
 import {
   hideTranscriptHistory,
   pruneMissingHiddenTranscriptHistory,
+  readTranscriptHistory,
   readHiddenTranscriptHistory,
   readVisibleTranscriptHistory,
   recordVisibleTranscriptHistoryEntries,
+  reconcileNativeTranscriptHistoryEntries,
   removeTranscriptHistory,
   writeHiddenTranscriptHistory,
   writeTranscriptHistory,
@@ -49,6 +51,24 @@ export function useTranscriptHistory() {
     return true;
   }, [replaceHistory]);
 
+  const reconcileNativeHistoryEntries = useCallback((entries: TranscriptHistoryEntry[], warning: string) => {
+    const hiddenHistoryOutputs = readHiddenTranscriptHistory();
+    const next = reconcileNativeTranscriptHistoryEntries(
+      readTranscriptHistory(),
+      entries,
+      hiddenHistoryOutputs,
+    );
+    try {
+      writeTranscriptHistory(next);
+    } catch (error) {
+      console.warn(warning, error);
+      toast.warning(warning);
+      return false;
+    }
+    replaceHistory(readVisibleTranscriptHistory());
+    return true;
+  }, [replaceHistory]);
+
   const rememberHiddenHistoryEntry = useCallback((outputPath: string) => {
     const next = hideTranscriptHistory(readHiddenTranscriptHistory(), outputPath);
     try {
@@ -77,6 +97,7 @@ export function useTranscriptHistory() {
   return {
     forgetHistoryEntry,
     history,
+    reconcileNativeHistoryEntries,
     reconcileHiddenHistory,
     recordVisibleHistoryEntries,
     rememberHiddenHistoryEntry,

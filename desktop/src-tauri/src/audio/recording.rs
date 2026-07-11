@@ -22,7 +22,9 @@ use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_
 use crate::audio::coordinator::{BoundedReceiver, BoundedSink};
 use crate::audio::frame::PreparedFrame;
 use crate::audio::preprocess::f32_to_i16_le_bytes;
-use crate::audio::session::{self, SessionId};
+use crate::audio::session::{
+    self, SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode,
+};
 
 const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const WAV_HEADER_BYTES: u64 = 44;
@@ -32,6 +34,9 @@ const MAX_SEQUENCE_GAP_DETAILS: usize = 1_024;
 const MAX_JOURNAL_BYTES: u64 = 512 * 1024;
 const MAX_JOURNAL_RECORD_BYTES: u64 = 8 * 1024;
 const MAX_JOURNAL_TERMINAL_BYTES: u64 = 256;
+
+static DELETE_QUARANTINE_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 static RECEIPT_HANDLE_COUNT: std::sync::atomic::AtomicUsize =
@@ -85,6 +90,8 @@ pub struct CaptureCommitManifest {
     pub capture_sidecar_file: String,
     pub capture_sidecar_sha256: String,
     pub committed_at_utc: String,
+    #[serde(default)]
+    pub session_metadata: Option<SessionMetadata>,
 }
 
 impl CaptureCommitManifest {
@@ -109,6 +116,9 @@ impl CaptureCommitManifest {
         }
         OffsetDateTime::parse(&self.committed_at_utc, &Rfc3339)
             .map_err(|_| "capture manifest has an invalid commit timestamp")?;
+        if let Some(metadata) = &self.session_metadata {
+            validate_capture_metadata(metadata, &self.session_id)?;
+        }
         Ok(())
     }
 }
@@ -539,6 +549,8 @@ struct CaptureSidecar {
     sequence_gap_overflow: Option<SequenceGapOverflow>,
     sink_degraded: bool,
     directory_sync_supported: bool,
+    #[serde(default)]
+    session_metadata: Option<SessionMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -559,9 +571,25 @@ impl CaptureSidecar {
         {
             return Err("capture sidecar does not match the commit manifest".into());
         }
+        if self.session_metadata != manifest.session_metadata {
+            return Err("capture session metadata does not match the commit manifest".into());
+        }
+        if let Some(metadata) = &self.session_metadata {
+            validate_capture_metadata(metadata, &self.session_id)?;
+        }
         validate_artifact_name(&self.audio_file)?;
         validate_sha256(&self.audio_sha256)
     }
+}
+
+fn validate_capture_metadata(
+    metadata: &SessionMetadata,
+    session_id: &SessionId,
+) -> Result<(), String> {
+    if metadata.session_id != *session_id {
+        return Err("capture session metadata does not match the recording session".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -813,6 +841,7 @@ impl DurableJournalState {
 
 pub struct StreamingRecording {
     paths: RecordingPaths,
+    session_metadata: SessionMetadata,
     audio: Option<File>,
     #[cfg(test)]
     _reservation_handle_drop_signal: Option<ReservationHandleDropSignal>,
@@ -839,6 +868,21 @@ pub struct StreamingRecording {
     append_write_attempts: Option<Arc<std::sync::atomic::AtomicUsize>>,
     #[cfg(test)]
     journal_write_attempts: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+fn default_session_metadata(session_id: SessionId) -> Result<SessionMetadata, String> {
+    SessionMetadata::new(
+        session_id,
+        SessionMode::Dictation,
+        SessionOrigin::LiveCapture,
+        TriggerMode::PushToTalk,
+        std::time::SystemTime::now(),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -998,6 +1042,7 @@ pub(crate) struct RecordingReservation {
     paths: RecordingPaths,
     audio: File,
     identity: FileIdentity,
+    session_metadata: SessionMetadata,
     #[cfg(test)]
     handle_drop_signal: Option<ReservationHandleDropSignal>,
 }
@@ -1005,6 +1050,15 @@ pub(crate) struct RecordingReservation {
 impl RecordingReservation {
     pub(crate) fn session_id(&self) -> &SessionId {
         &self.paths.session_id
+    }
+
+    pub(crate) fn with_session_metadata(
+        mut self,
+        metadata: SessionMetadata,
+    ) -> Result<Self, String> {
+        validate_capture_metadata(&metadata, self.session_id())?;
+        self.session_metadata = metadata;
+        Ok(self)
     }
 
     #[cfg(test)]
@@ -1085,10 +1139,13 @@ where
         .open(&paths.wav_part)?;
     file.sync_all()?;
     let identity = file_identity(&file).map_err(std::io::Error::other)?;
+    let session_metadata =
+        default_session_metadata(session_id.clone()).map_err(std::io::Error::other)?;
     Ok(RecordingReservation {
         paths,
         audio: file,
         identity,
+        session_metadata,
         #[cfg(test)]
         handle_drop_signal: None,
     })
@@ -1099,11 +1156,25 @@ impl StreamingRecording {
         Self::create_inner(directory, session_id, None)
     }
 
+    #[cfg(test)]
+    pub(crate) fn create_with_session_metadata(
+        directory: &Path,
+        metadata: SessionMetadata,
+    ) -> Result<Self, String> {
+        let session_id = metadata.session_id.clone();
+        fs::create_dir_all(directory)
+            .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
+        let paths = RecordingPaths::new(directory, session_id);
+        let audio = create_new(&paths.wav_part, "recording audio")?;
+        Self::create_from_open_audio(paths, audio, None, None, metadata)
+    }
+
     pub(crate) fn create_reserved(reservation: RecordingReservation) -> Result<Self, String> {
         let RecordingReservation {
             paths,
             audio,
             identity,
+            session_metadata,
             #[cfg(test)]
             handle_drop_signal,
         } = reservation;
@@ -1118,6 +1189,7 @@ impl StreamingRecording {
             #[cfg(test)]
             handle_drop_signal,
             None,
+            session_metadata,
         )
     }
 
@@ -1169,6 +1241,7 @@ impl StreamingRecording {
             .map_err(|error| format!("Failed to create live recordings folder: {error}"))?;
         let paths = RecordingPaths::new(directory, session_id.clone());
         let audio = create_new(&paths.wav_part, "recording audio")?;
+        let session_metadata = default_session_metadata(session_id)?;
         Self::create_from_open_audio(
             paths,
             audio,
@@ -1178,6 +1251,7 @@ impl StreamingRecording {
             fault,
             #[cfg(not(test))]
             _fault,
+            session_metadata,
         )
     }
 
@@ -1187,6 +1261,7 @@ impl StreamingRecording {
         #[cfg(test)] reservation_handle_drop_signal: Option<ReservationHandleDropSignal>,
         #[cfg(test)] fault: Option<CommitFaultPoint>,
         #[cfg(not(test))] _fault: Option<()>,
+        session_metadata: SessionMetadata,
     ) -> Result<Self, String> {
         if audio
             .metadata()
@@ -1213,6 +1288,7 @@ impl StreamingRecording {
             .map_err(|error| format!("Failed to initialize recording journal: {error}"))?;
         Ok(Self {
             paths,
+            session_metadata,
             audio: Some(audio),
             #[cfg(test)]
             _reservation_handle_drop_signal: reservation_handle_drop_signal,
@@ -1404,6 +1480,7 @@ impl StreamingRecording {
             sequence_gap_overflow: self.journal.sequence_gap_overflow.clone(),
             sink_degraded: self.journal.sink_degraded,
             directory_sync_supported: sync_parent_directory(&self.paths.directory),
+            session_metadata: Some(self.session_metadata.clone()),
         };
         let sidecar_file =
             write_json_file_open(&self.paths.sidecar_part, &sidecar, "capture sidecar")?;
@@ -1445,6 +1522,7 @@ impl StreamingRecording {
             capture_sidecar_file: self.paths.sidecar_file_name(),
             capture_sidecar_sha256: sidecar_receipt.sha256,
             committed_at_utc: now_utc()?,
+            session_metadata: Some(self.session_metadata.clone()),
         };
         manifest.validate()?;
         let commit_file =
@@ -2139,7 +2217,9 @@ pub fn scan_recordings(directory: &Path) -> Result<RecordingScan, String> {
         if !is_regular_artifact(&directory.join(name)) {
             continue;
         }
-        if let Some(session) = session_from_private_artifact(name) {
+        if let Some(session) =
+            session_from_private_artifact(name).or_else(|| session_from_orphan_wav_artifact(name))
+        {
             if name.ends_with(".capture.journal.part") {
                 let _ = read_journal_append_log(directory, name);
             }
@@ -2242,16 +2322,21 @@ pub(crate) fn recover_partial_wav(
 ) -> Result<(String, u64, String), String> {
     let source_name = format!("live-{session_id}.wav.part");
     let destination_name = format!("live-{session_id}.wav");
-    let source = directory.join(&source_name);
     let destination = directory.join(&destination_name);
+    if open_regular_artifact(directory, &source_name).is_err() {
+        let mut orphan = open_regular_artifact(directory, &destination_name)?;
+        validate_recoverable_wav(&mut orphan, "recovered live audio")?;
+        let bytes = orphan
+            .metadata()
+            .map_err(|error| format!("Failed to inspect recovered live audio: {error}"))?
+            .len();
+        let hash = sha256_open_file(&mut orphan)?;
+        return Ok((destination_name, bytes, hash));
+    }
+
+    let source = directory.join(&source_name);
     let mut audio = open_regular_artifact_for_update(directory, &source_name)?;
-    let length = audio
-        .metadata()
-        .map_err(|error| format!("Failed to inspect partial live audio: {error}"))?
-        .len();
-    let data_bytes = length
-        .checked_sub(WAV_HEADER_BYTES)
-        .ok_or_else(|| "partial live audio is shorter than a WAV header".to_string())?;
+    let (data_bytes, _) = validate_recoverable_wav(&mut audio, "partial live audio")?;
     write_wav_header(&mut audio, data_bytes)?;
     audio
         .sync_all()
@@ -2271,15 +2356,138 @@ pub(crate) fn recover_partial_wav(
 }
 
 pub(crate) fn remove_regular_artifact(directory: &Path, name: &str) -> Result<(), String> {
-    let path = directory.join(name);
     let owned = open_regular_artifact(directory, name)?;
-    let current = open_regular_path(&path)?;
-    if !same_file_identity(&owned, &current)? {
+    remove_open_regular_artifact(directory, name, &owned, || {})
+}
+
+pub(crate) fn remove_regular_artifact_if_hash(
+    directory: &Path,
+    name: &str,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let mut owned = open_regular_artifact(directory, name)?;
+    if sha256_open_file(&mut owned)? != expected_sha256 {
+        return Err("recording artifact no longer matches its validated hash".into());
+    }
+    remove_open_regular_artifact(directory, name, &owned, || {})
+}
+
+#[cfg(test)]
+fn remove_regular_artifact_with_barrier_for_test<F>(
+    directory: &Path,
+    name: &str,
+    barrier: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path),
+{
+    let owned = open_regular_artifact(directory, name)?;
+    remove_open_regular_artifact(directory, name, &owned, || barrier(&directory.join(name)))
+}
+
+fn remove_open_regular_artifact<F>(
+    directory: &Path,
+    name: &str,
+    owned: &File,
+    before_quarantine: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    validate_artifact_name(name)?;
+    let path = directory.join(name);
+    before_quarantine();
+    let quarantine = unique_delete_quarantine_path(directory, name)?;
+    fs::rename(&path, &quarantine).map_err(|error| {
+        format!("Failed to quarantine recording artifact for deletion: {error}")
+    })?;
+    let quarantined = match open_regular_path(&quarantine) {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(format!(
+                "Failed to verify quarantined recording artifact: {error}"
+            ))
+        }
+    };
+    if !same_file_identity(owned, &quarantined)? {
+        let _ = restore_quarantined_artifact(&quarantine, &path);
         return Err("recording artifact path no longer names the verified file".into());
     }
-    drop(current);
-    std::fs::remove_file(path)
-        .map_err(|error| format!("Failed to remove recording artifact: {error}"))
+    drop(quarantined);
+    fs::remove_file(&quarantine)
+        .map_err(|error| format!("Failed to remove quarantined recording artifact: {error}"))
+}
+
+fn unique_delete_quarantine_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    for _ in 0..128 {
+        let nonce = DELETE_QUARANTINE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = directory.join(format!(".{name}.delete-{}-{nonce}", std::process::id()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("Failed to allocate a private recording deletion quarantine path".into())
+}
+
+fn restore_quarantined_artifact(quarantine: &Path, path: &Path) -> Result<(), String> {
+    std::fs::hard_link(quarantine, path)
+        .map_err(|error| format!("Failed to restore quarantined recording artifact: {error}"))?;
+    std::fs::remove_file(quarantine).map_err(|error| {
+        format!("Failed to finish restoring quarantined recording artifact: {error}")
+    })
+}
+
+fn validate_recoverable_wav(file: &mut File, label: &str) -> Result<(u64, bool), String> {
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Failed to inspect {label}: {error}"))?
+        .len();
+    if length < WAV_HEADER_BYTES {
+        return Err(format!("{label} is shorter than a WAV header"));
+    }
+    let mut header = [0_u8; WAV_HEADER_BYTES as usize];
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut header))
+        .map_err(|error| format!("Failed to read {label} header: {error}"))?;
+    let read_u16 = |offset: usize| u16::from_le_bytes([header[offset], header[offset + 1]]);
+    let read_u32 = |offset: usize| {
+        u32::from_le_bytes([
+            header[offset],
+            header[offset + 1],
+            header[offset + 2],
+            header[offset + 3],
+        ])
+    };
+    if &header[0..4] != b"RIFF"
+        || &header[8..12] != b"WAVE"
+        || &header[12..16] != b"fmt "
+        || read_u32(16) != 16
+        || read_u16(20) != 1
+        || read_u16(22) != 1
+        || read_u32(24) != 16_000
+        || read_u32(28) != 32_000
+        || read_u16(32) != 2
+        || read_u16(34) != 16
+        || &header[36..40] != b"data"
+    {
+        return Err(format!(
+            "{label} is not Yap PCM mono 16 kHz 16-bit WAV audio"
+        ));
+    }
+    let data_bytes = length - WAV_HEADER_BYTES;
+    if !data_bytes.is_multiple_of(PCM16_BYTES_PER_SAMPLE) {
+        return Err(format!("{label} has an unaligned PCM data length"));
+    }
+    let riff_bytes = u64::from(read_u32(4));
+    let declared_data_bytes = u64::from(read_u32(40));
+    let placeholder = riff_bytes == 36 && declared_data_bytes == 0;
+    let finalized = riff_bytes == 36 + data_bytes && declared_data_bytes == data_bytes;
+    if !placeholder && !finalized {
+        return Err(format!(
+            "{label} header lengths do not match its opened file length"
+        ));
+    }
+    Ok((data_bytes, placeholder))
 }
 
 pub(crate) fn sha256_regular_artifact(directory: &Path, name: &str) -> Result<String, String> {
@@ -2458,6 +2666,11 @@ fn session_from_commit_name(name: &str) -> Option<SessionId> {
     SessionId::new(session).ok()
 }
 
+fn session_from_orphan_wav_artifact(name: &str) -> Option<SessionId> {
+    let session = name.strip_prefix("live-")?.strip_suffix(".wav")?;
+    SessionId::new(session).ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitFaultPoint {
     Append,
@@ -2496,8 +2709,10 @@ mod tests {
     use super::*;
     use crate::audio::coordinator::{bounded_sink, SinkKind};
     use crate::audio::frame::AudioFrame;
-    use crate::audio::session::SessionId;
     use crate::audio::session::TrackId;
+    use crate::audio::session::{
+        SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -3489,6 +3704,91 @@ mod tests {
         assert_eq!(scan.partial.len(), 1);
         std::fs::remove_file(&audio).ok();
         std::fs::remove_file(&outside).ok();
+    }
+
+    #[test]
+    fn committed_metadata_is_hash_bound_and_uses_the_reserved_session_id() {
+        let dir = tempfile_dir("metadata-bound");
+        let session = SessionId::new("s-metadata-bound").unwrap();
+        let metadata = SessionMetadata::new(
+            session.clone(),
+            SessionMode::Meeting,
+            SessionOrigin::LiveCapture,
+            TriggerMode::Toggle,
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100),
+            None,
+            None,
+            None,
+            Vec::new(),
+            Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200)),
+        )
+        .unwrap();
+        let mut recording =
+            StreamingRecording::create_with_session_metadata(&dir, metadata).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        let manifest = recording.finalize().unwrap().committed.unwrap().manifest;
+
+        assert_eq!(
+            manifest.session_metadata.as_ref().unwrap().session_id,
+            session
+        );
+        assert_eq!(
+            manifest.session_metadata.as_ref().unwrap().mode,
+            SessionMode::Meeting
+        );
+        assert_eq!(scan_recordings(&dir).unwrap().complete.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_rejects_invalid_wav_without_mutating_it() {
+        let dir = tempfile_dir("invalid-recovery-wav");
+        let session = SessionId::new("s-invalid-recovery-wav").unwrap();
+        let path = dir.join(format!("live-{session}.wav.part"));
+        let bytes = b"RIFF not a valid Yap wav".to_vec();
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(recover_partial_wav(&dir, &session).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!dir.join(format!("live-{session}.wav")).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn published_orphan_wav_remains_recoverable_until_its_commit_exists() {
+        let dir = tempfile_dir("orphan-recovery-wav");
+        let session = SessionId::new("s-orphan-recovery-wav").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.abort("inject partial".into());
+
+        recover_partial_wav(&dir, &session).unwrap();
+        let scan = scan_recordings(&dir).unwrap();
+        assert!(scan.complete.is_empty());
+        assert!(scan
+            .partial
+            .iter()
+            .any(|partial| partial.session_id.as_ref() == Some(&session)));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn deletion_quarantine_preserves_a_replacement() {
+        let dir = tempfile_dir("delete-replacement");
+        let name = "live-s-delete-replacement.wav.part";
+        let path = dir.join(name);
+        std::fs::write(&path, b"owned").unwrap();
+
+        let error = remove_regular_artifact_with_barrier_for_test(&dir, name, |target| {
+            let displaced = target.with_extension("displaced");
+            std::fs::rename(target, displaced).unwrap();
+            std::fs::write(target, b"replacement").unwrap();
+        })
+        .unwrap_err();
+
+        assert!(error.contains("no longer names the verified file"));
+        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(unix)]

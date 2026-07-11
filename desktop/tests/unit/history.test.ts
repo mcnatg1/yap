@@ -11,6 +11,7 @@ import {
   readHiddenTranscriptHistory,
   readTranscriptHistory,
   readVisibleTranscriptHistory,
+  reconcileNativeTranscriptHistoryEntries,
   recordVisibleTranscriptHistoryEntries,
   savedSessionToTranscriptHistoryEntry,
   transcriptPathIdentity,
@@ -23,6 +24,52 @@ function missingResolution(requestedPath: string): OwnedLiveTranscriptPathResolu
 }
 
 describe("transcript history storage", () => {
+  it("replaces only Rust-managed rows after a native reconciliation", () => {
+    const nativeGone = {
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-gone.commit.json",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-gone",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-gone.wav",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-gone.wav",
+    };
+    const legacy = {
+      createdAt: "2025-12-01T00:00:00.000Z",
+      name: "live-legacy",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-legacy.txt",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-legacy.txt",
+    };
+    const imported = {
+      createdAt: "2025-11-01T00:00:00.000Z",
+      name: "imported",
+      outputPath: "C:\\Users\\me\\Documents\\imported.txt",
+      sourcePath: "C:\\Users\\me\\Documents\\imported.txt",
+    };
+    const incoming = {
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-current.commit.json",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      name: "live-current",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-current.wav",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-current.wav",
+    };
+
+    expect(reconcileNativeTranscriptHistoryEntries(
+      [nativeGone, legacy, imported],
+      [incoming],
+      [],
+    ).map((entry) => entry.name)).toEqual(["live-current", "live-legacy", "imported"]);
+  });
+
+  it("keeps hidden native tombstones hidden during a refresh", () => {
+    const entry = {
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-hidden.commit.json",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      name: "live-hidden",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-hidden.wav",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-hidden.wav",
+    };
+
+    expect(reconcileNativeTranscriptHistoryEntries([], [entry], [entry.outputPath])).toEqual([]);
+  });
   it("dedupes hidden transcript paths", () => {
     expect(hideTranscriptHistory(["a.txt"], "a.txt")).toEqual(["a.txt"]);
     expect(normalizeHiddenTranscriptHistory(["a.txt", 42, "b.txt", "a.txt"])).toEqual([

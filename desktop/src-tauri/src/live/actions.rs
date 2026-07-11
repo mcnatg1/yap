@@ -265,7 +265,7 @@ pub(crate) fn start_live_runtime(
     }
     crate::emit_live(&app, &view);
 
-    match live_runtime.start_local(app.clone(), requested_device_id) {
+    match live_runtime.start_local(app.clone(), requested_device_id, active_capture_mode) {
         Ok(()) => live.snapshot(),
         Err(failure) => {
             let Some(message) = live_runtime.claim_start_failure(failure) else {

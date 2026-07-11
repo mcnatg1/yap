@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
+import { canDeleteTranscriptHistoryEntry, historyEntryPlaybackPath } from "@/history";
 
 describe("history job projection", () => {
   it("projects partial live saves with their warning", () => {
@@ -73,5 +74,19 @@ describe("history job projection", () => {
 
     expect(job.status).toBe("partial");
     expect(job.playbackPath).toBeUndefined();
+    expect(canDeleteTranscriptHistoryEntry({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-recoverable",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
+      recoveryState: "recoverable",
+    })).toBe(false);
+    expect(historyEntryPlaybackPath({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-recoverable",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
+      sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recoverable.wav.part",
+      recoveryState: "recoverable",
+    })).toBeUndefined();
   });
 });
