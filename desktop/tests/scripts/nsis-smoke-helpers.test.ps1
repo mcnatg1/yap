@@ -51,6 +51,23 @@ try {
   Initialize-ValidatedTree -Root $tempRoot -Candidate $externalRoot | Out-Null
   Initialize-ValidatedTree -Root $tempRoot -Candidate $processRoot | Out-Null
 
+  $helperModule = Get-Module | Where-Object {
+    $_.Path -ceq (Join-Path $PSScriptRoot "nsis-smoke-helpers.psm1")
+  } | Select-Object -First 1
+  Assert-True ($null -ne $helperModule) "NSIS helper module was not available for focused tests."
+  $builder = [Yap.NsisSmoke.KillOnCloseJob].GetMethod(
+    "BuildCommandLine",
+    [Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Static
+  )
+  Assert-True ($null -ne $builder) "Native command-line builder was not available for contract testing."
+  $builderArguments = [object[]]::new(2)
+  $builderArguments[0] = "C:\Program Files\Yap Test\setup.exe"
+  $builderArguments[1] = [string[]]@("/S", "/D=C:\Yap Test\Install")
+  $nsisCommandLine = [string]$builder.Invoke($null, $builderArguments)
+  Assert-True (
+    $nsisCommandLine -ceq '"C:\Program Files\Yap Test\setup.exe" /S /D=C:\Yap Test\Install'
+  ) "Native launcher changed NSIS's required raw /D= command-line tail."
+
   Assert-True (Test-StrictChildPath -Root $tempRoot -Candidate $testRoot) "Expected strict child path."
   Assert-True (-not (Test-StrictChildPath -Root $testRoot -Candidate $testRoot)) "Root is not its own child."
   Assert-True (-not (Test-StrictChildPath -Root $testRoot -Candidate "$testRoot-sibling")) "Sibling prefix escaped containment."
@@ -106,18 +123,126 @@ try {
 
   $quickOut = Join-Path $processRoot "quick.out.log"
   $quickErr = Join-Path $processRoot "quick.err.log"
+  $quickPidPath = Join-Path $processRoot "quick.pid"
+  $quickScript = @"
+`$PID | Set-Content -LiteralPath '$quickPidPath' -Encoding ascii
+[Console]::Out.WriteLine('quick-stdout')
+[Console]::Error.WriteLine('quick-stderr')
+exit 7
+"@
+  $quickEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($quickScript))
   $quick = Invoke-ProcessWithDeadline `
-    -FilePath "cmd.exe" `
-    -ArgumentList @("/d", "/c", "exit 7") `
+    -FilePath "powershell.exe" `
+    -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $quickEncoded) `
     -TimeoutSeconds 5 `
     -StdoutPath $quickOut `
     -StderrPath $quickErr
   Assert-True ($quick.ExitCode -eq 7) "Deadline helper lost the process exit code."
+  Assert-True (Test-Path -LiteralPath $quickPidPath -PathType Leaf) "Quick process did not report its PID."
+  $quickTargetProcessId = [int](Get-Content -LiteralPath $quickPidPath -Raw)
+  Assert-True (
+    $quick.ProcessId -eq $quickTargetProcessId
+  ) "Deadline helper reported a wrapper PID instead of the launched target PID."
+  Assert-True (
+    (Get-Content -LiteralPath $quickOut -Raw) -match "quick-stdout"
+  ) "Deadline helper lost redirected standard output."
+  Assert-True (
+    (Get-Content -LiteralPath $quickErr -Raw) -match "quick-stderr"
+  ) "Deadline helper lost redirected standard error."
+  Assert-FileUnlocked -Path $quickOut -Message "Quick-process stdout was not released."
+  Assert-FileUnlocked -Path $quickErr -Message "Quick-process stderr was not released."
   Assert-True ($quick.ProcessIds -contains $quick.ProcessId) "Deadline helper omitted its root process evidence."
   Assert-True ($quick.QuiescencePasses -ge 2) "Deadline helper did not verify process-tree quiescence."
   Assert-True (
     -not [string]::IsNullOrWhiteSpace(($quick | ConvertTo-Json -Depth 5))
   ) "Deadline helper returned evidence that Windows PowerShell cannot serialize."
+
+  $membershipPidPath = Join-Path $processRoot "membership.pid"
+  $membershipOutPath = Join-Path $processRoot "membership.out.log"
+  $membershipErrPath = Join-Path $processRoot "membership.err.log"
+  $membershipScript = @"
+`$PID | Set-Content -LiteralPath '$membershipPidPath' -Encoding ascii
+Start-Sleep -Seconds 10
+"@
+  $membershipEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($membershipScript))
+  $membershipContext = $null
+  try {
+    $membershipContext = & $helperModule {
+      param($Encoded, $StdoutPath, $StderrPath)
+      Start-JobContainedProcess `
+        -FilePath "powershell.exe" `
+        -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $Encoded) `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath
+    } $membershipEncoded $membershipOutPath $membershipErrPath
+    $membershipDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (
+      -not (Test-Path -LiteralPath $membershipPidPath -PathType Leaf) -and
+      [DateTime]::UtcNow -lt $membershipDeadline
+    ) {
+      Start-Sleep -Milliseconds 25
+    }
+    Assert-True (
+      Test-Path -LiteralPath $membershipPidPath -PathType Leaf
+    ) "Membership target did not report its PID."
+    $membershipTargetId = [int](Get-Content -LiteralPath $membershipPidPath -Raw)
+    Assert-True (
+      $membershipContext.Process.Id -eq $membershipTargetId
+    ) "Contained process handle did not identify the launched target."
+    Assert-True (
+      @($membershipContext.Job.GetProcessIds()) -contains $membershipTargetId
+    ) "Launched target was not present in the owned Job Object."
+    $membershipContext.Job.Terminate(1)
+    Assert-True (
+      $membershipContext.Process.WaitForExit(5000)
+    ) "Membership target did not exit after Job Object termination."
+    $membershipContext.Process.WaitForExit()
+  } finally {
+    if ($null -ne $membershipContext) {
+      $membershipContext.Process.Dispose()
+      $membershipContext.Job.Dispose()
+    }
+  }
+  Assert-FileUnlocked -Path $membershipOutPath -Message "Membership stdout was not released."
+  Assert-FileUnlocked -Path $membershipErrPath -Message "Membership stderr was not released."
+
+  $assignmentMarkerPath = Join-Path $processRoot "assignment-failure-executed.txt"
+  $assignmentOutPath = Join-Path $processRoot "assignment-failure.out.log"
+  $assignmentErrPath = Join-Path $processRoot "assignment-failure.err.log"
+  $assignmentScript = @"
+Set-Content -LiteralPath '$assignmentMarkerPath' -Value 'executed' -Encoding ascii
+Start-Sleep -Seconds 10
+"@
+  $assignmentEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($assignmentScript))
+  $assignmentError = $null
+  try {
+    & $helperModule {
+      param($Encoded, $StdoutPath, $StderrPath)
+      Start-JobContainedProcess `
+        -FilePath "powershell.exe" `
+        -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $Encoded) `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath `
+        -FailAssignmentForTest | Out-Null
+    } $assignmentEncoded $assignmentOutPath $assignmentErrPath
+  } catch {
+    $assignmentError = $_.Exception.Message
+  }
+  Assert-True (
+    $assignmentError -match "Injected assignment failure before process execution"
+  ) "Assignment-failure injection did not fail at the containment boundary."
+  Assert-True (
+    $assignmentError -match "ProcessId=(\d+)"
+  ) "Assignment-failure evidence omitted the suspended process PID."
+  $assignmentProcessId = [int]$Matches[1]
+  Assert-True (
+    -not (Test-ProcessAlive -ProcessId $assignmentProcessId)
+  ) "Assignment failure leaked its suspended process."
+  Assert-True (
+    -not (Test-Path -LiteralPath $assignmentMarkerPath)
+  ) "A target executed before its containment assignment was proven."
+  Assert-FileUnlocked -Path $assignmentOutPath -Message "Assignment-failure stdout was not released."
+  Assert-FileUnlocked -Path $assignmentErrPath -Message "Assignment-failure stderr was not released."
 
   $slowSnapshotQuick = Invoke-ProcessWithDeadline `
     -FilePath "cmd.exe" `
@@ -252,18 +377,41 @@ Start-Sleep -Seconds 8
   Assert-FileUnlocked -Path $snapshotFailureErrPath -Message "Snapshot-failure stderr was not reaped."
 
   $fastChildPidPath = Join-Path $processRoot "fast-parent-child.pid"
+  $fastChildLaunchErrorPath = Join-Path $processRoot "fast-parent-child.launch-error.txt"
   $fastChildOutPath = Join-Path $processRoot "fast-parent-child.out.log"
   $fastChildErrPath = Join-Path $processRoot "fast-parent-child.err.log"
-  $fastChildScript = @"
+  $fastDescendantScript = @"
 `$current = [Diagnostics.Process]::GetCurrentProcess()
 `$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
 "`$PID|`$identity" | Set-Content -LiteralPath '$fastChildPidPath' -Encoding ascii
 `$current.Dispose()
-`$parentId = [int](Get-CimInstance Win32_Process -Filter "ProcessId=`$PID").ParentProcessId
-Stop-Process -Id `$parentId -Force
 Start-Sleep -Seconds 8
 "@
+  $fastDescendantEncoded = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes($fastDescendantScript)
+  )
+  $fastChildScript = @"
+`$ErrorActionPreference = "Stop"
+try {
+  `$child = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', '$fastDescendantEncoded') -NoNewWindow -PassThru
+  `$child.Dispose()
+  exit 0
+} catch {
+  `$_.Exception.ToString() | Set-Content -LiteralPath '$fastChildLaunchErrorPath' -Encoding utf8
+  exit 126
+}
+"@
   $fastChildEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($fastChildScript))
+  $fastSnapshotProviderScript = @"
+while (
+  -not (Test-Path -LiteralPath '$fastChildPidPath') -and
+  -not (Test-Path -LiteralPath '$fastChildLaunchErrorPath')
+) { Start-Sleep -Milliseconds 10 }
+if (Test-Path -LiteralPath '$fastChildLaunchErrorPath') {
+  throw "Fast descendant launch failed: `$((Get-Content -LiteralPath '$fastChildLaunchErrorPath' -Raw).Trim())"
+}
+Start-Sleep -Milliseconds 300
+"@
   $fastParentError = $null
   $fastParentWatch = [System.Diagnostics.Stopwatch]::StartNew()
   try {
@@ -272,8 +420,8 @@ Start-Sleep -Seconds 8
       -ArgumentList @("-NoProfile", "-EncodedCommand", $fastChildEncoded) `
       -TimeoutSeconds 1 `
       -QuiescenceTimeoutSeconds 0.2 `
-      -SnapshotTimeoutSeconds 2 `
-      -SnapshotProviderScript "while (-not (Test-Path -LiteralPath '$fastChildPidPath')) { Start-Sleep -Milliseconds 10 }; Start-Sleep -Milliseconds 300" `
+      -SnapshotTimeoutSeconds 5 `
+      -SnapshotProviderScript $fastSnapshotProviderScript `
       -StdoutPath $fastChildOutPath `
       -StderrPath $fastChildErrPath
   } catch {
@@ -283,7 +431,7 @@ Start-Sleep -Seconds 8
   Assert-True (
     $fastParentError -match "exceeded the 1 second deadline"
   ) "Fast-parent descendants were not included in the runtime deadline. Received: $fastParentError"
-  Assert-True ($fastParentWatch.Elapsed.TotalSeconds -lt 5) "Fast-parent cleanup exceeded its bounded window."
+  Assert-True ($fastParentWatch.Elapsed.TotalSeconds -lt 8) "Fast-parent cleanup exceeded its bounded window."
   Assert-True (Test-Path -LiteralPath $fastChildPidPath -PathType Leaf) "Fast-parent child did not report its PID."
   $fastChildIdentity = (Get-Content -LiteralPath $fastChildPidPath -Raw).Trim().Split("|")
   Assert-True ($fastChildIdentity.Count -eq 2) "Fast-parent child identity evidence was malformed."

@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Yap.NsisSmoke
 {
@@ -18,6 +19,27 @@ namespace Yap.NsisSmoke
         private const int JobObjectBasicProcessIdList = 3;
         private const int JobObjectExtendedLimitInformation = 9;
         private const int ErrorMoreData = 234;
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint CreateAlways = 2;
+        private const uint OpenExisting = 3;
+        private const uint FileAttributeNormal = 0x00000080;
+        private const uint CreateSuspended = 0x00000004;
+        private const uint CreateNoWindow = 0x08000000;
+        private const uint ExtendedStartupInfoPresent = 0x00080000;
+        private const uint StartfUseShowWindow = 0x00000001;
+        private const uint StartfUseStdHandles = 0x00000100;
+        private const long ProcThreadAttributeHandleList = 0x00020002;
+        private const ushort SwHide = 0;
+        private const uint LaunchFailureExitCode = 125;
+        private const uint WaitObject0 = 0;
+        private const uint WaitTimeout = 0x00000102;
+        private const uint WaitFailed = 0xFFFFFFFF;
+        private const uint FailureCleanupWaitMilliseconds = 5000;
+        private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
         private IntPtr handle;
 
         private KillOnCloseJob(IntPtr handle)
@@ -47,11 +69,195 @@ namespace Yap.NsisSmoke
             }
         }
 
-        public void Assign(Process process)
+        public Process StartProcess(
+            string filePath,
+            string[] arguments,
+            string stdoutPath,
+            string stderrPath,
+            bool failAssignmentForTest)
         {
             EnsureOpen();
-            if (!AssignProcessToJobObject(handle, process.Handle))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject failed.");
+            if (String.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Process path must not be empty.", "filePath");
+            if (String.IsNullOrWhiteSpace(stdoutPath))
+                throw new ArgumentException("Standard-output path must not be empty.", "stdoutPath");
+            if (String.IsNullOrWhiteSpace(stderrPath))
+                throw new ArgumentException("Standard-error path must not be empty.", "stderrPath");
+
+            SECURITY_ATTRIBUTES inheritable = new SECURITY_ATTRIBUTES();
+            inheritable.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+            inheritable.bInheritHandle = true;
+            IntPtr stdoutHandle = InvalidHandleValue;
+            IntPtr stderrHandle = InvalidHandleValue;
+            IntPtr stdinHandle = InvalidHandleValue;
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr inheritedHandleList = IntPtr.Zero;
+            bool attributeListInitialized = false;
+            PROCESS_INFORMATION processInformation = new PROCESS_INFORMATION();
+            Process process = null;
+            bool created = false;
+            bool assigned = false;
+            bool resumed = false;
+            try
+            {
+                stdoutHandle = CreateFile(
+                    stdoutPath,
+                    GenericWrite,
+                    FileShareRead | FileShareWrite | FileShareDelete,
+                    ref inheritable,
+                    CreateAlways,
+                    FileAttributeNormal,
+                    IntPtr.Zero);
+                EnsureValidFileHandle(stdoutHandle, "Opening redirected standard output failed.");
+
+                stderrHandle = CreateFile(
+                    stderrPath,
+                    GenericWrite,
+                    FileShareRead | FileShareWrite | FileShareDelete,
+                    ref inheritable,
+                    CreateAlways,
+                    FileAttributeNormal,
+                    IntPtr.Zero);
+                EnsureValidFileHandle(stderrHandle, "Opening redirected standard error failed.");
+
+                stdinHandle = CreateFile(
+                    "NUL",
+                    GenericRead,
+                    FileShareRead | FileShareWrite,
+                    ref inheritable,
+                    OpenExisting,
+                    FileAttributeNormal,
+                    IntPtr.Zero);
+                EnsureValidFileHandle(stdinHandle, "Opening the null standard input failed.");
+
+                IntPtr attributeListSize = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+                if (attributeListSize == IntPtr.Zero)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Sizing the inherited-handle list failed.");
+                attributeList = Marshal.AllocHGlobal(attributeListSize);
+                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Initializing the inherited-handle list failed.");
+                attributeListInitialized = true;
+                inheritedHandleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(inheritedHandleList, 0, stdinHandle);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, stdoutHandle);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, stderrHandle);
+                if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    0,
+                    new IntPtr(ProcThreadAttributeHandleList),
+                    inheritedHandleList,
+                    new IntPtr(IntPtr.Size * 3),
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Restricting inherited process handles failed.");
+                }
+
+                STARTUPINFOEX startupInformation = new STARTUPINFOEX();
+                startupInformation.StartupInfo.cb = checked((uint)Marshal.SizeOf(typeof(STARTUPINFOEX)));
+                startupInformation.StartupInfo.dwFlags = StartfUseShowWindow | StartfUseStdHandles;
+                startupInformation.StartupInfo.wShowWindow = SwHide;
+                startupInformation.StartupInfo.hStdInput = stdinHandle;
+                startupInformation.StartupInfo.hStdOutput = stdoutHandle;
+                startupInformation.StartupInfo.hStdError = stderrHandle;
+                startupInformation.lpAttributeList = attributeList;
+
+                StringBuilder commandLine = new StringBuilder(BuildCommandLine(filePath, arguments));
+                if (!CreateProcess(
+                    filePath,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    true,
+                    CreateSuspended | CreateNoWindow | ExtendedStartupInfoPresent,
+                    IntPtr.Zero,
+                    null,
+                    ref startupInformation,
+                    out processInformation))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcess failed.");
+                }
+                created = true;
+
+                if (failAssignmentForTest)
+                    throw new InvalidOperationException(
+                        "Injected assignment failure before process execution. ProcessId=" +
+                        processInformation.dwProcessId + ".");
+                if (!AssignProcessToJobObject(handle, processInformation.hProcess))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Assigning the suspended process to the job failed.");
+                assigned = true;
+
+                bool isInJob;
+                if (!IsProcessInJob(processInformation.hProcess, handle, out isInJob))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Verifying process job membership failed.");
+                if (!isInJob)
+                    throw new InvalidOperationException("The suspended process was not assigned to the containment job.");
+
+                process = Process.GetProcessById(checked((int)processInformation.dwProcessId));
+                // Materialize an independent Process handle before closing the
+                // CreateProcess handle returned below.
+                IntPtr ignored = process.Handle;
+                uint previousSuspendCount = ResumeThread(processInformation.hThread);
+                if (previousSuspendCount == UInt32.MaxValue)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Resuming the contained process failed.");
+                if (previousSuspendCount != 1)
+                    throw new InvalidOperationException(
+                        "Contained process had unexpected suspend count " + previousSuspendCount + ".");
+                resumed = true;
+                Process launched = process;
+                process = null;
+                return launched;
+            }
+            catch (Exception launchError)
+            {
+                string cleanupError = null;
+                if (created && !resumed)
+                {
+                    bool terminated = assigned
+                        ? TerminateJobObject(handle, LaunchFailureExitCode)
+                        : TerminateProcess(processInformation.hProcess, LaunchFailureExitCode);
+                    if (!terminated)
+                    {
+                        cleanupError = new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    }
+                    else
+                    {
+                        uint waitResult = WaitForSingleObject(
+                            processInformation.hProcess,
+                            FailureCleanupWaitMilliseconds);
+                        if (waitResult == WaitTimeout)
+                            cleanupError = "Timed out reaping the suspended process.";
+                        else if (waitResult == WaitFailed)
+                            cleanupError = new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                        else if (waitResult != WaitObject0)
+                            cleanupError = "Unexpected process wait result " + waitResult + ".";
+                    }
+                }
+                if (process != null)
+                    process.Dispose();
+                if (cleanupError != null)
+                {
+                    throw new InvalidOperationException(
+                        "Contained process launch failed and cleanup was not proven: " + cleanupError,
+                        launchError);
+                }
+                throw;
+            }
+            finally
+            {
+                if (attributeListInitialized)
+                    DeleteProcThreadAttributeList(attributeList);
+                if (inheritedHandleList != IntPtr.Zero)
+                    Marshal.FreeHGlobal(inheritedHandleList);
+                if (attributeList != IntPtr.Zero)
+                    Marshal.FreeHGlobal(attributeList);
+                CloseValidHandle(processInformation.hThread);
+                CloseValidHandle(processInformation.hProcess);
+                CloseValidHandle(stdinHandle);
+                CloseValidHandle(stderrHandle);
+                CloseValidHandle(stdoutHandle);
+            }
         }
 
         public uint ActiveProcessCount
@@ -139,6 +345,72 @@ namespace Yap.NsisSmoke
                 throw new ObjectDisposedException("KillOnCloseJob");
         }
 
+        private static void EnsureValidFileHandle(IntPtr fileHandle, string message)
+        {
+            if (fileHandle == IntPtr.Zero || fileHandle == InvalidHandleValue)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), message);
+        }
+
+        private static void CloseValidHandle(IntPtr value)
+        {
+            if (value != IntPtr.Zero && value != InvalidHandleValue)
+                CloseHandle(value);
+        }
+
+        private static string BuildCommandLine(string filePath, string[] arguments)
+        {
+            StringBuilder commandLine = new StringBuilder(QuoteArgument(filePath));
+            if (arguments != null)
+            {
+                foreach (string argument in arguments)
+                {
+                    commandLine.Append(' ');
+                    // Preserve Start-Process's existing ArgumentList contract.
+                    // In particular, NSIS requires its final /D= value to be
+                    // an unquoted raw command-line tail even when it has spaces.
+                    commandLine.Append(argument ?? String.Empty);
+                }
+            }
+            return commandLine.ToString();
+        }
+
+        private static string QuoteArgument(string argument)
+        {
+            bool requiresQuotes = argument.Length == 0;
+            for (int index = 0; index < argument.Length && !requiresQuotes; index++)
+            {
+                char value = argument[index];
+                requiresQuotes = Char.IsWhiteSpace(value) || value == '"';
+            }
+            if (!requiresQuotes)
+                return argument;
+
+            StringBuilder quoted = new StringBuilder();
+            quoted.Append('"');
+            int backslashes = 0;
+            foreach (char value in argument)
+            {
+                if (value == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+                if (value == '"')
+                {
+                    quoted.Append('\\', (backslashes * 2) + 1);
+                    quoted.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+                quoted.Append('\\', backslashes);
+                quoted.Append(value);
+                backslashes = 0;
+            }
+            quoted.Append('\\', backslashes * 2);
+            quoted.Append('"');
+            return quoted.ToString();
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
         {
@@ -188,6 +460,54 @@ namespace Yap.NsisSmoke
             public UIntPtr PeakJobMemoryUsed;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SECURITY_ATTRIBUTES
+        {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bInheritHandle;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public uint cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttribute;
+            public uint dwFlags;
+            public ushort wShowWindow;
+            public ushort cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct STARTUPINFOEX
+        {
+            public STARTUPINFO StartupInfo;
+            public IntPtr lpAttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public uint dwProcessId;
+            public uint dwThreadId;
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
 
@@ -200,6 +520,67 @@ namespace Yap.NsisSmoke
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool IsProcessInJob(
+            IntPtr process,
+            IntPtr job,
+            [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            ref SECURITY_ATTRIBUTES securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcess(
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string currentDirectory,
+            ref STARTUPINFOEX startupInfo,
+            out PROCESS_INFORMATION processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr attributeList,
+            int attributeCount,
+            int flags,
+            ref IntPtr size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr attributeList,
+            uint flags,
+            IntPtr attribute,
+            IntPtr value,
+            IntPtr size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr thread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
         [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
         private static extern bool QueryInformationJobObjectAccounting(
@@ -970,113 +1351,44 @@ function Start-JobContainedProcess {
     [Parameter(Mandatory)][string]$FilePath,
     [string[]]$ArgumentList = @(),
     [Parameter(Mandatory)][string]$StdoutPath,
-    [Parameter(Mandatory)][string]$StderrPath
+    [Parameter(Mandatory)][string]$StderrPath,
+    [switch]$FailAssignmentForTest
   )
 
-  $suffix = "$PID.$([Guid]::NewGuid().ToString('N'))"
-  $gateName = "Local\Yap.NsisSmoke.Gate.$suffix"
-  $startedName = "Local\Yap.NsisSmoke.Started.$suffix"
-  $gate = [System.Threading.EventWaitHandle]::new(
-    $false,
-    [System.Threading.EventResetMode]::ManualReset,
-    $gateName
-  )
-  $started = [System.Threading.EventWaitHandle]::new(
-    $false,
-    [System.Threading.EventResetMode]::ManualReset,
-    $startedName
-  )
   $job = $null
-  $wrapper = $null
+  $process = $null
   try {
-    $payload = [ordered]@{
-      ArgumentList = @($ArgumentList)
-      FilePath = $FilePath
-      GateName = $gateName
-      StartedName = $startedName
-    } | ConvertTo-Json -Compress -Depth 3
-    $payloadBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    $wrapperTemplate = @'
-$ErrorActionPreference = "Stop"
-$payload = [Text.Encoding]::UTF8.GetString(
-  [Convert]::FromBase64String("__PAYLOAD__")
-) | ConvertFrom-Json
-$gate = $null
-$started = $null
-$target = $null
-try {
-  $gate = [Threading.EventWaitHandle]::OpenExisting([string]$payload.GateName)
-  $started = [Threading.EventWaitHandle]::OpenExisting([string]$payload.StartedName)
-  if (-not $gate.WaitOne(30000)) { throw "The containment launch gate timed out." }
-  $gate.Dispose()
-  $gate = $null
-  $parameters = @{
-    FilePath = [string]$payload.FilePath
-    NoNewWindow = $true
-    PassThru = $true
-  }
-  [string[]]$targetArguments = @($payload.ArgumentList | ForEach-Object { [string]$_ })
-  if ($targetArguments.Count -gt 0) { $parameters.ArgumentList = $targetArguments }
-  $target = Start-Process @parameters
-  [void]$target.Handle
-  [void]$started.Set()
-  $started.Dispose()
-  $started = $null
-  $target.WaitForExit()
-  $exitCode = $target.ExitCode
-  $target.Dispose()
-  $target = $null
-  exit $exitCode
-} catch {
-  [Console]::Error.WriteLine("Yap process wrapper failed: $($_.Exception.Message)")
-  exit 125
-} finally {
-  if ($null -ne $target) { $target.Dispose() }
-  if ($null -ne $started) { $started.Dispose() }
-  if ($null -ne $gate) { $gate.Dispose() }
-}
-'@
-    $wrapperScript = $wrapperTemplate.Replace("__PAYLOAD__", $payloadBase64)
-    $wrapperEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapperScript))
-    $wrapperPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $job = [Yap.NsisSmoke.KillOnCloseJob]::Create()
-    $wrapper = Start-Process `
-      -FilePath $wrapperPowerShell `
-      -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $wrapperEncoded) `
-      -PassThru `
-      -RedirectStandardOutput $StdoutPath `
-      -RedirectStandardError $StderrPath `
-      -WindowStyle Hidden
-    [void]$wrapper.Handle
-    $job.Assign($wrapper)
-    [void]$gate.Set()
-
-    $launchDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    while (-not $started.WaitOne(25)) {
-      $wrapper.Refresh()
-      if ($wrapper.HasExited) {
-        $wrapper.WaitForExit()
-        throw "The contained process failed to launch; wrapper exit code $($wrapper.ExitCode)."
+    $resolvedFilePath = if (Test-Path -LiteralPath $FilePath -PathType Leaf) {
+      (Get-Item -LiteralPath $FilePath -Force -ErrorAction Stop).FullName
+    } else {
+      $command = Get-Command -Name $FilePath -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+      if ($null -eq $command -or [string]::IsNullOrWhiteSpace($command.Source)) {
+        throw "Executable could not be resolved: $FilePath"
       }
-      if ([DateTime]::UtcNow -ge $launchDeadline) {
-        throw "The contained process did not launch within 10 seconds."
-      }
+      $command.Source
     }
-    return [pscustomobject]@{ Job = $job; Process = $wrapper }
+    $resolvedFilePath = [System.IO.Path]::GetFullPath($resolvedFilePath)
+    $job = [Yap.NsisSmoke.KillOnCloseJob]::Create()
+    $process = $job.StartProcess(
+      $resolvedFilePath,
+      [string[]]@($ArgumentList),
+      [System.IO.Path]::GetFullPath($StdoutPath),
+      [System.IO.Path]::GetFullPath($StderrPath),
+      $FailAssignmentForTest.IsPresent
+    )
+    return [pscustomobject]@{ Job = $job; Process = $process }
   } catch {
     $startError = $_.Exception
     if ($null -ne $job) {
       try { $job.Terminate(125) } catch {}
       $job.Dispose()
     }
-    if ($null -ne $wrapper) {
-      if ($wrapper.WaitForExit(2000)) { $wrapper.WaitForExit() }
-      $wrapper.Dispose()
+    if ($null -ne $process) {
+      if ($process.WaitForExit(2000)) { $process.WaitForExit() }
+      $process.Dispose()
     }
     throw $startError
-  } finally {
-    $started.Dispose()
-    $gate.Dispose()
   }
 }
 
