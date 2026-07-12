@@ -11,9 +11,11 @@ import {
   readHiddenTranscriptHistory,
   readTranscriptHistory,
   readVisibleTranscriptHistory,
+  recoverableLiveSessionActionIdentity,
   reconcileNativeTranscriptHistoryEntries,
   recordVisibleTranscriptHistoryEntries,
   savedSessionToTranscriptHistoryEntry,
+  savedLiveSessionActionIdentity,
   transcriptPathIdentity,
   writeTranscriptHistory,
   type OwnedLiveTranscriptPathResolution,
@@ -620,5 +622,44 @@ describe("transcript history storage", () => {
       outputPath: "C:\\Users\\me\\Documents\\meeting-notes.txt",
       sourcePath: "C:\\Users\\me\\Downloads\\meeting.mp3",
     })).toBeUndefined();
+  });
+
+  it("keeps a committed audio-only session actionable through its WAV identity", () => {
+    const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-audio.wav";
+    const entry = {
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-audio.commit.json",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-audio",
+      outputPath: sourcePath,
+      sessionId: "audio",
+      sourcePath,
+    };
+
+    expect(savedLiveSessionActionIdentity(entry)).toEqual({
+      expectedCaptureCommitPath: entry.captureCommitPath,
+      expectedOutputPath: sourcePath,
+      sessionId: "audio",
+    });
+    expect(canDeleteTranscriptHistoryEntry(entry)).toBe(true);
+    expect(historyEntryPlaybackPath(entry)).toBe(sourcePath);
+  });
+
+  it("uses a recovered partial row's source WAV as its native action identity", () => {
+    const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.wav";
+    const entry = {
+      captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.commit.json",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-recovered",
+      outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.txt",
+      recoveryState: "recovered" as const,
+      sessionId: "recovered",
+      sourcePath,
+    };
+
+    expect(recoverableLiveSessionActionIdentity(entry)).toEqual({
+      expectedArtifactPath: sourcePath,
+      sessionId: "recovered",
+    });
+    expect(savedLiveSessionActionIdentity(entry)).toBeUndefined();
   });
 });

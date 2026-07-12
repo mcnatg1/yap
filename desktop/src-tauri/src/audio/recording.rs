@@ -1373,6 +1373,37 @@ struct FileIdentity {
 #[cfg(not(any(unix, windows)))]
 struct FileIdentity;
 
+#[derive(Debug)]
+pub(crate) struct RegularArtifactIdentity {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+impl RegularArtifactIdentity {
+    pub(crate) fn matches_artifact_name(&self, name: &str) -> bool {
+        self.path.file_name().and_then(|value| value.to_str()) == Some(name)
+    }
+
+    fn open_current(&self) -> Result<File, String> {
+        self.open_current_at(&self.path)
+    }
+
+    fn open_current_at(&self, path: &Path) -> Result<File, String> {
+        let current = open_regular_path(path)?;
+        if file_identity(&current)? != self.identity {
+            return Err("recording artifact path no longer names the admitted file".into());
+        }
+        Ok(current)
+    }
+
+    fn ensure_open_file(&self, file: &File) -> Result<(), String> {
+        if file_identity(file)? != self.identity {
+            return Err("recording artifact path no longer names the admitted file".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct QuarantinedArtifact {
     path: PathBuf,
@@ -2980,11 +3011,36 @@ pub(crate) fn recover_partial_wav(
     directory: &Path,
     session_id: &SessionId,
 ) -> Result<(String, u64, String), String> {
+    recover_partial_wav_with_admitted_identity(directory, session_id, None)
+}
+
+pub(crate) fn recover_partial_wav_with_identity(
+    directory: &Path,
+    session_id: &SessionId,
+    expected: &RegularArtifactIdentity,
+) -> Result<(String, u64, String), String> {
+    recover_partial_wav_with_admitted_identity(directory, session_id, Some(expected))
+}
+
+fn recover_partial_wav_with_admitted_identity(
+    directory: &Path,
+    session_id: &SessionId,
+    expected: Option<&RegularArtifactIdentity>,
+) -> Result<(String, u64, String), String> {
     let source_name = format!("live-{session_id}.wav.part");
     let destination_name = format!("live-{session_id}.wav");
+    let source = directory.join(&source_name);
     let destination = directory.join(&destination_name);
     if open_regular_artifact(directory, &source_name).is_err() {
         let mut orphan = open_regular_artifact(directory, &destination_name)?;
+        if let Some(expected) = expected {
+            if !expected.matches_artifact_name(&destination_name) {
+                return Err(
+                    "admitted recovery artifact no longer matches the current session".into(),
+                );
+            }
+            expected.ensure_open_file(&orphan)?;
+        }
         validate_recoverable_wav(&mut orphan, "recovered live audio")?;
         let bytes = orphan
             .metadata()
@@ -2994,8 +3050,13 @@ pub(crate) fn recover_partial_wav(
         return Ok((destination_name, bytes, hash));
     }
 
-    let source = directory.join(&source_name);
     let mut audio = open_regular_artifact_for_update(directory, &source_name)?;
+    if let Some(expected) = expected {
+        if !expected.matches_artifact_name(&source_name) {
+            return Err("admitted recovery artifact no longer matches the current session".into());
+        }
+        expected.ensure_open_file(&audio)?;
+    }
     let (data_bytes, _) = validate_recoverable_wav(&mut audio, "partial live audio")?;
     write_wav_header(&mut audio, data_bytes)?;
     audio
@@ -3013,6 +3074,23 @@ pub(crate) fn recover_partial_wav(
         .len();
     let hash = sha256_open_file(&mut published)?;
     Ok((destination_name, published_bytes, hash))
+}
+
+pub(crate) fn admit_expected_regular_artifact(
+    actual_path: &Path,
+    expected_path: &Path,
+) -> Result<RegularArtifactIdentity, String> {
+    let actual = open_regular_path(actual_path)?;
+    let expected = open_regular_path(expected_path)?;
+    if !same_file_identity(&actual, &expected)? {
+        return Err(
+            "Live recording identity is no longer current. Refresh history and try again.".into(),
+        );
+    }
+    Ok(RegularArtifactIdentity {
+        path: actual_path.to_path_buf(),
+        identity: file_identity(&actual)?,
+    })
 }
 
 pub(crate) fn remove_regular_artifact(directory: &Path, name: &str) -> Result<(), String> {
@@ -3110,6 +3188,42 @@ pub(crate) fn remove_regular_artifact_if_hash(
     expected_sha256: &str,
 ) -> Result<(), String> {
     let mut owned = open_regular_artifact(directory, name)?;
+    if sha256_open_file(&mut owned)? != expected_sha256 {
+        return Err("recording artifact no longer matches its validated hash".into());
+    }
+    remove_open_regular_artifact(directory, name, &owned, || {})
+}
+
+pub(crate) fn remove_regular_artifact_if_identity(
+    directory: &Path,
+    name: &str,
+    expected: &RegularArtifactIdentity,
+) -> Result<(), String> {
+    let path = directory.join(name);
+    if !expected.matches_artifact_name(name) {
+        return Err("admitted recording artifact no longer matches the deletion target".into());
+    }
+    let owned = expected.open_current_at(&path)?;
+    remove_open_regular_artifact(directory, name, &owned, || {})
+}
+
+pub(crate) fn revalidate_regular_artifact_identity(
+    expected: &RegularArtifactIdentity,
+) -> Result<(), String> {
+    expected.open_current().map(drop)
+}
+
+pub(crate) fn remove_regular_artifact_if_identity_and_hash(
+    directory: &Path,
+    name: &str,
+    expected: &RegularArtifactIdentity,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let path = directory.join(name);
+    if !expected.matches_artifact_name(name) {
+        return Err("admitted recording artifact no longer matches the deletion target".into());
+    }
+    let mut owned = expected.open_current_at(&path)?;
     if sha256_open_file(&mut owned)? != expected_sha256 {
         return Err("recording artifact no longer matches its validated hash".into());
     }

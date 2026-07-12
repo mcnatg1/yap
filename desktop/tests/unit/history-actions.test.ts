@@ -207,6 +207,22 @@ describe("history action ordering", () => {
     ]);
   });
 
+  it("uses the source WAV for both recovered-partial native actions", async () => {
+    const { ports, runtime } = actionHarness();
+    const sourcePath = "C:/Yap/live-123.wav";
+    const recovered = historyEntry({
+      outputPath: "C:/Yap/live-123.txt",
+      recoveryState: "recovered",
+      sourcePath,
+    });
+
+    await runRecoverHistoryEntry(recovered, ports, runtime);
+    await runDeleteRecoverableHistoryEntry(recovered, ports, runtime);
+
+    expect(runtime.recoverLiveSession).toHaveBeenCalledWith("123", sourcePath);
+    expect(runtime.deleteRecoverableLiveSession).toHaveBeenCalledWith("123", sourcePath);
+  });
+
   it("does not invoke native actions for a legacy row without an opaque identity", async () => {
     const { calls, ports, runtime } = actionHarness();
     const legacy = historyEntry({ sessionId: undefined });

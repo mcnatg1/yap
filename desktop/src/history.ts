@@ -332,7 +332,7 @@ export function savedLiveSessionActionIdentity(
   const source = historyArtifactPath(entry.sourcePath);
   const commit = historyArtifactPath(expectedCaptureCommitPath);
   if (
-    output.name !== `${stem}.txt`
+    ![`${stem}.txt`, `${stem}.wav`].includes(output.name)
     || source.name !== `${stem}.wav`
     || commit.name !== `${stem}.commit.json`
     || source.directory !== output.directory
@@ -350,14 +350,18 @@ export function recoverableLiveSessionActionIdentity(
   entry: TranscriptHistoryEntry,
 ): RecoverableLiveSessionActionIdentity | undefined {
   const sessionId = validHistorySessionId(entry);
-  if (!sessionId || entry.sourcePath !== entry.outputPath || !isRecoverableTranscriptHistoryEntry(entry)) {
-    return undefined;
-  }
+  if (!sessionId || !isRecoverableTranscriptHistoryEntry(entry)) return undefined;
   const artifact = historyArtifactPath(entry.sourcePath);
+  const output = historyArtifactPath(entry.outputPath);
   const stem = `live-${sessionId}`.toLowerCase();
   if (![`${stem}.wav.part`, `${stem}.capture.journal.part`, `${stem}.wav`].includes(artifact.name)) {
     return undefined;
   }
+  if (
+    artifact.directory !== output.directory
+    || (entry.recoveryState === "recoverable" && entry.sourcePath !== entry.outputPath)
+    || ![artifact.name, `${stem}.txt`].includes(output.name)
+  ) return undefined;
   return { expectedArtifactPath: entry.sourcePath, sessionId };
 }
 

@@ -139,6 +139,10 @@ function HistoryActionMenu({
                 <Recover />
                 Recover
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
+                <EyeSlash />
+                Hide
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => onDeleteRecoverable(entry)} variant="destructive">
                 <Trash2 />
                 Delete

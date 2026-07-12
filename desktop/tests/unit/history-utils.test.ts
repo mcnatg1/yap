@@ -27,6 +27,7 @@ describe("history job projection", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
+      sessionId: "123",
       sourcePath,
     });
 
