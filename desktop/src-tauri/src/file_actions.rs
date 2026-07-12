@@ -4,8 +4,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
+const MAX_DECODED_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
 const MAX_HIDDEN_PRUNE_CANDIDATES: usize = 200;
@@ -28,37 +28,46 @@ pub struct OwnedLiveTranscriptPathResolution {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingPlaybackAdmission {
     playback_path: String,
-    byte_length: u64,
+    byte_length: String,
+    waveform_eligible: bool,
 }
 
 #[tauri::command]
 pub fn allow_recording_playback_path(
     window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
+    owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
     path: String,
 ) -> Result<RecordingPlaybackAdmission, String> {
     ensure_main_window(&window)?;
     let path = register_playback_path_at(path, &recording_playback_registry_path())?;
     revalidate_owned_playback_path(&path)?;
-    let admission = playback_admission_for_path(&path)?;
-    allow_asset_playback_path(&app, &path)?;
-    Ok(admission)
+    mint_playback_admission(&path, &owner)
 }
 
 #[tauri::command]
 pub fn restore_recording_playback_path(
     window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
+    owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
     path: String,
 ) -> Result<RecordingPlaybackAdmission, String> {
     ensure_main_window(&window)?;
-    let admission = restore_playback_admission_at(
+    let path = restore_playback_path_at(
         path,
         &recording_playback_registry_path(),
         &crate::live::recordings::recordings_dir(),
     )?;
-    allow_asset_playback_path(&app, std::path::Path::new(&admission.playback_path))?;
-    Ok(admission)
+    mint_playback_admission(&path, &owner)
+}
+
+#[tauri::command]
+pub fn release_recording_playback(
+    window: tauri::WebviewWindow,
+    owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
+    playback_path: String,
+) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    owner.release(&playback_path);
+    Ok(())
 }
 
 #[tauri::command]
@@ -134,13 +143,6 @@ fn resolve_owned_live_transcript_paths_from_dir(
         }
     }
     Ok(resolutions)
-}
-
-fn allow_asset_playback_path(app: &tauri::AppHandle, path: &std::path::Path) -> Result<(), String> {
-    app.asset_protocol_scope()
-        .allow_file(path)
-        .map_err(|err| format!("Failed to allow recording playback: {err}"))?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -383,11 +385,11 @@ fn registered_playback_path_at(
     registered_recording_path_at(&std::path::PathBuf::from(path), registry_path)
 }
 
-fn restore_playback_admission_at(
+fn restore_playback_path_at(
     path: String,
     registry_path: &std::path::Path,
     owned_dir: &std::path::Path,
-) -> Result<RecordingPlaybackAdmission, String> {
+) -> Result<std::path::PathBuf, String> {
     let path = std::path::PathBuf::from(path);
     let path = if path_is_inside_owned_live_directory(&path, owned_dir) {
         crate::live::recordings::canonical_committed_live_path_from_dir(&path, owned_dir, false)?
@@ -395,21 +397,18 @@ fn restore_playback_admission_at(
         registered_playback_path_at(path.display().to_string(), registry_path)?
     };
     revalidate_owned_playback_path_from_dir(&path, owned_dir)?;
-    playback_admission_for_path(&path)
+    Ok(path)
 }
 
-fn playback_admission_for_path(
+fn mint_playback_admission(
     path: &std::path::Path,
+    owner: &crate::commands::media_protocol::MediaOwner,
 ) -> Result<RecordingPlaybackAdmission, String> {
-    let metadata = path
-        .metadata()
-        .map_err(|error| format!("Failed to inspect recording: {error}"))?;
-    if !metadata.is_file() || !is_recording_media_path(path) {
-        return Err("Choose a supported audio or video file.".into());
-    }
+    let admission = owner.admit(path, MAX_DECODED_WAVEFORM_BYTES)?;
     Ok(RecordingPlaybackAdmission {
-        playback_path: path.display().to_string(),
-        byte_length: metadata.len(),
+        playback_path: admission.url,
+        byte_length: admission.byte_length,
+        waveform_eligible: admission.waveform_eligible,
     })
 }
 
@@ -1090,18 +1089,19 @@ mod tests {
     }
 
     #[test]
-    fn playback_admission_reports_canonical_path_and_byte_length() {
+    fn playback_admission_returns_revocable_url_and_exact_metadata() {
         let dir = temp_test_dir("playback-admission-metadata");
         let media = dir.join("meeting.wav");
         std::fs::write(&media, b"RIFFdata").unwrap();
+        let owner = crate::commands::media_protocol::MediaOwner::new();
 
-        let admission = playback_admission_for_path(&media.canonicalize().unwrap()).unwrap();
+        let admission = mint_playback_admission(&media.canonicalize().unwrap(), &owner).unwrap();
 
-        assert_eq!(
-            admission.playback_path,
-            media.canonicalize().unwrap().display().to_string()
-        );
-        assert_eq!(admission.byte_length, 8);
+        assert!(admission.playback_path.starts_with("http://127.0.0.1:"));
+        assert!(!admission.playback_path.contains("meeting.wav"));
+        assert_eq!(admission.byte_length, "8");
+        assert!(admission.waveform_eligible);
+        assert!(owner.release(&admission.playback_path));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1117,8 +1117,8 @@ mod tests {
             .unwrap();
         std::fs::remove_file(&media).unwrap();
 
-        let error = restore_playback_admission_at(media.display().to_string(), &registry, &owned)
-            .unwrap_err();
+        let error =
+            restore_playback_path_at(media.display().to_string(), &registry, &owned).unwrap_err();
 
         assert_eq!(error, "File no longer exists.");
         std::fs::remove_dir_all(dir).ok();

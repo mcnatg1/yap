@@ -4,6 +4,8 @@ import {
   maxDecodedWaveformBytes,
   maxDecodedWaveformDurationSeconds,
   mountDecodedWaveform,
+  roundedMediaSecond,
+  seekRatioFromBounds,
 } from "@/components/panels/transcript-panel";
 
 function waveformFactory() {
@@ -55,6 +57,20 @@ describe("decoded waveform admission", () => {
     expect(mounted).toBeDefined();
   });
 
+  it("does not construct WaveSurfer before media metadata arrives", () => {
+    const factory = waveformFactory();
+
+    const mounted = mountDecodedWaveform({
+      byteLength: 4_096,
+      create: factory.create,
+      durationSeconds: undefined,
+      subscribe: () => [],
+    });
+
+    expect(mounted).toBeUndefined();
+    expect(factory.create).not.toHaveBeenCalled();
+  });
+
   it("unsubscribes and destroys the decoded waveform on cleanup", () => {
     const factory = waveformFactory();
     const firstUnsubscribe = vi.fn();
@@ -72,5 +88,19 @@ describe("decoded waveform admission", () => {
     expect(firstUnsubscribe).toHaveBeenCalledOnce();
     expect(secondUnsubscribe).toHaveBeenCalledOnce();
     expect(factory.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("maps pointer endpoints to the visible track instead of its outer container", () => {
+    const bounds = { left: 112, width: 176 };
+
+    expect(seekRatioFromBounds(100, bounds)).toBe(0);
+    expect(seekRatioFromBounds(200, bounds)).toBe(0.5);
+    expect(seekRatioFromBounds(300, bounds)).toBe(1);
+  });
+
+  it("uses the same floor rounding for ARIA current and endpoint values", () => {
+    expect(roundedMediaSecond(100.9)).toBe(100);
+    expect(roundedMediaSecond(0)).toBe(0);
+    expect(roundedMediaSecond(undefined)).toBe(0);
   });
 });

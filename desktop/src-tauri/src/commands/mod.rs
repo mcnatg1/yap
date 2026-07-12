@@ -1,8 +1,10 @@
 mod live;
+pub(crate) mod media_protocol;
 mod recordings;
 mod setup;
 
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    let builder = builder.manage(media_protocol::MediaOwner::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
         recordings::server_connection_status,
@@ -40,6 +42,7 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         recordings::start_transcribe,
         crate::file_actions::allow_recording_playback_path,
         crate::file_actions::restore_recording_playback_path,
+        crate::file_actions::release_recording_playback,
         crate::file_actions::resolve_owned_live_transcript_paths,
         crate::file_actions::read_text_file,
         crate::file_actions::read_text_preview,

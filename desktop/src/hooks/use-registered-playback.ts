@@ -4,7 +4,11 @@ import type { TranscriptHistoryEntry } from "@/history";
 import type { RecordingJobView } from "@/lib/app-types";
 import {
   applyRestoredQueuePlaybackPaths,
+  clearTerminalQueuePlaybackAdmissions,
+  currentPlaybackPaths,
   mergeHistoryPlaybackAdmissions,
+  reconcilePlaybackAdmissionLifecycle,
+  releaseRecordingPlaybackPaths,
   restoreHistoryPlaybackAdmissions,
   restoreQueuePlaybackPaths,
   trimHistoryPlaybackAdmissions,
@@ -20,14 +24,18 @@ export function useRegisteredPlayback(
     useState<HistoryPlaybackAdmissions>({});
 
   useEffect(() => {
-    let cancelled = false;
-    void restoreQueuePlaybackPaths(queue).then((restored) => {
-      if (cancelled || !restored.length) return;
+    const controller = new AbortController();
+    void restoreQueuePlaybackPaths(queue, { signal: controller.signal }).then((restored) => {
+      if (controller.signal.aborted) {
+        void releaseRecordingPlaybackPaths(restored.map((entry) => entry.playbackPath));
+        return;
+      }
+      if (!restored.length) return;
       setQueue((current) => applyRestoredQueuePlaybackPaths(current, restored));
     });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [queue, setQueue]);
 
@@ -36,16 +44,35 @@ export function useRegisteredPlayback(
   }, [history]);
 
   useEffect(() => {
-    let cancelled = false;
-    void restoreHistoryPlaybackAdmissions(history, historyPlaybackAdmissions).then((restored) => {
-      if (cancelled || !restored.length) return;
+    const controller = new AbortController();
+    void restoreHistoryPlaybackAdmissions(
+      history,
+      historyPlaybackAdmissions,
+      { signal: controller.signal },
+    ).then((restored) => {
+      if (controller.signal.aborted) {
+        void releaseRecordingPlaybackPaths(restored.map((entry) => entry.playbackPath));
+        return;
+      }
+      if (!restored.length) return;
       setHistoryPlaybackAdmissions((current) => mergeHistoryPlaybackAdmissions(current, restored));
     });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [history, historyPlaybackAdmissions]);
+
+  useEffect(() => {
+    reconcilePlaybackAdmissionLifecycle(
+      currentPlaybackPaths(queue, historyPlaybackAdmissions),
+    );
+    if (queue.some((item) =>
+      (item.status === "cancelled" || item.status === "failed") &&
+      (item.playbackPath || item.playbackByteLength !== undefined))) {
+      setQueue(clearTerminalQueuePlaybackAdmissions);
+    }
+  }, [historyPlaybackAdmissions, queue, setQueue]);
 
   return useMemo(() => ({
     historyPlaybackByteLengths: Object.fromEntries(

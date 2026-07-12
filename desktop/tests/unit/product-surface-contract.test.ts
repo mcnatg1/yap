@@ -112,12 +112,12 @@ describe("product surface contracts", () => {
     expect(owner.isSaving()).toBe(false);
   });
 
-  it("keeps production CSP narrow and adds only the explicit Ollama development endpoint", () => {
+  it("allows only the loopback media owner and removes the asset protocol", () => {
     const config = JSON.parse(readFileSync(
       new URL("../../src-tauri/tauri.conf.json", import.meta.url),
       "utf8",
     )) as {
-      app: { security: { csp: string; devCsp?: string } };
+      app: { security: { assetProtocol?: unknown; csp: string; devCsp?: string } };
       bundle: { resources: Record<string, string> };
     };
     const productionConnect = cspSources(config.app.security.csp, "connect-src");
@@ -128,11 +128,13 @@ describe("product surface contracts", () => {
       "ipc:",
       "http://ipc.localhost",
       "https://ipc.localhost",
+      "http://127.0.0.1:*",
     ]);
-    expect(developmentConnect).toEqual([
-      ...productionConnect,
-      "http://127.0.0.1:11434",
-    ]);
+    expect(developmentConnect).toEqual(productionConnect);
+    expect(cspSources(config.app.security.csp, "media-src")).toContain(
+      "http://127.0.0.1:*",
+    );
+    expect(config.app.security.assetProtocol).toBeUndefined();
     expect(config.bundle.resources["../../THIRD_PARTY_NOTICES.md"])
       .toBe("THIRD_PARTY_NOTICES.md");
   });

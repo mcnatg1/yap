@@ -6,7 +6,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { FileAudio } from "@phosphor-icons/react/FileAudio";
 import { FileText } from "@phosphor-icons/react/FileText";
@@ -44,7 +44,7 @@ import {
 import { projectTranscriptText } from "@/lib/transcript-text";
 import { cn } from "@/lib/utils";
 
-function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: number) {
+function recordingActivityLabel(status: RecordingJobStatus) {
   switch (status) {
     case "uploading":
       return "Uploading";
@@ -54,8 +54,6 @@ function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: num
       return "Finding speakers";
     case "saving":
       return "Saving";
-    case "local_transcribing":
-      return elapsedSeconds ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}` : "Transcribing locally...";
     default:
       return "Working";
   }
@@ -70,11 +68,12 @@ type DisposableWaveform = {
   destroy: () => void;
 };
 
-function canMountDecodedWaveform(byteLength: number, durationSeconds: number) {
+function canMountDecodedWaveform(byteLength: number, durationSeconds: number | undefined) {
   return (
     Number.isSafeInteger(byteLength) &&
     byteLength >= 0 &&
     byteLength <= maxDecodedWaveformBytes &&
+    durationSeconds !== undefined &&
     Number.isFinite(durationSeconds) &&
     durationSeconds > 0 &&
     durationSeconds <= maxDecodedWaveformDurationSeconds
@@ -89,7 +88,7 @@ export function mountDecodedWaveform<T extends DisposableWaveform>({
 }: {
   byteLength: number;
   create: () => T;
-  durationSeconds: number;
+  durationSeconds: number | undefined;
   subscribe: (waveform: T) => Array<() => void>;
 }) {
   if (!canMountDecodedWaveform(byteLength, durationSeconds)) {
@@ -116,6 +115,20 @@ export function mountDecodedWaveform<T extends DisposableWaveform>({
   };
 }
 
+export function seekRatioFromBounds(
+  clientX: number,
+  bounds: Pick<DOMRect, "left" | "width">,
+) {
+  if (bounds.width <= 0) return undefined;
+  return Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width));
+}
+
+export function roundedMediaSecond(seconds: number | undefined) {
+  return seconds !== undefined && Number.isFinite(seconds)
+    ? Math.max(0, Math.floor(seconds))
+    : 0;
+}
+
 function RecordingPlayer({
   item,
   onOpen,
@@ -130,6 +143,7 @@ function RecordingPlayer({
   const displayedSecondRef = useRef(0);
   const dragPointerIdRef = useRef<number | undefined>(undefined);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const lightweightTrackRef = useRef<HTMLDivElement>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
   const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
   const statusId = useId();
@@ -143,7 +157,10 @@ function RecordingPlayer({
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
   const recordingPath = item.playbackPath;
-  const recordingSrc = useMemo(() => (isTauri() && recordingPath ? convertFileSrc(recordingPath) : undefined), [recordingPath]);
+  const recordingSrc = useMemo(
+    () => (isTauri() && recordingPath ? recordingPath : undefined),
+    [recordingPath],
+  );
   const durationSeconds = nativeMetadata && nativeMetadata.recordingSrc === recordingSrc
     ? nativeMetadata.durationSeconds
     : undefined;
@@ -169,6 +186,7 @@ function RecordingPlayer({
     setProgressSeconds(0);
     displayedSecondRef.current = 0;
     dragPointerIdRef.current = undefined;
+    setNativeMetadata(undefined);
     setFailed(false);
     setPlaying(false);
   }, [recordingSrc]);
@@ -225,9 +243,11 @@ function RecordingPlayer({
     });
     if (!mounted) return;
     waveSurferRef.current = mounted.waveform;
+    container.dataset.waveformMounted = "true";
 
     return () => {
       mounted.dispose();
+      delete container.dataset.waveformMounted;
       if (waveSurferRef.current === mounted.waveform) waveSurferRef.current = undefined;
     };
   }, [durationSeconds, item.playbackByteLength, recordingSrc]);
@@ -284,9 +304,10 @@ function RecordingPlayer({
 
   function seekFromPointer(event: ReactPointerEvent<HTMLDivElement>) {
     if (waveformMode !== "lightweight" || !canSeek) return;
-    const bounds = event.currentTarget.getBoundingClientRect();
-    if (bounds.width <= 0) return;
-    seekToRatio((event.clientX - bounds.left) / bounds.width);
+    const track = lightweightTrackRef.current;
+    if (!track) return;
+    const ratio = seekRatioFromBounds(event.clientX, track.getBoundingClientRect());
+    if (ratio !== undefined) seekToRatio(ratio);
   }
 
   function finishPointerSeek(event: ReactPointerEvent<HTMLDivElement>) {
@@ -335,7 +356,7 @@ function RecordingPlayer({
                 {durationSeconds === undefined ? "Local file" : formatElapsed(Math.floor(durationSeconds))}
               </Badge>
             </div>
-            <p className="truncate text-xs text-muted-foreground" id={statusId} title={recordingPath}>
+            <p className="truncate text-xs text-muted-foreground" id={statusId} title={item.path}>
               {recordingStatus}
             </p>
           </div>
@@ -343,7 +364,7 @@ function RecordingPlayer({
         <ButtonGroup aria-label="Recording actions">
           <Button
             aria-label={`Open recording ${item.name}`}
-            onClick={() => onOpen(recordingPath)}
+            onClick={() => onOpen(item.path)}
             size="sm"
             type="button"
             variant="secondary"
@@ -353,7 +374,7 @@ function RecordingPlayer({
           </Button>
           <Button
             aria-label={`Reveal recording ${item.name}`}
-            onClick={() => onReveal(recordingPath)}
+            onClick={() => onReveal(item.path)}
             size="sm"
             type="button"
             variant="ghost"
@@ -389,11 +410,12 @@ function RecordingPlayer({
           <div
             aria-label={`Seek recording ${item.name}`}
             aria-disabled={!canSeek}
-            aria-valuemax={Math.round(durationSeconds ?? 0)}
+            aria-valuemax={roundedMediaSecond(durationSeconds)}
             aria-valuemin={0}
-            aria-valuenow={currentSeconds}
-            aria-valuetext={`${formatElapsed(currentSeconds)}${durationSeconds === undefined ? "" : ` of ${formatElapsed(Math.floor(durationSeconds))}`}`}
+            aria-valuenow={Math.min(currentSeconds, roundedMediaSecond(durationSeconds))}
+            aria-valuetext={`${formatElapsed(currentSeconds)}${durationSeconds === undefined ? "" : ` of ${formatElapsed(roundedMediaSecond(durationSeconds))}`}`}
             className="relative h-14 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-md bg-muted/60 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60"
+            data-waveform-mode={waveformMode}
             onKeyDown={(event) => {
               if (!canSeek) return;
               if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
@@ -435,7 +457,11 @@ function RecordingPlayer({
             tabIndex={canSeek ? 0 : -1}
           >
             {waveformMode === "decoded" ? null : (
-              <div className="pointer-events-none absolute inset-x-3 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-foreground/10">
+              <div
+                className="pointer-events-none absolute inset-x-3 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-foreground/10"
+                data-testid="lightweight-seek-track"
+                ref={lightweightTrackRef}
+              >
                 <div
                   className="h-full rounded-full bg-primary transition-[width] duration-100 ease-linear motion-reduce:transition-none"
                   style={{ width: waveformMode === "lightweight" ? `${lightweightProgress}%` : "0%" }}
@@ -557,7 +583,7 @@ export function TranscriptPanel({
               )
               : isRunning
                 ? item?.progressMessage ??
-                  (item ? recordingActivityLabel(item.status, elapsedSeconds) : "Working")
+                  (item ? recordingActivityLabel(item.status) : "Working")
                 : isError
                   ? "Transcription failed"
                   : item
