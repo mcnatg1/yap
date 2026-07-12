@@ -523,6 +523,27 @@ fn reconcile_publication_failure(
     before: &DestinationSnapshot,
     publish_error: std::io::Error,
 ) -> ConfigError {
+    reconcile_publication_failure_with_parent_sync(
+        path,
+        partial,
+        intended,
+        before,
+        publish_error,
+        sync_parent_directory,
+    )
+}
+
+fn reconcile_publication_failure_with_parent_sync<ParentSync>(
+    path: &Path,
+    partial: &Path,
+    intended: &[u8],
+    before: &DestinationSnapshot,
+    publish_error: std::io::Error,
+    parent_sync: ParentSync,
+) -> ConfigError
+where
+    ParentSync: Fn(&Path) -> std::io::Result<()>,
+{
     let after = snapshot_destination(path);
     if after
         .as_ref()
@@ -535,7 +556,7 @@ fn reconcile_publication_failure(
     let visible = after
         .as_ref()
         .is_ok_and(|after| destination_contains(after, intended));
-    let recovery_path = match preserve_recovery_artifact(path, partial, intended) {
+    let recovery_path = match preserve_recovery_artifact(path, partial, intended, parent_sync) {
         Ok(path) => Some(path),
         Err(recovery_error) => {
             let source = std::io::Error::other(format!(
@@ -573,11 +594,15 @@ fn reconcile_publication_failure(
     }
 }
 
-fn preserve_recovery_artifact(
+fn preserve_recovery_artifact<ParentSync>(
     path: &Path,
     partial: &Path,
     contents: &[u8],
-) -> std::io::Result<PathBuf> {
+    parent_sync: ParentSync,
+) -> std::io::Result<PathBuf>
+where
+    ParentSync: Fn(&Path) -> std::io::Result<()>,
+{
     let file_name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -608,6 +633,7 @@ fn preserve_recovery_artifact(
             return Err(error);
         }
         drop(file);
+        parent_sync(&recovery)?;
         std::fs::remove_file(partial).ok();
         return Ok(recovery);
     }
@@ -1146,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_destination_after_1176_is_indeterminate_and_preserves_recovery() {
+    fn missing_destination_after_failed_publish_is_indeterminate_and_preserves_recovery() {
         let dir = temp_dir("failed-missing-publication");
         let path = dir.join("server-settings.json");
         let intended = b"intended settings";
@@ -1169,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_destination_after_1177_is_indeterminate_and_preserves_recovery() {
+    fn moved_destination_after_failed_publish_is_indeterminate_and_preserves_recovery() {
         let dir = temp_dir("failed-moved-publication");
         let path = dir.join("server-settings.json");
         let moved = dir.join("server-settings.moved-by-api.json");
@@ -1280,6 +1306,48 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
         assert_eq!(partial_files(&dir), Vec::<String>::new());
         assert_eq!(recovery_files(&dir), Vec::<PathBuf>::new());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_parent_sync_failure_reports_no_confirmed_recovery() {
+        let dir = temp_dir("recovery-parent-sync-failure");
+        let path = dir.join("server-settings.json");
+        let intended = b"intended settings";
+        std::fs::write(&path, b"original settings").unwrap();
+        let before = snapshot_destination(&path).unwrap();
+        let (partial, mut partial_file) = reserve_unique_partial(&path).unwrap();
+        partial_file.write_all(intended).unwrap();
+        partial_file.sync_all().unwrap();
+        drop(partial_file);
+        std::fs::remove_file(&path).unwrap();
+        let parent_sync_called = AtomicBool::new(false);
+
+        let error = reconcile_publication_failure_with_parent_sync(
+            &path,
+            &partial,
+            intended,
+            &before,
+            std::io::Error::other("injected publication failure"),
+            |recovery| {
+                assert_eq!(std::fs::read(recovery)?, intended);
+                parent_sync_called.store(true, Ordering::Release);
+                Err(std::io::Error::other(
+                    "injected recovery parent sync failure",
+                ))
+            },
+        );
+
+        assert!(parent_sync_called.load(Ordering::Acquire));
+        assert!(matches!(
+            error,
+            ConfigError::PublicationStateIndeterminate {
+                recovery_path: None,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("could not be preserved"));
+        assert!(!error.to_string().contains("was preserved at"));
         std::fs::remove_dir_all(dir).ok();
     }
 
