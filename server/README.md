@@ -2,6 +2,9 @@
 
 This directory is the MVP staging area for the future `yap-server` repo.
 
+It remains part of the MVP monorepo. Do not split the server or contracts into
+another repository before the canonical Phase 10 boundary.
+
 Keep it boring until there is a real service:
 
 - API contracts live here first, likely `openapi/`.
@@ -35,10 +38,47 @@ server/
 
 Use `workload_router/` instead of vague `router/`. Use `schemas/` for API and message shapes. Do not add a repo `models/` directory; runtime model files belong on the server node, not in Git.
 
+## Phase 3 contract boundary
+
+`openapi/openapi.json` and `openapi/live-events.schema.json` are the normative
+machine-readable wire contracts. Their presence does not mean every route is
+implemented:
+
+| Method | Path | Phase 3 behavior | Later owner |
+|--------|------|------------------|-------------|
+| `GET` | `/v1/health` | Implemented | Server process |
+| `POST` | `/v1/jobs` | Contract only | Phase 5 upload intake |
+| `GET` | `/v1/jobs/{jobId}` | Contract only | Phase 5 job status |
+| `DELETE` | `/v1/jobs/{jobId}` | Contract only | Phase 5 cancellation |
+| `PUT` | `/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}` | Contract only | Phase 5 resumable upload |
+| `POST` | `/v1/jobs/{jobId}/commit` | Contract only | Phase 5 upload commit |
+| `GET` upgrade | `/v1/live` | Event schema only | Phase 5 WSS streaming |
+
+Phase 3 health advertises `batchJobs`, `liveStreaming`, and `jobStatus` as
+`false`. Upload handlers, job persistence, a WebSocket runtime, queue drain,
+authentication, token validation, inference, and diarization are not present.
+
+Contract JSON fields use camelCase. Immutable manifest and server enum values
+use snake_case. The React `RecordingJobView` values are an explicit projection,
+not alternate wire values.
+
+Chunk uploads use `application/octet-stream` raw `pcm_s16le` bytes. The logical
+idempotency key and the SHA-256 byte identity are separate: the same key and
+hash is replay success, while the same key with a different hash is a 409
+`CONTENT_IDENTITY_CONFLICT`. Job and chunk requests do not accept tenant or
+owner-subject fields; those values become server-derived only after token
+validation exists.
+
 ## Local checks
 
 ```powershell
 $env:PYTHONPATH = "server/src"; python -m unittest discover -s server/tests -p "test_*.py"
+```
+
+Run only the wire-contract tests while editing the JSON documents:
+
+```powershell
+$env:PYTHONPATH = "server/src"; python -m unittest server.tests.contract.test_contract -v
 ```
 
 Skipped for now: Nx/Turborepo, package workspace wiring, framework/server dependencies, checked-in model weights, and fake GB300 profiles.

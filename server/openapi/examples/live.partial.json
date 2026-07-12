@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "s-01JABCDEF",
+  "eventSequence": 42,
+  "eventType": "transcript.partial",
+  "revision": 3,
+  "text": "The next step is",
+  "stableThroughMs": 1840
+}

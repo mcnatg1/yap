@@ -1,0 +1,11 @@
+{
+  "service": "yap-server",
+  "status": "ok",
+  "apiVersion": "1",
+  "auth": "not_configured",
+  "capabilities": {
+    "batchJobs": false,
+    "liveStreaming": false,
+    "jobStatus": false
+  }
+}

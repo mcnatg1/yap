@@ -1,0 +1,544 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.yap.local/v1/live-events.schema.json",
+  "title": "Yap live event protocol",
+  "description": "Contract-only Phase 5 WebSocket event vocabulary. Every event carries a schema version, session ID, and per-direction monotonically increasing sequence. Stale event sequences are ignored. Duplicate final events with the same finalEventId are idempotent.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SessionStartEvent"
+    },
+    {
+      "$ref": "#/$defs/AudioChunkEvent"
+    },
+    {
+      "$ref": "#/$defs/AudioGapEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionFinishEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionCancelEvent"
+    },
+    {
+      "$ref": "#/$defs/PingEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionAcceptedEvent"
+    },
+    {
+      "$ref": "#/$defs/TranscriptPartialEvent"
+    },
+    {
+      "$ref": "#/$defs/TranscriptFinalEvent"
+    },
+    {
+      "$ref": "#/$defs/ServerBackpressureEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionErrorEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/PongEvent"
+    }
+  ],
+  "discriminator": {
+    "propertyName": "eventType",
+    "mapping": {
+      "session.start": "#/$defs/SessionStartEvent",
+      "audio.chunk": "#/$defs/AudioChunkEvent",
+      "audio.gap": "#/$defs/AudioGapEvent",
+      "session.finish": "#/$defs/SessionFinishEvent",
+      "session.cancel": "#/$defs/SessionCancelEvent",
+      "ping": "#/$defs/PingEvent",
+      "session.accepted": "#/$defs/SessionAcceptedEvent",
+      "transcript.partial": "#/$defs/TranscriptPartialEvent",
+      "transcript.final": "#/$defs/TranscriptFinalEvent",
+      "server.backpressure": "#/$defs/ServerBackpressureEvent",
+      "session.error": "#/$defs/SessionErrorEvent",
+      "session.finished": "#/$defs/SessionFinishedEvent",
+      "pong": "#/$defs/PongEvent"
+    }
+  },
+  "x-yap-client-events": [
+    "session.start",
+    "audio.chunk",
+    "audio.gap",
+    "session.finish",
+    "session.cancel",
+    "ping"
+  ],
+  "x-yap-server-events": [
+    "session.accepted",
+    "transcript.partial",
+    "transcript.final",
+    "server.backpressure",
+    "session.error",
+    "session.finished",
+    "pong"
+  ],
+  "x-yap-ordering": {
+    "scope": "per_session_per_direction",
+    "eventSequence": "strictly_increasing",
+    "staleEventSequence": "ignore",
+    "duplicateFinalEvents": "idempotent"
+  },
+  "$defs": {
+    "EventEnvelope": {
+      "type": "object",
+      "description": "Common envelope. Each peer maintains a strictly increasing eventSequence for each session; reconnect replay never rewinds applied state.",
+      "required": [
+        "schemaVersion",
+        "sessionId",
+        "eventSequence",
+        "eventType"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "eventSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonically and strictly increasing within one session and sender direction. Stale values are ignored."
+        },
+        "eventType": {
+          "type": "string",
+          "enum": [
+            "session.start",
+            "audio.chunk",
+            "audio.gap",
+            "session.finish",
+            "session.cancel",
+            "ping",
+            "session.accepted",
+            "transcript.partial",
+            "transcript.final",
+            "server.backpressure",
+            "session.error",
+            "session.finished",
+            "pong"
+          ]
+        }
+      }
+    },
+    "SessionStartEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Opens a live server session using immutable client capture metadata.",
+          "required": [
+            "eventType",
+            "metadata",
+            "tracks",
+            "route"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "session.start"
+            },
+            "metadata": {
+              "$ref": "openapi.json#/components/schemas/SessionMetadata"
+            },
+            "tracks": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "openapi.json#/components/schemas/CaptureTrackDescriptor"
+              }
+            },
+            "route": {
+              "type": "string",
+              "const": "server_live"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "AudioChunkEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Declares chunk replay and content identity. The encoded audio bytes arrive in the immediately following WebSocket binary message; no other JSON event may intervene.",
+          "required": [
+            "eventType",
+            "replayKey",
+            "contentIdentity",
+            "audioCodec",
+            "sampleRateHz",
+            "channels",
+            "binaryFollows"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "audio.chunk"
+            },
+            "replayKey": {
+              "$ref": "openapi.json#/components/schemas/ChunkReplayKey"
+            },
+            "contentIdentity": {
+              "$ref": "openapi.json#/components/schemas/ContentIdentity"
+            },
+            "audioCodec": {
+              "type": "string",
+              "const": "pcm_s16le"
+            },
+            "sampleRateHz": {
+              "type": "integer",
+              "const": 16000
+            },
+            "channels": {
+              "type": "integer",
+              "const": 1
+            },
+            "binaryFollows": {
+              "type": "boolean",
+              "const": true
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "AudioGapEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Reports a source timeline gap explicitly so missing audio is never represented as silence.",
+          "required": [
+            "eventType",
+            "gap"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "audio.gap"
+            },
+            "gap": {
+              "$ref": "openapi.json#/components/schemas/AudioGap"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "SessionFinishEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Declares that the client has no more audio or gap events for the session.",
+          "required": [
+            "eventType",
+            "lastAudioEventSequence"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "session.finish"
+            },
+            "lastAudioEventSequence": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "SessionCancelEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Requests cancellation of a live session.",
+          "required": [
+            "eventType",
+            "reason"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "session.cancel"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "PingEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Application-level liveness probe.",
+          "required": [
+            "eventType",
+            "nonce"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "ping"
+            },
+            "nonce": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "SessionAcceptedEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Confirms that the future live runtime accepted the declared session contract.",
+          "required": [
+            "eventType",
+            "acceptedAtUtc"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "session.accepted"
+            },
+            "acceptedAtUtc": {
+              "$ref": "openapi.json#/components/schemas/UtcDateTime"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "TranscriptPartialEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Replaceable model-agnostic partial transcript projection.",
+          "required": [
+            "eventType",
+            "revision",
+            "text",
+            "stableThroughMs"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "transcript.partial"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "text": {
+              "type": "string"
+            },
+            "stableThroughMs": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "TranscriptFinalEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Immutable final transcript publication. Duplicate deliveries with the same finalEventId are idempotent.",
+          "required": [
+            "eventType",
+            "finalEventId",
+            "result"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "transcript.final"
+            },
+            "finalEventId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "result": {
+              "$ref": "openapi.json#/components/schemas/TranscriptResultRevision"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ServerBackpressureEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Asks the client to pause sending new binary audio without discarding its durable reconnect ledger.",
+          "required": [
+            "eventType",
+            "retryAfterMs",
+            "maxInFlightBytes"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "server.backpressure"
+            },
+            "retryAfterMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxInFlightBytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "SessionErrorEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Reports the stable error envelope and whether the session can continue.",
+          "required": [
+            "eventType",
+            "error",
+            "final"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "session.error"
+            },
+            "error": {
+              "$ref": "openapi.json#/components/schemas/ApiError"
+            },
+            "final": {
+              "type": "boolean"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "SessionFinishedEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Terminal session state. Duplicate deliveries with the same finalEventId are idempotent.",
+          "required": [
+            "eventType",
+            "finalEventId",
+            "status"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "session.finished"
+            },
+            "finalEventId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "complete",
+                "partial",
+                "cancelled",
+                "failed"
+              ]
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "PongEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/EventEnvelope"
+        },
+        {
+          "type": "object",
+          "description": "Application-level response that echoes a ping nonce.",
+          "required": [
+            "eventType",
+            "nonce"
+          ],
+          "properties": {
+            "eventType": {
+              "type": "string",
+              "const": "pong"
+            },
+            "nonce": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}
