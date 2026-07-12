@@ -140,13 +140,8 @@ jobs:
             cargo install cargo-audit --locked --root .cargo-tools
           }
           # Policy: cargo-audit warnings from Tauri's target-all desktop
-          # transitive crates are allowed for now. Unignored vulnerabilities must
-          # fail CI; every ignore below needs a removal condition in docs.
-          # quick-xml is pulled transitively through tauri-utils -> plist.
-          # Remove these ignores once plist can move to quick-xml >=0.41.
-          cargo audit --target-os windows --target-arch x86_64 `
-            --ignore RUSTSEC-2026-0194 `
-            --ignore RUSTSEC-2026-0195
+          # transitive crates are allowed for now. Vulnerabilities fail CI.
+          cargo audit --target-os windows --target-arch x86_64
 
   native-wdio:
     name: Native WDIO smoke (required, no hardware)

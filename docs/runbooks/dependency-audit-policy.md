@@ -18,18 +18,13 @@ bindings, `glib`, `proc-macro-error`, and `unic-*` crates pulled through that
 graph. Do not add `cargo audit -D warnings` until the upstream Tauri dependency
 graph no longer reports those warnings for crates we do not ship directly.
 
-As of July 5, 2026, the CI command reports 17 allowed warnings and no unignored
+As of July 12, 2026, the CI command reports 17 allowed warnings and no
 vulnerability.
 
 ## Ignored Advisories
 
-The CI ignore list is intentionally small:
-
-- `RUSTSEC-2026-0194`
-- `RUSTSEC-2026-0195`
-
-Both are from `quick-xml` pulled transitively through `tauri-utils -> plist`.
-Remove the ignores when `plist` can move to `quick-xml >= 0.41`.
+The CI ignore list is empty. `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` were
+removed after `plist` 1.10.0 moved the transitive parser to `quick-xml` 0.41.0.
 
 ## Change Rules
 
