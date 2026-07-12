@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-12 on `hardening/yap-maintainability`
+**As of:** 2026-07-12 at merged main `51931e5`
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.

@@ -13,6 +13,7 @@ This repo stays a staged monorepo through the MVP. Keep cleanup changes small, t
 | `infra/yap-server-node/` | Server host bootstrap | Host scripts/env examples; no app code |
 | `docs/adr/` | Decisions | Why the architecture is this way |
 | `docs/specs/` | Build specs | What to implement next |
+| `docs/research/` | External-source audits | Pin revisions, separate studied/adapted/copied status, and define selective reuse gates |
 | `docs/runbooks/` | Operations and maintenance | How to run, audit, clean, or recover things |
 | `docs/superpowers/` | Working implementation flow notes | Must name a canonical owner, merge/expiry target, and delete/archive condition |
 
@@ -34,7 +35,6 @@ Keep the folder name `desktop/` while this is a staged monorepo. Rename the repo
 
 | Priority | Item | Current state | Next action |
 |----------|------|---------------|-------------|
-| P1 | `desktop/src-tauri/src/lib.rs` is still broad | Filesystem/open/reveal/delete commands moved to `desktop/src-tauri/src/file_actions.rs`; lib.rs still owns setup, live state, tray, and app lifecycle | Split setup/live/tray only when those command clusters change next |
 | P1 | Server connector does not exist yet | Batch jobs block/queue instead of routing to `yap-server` | Finish server contract, then add the desktop reachability/connector path |
 | P1 | CI parity clip is opt-in | Mock verbose JSON fixture protects timestamp contract in normal CI; real audio sidecar tests are ignored unless `YAP_PARITY_CLIP` is set | Add a licensed speech fixture later if real audio parity must run in CI |
 | P2 | ShadCN icon metadata now matches Phosphor | `components.json` declares Phosphor, and app imports Phosphor directly | Keep direct imports; do not add an icon adapter |

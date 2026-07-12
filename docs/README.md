@@ -6,6 +6,7 @@
 | [**adr/README.md**](adr/README.md) | Architecture Decision Records (normative decisions) |
 | [**ADR-IMPLEMENTATION-STATUS.md**](ADR-IMPLEMENTATION-STATUS.md) | Living client/server ownership and implementation audit for every ADR |
 | [**specs/**](specs/) | Buildable implementation specs (IPC, error codes, lifecycle, acceptance) |
+| [**research/**](research/) | Pinned, non-normative external-source audits and selective reuse decisions |
 | [**runbooks/**](runbooks/) | Operational setup notes for local/server environments |
 | [../PRODUCT.md](../PRODUCT.md) | Product purpose and UX principles |
 | [../DESIGN.md](../DESIGN.md) | Visual and interaction design |
