@@ -35,6 +35,12 @@ function Assert-FileUnlocked([string]$Path, [string]$Message) {
   }
 }
 
+function Get-TestProcessIdentity([System.Diagnostics.Process]$Process) {
+  return ([long][Math]::Floor(
+    $Process.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond
+  )).ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $testRoot = Get-ValidatedChildPath -Root $tempRoot -Token "yap-nsis-helper-test-$PID"
 $externalRoot = Get-ValidatedChildPath -Root $tempRoot -Token "yap-nsis-helper-external-$PID"
@@ -56,6 +62,19 @@ try {
   Assert-True (
     (Get-Sha256Hex -Path $hashFixture) -ceq "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
   ) "Framework SHA-256 helper returned the wrong digest."
+
+  $currentProcess = Get-Process -Id $PID -ErrorAction Stop
+  try {
+    $currentIdentity = Get-TestProcessIdentity -Process $currentProcess
+  } finally {
+    $currentProcess.Dispose()
+  }
+  Assert-True (
+    Test-ProcessIdentityAlive -ProcessId $PID -ExpectedIdentity $currentIdentity
+  ) "The current process identity was not recognized as live."
+  Assert-True (-not (
+    Test-ProcessIdentityAlive -ProcessId $PID -ExpectedIdentity "0"
+  )) "A reused PID was mistaken for the original process identity."
 
   $nsisRoot = Join-Path $testRoot "nsis-cache"
   $nsisBin = Join-Path $nsisRoot "Bin"
@@ -153,7 +172,13 @@ try {
   $timeoutPidPath = Join-Path $processRoot "timeout.pid"
   $timeoutOutPath = Join-Path $processRoot "timeout.out.log"
   $timeoutErrPath = Join-Path $processRoot "timeout.err.log"
-  $timeoutScript = "`$PID | Set-Content -LiteralPath '$timeoutPidPath' -Encoding ascii; Start-Sleep -Seconds 6"
+  $timeoutScript = @"
+`$current = [Diagnostics.Process]::GetCurrentProcess()
+`$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
+"`$PID|`$identity" | Set-Content -LiteralPath '$timeoutPidPath' -Encoding ascii
+`$current.Dispose()
+Start-Sleep -Seconds 6
+"@
   $timeoutEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($timeoutScript))
   $timeoutError = $null
   $timeoutWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -172,9 +197,13 @@ try {
   Assert-True ($timeoutError -match "exceeded the 0.5 second deadline") "Deadline helper did not fail on timeout."
   Assert-True ($timeoutError -match '"residualProcessIds":\[\]') "Deadline helper omitted successful cleanup evidence."
   Assert-True (Test-Path -LiteralPath $timeoutPidPath -PathType Leaf) "Timed process did not report its PID."
-  $timedProcessId = [int](Get-Content -LiteralPath $timeoutPidPath -Raw)
+  $timedProcessIdentity = (Get-Content -LiteralPath $timeoutPidPath -Raw).Trim().Split("|")
+  Assert-True ($timedProcessIdentity.Count -eq 2) "Timed-process identity evidence was malformed."
+  $timedProcessId = [int]$timedProcessIdentity[0]
   Assert-True ($timeoutWatch.Elapsed.TotalSeconds -lt 4.5) "Deadline cleanup waited for the timed process to exit naturally."
-  Assert-True (-not (Test-ProcessAlive -ProcessId $timedProcessId)) "Timed process survived deadline cleanup."
+  Assert-True (-not (
+    Test-ProcessIdentityAlive -ProcessId $timedProcessId -ExpectedIdentity $timedProcessIdentity[1]
+  )) "Timed process identity survived deadline cleanup."
   Assert-True ($timeoutError -match "terminatedProcessIds[^]]*$timedProcessId") "Deadline cleanup did not report terminating the timed process."
   Assert-True ($timeoutError -match '"reusedProcessIds":\[\]') "Creation-time precision misclassified the timed process as PID reuse."
   Assert-FileUnlocked -Path $timeoutOutPath -Message "Timed-process stdout was not reaped."
@@ -183,7 +212,13 @@ try {
   $snapshotFailurePidPath = Join-Path $processRoot "snapshot-failure.pid"
   $snapshotFailureOutPath = Join-Path $processRoot "snapshot-failure.out.log"
   $snapshotFailureErrPath = Join-Path $processRoot "snapshot-failure.err.log"
-  $snapshotFailureScript = "`$PID | Set-Content -LiteralPath '$snapshotFailurePidPath' -Encoding ascii; Start-Sleep -Seconds 8"
+  $snapshotFailureScript = @"
+`$current = [Diagnostics.Process]::GetCurrentProcess()
+`$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
+"`$PID|`$identity" | Set-Content -LiteralPath '$snapshotFailurePidPath' -Encoding ascii
+`$current.Dispose()
+Start-Sleep -Seconds 8
+"@
   $snapshotFailureEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($snapshotFailureScript))
   $snapshotFailureError = $null
   $snapshotFailureWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -205,8 +240,14 @@ try {
   Assert-True ($snapshotFailureError -match "process snapshot exceeded the 2 second deadline") "Snapshot failure was not reported."
   Assert-True ($snapshotFailureWatch.Elapsed.TotalSeconds -lt 6) "Snapshot failure cleanup exceeded its bounded window."
   Assert-True (Test-Path -LiteralPath $snapshotFailurePidPath -PathType Leaf) "Snapshot-failure process did not report its PID."
-  $snapshotFailureProcessId = [int](Get-Content -LiteralPath $snapshotFailurePidPath -Raw)
-  Assert-True (-not (Test-ProcessAlive -ProcessId $snapshotFailureProcessId)) "Snapshot failure abandoned the launched process."
+  $snapshotFailureIdentity = (Get-Content -LiteralPath $snapshotFailurePidPath -Raw).Trim().Split("|")
+  Assert-True ($snapshotFailureIdentity.Count -eq 2) "Snapshot-failure process identity evidence was malformed."
+  $snapshotFailureProcessId = [int]$snapshotFailureIdentity[0]
+  Assert-True (-not (
+    Test-ProcessIdentityAlive `
+      -ProcessId $snapshotFailureProcessId `
+      -ExpectedIdentity $snapshotFailureIdentity[1]
+  )) "Snapshot failure abandoned the launched process identity."
   Assert-FileUnlocked -Path $snapshotFailureOutPath -Message "Snapshot-failure stdout was not reaped."
   Assert-FileUnlocked -Path $snapshotFailureErrPath -Message "Snapshot-failure stderr was not reaped."
 
@@ -214,7 +255,10 @@ try {
   $fastChildOutPath = Join-Path $processRoot "fast-parent-child.out.log"
   $fastChildErrPath = Join-Path $processRoot "fast-parent-child.err.log"
   $fastChildScript = @"
-`$PID | Set-Content -LiteralPath '$fastChildPidPath' -Encoding ascii
+`$current = [Diagnostics.Process]::GetCurrentProcess()
+`$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
+"`$PID|`$identity" | Set-Content -LiteralPath '$fastChildPidPath' -Encoding ascii
+`$current.Dispose()
 `$parentId = [int](Get-CimInstance Win32_Process -Filter "ProcessId=`$PID").ParentProcessId
 Stop-Process -Id `$parentId -Force
 Start-Sleep -Seconds 8
@@ -241,8 +285,12 @@ Start-Sleep -Seconds 8
   ) "Fast-parent descendants were not included in the runtime deadline. Received: $fastParentError"
   Assert-True ($fastParentWatch.Elapsed.TotalSeconds -lt 5) "Fast-parent cleanup exceeded its bounded window."
   Assert-True (Test-Path -LiteralPath $fastChildPidPath -PathType Leaf) "Fast-parent child did not report its PID."
-  $fastChildProcessId = [int](Get-Content -LiteralPath $fastChildPidPath -Raw)
-  Assert-True (-not (Test-ProcessAlive -ProcessId $fastChildProcessId)) "Fast-parent child escaped deadline cleanup."
+  $fastChildIdentity = (Get-Content -LiteralPath $fastChildPidPath -Raw).Trim().Split("|")
+  Assert-True ($fastChildIdentity.Count -eq 2) "Fast-parent child identity evidence was malformed."
+  $fastChildProcessId = [int]$fastChildIdentity[0]
+  Assert-True (-not (
+    Test-ProcessIdentityAlive -ProcessId $fastChildProcessId -ExpectedIdentity $fastChildIdentity[1]
+  )) "Fast-parent child identity escaped deadline cleanup."
   Assert-FileUnlocked -Path $fastChildOutPath -Message "Fast-parent stdout was not reaped."
   Assert-FileUnlocked -Path $fastChildErrPath -Message "Fast-parent stderr was not reaped."
 
@@ -260,6 +308,13 @@ Start-Sleep -Seconds 30
   }
   Assert-True (Test-Path -LiteralPath $childIdPath -PathType Leaf) "Child process did not report its PID."
   $childId = [int](Get-Content -LiteralPath $childIdPath -Raw)
+  $parentIdentity = Get-TestProcessIdentity -Process $parent
+  $childProcess = Get-Process -Id $childId -ErrorAction Stop
+  try {
+    $childIdentity = Get-TestProcessIdentity -Process $childProcess
+  } finally {
+    $childProcess.Dispose()
+  }
   $tree = @(Get-ProcessTreeIds -RootProcessId $parent.Id)
   Assert-True ($tree -contains $childId) "Process-tree discovery omitted the child."
   $cleanup = Stop-ProcessTreeBounded -RootProcessId $parent.Id -TimeoutSeconds 5
@@ -268,8 +323,12 @@ Start-Sleep -Seconds 30
   Assert-True (
     -not [string]::IsNullOrWhiteSpace(($cleanup | ConvertTo-Json -Depth 5))
   ) "Tree cleanup returned evidence that Windows PowerShell cannot serialize."
-  Assert-True (-not (Test-ProcessAlive -ProcessId $parent.Id)) "Parent process survived bounded termination."
-  Assert-True (-not (Test-ProcessAlive -ProcessId $childId)) "Child process survived bounded termination."
+  Assert-True (-not (
+    Test-ProcessIdentityAlive -ProcessId $parent.Id -ExpectedIdentity $parentIdentity
+  )) "Parent process identity survived bounded termination."
+  Assert-True (-not (
+    Test-ProcessIdentityAlive -ProcessId $childId -ExpectedIdentity $childIdentity
+  )) "Child process identity survived bounded termination."
   $parent.Dispose()
 
   $snapshotCountPath = Join-Path $processRoot "independent-quiescence-snapshots.txt"

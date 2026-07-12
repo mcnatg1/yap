@@ -468,6 +468,30 @@ function Test-ProcessAlive {
   }
 }
 
+function Test-ProcessIdentityAlive {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$ExpectedIdentity
+  )
+
+  $liveProcess = $null
+  try {
+    $liveProcess = Get-Process -Id $ProcessId -ErrorAction Stop
+    # Bind the observation to one OS handle before comparing creation time so
+    # a later PID reuse cannot turn a completed cleanup into a false failure.
+    [void]$liveProcess.Handle
+    $actualIdentity = ConvertTo-ProcessCreationIdentity -Timestamp $liveProcess.StartTime
+    $normalizedExpected = Normalize-ProcessCreationIdentity -Identity $ExpectedIdentity
+    return $actualIdentity -ceq $normalizedExpected
+  } catch [Microsoft.PowerShell.Commands.ProcessCommandException], `
+      [System.ComponentModel.Win32Exception], `
+      [System.InvalidOperationException] {
+    return $false
+  } finally {
+    if ($null -ne $liveProcess) { $liveProcess.Dispose() }
+  }
+}
+
 function Get-ProcessTreeIds {
   param([Parameter(Mandatory)][int]$RootProcessId)
 
@@ -1341,5 +1365,6 @@ Export-ModuleMember -Function `
   Stop-ProcessTreeBounded, `
   Stop-TrackedProcessesBounded, `
   Test-ProcessAlive, `
+  Test-ProcessIdentityAlive, `
   Test-StrictChildPath, `
   Wait-PathAbsent
