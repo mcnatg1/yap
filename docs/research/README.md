@@ -21,3 +21,4 @@ adapted or copied source enters a shipped artifact, then update
 | Audit | Decision |
 |-------|----------|
 | [Freeflow and Meetily donor audit](2026-07-12-freeflow-meetily-reuse-audit.md) | Preserve Yap's runtime/safety core; selectively adapt donor behaviors after parity, security, license, and native tests |
+| [GB10 readiness audit](2026-07-12-gb10-readiness-audit.md) | Start Phase 3 loopback-only over the private-Ethernet SSH tunnel; the host is multi-homed and ASR remains unprovisioned |

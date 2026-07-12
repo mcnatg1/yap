@@ -14,19 +14,77 @@ Keep three planes separate:
 | App entrypoint | Future `yap-server` WSS + HTTP | One TLS endpoint, opened only after the router exists |
 | Model/runtime internals | Ollama, VNC, dashboard, model pools, databases | Loopback, container network, or SSH tunnel only |
 
-Default rule: the server node is never exposed to the public internet. Corporate access should mean LAN/VPN reachability plus TLS plus auth, not open model ports.
+Default rule: a Yap application service is never exposed to the public internet.
+Do not infer host isolation from the private cable: the current GB10 also has
+Wi-Fi and overlay routes. Corporate access should mean approved LAN/VPN
+reachability plus TLS plus auth, not open model ports.
 
-## Demo Mode
+## Current GB10 And Phase 3 Demo Mode
 
-For demos and early development on the current DGX Spark GB10:
+The 2026-07-12 read-only audit found:
 
 - Windows laptop private IP: `192.168.50.63/24`
 - Spark private IP: `192.168.50.1/24`
 - Spark wired interface: `enP7s7`
-- Spark internet: Wi-Fi/router or another upstream route
+- Spark default route: active Wi-Fi, with additional overlay interfaces
 - SSH alias: `dgx-spark-eth`
+- UFW: active, but effective rules require root to inspect
+- External TCP: SSH only; dashboard, Ollama, and Twingate local services are
+  loopback-only
+- Tailscale: removed after the audit; Twingate/`sdwan0` remains active
+- Time: not NTP-synchronized and about 18.6 seconds ahead of the Windows client
 
-Run the setup from this repo:
+Do **not** rerun the baseline setup script on this prepared, multi-purpose host.
+Its landing zone and SSH hardening already exist, and a rerun would perform
+unnecessary package, firewall, logging, and service operations.
+
+Phase 3 uses a loopback-only health process on the GB10:
+
+```bash
+YAP_SERVER_HOST=127.0.0.1 \
+YAP_SERVER_PORT=18765 \
+PYTHONPATH=/srv/yap-server/releases/<git-sha>/server/src \
+python3 -m yap_server
+```
+
+Forward that loopback port over the private SSH alias from Windows:
+
+```powershell
+ssh -o BatchMode=yes `
+  -o ExitOnForwardFailure=yes `
+  -o ServerAliveInterval=15 `
+  -o ServerAliveCountMax=3 `
+  -N -T `
+  -L 127.0.0.1:18765:127.0.0.1:18765 `
+  dgx-spark-eth
+```
+
+Point the desktop connector to `http://127.0.0.1:18765`. This opens no GB10
+application port, needs no UFW change, and satisfies the connector's
+loopback-only HTTP policy. The client must fail closed when the tunnel dies and
+must never retry against the Wi-Fi address.
+
+See the [GB10 readiness audit](../research/2026-07-12-gb10-readiness-audit.md)
+for the evidence and remaining gates.
+
+## Fresh Dedicated Node Bootstrap
+
+On a genuinely fresh, dedicated demo node, validate the values first without
+root or host mutation:
+
+```bash
+env \
+  YAP_CONFIGURE_PRIVATE_ETHERNET=1 \
+  YAP_PRIVATE_IFACE=enP7s7 \
+  YAP_PRIVATE_ADDR=192.168.50.1/24 \
+  YAP_PRIVATE_SSH_FROM=192.168.50.63 \
+  YAP_LAN_SSH_CIDR= \
+  YAP_VALIDATE_ONLY=1 \
+  bash infra/yap-server-node/setup-server.sh
+```
+
+Then run the bootstrap with conservative firewall handling and explicit
+desktop/peripheral cleanup:
 
 ```bash
 sudo env \
@@ -34,12 +92,26 @@ sudo env \
   YAP_PRIVATE_IFACE=enP7s7 \
   YAP_PRIVATE_ADDR=192.168.50.1/24 \
   YAP_PRIVATE_SSH_FROM=192.168.50.63 \
-  YAP_LAN_SSH_CIDR=192.168.68.0/22 \
+  YAP_LAN_SSH_CIDR= \
   YAP_HARDWARE_PROFILE=dgx-spark-gb10 \
+  YAP_FIREWALL_RESET=0 \
+  YAP_DISABLE_NOISE_SERVICES=1 \
   bash infra/yap-server-node/setup-server.sh
 ```
 
-This keeps SSH open for the demo link and current LAN, but it does not open an app port.
+This adds only the direct-management-link SSH rule and does not open an app
+port. Because reset is disabled, existing UFW rules remain and must be
+inspected separately. Before running it remotely, prove that a second terminal
+can connect with `ssh dgx-spark-eth`. Missing `nmcli`, failed profile
+activation, or a missing private address now stops setup before UFW changes.
+
+`YAP_DISABLE_NOISE_SERVICES=1` stops desktop/peripheral services. Use it only on
+a dedicated node. If incompatible existing UFW rules truly require a reset,
+run only from the local console with a tested recovery path and set both
+`YAP_FIREWALL_RESET=1` and `YAP_FIREWALL_RESET_CONFIRM=local-console`. The
+script validates all app-port inputs before mutation, installs management rules
+before re-enabling UFW, and attempts to restore those rules if a later reset
+step fails. Treat any reported recovery failure as a console repair condition.
 
 ## Corporate LAN/VPN Mode
 
@@ -58,6 +130,8 @@ sudo env \
   YAP_CONFIGURE_PRIVATE_ETHERNET=0 \
   YAP_PRIVATE_SSH_FROM= \
   YAP_LAN_SSH_CIDR='<corp-admin-cidr>' \
+  YAP_FIREWALL_RESET=0 \
+  YAP_DISABLE_NOISE_SERVICES=0 \
   bash infra/yap-server-node/setup-server.sh
 ```
 
@@ -68,6 +142,8 @@ sudo env \
   YAP_LAN_SSH_CIDR='<corp-admin-cidr>' \
   YAP_APP_PORT=443 \
   YAP_APP_CIDR='<corp-client-or-vpn-cidr>' \
+  YAP_FIREWALL_RESET=0 \
+  YAP_DISABLE_NOISE_SERVICES=0 \
   bash infra/yap-server-node/setup-server.sh
 ```
 
@@ -100,7 +176,8 @@ If IT routes Zscaler traffic through connector hosts, use the connector subnet f
 
 ## Baseline Script
 
-`infra/yap-server-node/setup-server.sh` is intentionally small and idempotent. It configures:
+`infra/yap-server-node/setup-server.sh` is intentionally small, but it is a
+host-mutating bootstrap tool rather than a normal deploy command. It configures:
 
 - `/srv/yap-server/{releases,shared,logs,data,models}`
 - SSH key-only access for the configured admin user
@@ -112,9 +189,13 @@ If IT routes Zscaler traffic through connector hosts, use the connector subnet f
 - optional app entrypoint allow rule
 - disabled desktop/peripheral noise that does not belong on a server
 
-Copy `infra/yap-server-node/server.env.example` to a local env file for repeatable setup.
+Copy `infra/yap-server-node/server.env.example` to a local, untracked env file
+for repeatable setup. Its defaults do not reset UFW, disable services, open LAN
+SSH, or open an application port. Set `YAP_VALIDATE_ONLY=1` for a non-mutating
+configuration and host-prerequisite check before every bootstrap run.
 
-For non-fresh or corporate-managed nodes, avoid destructive baseline changes unless IT has approved them:
+For non-fresh or corporate-managed nodes, keep the conservative settings
+explicit even though they are the defaults:
 
 ```bash
 sudo env \
@@ -123,12 +204,20 @@ sudo env \
   bash infra/yap-server-node/setup-server.sh
 ```
 
-Use the defaults for a fresh demo/server node where resetting UFW and disabling desktop/peripheral services is intended.
+On a fresh dedicated node, opt in to reset/disable behavior only as shown in the
+fresh-node section. Never assume that a second run is harmless merely because
+the directory and allow-rule operations are repeatable.
 
 ## What Not To Do Yet
 
 - Do not open `11000`, `11434`, `5909`, database ports, or model worker ports directly.
+- Do not bind the Phase 3 service to `0.0.0.0`, `[::]`, the Wi-Fi address, or an
+  overlay address.
 - Do not make the server node public-internet reachable.
+- Do not reuse cached model weights, Handy model files, or `latest` container
+  tags without pinned provenance, licenses, and hashes.
+- Do not enable time-sensitive auth, leases, replay windows, or authoritative
+  server timestamps until the host clock is synchronized.
 - Do not delete Docker images or model caches just because they are large; disk is cheap and redownloading model/runtime layers is slow.
 - Do not force headless mode until VNC/DGX Dashboard recovery is no longer useful.
 
@@ -139,8 +228,18 @@ After setup:
 ```bash
 ssh dgx-spark-eth 'hostname; uname -r; systemctl --failed --no-pager'
 ssh dgx-spark-eth 'nvidia-smi --query-gpu=name,driver_version --format=csv,noheader'
+ssh dgx-spark-eth 'timedatectl show -p NTPSynchronized --value'
 ssh dgx-spark-eth 'docker run --rm --pull=never --device=nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04 nvidia-smi --query-gpu=name --format=csv,noheader'
 ssh dgx-spark-eth 'sudo ufw status verbose'
 ```
 
-Expected state: SSH works, apt is clean, no reboot pending, UFW is active, only SSH is externally reachable, and GPU works from host and Docker.
+The Docker command creates an ephemeral container; run it only when that runtime
+validation is authorized. The firewall command requires an interactive sudo
+session and must never receive a password through a script or command line.
+
+Expected state for the current Phase 3 boundary: private-link SSH works, no Yap
+application port is externally reachable, the health process is loopback-only,
+the SSH forward binds only Windows loopback, and a stopped tunnel makes the
+connector offline. Host and container GPU proof, synchronized time, and an
+effective firewall read-back are separate evidence items; do not infer them
+from service status alone.

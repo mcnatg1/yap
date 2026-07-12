@@ -264,7 +264,7 @@ git commit -m "Define the Yap server contract"
 @dataclass(frozen=True, slots=True)
 class ServerSettings:
     host: str = "127.0.0.1"
-    port: int = 8765
+    port: int = 18765
 
 def create_server(settings: ServerSettings) -> HTTPServer: ...
 def serve(settings: ServerSettings) -> None: ...
@@ -317,7 +317,7 @@ python -m yap_server
 ```
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8765/v1/health
+Invoke-RestMethod http://127.0.0.1:18765/v1/health
 ```
 
 Expected response fields: `service=yap-server`, `status=ok`, `apiVersion=1`, `auth=not_configured`, and all Phase 5 capabilities set to `false`.
