@@ -42,7 +42,7 @@ fn finish_settings_save(
             Ok(saved)
         }
         Err(error) => {
-            if error.settings_were_published() {
+            if error.settings_may_have_changed() {
                 generation.invalidate();
             }
             Err(error.to_string())
@@ -106,5 +106,27 @@ mod tests {
 
         assert_eq!(generation.current(), 0);
         assert!(error.starts_with("Could not save server settings:"));
+    }
+
+    #[test]
+    fn visible_and_indeterminate_publication_failures_each_invalidate_generation_exactly_once() {
+        let cases = [
+            config::ConfigError::PublicationFailedAfterVisibleChange {
+                source: std::io::Error::from_raw_os_error(1176),
+                recovery_path: Some(std::path::PathBuf::from("visible-recovery.json")),
+            },
+            config::ConfigError::PublicationStateIndeterminate {
+                source: std::io::Error::from_raw_os_error(1177),
+                recovery_path: Some(std::path::PathBuf::from("indeterminate-recovery.json")),
+            },
+        ];
+
+        for error in cases {
+            let generation = ConnectorGeneration::default();
+            let result = finish_settings_save(&generation, Err(error));
+
+            assert!(result.is_err());
+            assert_eq!(generation.current(), 1);
+        }
     }
 }

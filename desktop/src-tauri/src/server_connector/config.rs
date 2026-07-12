@@ -1,10 +1,12 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::Url;
 
 pub const CURRENT_SCHEMA_VERSION: u16 = 1;
+
+static NEXT_SETTINGS_ARTIFACT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,6 +33,14 @@ pub enum ConfigError {
     AccessIo(std::io::Error),
     SaveIo(std::io::Error),
     PublishedButDurabilityUnconfirmed(std::io::Error),
+    PublicationFailedAfterVisibleChange {
+        source: std::io::Error,
+        recovery_path: Option<PathBuf>,
+    },
+    PublicationStateIndeterminate {
+        source: std::io::Error,
+        recovery_path: Option<PathBuf>,
+    },
     Serialization(serde_json::Error),
 }
 
@@ -50,6 +60,22 @@ impl std::fmt::Display for ConfigError {
                 formatter,
                 "Server settings changed, but durability confirmation failed: {error}"
             ),
+            Self::PublicationFailedAfterVisibleChange {
+                source,
+                recovery_path: Some(recovery_path),
+            } => write!(formatter, "Server settings changed even though replacement reported failure; intended settings recovery was preserved at {}: {source}", recovery_path.display()),
+            Self::PublicationFailedAfterVisibleChange {
+                source,
+                recovery_path: None,
+            } => write!(formatter, "Server settings changed even though replacement reported failure, and intended settings recovery could not be preserved: {source}"),
+            Self::PublicationStateIndeterminate {
+                source,
+                recovery_path: Some(recovery_path),
+            } => write!(formatter, "Server settings file state changed or could not be verified after replacement failure; intended settings recovery was preserved at {}: {source}", recovery_path.display()),
+            Self::PublicationStateIndeterminate {
+                source,
+                recovery_path: None,
+            } => write!(formatter, "Server settings file state changed or could not be verified after replacement failure, and intended settings recovery could not be preserved: {source}"),
             Self::Serialization(error) => {
                 write!(formatter, "Could not encode server settings: {error}")
             }
@@ -60,8 +86,13 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl ConfigError {
-    pub(crate) fn settings_were_published(&self) -> bool {
-        matches!(self, Self::PublishedButDurabilityUnconfirmed(_))
+    pub(crate) fn settings_may_have_changed(&self) -> bool {
+        matches!(
+            self,
+            Self::PublishedButDurabilityUnconfirmed(_)
+                | Self::PublicationFailedAfterVisibleChange { .. }
+                | Self::PublicationStateIndeterminate { .. }
+        )
     }
 }
 
@@ -133,6 +164,26 @@ pub fn save(settings: &ServerSettings) -> Result<ServerSettings, ConfigError> {
 }
 
 pub(crate) fn load_from_path(
+    path: &Path,
+    allow_insecure_private: bool,
+) -> Result<ServerSettings, ConfigError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return load_from_path_under_lock(path, allow_insecure_private);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !path.parent().is_some_and(Path::is_dir) {
+                return Ok(ServerSettings::default());
+            }
+        }
+        Err(error) => return Err(ConfigError::AccessIo(error)),
+    }
+    let _lock = acquire_settings_access_lock(path)?;
+    load_from_path_under_lock(path, allow_insecure_private)
+}
+
+fn load_from_path_under_lock(
     path: &Path,
     allow_insecure_private: bool,
 ) -> Result<ServerSettings, ConfigError> {
@@ -298,19 +349,36 @@ where
 
     let (partial, mut file) = reserve_unique_partial(path).map_err(ConfigError::SaveIo)?;
 
-    let publication = (|| -> std::io::Result<()> {
+    let staging = (|| -> std::io::Result<()> {
         file.write_all(contents)?;
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        before_publish(&partial, path)?;
-        atomic_replace_same_directory(&partial, path)?;
         Ok(())
     })();
 
-    if let Err(error) = publication {
+    if let Err(error) = staging {
         std::fs::remove_file(&partial).ok();
         return Err(ConfigError::SaveIo(error));
+    }
+
+    let destination_before = match snapshot_destination(path) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            std::fs::remove_file(&partial).ok();
+            return Err(ConfigError::SaveIo(error));
+        }
+    };
+    let publication =
+        before_publish(&partial, path).and_then(|_| atomic_replace_same_directory(&partial, path));
+    if let Err(error) = publication {
+        return Err(reconcile_publication_failure(
+            path,
+            &partial,
+            contents,
+            &destination_before,
+            error,
+        ));
     }
     if let Err(error) = after_publish(path).and_then(|_| sync_parent_directory(path)) {
         return Err(ConfigError::PublishedButDurabilityUnconfirmed(error));
@@ -319,7 +387,6 @@ where
 }
 
 fn reserve_unique_partial(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let file_name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -327,7 +394,7 @@ fn reserve_unique_partial(path: &Path) -> std::io::Result<(PathBuf, std::fs::Fil
         )
     })?;
     for _ in 0..64 {
-        let counter = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let counter = NEXT_SETTINGS_ARTIFACT.fetch_add(1, Ordering::Relaxed);
         let mut partial_name = file_name.to_os_string();
         partial_name.push(format!(".{}.{counter}.part", std::process::id()));
         let partial = path.with_file_name(partial_name);
@@ -344,6 +411,209 @@ fn reserve_unique_partial(path: &Path) -> std::io::Result<(PathBuf, std::fs::Fil
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         "could not reserve unique server settings partial",
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DestinationSnapshot {
+    Missing,
+    Present {
+        identity: Option<FileIdentity>,
+        bytes: Vec<u8>,
+    },
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(not(any(windows, unix)))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity;
+
+fn snapshot_destination(path: &Path) -> std::io::Result<DestinationSnapshot> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DestinationSnapshot::Missing);
+        }
+        Err(error) => return Err(error),
+    };
+    let identity = file_identity(&file)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(DestinationSnapshot::Present { identity, bytes })
+}
+
+#[cfg(windows)]
+fn file_identity(file: &std::fs::File) -> std::io::Result<Option<FileIdentity>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information) }
+        .map_err(|_| std::io::Error::last_os_error())?;
+    Ok(Some(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    }))
+}
+
+#[cfg(unix)]
+fn file_identity(file: &std::fs::File) -> std::io::Result<Option<FileIdentity>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn file_identity(_file: &std::fs::File) -> std::io::Result<Option<FileIdentity>> {
+    Ok(None)
+}
+
+fn destination_is_proven_unchanged(
+    before: &DestinationSnapshot,
+    after: &DestinationSnapshot,
+) -> bool {
+    match (before, after) {
+        (DestinationSnapshot::Missing, DestinationSnapshot::Missing) => true,
+        (
+            DestinationSnapshot::Present {
+                identity: Some(before_identity),
+                bytes: before_bytes,
+            },
+            DestinationSnapshot::Present {
+                identity: Some(after_identity),
+                bytes: after_bytes,
+            },
+        ) => before_identity == after_identity && before_bytes == after_bytes,
+        _ => false,
+    }
+}
+
+fn destination_contains(after: &DestinationSnapshot, intended: &[u8]) -> bool {
+    matches!(
+        after,
+        DestinationSnapshot::Present { bytes, .. } if bytes == intended
+    )
+}
+
+fn reconcile_publication_failure(
+    path: &Path,
+    partial: &Path,
+    intended: &[u8],
+    before: &DestinationSnapshot,
+    publish_error: std::io::Error,
+) -> ConfigError {
+    let after = snapshot_destination(path);
+    if after
+        .as_ref()
+        .is_ok_and(|after| destination_is_proven_unchanged(before, after))
+    {
+        std::fs::remove_file(partial).ok();
+        return ConfigError::SaveIo(publish_error);
+    }
+
+    let visible = after
+        .as_ref()
+        .is_ok_and(|after| destination_contains(after, intended));
+    let recovery_path = match preserve_recovery_artifact(path, partial, intended) {
+        Ok(path) => Some(path),
+        Err(recovery_error) => {
+            let source = std::io::Error::other(format!(
+                "{publish_error}; recovery preservation failed: {recovery_error}"
+            ));
+            return if visible {
+                ConfigError::PublicationFailedAfterVisibleChange {
+                    source,
+                    recovery_path: None,
+                }
+            } else {
+                ConfigError::PublicationStateIndeterminate {
+                    source,
+                    recovery_path: None,
+                }
+            };
+        }
+    };
+    if visible {
+        ConfigError::PublicationFailedAfterVisibleChange {
+            source: publish_error,
+            recovery_path,
+        }
+    } else {
+        let source = match after {
+            Ok(_) => publish_error,
+            Err(observation_error) => std::io::Error::other(format!(
+                "{publish_error}; could not verify destination state: {observation_error}"
+            )),
+        };
+        ConfigError::PublicationStateIndeterminate {
+            source,
+            recovery_path,
+        }
+    }
+}
+
+fn preserve_recovery_artifact(
+    path: &Path,
+    partial: &Path,
+    contents: &[u8],
+) -> std::io::Result<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "settings path has no file name",
+        )
+    })?;
+    for _ in 0..64 {
+        let counter = NEXT_SETTINGS_ARTIFACT.fetch_add(1, Ordering::Relaxed);
+        let mut recovery_name = file_name.to_os_string();
+        recovery_name.push(format!(".recovery.{}.{counter}.json", std::process::id()));
+        let recovery = path.with_file_name(recovery_name);
+        let mut file = match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&recovery)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = (|| {
+            file.write_all(contents)?;
+            file.flush()?;
+            file.sync_all()
+        })() {
+            drop(file);
+            std::fs::remove_file(&recovery).ok();
+            return Err(error);
+        }
+        drop(file);
+        std::fs::remove_file(partial).ok();
+        return Ok(recovery);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve server settings recovery artifact",
     ))
 }
 
@@ -397,15 +667,22 @@ struct SettingsFileLock {
 }
 
 fn acquire_settings_lock(path: &Path) -> Result<SettingsFileLock, ConfigError> {
+    open_settings_lock(path).map_err(ConfigError::SaveIo)
+}
+
+fn acquire_settings_access_lock(path: &Path) -> Result<SettingsFileLock, ConfigError> {
+    open_settings_lock(path).map_err(ConfigError::AccessIo)
+}
+
+fn open_settings_lock(path: &Path) -> std::io::Result<SettingsFileLock> {
     let lock_path = path.with_extension("json.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(lock_path)
-        .map_err(ConfigError::SaveIo)?;
-    lock_file_exclusive(&file).map_err(ConfigError::SaveIo)?;
+        .open(lock_path)?;
+    lock_file_exclusive(&file)?;
     Ok(SettingsFileLock { file })
 }
 
@@ -482,10 +759,7 @@ fn unlock_file(file: &std::fs::File) -> std::io::Result<()> {
 fn atomic_replace_same_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{
-        GetFileAttributesW, MoveFileExW, ReplaceFileW, INVALID_FILE_ATTRIBUTES,
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
-    };
+    use windows::Win32::Storage::FileSystem::MoveFileExW;
 
     let wide = |path: &Path| {
         path.as_os_str()
@@ -495,28 +769,21 @@ fn atomic_replace_same_directory(source: &Path, destination: &Path) -> std::io::
     };
     let source_wide = wide(source);
     let destination_wide = wide(destination);
-    let source = PCWSTR(source_wide.as_ptr());
-    let destination = PCWSTR(destination_wide.as_ptr());
-    let destination_exists = unsafe { GetFileAttributesW(destination) } != INVALID_FILE_ATTRIBUTES;
     let result = unsafe {
-        if destination_exists {
-            ReplaceFileW(
-                destination,
-                source,
-                PCWSTR::null(),
-                REPLACEFILE_WRITE_THROUGH,
-                None,
-                None,
-            )
-        } else {
-            MoveFileExW(
-                source,
-                destination,
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        }
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            windows_move_flags(),
+        )
     };
     result.map_err(|_| std::io::Error::last_os_error())
+}
+
+#[cfg(windows)]
+fn windows_move_flags() -> windows::Win32::Storage::FileSystem::MOVE_FILE_FLAGS {
+    use windows::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+
+    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
 }
 
 #[cfg(not(windows))]
@@ -565,6 +832,27 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    fn recovery_files(dir: &Path) -> Vec<PathBuf> {
+        let mut paths = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with("server-settings.json.recovery.") && name.ends_with(".json")
+                })
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn assert_one_recovery_with_contents(dir: &Path, expected: &[u8]) {
+        let recovery = recovery_files(dir);
+        assert_eq!(recovery.len(), 1, "expected one recovery artifact");
+        assert_eq!(std::fs::read(&recovery[0]).unwrap(), expected);
     }
 
     const CROSS_PROCESS_CHILD_PATH: &str = "YAP_TEST_SETTINGS_CHILD_PATH";
@@ -756,8 +1044,10 @@ mod tests {
         let observer_values = Arc::clone(&observations);
         let observer = std::thread::spawn(move || {
             while observer_running.load(Ordering::Acquire) {
-                if let Ok(text) = std::fs::read_to_string(&observer_path) {
-                    observer_values.lock().unwrap().push(text);
+                if let Ok(_lock) = acquire_settings_lock(&observer_path) {
+                    if let Ok(text) = std::fs::read_to_string(&observer_path) {
+                        observer_values.lock().unwrap().push(text);
+                    }
                 }
                 std::thread::yield_now();
             }
@@ -823,6 +1113,176 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_uses_only_supported_move_replace_and_write_through_flags() {
+        use windows::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        assert_eq!(
+            windows_move_flags().0,
+            (MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH).0
+        );
+    }
+
+    #[test]
+    fn failed_publication_with_unchanged_destination_is_prepublication_and_cleans_temp() {
+        let dir = temp_dir("failed-unchanged-publication");
+        let path = dir.join("server-settings.json");
+        let original = b"original settings";
+        std::fs::write(&path, original).unwrap();
+
+        let error = write_atomically_with_before_publish(&path, b"intended settings", |_, _| {
+            Err(std::io::Error::from_raw_os_error(1176))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, ConfigError::SaveIo(_)));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_eq!(recovery_files(&dir), Vec::<PathBuf>::new());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn missing_destination_after_1176_is_indeterminate_and_preserves_recovery() {
+        let dir = temp_dir("failed-missing-publication");
+        let path = dir.join("server-settings.json");
+        let intended = b"intended settings";
+        std::fs::write(&path, b"original settings").unwrap();
+
+        let error = write_atomically_with_before_publish(&path, intended, |_, destination| {
+            std::fs::remove_file(destination)?;
+            Err(std::io::Error::from_raw_os_error(1176))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::PublicationStateIndeterminate { .. }
+        ));
+        assert!(!path.exists());
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_one_recovery_with_contents(&dir, intended);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn moved_destination_after_1177_is_indeterminate_and_preserves_recovery() {
+        let dir = temp_dir("failed-moved-publication");
+        let path = dir.join("server-settings.json");
+        let moved = dir.join("server-settings.moved-by-api.json");
+        let original = b"original settings";
+        let intended = b"intended settings";
+        std::fs::write(&path, original).unwrap();
+
+        let error = write_atomically_with_before_publish(&path, intended, |_, destination| {
+            std::fs::rename(destination, &moved)?;
+            Err(std::io::Error::from_raw_os_error(1177))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::PublicationStateIndeterminate { .. }
+        ));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(moved).unwrap(), original);
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_one_recovery_with_contents(&dir, intended);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn mutated_destination_after_failed_publish_is_indeterminate_even_with_same_identity() {
+        let dir = temp_dir("failed-mutated-publication");
+        let path = dir.join("server-settings.json");
+        let intended = b"intended settings";
+        std::fs::write(&path, b"original settings").unwrap();
+
+        let error = write_atomically_with_before_publish(&path, intended, |_, destination| {
+            std::fs::write(destination, b"mutated settings")?;
+            Err(std::io::Error::from_raw_os_error(1177))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::PublicationStateIndeterminate { .. }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"mutated settings");
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_one_recovery_with_contents(&dir, intended);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn replaced_identity_after_failed_publish_is_indeterminate_even_with_same_bytes() {
+        let dir = temp_dir("failed-replaced-identity");
+        let path = dir.join("server-settings.json");
+        let displaced = dir.join("server-settings.displaced.json");
+        let original = b"original settings";
+        let intended = b"intended settings";
+        std::fs::write(&path, original).unwrap();
+
+        let error = write_atomically_with_before_publish(&path, intended, |_, destination| {
+            std::fs::rename(destination, &displaced)?;
+            std::fs::write(destination, original)?;
+            Err(std::io::Error::from_raw_os_error(1177))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::PublicationStateIndeterminate { .. }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read(displaced).unwrap(), original);
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_one_recovery_with_contents(&dir, intended);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn intended_destination_after_failed_publish_is_visible_and_preserves_recovery() {
+        let dir = temp_dir("failed-visible-publication");
+        let path = dir.join("server-settings.json");
+        let intended = b"intended settings";
+        std::fs::write(&path, b"original settings").unwrap();
+
+        let error =
+            write_atomically_with_before_publish(&path, intended, |partial, destination| {
+                std::fs::remove_file(destination)?;
+                std::fs::rename(partial, destination)?;
+                Err(std::io::Error::from_raw_os_error(1177))
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::PublicationFailedAfterVisibleChange { .. }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), intended);
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_one_recovery_with_contents(&dir, intended);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn normal_success_leaves_no_temp_or_recovery_artifact() {
+        let dir = temp_dir("successful-publication-artifacts");
+        let path = dir.join("server-settings.json");
+
+        write_atomically_with_before_publish(&path, b"first", |_, _| Ok(())).unwrap();
+        write_atomically_with_before_publish(&path, b"second", |_, _| Ok(())).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(partial_files(&dir), Vec::<String>::new());
+        assert_eq!(recovery_files(&dir), Vec::<PathBuf>::new());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn load_io_errors_are_reported_as_access_failures() {
         let dir = temp_dir("load-access-error");
@@ -833,6 +1293,83 @@ mod tests {
             .to_string()
             .starts_with("Could not access server settings:"));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn load_waits_for_the_settings_lock_before_opening_the_destination() {
+        let dir = temp_dir("load-lock");
+        let path = dir.join("server-settings.json");
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"enabled":false,"baseUrl":null}"#,
+        )
+        .unwrap();
+        let lock = acquire_settings_lock(&path).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            loaded_tx.send(load_from_path(&reader_path, false)).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            loaded_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "load opened the destination while the writer lock was held"
+        );
+        drop(lock);
+        assert_eq!(
+            loaded_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            ServerSettings::default()
+        );
+        reader.join().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn missing_load_waits_for_an_in_progress_first_save() {
+        let dir = temp_dir("missing-load-lock");
+        let path = dir.join("server-settings.json");
+        let lock = acquire_settings_lock(&path).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            loaded_tx.send(load_from_path(&reader_path, false)).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            loaded_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "missing load bypassed the in-progress writer lock"
+        );
+        drop(lock);
+        assert_eq!(
+            loaded_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            ServerSettings::default()
+        );
+        reader.join().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn indeterminate_error_never_claims_missing_recovery_was_preserved() {
+        let error = ConfigError::PublicationStateIndeterminate {
+            source: std::io::Error::other("replacement and recovery failed"),
+            recovery_path: None,
+        };
+
+        assert!(error.settings_may_have_changed());
+        assert!(error.to_string().contains("could not be preserved"));
+        assert!(!error.to_string().contains("was preserved at"));
     }
 
     #[test]
