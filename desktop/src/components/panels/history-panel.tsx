@@ -49,7 +49,9 @@ import {
 import {
   canDeleteTranscriptHistoryEntry,
   isRecoverableTranscriptHistoryEntry,
+  isUntrustedNativeLiveTranscriptHistoryEntry,
   maxTranscriptHistoryEntries,
+  recoverableLiveSessionActionIdentity,
   type TranscriptHistoryEntry,
 } from "@/history";
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
@@ -68,28 +70,35 @@ const maxHistoryPreviewCacheEntries = maxTranscriptHistoryEntries;
 export function projectHistorySearchDisplay({
   hasResults,
   indexingBodies,
+  hasUnavailableBodies = false,
 }: {
   hasResults: boolean;
   indexingBodies: boolean;
-}): "results" | "indexing" | "empty" {
+  hasUnavailableBodies?: boolean;
+}): "results" | "indexing" | "unavailable" | "empty" {
   if (hasResults) return "results";
-  return indexingBodies ? "indexing" : "empty";
+  if (indexingBodies) return "indexing";
+  return hasUnavailableBodies ? "unavailable" : "empty";
 }
 
 export function isHistoryBodySearchPending({
   cachedOutputPaths,
+  terminalOutputPaths = new Set<string>(),
   hasPreviewLoader,
   outputPaths,
   query,
 }: {
   cachedOutputPaths: ReadonlySet<string>;
+  terminalOutputPaths?: ReadonlySet<string>;
   hasPreviewLoader: boolean;
   outputPaths: readonly string[];
   query: string;
 }) {
   return hasPreviewLoader
     && shouldSearchTranscriptBodies(query)
-    && outputPaths.some((outputPath) => !cachedOutputPaths.has(outputPath));
+    && outputPaths.some(
+      (outputPath) => !cachedOutputPaths.has(outputPath) && !terminalOutputPaths.has(outputPath),
+    );
 }
 
 function HistoryActionMenu({
@@ -116,6 +125,8 @@ function HistoryActionMenu({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const canDelete = canDeleteTranscriptHistoryEntry(entry);
   const recoverable = isRecoverableTranscriptHistoryEntry(entry);
+  const canMutateRecoverable = recoverableLiveSessionActionIdentity(entry) !== undefined;
+  const hideOnly = isUntrustedNativeLiveTranscriptHistoryEntry(entry);
 
   return (
     <>
@@ -135,19 +146,28 @@ function HistoryActionMenu({
           <DropdownMenuLabel>{recoverable ? "Partial" : "Transcript"}</DropdownMenuLabel>
           {recoverable ? (
             <DropdownMenuGroup>
-              <DropdownMenuItem onSelect={() => onRecover(entry)}>
-                <Recover />
-                Recover
-              </DropdownMenuItem>
+              {canMutateRecoverable ? (
+                <DropdownMenuItem onSelect={() => onRecover(entry)}>
+                  <Recover />
+                  Recover
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
                 <EyeSlash />
                 Hide
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => onDeleteRecoverable(entry)} variant="destructive">
-                <Trash2 />
-                Delete
-              </DropdownMenuItem>
+              {canMutateRecoverable ? (
+                <DropdownMenuItem onSelect={() => onDeleteRecoverable(entry)} variant="destructive">
+                  <Trash2 />
+                  Delete
+                </DropdownMenuItem>
+              ) : null}
             </DropdownMenuGroup>
+          ) : hideOnly ? (
+            <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
+              <EyeSlash />
+              Hide
+            </DropdownMenuItem>
           ) : (
             <>
               <DropdownMenuGroup>
@@ -247,6 +267,9 @@ export function HistoryPanel({
   const [searchFilter, setSearchFilter] = useState("");
   const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
+  const [unavailablePreviewPaths, setUnavailablePreviewPaths] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const previewTextByPathRef = useRef(previewTextByPath);
   const previewLoaderRef = useRef(createPreviewTextLoader());
   const previewSearchGenerationRef = useRef(createPreviewSearchGenerationGuard());
@@ -261,6 +284,12 @@ export function HistoryPanel({
       previewTextByPathRef.current,
       onLoadPreviewText,
       (outputPath, text) => {
+        setUnavailablePreviewPaths((current) => {
+          if (!current.has(outputPath)) return current;
+          const next = new Set(current);
+          next.delete(outputPath);
+          return next;
+        });
         setPreviewTextByPath((current) =>
           current[outputPath] === undefined
             ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
@@ -284,7 +313,12 @@ export function HistoryPanel({
     hasPreviewLoader: Boolean(onLoadPreviewText),
     outputPaths: searchableOutputPaths,
     query: searchFilter,
+    terminalOutputPaths: unavailablePreviewPaths,
   });
+
+  useEffect(() => {
+    setUnavailablePreviewPaths(new Set());
+  }, [entries]);
 
   useEffect(() => {
     if (!indexingBodies || !onLoadPreviewText) return;
@@ -302,6 +336,12 @@ export function HistoryPanel({
             onLoadPreviewText,
             (outputPath, text) => {
               if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
+              setUnavailablePreviewPaths((current) => {
+                if (!current.has(outputPath)) return current;
+                const next = new Set(current);
+                next.delete(outputPath);
+                return next;
+              });
               setPreviewTextByPath((current) =>
                 current[outputPath] === undefined
                   ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
@@ -310,7 +350,13 @@ export function HistoryPanel({
             },
           );
         } catch {
-          // Keep search indexing the rest of history when one transcript moved or is unreadable.
+          if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) continue;
+          setUnavailablePreviewPaths((current) => {
+            const visible = new Set(searchableOutputPaths);
+            const next = new Set([...current].filter((path) => visible.has(path)));
+            next.add(entry.outputPath);
+            return next;
+          });
         }
       }
     })();
@@ -318,7 +364,7 @@ export function HistoryPanel({
     return () => {
       cancelled = true;
     };
-  }, [indexingBodies, onLoadPreviewText, searchFilter, searchableEntries]);
+  }, [indexingBodies, onLoadPreviewText, searchFilter, searchableEntries, searchableOutputPaths]);
 
   useEffect(() => {
     setRenderLimit(historyRenderWindowSize);
@@ -346,6 +392,7 @@ export function HistoryPanel({
     [historyWindow.visibleEntries],
   );
   const searchDisplay = projectHistorySearchDisplay({
+    hasUnavailableBodies: unavailablePreviewPaths.size > 0,
     hasResults: visibleGroups.length > 0,
     indexingBodies,
   });
@@ -381,7 +428,10 @@ export function HistoryPanel({
               ) : (
                 <Button
                   aria-label="Search past transcripts"
-                  onClick={() => setSearchOpen(true)}
+                  onClick={() => {
+                    setUnavailablePreviewPaths(new Set());
+                    setSearchOpen(true);
+                  }}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
@@ -401,9 +451,10 @@ export function HistoryPanel({
                           {group.entries.map((entry) => {
                             const selected = entry.outputPath === selectedOutputPath;
                             const recoverable = isRecoverableTranscriptHistoryEntry(entry);
+                            const hideOnly = isUntrustedNativeLiveTranscriptHistoryEntry(entry);
 
                             function selectEntry(event: MouseEvent<HTMLElement>) {
-                              if (recoverable) return;
+                              if (recoverable || hideOnly) return;
                               const row = event.currentTarget.closest("[data-history-entry-row]");
                               onSelect(entry, row?.getBoundingClientRect());
                             }
@@ -421,19 +472,24 @@ export function HistoryPanel({
                                 <TableCell
                                   className={cn(
                                     "w-24 align-top text-xs tabular-nums text-muted-foreground",
-                                    !recoverable && "cursor-pointer",
+                                    !recoverable && !hideOnly && "cursor-pointer",
                                   )}
-                                  onClick={recoverable ? undefined : selectEntry}
+                                  onClick={recoverable || hideOnly ? undefined : selectEntry}
                                 >
                                   {formatHistoryTime(entry.createdAt)}
                                 </TableCell>
                                 <TableCell
-                                  className={cn("max-w-0 whitespace-normal align-top", !recoverable && "cursor-pointer")}
-                                  onClick={recoverable ? undefined : selectEntry}
+                                  className={cn(
+                                    "max-w-0 whitespace-normal align-top",
+                                    !recoverable && !hideOnly && "cursor-pointer",
+                                  )}
+                                  onClick={recoverable || hideOnly ? undefined : selectEntry}
                                 >
                                   <div className="flex min-w-0 items-start gap-2">
                                     {recoverable ? (
                                       <span className="shrink-0 text-xs font-medium text-muted-foreground">Partial</span>
+                                    ) : hideOnly ? (
+                                      <span className="truncate text-sm text-muted-foreground">{entry.name}</span>
                                     ) : (
                                       <HistoryEntryPreview
                                         entry={entry}
@@ -445,7 +501,7 @@ export function HistoryPanel({
                                 </TableCell>
                                 <TableCell className="w-[4.5rem] align-top text-right">
                                   <div className="flex items-center justify-end gap-0.5">
-                                    {!recoverable ? (
+                                    {!recoverable && !hideOnly ? (
                                       <Tooltip>
                                         <TooltipTrigger asChild>
                                           <Button
@@ -503,6 +559,18 @@ export function HistoryPanel({
                   className="flex items-center justify-center py-8 text-sm text-muted-foreground"
                 >
                   Searching transcript text...
+                </div>
+              ) : searchDisplay === "unavailable" ? (
+                <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
+                  <p>Some transcripts are unavailable. No available recordings match that search.</p>
+                  <Button
+                    onClick={() => setUnavailablePreviewPaths(new Set())}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Retry search
+                  </Button>
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">

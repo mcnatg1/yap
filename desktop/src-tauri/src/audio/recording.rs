@@ -1355,28 +1355,31 @@ impl PublicationReceipt {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg(unix)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     device: u64,
     inode: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg(windows)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     volume_serial: u32,
     file_index: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg(not(any(unix, windows)))]
-struct FileIdentity;
+pub(crate) struct FileIdentity;
 
 #[derive(Debug)]
 pub(crate) struct RegularArtifactIdentity {
     path: PathBuf,
     identity: FileIdentity,
+    require_single_link: bool,
 }
 
 impl RegularArtifactIdentity {
@@ -1393,6 +1396,7 @@ impl RegularArtifactIdentity {
         if file_identity(&current)? != self.identity {
             return Err("recording artifact path no longer names the admitted file".into());
         }
+        self.ensure_link_ownership(&current)?;
         Ok(current)
     }
 
@@ -1400,7 +1404,34 @@ impl RegularArtifactIdentity {
         if file_identity(file)? != self.identity {
             return Err("recording artifact path no longer names the admitted file".into());
         }
+        self.ensure_link_ownership(file)?;
         Ok(())
+    }
+
+    fn ensure_link_ownership(&self, file: &File) -> Result<(), String> {
+        if self.require_single_link && file_link_count(file)? != 1 {
+            return Err("private recording artifact has multiple filesystem links".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn file_identity(&self) -> FileIdentity {
+        self.identity
+    }
+
+    pub(crate) fn read_and_hash(&self) -> Result<(String, String), String> {
+        let mut current = self.open_current()?;
+        let text = read_open_file(&mut current)?;
+        let hash = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok((text, hash))
+    }
+
+    pub(crate) fn sha256(&self) -> Result<String, String> {
+        let mut current = self.open_current()?;
+        sha256_open_file(&mut current)
     }
 }
 
@@ -3007,13 +3038,6 @@ pub(crate) fn open_regular_artifact(directory: &Path, name: &str) -> Result<File
     Ok(file)
 }
 
-pub(crate) fn recover_partial_wav(
-    directory: &Path,
-    session_id: &SessionId,
-) -> Result<(String, u64, String), String> {
-    recover_partial_wav_with_admitted_identity(directory, session_id, None)
-}
-
 pub(crate) fn recover_partial_wav_with_identity(
     directory: &Path,
     session_id: &SessionId,
@@ -3080,6 +3104,30 @@ pub(crate) fn admit_expected_regular_artifact(
     actual_path: &Path,
     expected_path: &Path,
 ) -> Result<RegularArtifactIdentity, String> {
+    admit_expected_regular_artifact_with_link_policy(actual_path, expected_path, false)
+}
+
+pub(crate) fn admit_regular_artifact(path: &Path) -> Result<RegularArtifactIdentity, String> {
+    let file = open_regular_path(path)?;
+    Ok(RegularArtifactIdentity {
+        path: path.to_path_buf(),
+        identity: file_identity(&file)?,
+        require_single_link: false,
+    })
+}
+
+pub(crate) fn admit_expected_private_regular_artifact(
+    actual_path: &Path,
+    expected_path: &Path,
+) -> Result<RegularArtifactIdentity, String> {
+    admit_expected_regular_artifact_with_link_policy(actual_path, expected_path, true)
+}
+
+fn admit_expected_regular_artifact_with_link_policy(
+    actual_path: &Path,
+    expected_path: &Path,
+    require_single_link: bool,
+) -> Result<RegularArtifactIdentity, String> {
     let actual = open_regular_path(actual_path)?;
     let expected = open_regular_path(expected_path)?;
     if !same_file_identity(&actual, &expected)? {
@@ -3087,10 +3135,13 @@ pub(crate) fn admit_expected_regular_artifact(
             "Live recording identity is no longer current. Refresh history and try again.".into(),
         );
     }
-    Ok(RegularArtifactIdentity {
+    let admitted = RegularArtifactIdentity {
         path: actual_path.to_path_buf(),
         identity: file_identity(&actual)?,
-    })
+        require_single_link,
+    };
+    admitted.ensure_link_ownership(&actual)?;
+    Ok(admitted)
 }
 
 pub(crate) fn remove_regular_artifact(directory: &Path, name: &str) -> Result<(), String> {
@@ -3194,19 +3245,6 @@ pub(crate) fn remove_regular_artifact_if_hash(
     remove_open_regular_artifact(directory, name, &owned, || {})
 }
 
-pub(crate) fn remove_regular_artifact_if_identity(
-    directory: &Path,
-    name: &str,
-    expected: &RegularArtifactIdentity,
-) -> Result<(), String> {
-    let path = directory.join(name);
-    if !expected.matches_artifact_name(name) {
-        return Err("admitted recording artifact no longer matches the deletion target".into());
-    }
-    let owned = expected.open_current_at(&path)?;
-    remove_open_regular_artifact(directory, name, &owned, || {})
-}
-
 pub(crate) fn revalidate_regular_artifact_identity(
     expected: &RegularArtifactIdentity,
 ) -> Result<(), String> {
@@ -3224,6 +3262,38 @@ pub(crate) fn remove_regular_artifact_if_identity_and_hash(
         return Err("admitted recording artifact no longer matches the deletion target".into());
     }
     let mut owned = expected.open_current_at(&path)?;
+    if sha256_open_file(&mut owned)? != expected_sha256 {
+        return Err("recording artifact no longer matches its validated hash".into());
+    }
+    remove_open_regular_artifact(directory, name, &owned, || {})
+}
+
+pub(crate) fn revalidate_regular_artifact_file_identity_and_hash(
+    directory: &Path,
+    name: &str,
+    expected: &FileIdentity,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let mut owned = open_regular_artifact(directory, name)?;
+    if file_identity(&owned)? != *expected {
+        return Err("recording artifact no longer matches its admitted identity".into());
+    }
+    if sha256_open_file(&mut owned)? != expected_sha256 {
+        return Err("recording artifact no longer matches its validated hash".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_regular_artifact_if_file_identity_and_hash(
+    directory: &Path,
+    name: &str,
+    expected: &FileIdentity,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let mut owned = open_regular_artifact(directory, name)?;
+    if file_identity(&owned)? != *expected {
+        return Err("recording artifact no longer matches its admitted identity".into());
+    }
     if sha256_open_file(&mut owned)? != expected_sha256 {
         return Err("recording artifact no longer matches its validated hash".into());
     }
@@ -3416,6 +3486,33 @@ fn file_identity(file: &File) -> Result<FileIdentity, String> {
         device: metadata.dev(),
         inode: metadata.ino(),
     })
+}
+
+#[cfg(unix)]
+fn file_link_count(file: &File) -> Result<u64, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    file.metadata()
+        .map(|metadata| metadata.nlink())
+        .map_err(|error| format!("Failed to inspect recording file link count: {error}"))
+}
+
+#[cfg(windows)]
+fn file_link_count(file: &File) -> Result<u64, String> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            &mut information as *mut BY_HANDLE_FILE_INFORMATION,
+        )
+    }
+    .map_err(|error| format!("Failed to inspect recording file link count: {error}"))?;
+    Ok(u64::from(information.nNumberOfLinks))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_link_count(_file: &File) -> Result<u64, String> {
+    Err("recording link ownership is unsupported on this platform".into())
 }
 
 #[cfg(windows)]
@@ -5537,7 +5634,7 @@ mod tests {
         let bytes = b"RIFF not a valid Yap wav".to_vec();
         std::fs::write(&path, &bytes).unwrap();
 
-        assert!(recover_partial_wav(&dir, &session).is_err());
+        assert!(recover_partial_wav_for_test(&dir, &session).is_err());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
         assert!(!dir.join(format!("live-{session}.wav")).exists());
         std::fs::remove_dir_all(dir).ok();
@@ -5551,7 +5648,7 @@ mod tests {
         recording.append_pcm16(&[1, 0]).unwrap();
         recording.abort("inject partial".into());
 
-        recover_partial_wav(&dir, &session).unwrap();
+        recover_partial_wav_for_test(&dir, &session).unwrap();
         let scan = scan_recordings(&dir).unwrap();
         assert!(scan.complete.is_empty());
         assert!(scan
@@ -5760,5 +5857,20 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn recover_partial_wav_for_test(
+        directory: &Path,
+        session_id: &SessionId,
+    ) -> Result<(String, u64, String), String> {
+        let partial = directory.join(format!("live-{session_id}.wav.part"));
+        let final_wav = directory.join(format!("live-{session_id}.wav"));
+        let path = if partial.is_file() {
+            partial
+        } else {
+            final_wav
+        };
+        let admitted = admit_expected_private_regular_artifact(&path, &path)?;
+        recover_partial_wav_with_identity(directory, session_id, &admitted)
     }
 }

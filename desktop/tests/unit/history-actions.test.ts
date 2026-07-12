@@ -8,11 +8,14 @@ import {
   type HistoryActionPorts,
   type HistoryActionRuntime,
 } from "@/hooks/use-history-actions";
-import type { TranscriptHistoryEntry } from "@/history";
+import {
+  savedSessionToTranscriptHistoryEntry,
+  type TranscriptHistoryEntry,
+} from "@/history";
 import type { SavedLiveSession } from "@/live";
 
 function historyEntry(overrides: Partial<TranscriptHistoryEntry> = {}): TranscriptHistoryEntry {
-  return {
+  const entry: TranscriptHistoryEntry = {
     captureCommitPath: "C:/Yap/live-123.commit.json",
     createdAt: "2026-07-11T12:00:00.000Z",
     name: "live-123",
@@ -21,6 +24,17 @@ function historyEntry(overrides: Partial<TranscriptHistoryEntry> = {}): Transcri
     sourcePath: "C:/Yap/live-123.wav",
     ...overrides,
   };
+  if (!entry.sessionId) return entry;
+  return savedSessionToTranscriptHistoryEntry({
+    captureCommitPath: entry.captureCommitPath,
+    createdAtMs: Date.parse(entry.createdAt),
+    name: entry.name,
+    outputPath: entry.outputPath,
+    recoveryState: entry.recoveryState,
+    sessionId: entry.sessionId,
+    sourcePath: entry.sourcePath,
+    warning: entry.warning,
+  });
 }
 
 function savedSession(): SavedLiveSession {

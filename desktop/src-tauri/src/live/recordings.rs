@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -21,7 +21,7 @@ const MAX_MAINTENANCE_WARNINGS: usize = 8;
 const MAX_PRIVATE_DELETION_LEFTOVERS: usize = 128;
 const PRIVATE_DELETION_LEFTOVER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-static SESSION_MUTATION_OWNERSHIP: OnceLock<Mutex<()>> = OnceLock::new();
+static SESSION_MUTATION_OWNERSHIP: OnceLock<SessionMutationOwnership> = OnceLock::new();
 static DELETION_CLEANUP_CURSORS: OnceLock<Mutex<HashMap<PathBuf, DeletionCleanupCursors>>> =
     OnceLock::new();
 
@@ -39,11 +39,50 @@ enum DeletionCleanupCursor {
     PendingIntents,
 }
 
-fn session_mutation_ownership() -> MutexGuard<'static, ()> {
-    SESSION_MUTATION_OWNERSHIP
-        .get_or_init(|| Mutex::new(()))
+#[derive(Default)]
+struct SessionMutationOwnershipState {
+    next_ticket: u64,
+    serving_ticket: u64,
+}
+
+#[derive(Default)]
+struct SessionMutationOwnership {
+    state: Mutex<SessionMutationOwnershipState>,
+    changed: Condvar,
+}
+
+struct SessionMutationOwnershipGuard {
+    owner: &'static SessionMutationOwnership,
+}
+
+impl Drop for SessionMutationOwnershipGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.serving_ticket = state.serving_ticket.wrapping_add(1);
+        self.owner.changed.notify_all();
+    }
+}
+
+fn session_mutation_ownership() -> SessionMutationOwnershipGuard {
+    let owner = SESSION_MUTATION_OWNERSHIP.get_or_init(SessionMutationOwnership::default);
+    let mut state = owner
+        .state
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ticket = state.next_ticket;
+    state.next_ticket = state.next_ticket.wrapping_add(1);
+    while state.serving_ticket != ticket {
+        state = owner
+            .changed
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    drop(state);
+    SessionMutationOwnershipGuard { owner }
 }
 
 fn deletion_cleanup_cursor(dir: &Path, kind: DeletionCleanupCursor) -> Option<String> {
@@ -123,6 +162,8 @@ impl RotatingDeletionCandidates {
 struct DeletionArtifact {
     name: String,
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_identity: Option<recording::FileIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -133,6 +174,8 @@ struct DeletionIntent {
     reason: String,
     commit_file: String,
     commit_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit_file_identity: Option<recording::FileIdentity>,
     artifacts: Vec<DeletionArtifact>,
 }
 
@@ -461,7 +504,15 @@ fn list_session_catalog_from_dir_at(
         });
     }
 
-    let pending = reconcile_pending_deletion_intents(dir);
+    let _ownership = session_mutation_ownership();
+    list_session_catalog_from_dir_at_while_owned(dir, now)
+}
+
+fn list_session_catalog_from_dir_at_while_owned(
+    dir: &std::path::Path,
+    now: OffsetDateTime,
+) -> Result<SavedLiveSessionCatalog, String> {
+    let pending = reconcile_pending_deletion_intents_while_owned(dir);
     let scan = recording::scan_recordings(dir)?;
     let recoverable = list_recoverable_live_sessions_from_scan(dir, &scan, now)?;
     let maintenance_warnings = damaged_commit_warnings(&scan, pending.maintenance_warnings);
@@ -568,7 +619,13 @@ fn delete_expired_committed_meeting(
     dir: &Path,
     capture: &recording::CommittedCapture,
 ) -> Result<(), String> {
-    delete_committed_session_in_dir(dir, capture, "expired-meeting-retention")
+    delete_committed_session_in_dir_with_publication_barrier_while_owned(
+        dir,
+        capture,
+        "expired-meeting-retention",
+        |_| {},
+        None,
+    )
 }
 
 fn committed_session_output_path(dir: &Path, committed: &recording::CommittedCapture) -> PathBuf {
@@ -590,6 +647,13 @@ fn admit_expected_artifact_identity(
     expected_path: &str,
 ) -> Result<recording::RegularArtifactIdentity, String> {
     recording::admit_expected_regular_artifact(actual_path, Path::new(expected_path))
+}
+
+fn admit_expected_private_artifact_identity(
+    actual_path: &Path,
+    expected_path: &str,
+) -> Result<recording::RegularArtifactIdentity, String> {
+    recording::admit_expected_private_regular_artifact(actual_path, Path::new(expected_path))
 }
 
 struct ExpectedDeletionArtifacts<'a> {
@@ -632,14 +696,7 @@ fn delete_saved_live_session_in_dir(
     )
 }
 
-fn delete_committed_session_in_dir(
-    dir: &Path,
-    capture: &recording::CommittedCapture,
-    reason: &str,
-) -> Result<(), String> {
-    delete_committed_session_in_dir_with_publication_barrier(dir, capture, reason, |_| {})
-}
-
+#[cfg(test)]
 fn delete_committed_session_in_dir_with_publication_barrier<F>(
     dir: &Path,
     capture: &recording::CommittedCapture,
@@ -690,32 +747,29 @@ fn build_deletion_intent(
     }
     let manifest = &capture.manifest;
     let commit_file = format!("live-{}.commit.json", manifest.session_id);
-    let (commit_text, commit_sha256) =
-        recording::read_and_hash_regular_artifact(dir, &commit_file)?;
+    let commit_admission = recording::admit_regular_artifact(&dir.join(&commit_file))?;
+    let (commit_text, commit_sha256) = commit_admission.read_and_hash()?;
     let current_manifest: recording::CaptureCommitManifest = serde_json::from_str(&commit_text)
         .map_err(|error| format!("Failed to parse committed recording manifest: {error}"))?;
     if current_manifest != *manifest {
         return Err("committed recording manifest changed before deletion".into());
     }
-    let mut artifacts = vec![
-        DeletionArtifact {
-            name: manifest.audio_file.clone(),
-            sha256: manifest.audio_sha256.clone(),
-        },
-        DeletionArtifact {
-            name: manifest.capture_sidecar_file.clone(),
-            sha256: manifest.capture_sidecar_sha256.clone(),
-        },
-    ];
+    let audio = admit_deletion_artifact(dir, &manifest.audio_file)?;
+    let sidecar = admit_deletion_artifact(dir, &manifest.capture_sidecar_file)?;
+    if audio.sha256 != manifest.audio_sha256 || sidecar.sha256 != manifest.capture_sidecar_sha256 {
+        return Err("committed recording artifacts changed before deletion".into());
+    }
+    let mut artifacts = vec![audio, sidecar];
     let journal = format!("live-{}.capture.journal.part", manifest.session_id);
     if recording::is_regular_artifact(&dir.join(&journal)) {
-        let (journal_text, journal_sha256) =
-            recording::read_and_hash_regular_artifact(dir, &journal)?;
+        let journal_admission = recording::admit_regular_artifact(&dir.join(&journal))?;
+        let (journal_text, journal_sha256) = journal_admission.read_and_hash()?;
         let parsed = recording::parse_journal_for_session(&journal_text, &manifest.session_id)?;
         if parsed {
             artifacts.push(DeletionArtifact {
                 name: journal,
                 sha256: journal_sha256,
+                file_identity: Some(journal_admission.file_identity()),
             });
         }
     }
@@ -739,17 +793,11 @@ fn build_deletion_intent(
             return Err("transcript artifacts are incomplete or do not form a valid immutable revision chain".into());
         }
         for name in transcript_names {
-            artifacts.push(DeletionArtifact {
-                sha256: recording::sha256_regular_artifact(dir, &name)?,
-                name,
-            });
+            artifacts.push(admit_deletion_artifact(dir, &name)?);
         }
         let polished = format!("live-{}.polished.txt", manifest.session_id);
         if recording::is_regular_artifact(&dir.join(&polished)) {
-            artifacts.push(DeletionArtifact {
-                sha256: recording::sha256_regular_artifact(dir, &polished)?,
-                name: polished,
-            });
+            artifacts.push(admit_deletion_artifact(dir, &polished)?);
         }
     }
     let intent = DeletionIntent {
@@ -758,10 +806,20 @@ fn build_deletion_intent(
         reason: reason.to_string(),
         commit_file,
         commit_sha256,
+        commit_file_identity: Some(commit_admission.file_identity()),
         artifacts,
     };
     validate_deletion_intent(&intent)?;
     Ok(intent)
+}
+
+fn admit_deletion_artifact(dir: &Path, name: &str) -> Result<DeletionArtifact, String> {
+    let admission = recording::admit_regular_artifact(&dir.join(name))?;
+    Ok(DeletionArtifact {
+        name: name.to_string(),
+        sha256: admission.sha256()?,
+        file_identity: Some(admission.file_identity()),
+    })
 }
 
 fn deletion_intent_name(session_id: &crate::audio::session::SessionId) -> String {
@@ -909,6 +967,7 @@ struct ReconciliationWarnings {
     maintenance_warnings: Vec<String>,
 }
 
+#[cfg(test)]
 fn reconcile_pending_deletion_intents(dir: &Path) -> ReconciliationWarnings {
     let _ownership = session_mutation_ownership();
     reconcile_pending_deletion_intents_while_owned(dir)
@@ -1297,57 +1356,112 @@ fn resume_deletion_intent_while_owned_with_expected(
     intent_name: &str,
     expected: Option<&ExpectedDeletionArtifacts<'_>>,
 ) -> Result<(), String> {
-    let (text, intent_sha256) = recording::read_and_hash_regular_artifact(dir, intent_name)?;
+    let intent_admission = recording::admit_regular_artifact(&dir.join(intent_name))?;
+    let (text, intent_sha256) = intent_admission.read_and_hash()?;
     let intent: DeletionIntent = serde_json::from_str(&text)
         .map_err(|error| format!("Failed to parse recording deletion intent: {error}"))?;
     validate_deletion_intent(&intent)?;
     if intent_name != deletion_intent_name(&intent.session_id) {
         return Err("recording deletion intent name does not match its session".into());
     }
+    preflight_deletion_intent_artifacts(dir, &intent)?;
     if physical_entry_exists(dir, &intent.commit_file)? {
-        prove_intent_against_current_commit(dir, &intent, OffsetDateTime::now_utc())?;
-        if let Some(expected) = expected {
-            recording::revalidate_regular_artifact_identity(expected.commit)?;
-            let output_artifact = intent
-                .artifacts
-                .iter()
-                .find(|artifact| expected.output.matches_artifact_name(&artifact.name))
-                .ok_or_else(|| {
-                    "admitted output artifact is absent from the deletion intent".to_string()
-                })?;
-            recording::remove_regular_artifact_if_identity_and_hash(
-                dir,
-                &output_artifact.name,
-                expected.output,
-                &output_artifact.sha256,
-            )?;
+        if intent.reason != "recoverable" {
+            prove_intent_against_current_commit(dir, &intent, OffsetDateTime::now_utc())?;
+            if let Some(expected) = expected {
+                recording::revalidate_regular_artifact_identity(expected.commit)?;
+                intent
+                    .artifacts
+                    .iter()
+                    .find(|artifact| expected.output.matches_artifact_name(&artifact.name))
+                    .ok_or_else(|| {
+                        "admitted output artifact is absent from the deletion intent".to_string()
+                    })?;
+                recording::revalidate_regular_artifact_identity(expected.output)?;
+            }
         }
         for artifact in &intent.artifacts {
-            if expected
-                .is_some_and(|expected| expected.output.matches_artifact_name(&artifact.name))
-            {
-                continue;
-            }
-            remove_regular_artifact_if_present(dir, &artifact.name, &artifact.sha256)?;
+            remove_intent_artifact_if_present(dir, artifact)?;
         }
-        if let Some(expected) = expected {
-            recording::remove_regular_artifact_if_identity_and_hash(
-                dir,
-                &intent.commit_file,
-                expected.commit,
-                &intent.commit_sha256,
-            )?;
-        } else {
-            recording::remove_regular_artifact_if_hash(
-                dir,
-                &intent.commit_file,
-                &intent.commit_sha256,
-            )?;
-        }
+        remove_intent_commit(dir, &intent)?;
     } else {
         ensure_intent_artifacts_are_absent(dir, &intent)?;
     }
-    recording::remove_regular_artifact_if_hash(dir, intent_name, &intent_sha256)
+    recording::remove_regular_artifact_if_identity_and_hash(
+        dir,
+        intent_name,
+        &intent_admission,
+        &intent_sha256,
+    )
+}
+
+fn preflight_deletion_intent_artifacts(dir: &Path, intent: &DeletionIntent) -> Result<(), String> {
+    if physical_entry_exists(dir, &intent.commit_file)? {
+        revalidate_intent_artifact(
+            dir,
+            &intent.commit_file,
+            &intent.commit_sha256,
+            intent.commit_file_identity.as_ref(),
+        )?;
+    }
+    for artifact in &intent.artifacts {
+        if physical_entry_exists(dir, &artifact.name)? {
+            revalidate_intent_artifact(
+                dir,
+                &artifact.name,
+                &artifact.sha256,
+                artifact.file_identity.as_ref(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn revalidate_intent_artifact(
+    dir: &Path,
+    name: &str,
+    sha256: &str,
+    identity: Option<&recording::FileIdentity>,
+) -> Result<(), String> {
+    if let Some(identity) = identity {
+        recording::revalidate_regular_artifact_file_identity_and_hash(dir, name, identity, sha256)
+    } else if recording::sha256_regular_artifact(dir, name)? == sha256 {
+        Ok(())
+    } else {
+        Err("recording artifact no longer matches its validated hash".into())
+    }
+}
+
+fn remove_intent_artifact_if_present(
+    dir: &Path,
+    artifact: &DeletionArtifact,
+) -> Result<(), String> {
+    if !physical_entry_exists(dir, &artifact.name)? {
+        return Ok(());
+    }
+    if let Some(identity) = artifact.file_identity.as_ref() {
+        recording::remove_regular_artifact_if_file_identity_and_hash(
+            dir,
+            &artifact.name,
+            identity,
+            &artifact.sha256,
+        )
+    } else {
+        recording::remove_regular_artifact_if_hash(dir, &artifact.name, &artifact.sha256)
+    }
+}
+
+fn remove_intent_commit(dir: &Path, intent: &DeletionIntent) -> Result<(), String> {
+    if let Some(identity) = intent.commit_file_identity.as_ref() {
+        recording::remove_regular_artifact_if_file_identity_and_hash(
+            dir,
+            &intent.commit_file,
+            identity,
+            &intent.commit_sha256,
+        )
+    } else {
+        recording::remove_regular_artifact_if_hash(dir, &intent.commit_file, &intent.commit_sha256)
+    }
 }
 
 fn prove_intent_against_current_commit(
@@ -1395,25 +1509,35 @@ fn intent_originals_are_intact(dir: &Path, intent: &DeletionIntent) -> Result<bo
     if !physical_entry_exists(dir, &intent.commit_file)? {
         return Ok(false);
     }
-    if prove_intent_against_current_commit(dir, intent, OffsetDateTime::now_utc()).is_err() {
+    if intent.reason != "recoverable"
+        && prove_intent_against_current_commit(dir, intent, OffsetDateTime::now_utc()).is_err()
+    {
+        return Ok(false);
+    }
+    if revalidate_intent_artifact(
+        dir,
+        &intent.commit_file,
+        &intent.commit_sha256,
+        intent.commit_file_identity.as_ref(),
+    )
+    .is_err()
+    {
         return Ok(false);
     }
     for artifact in &intent.artifacts {
         if !physical_entry_exists(dir, &artifact.name)?
-            || recording::sha256_regular_artifact(dir, &artifact.name)? != artifact.sha256
+            || revalidate_intent_artifact(
+                dir,
+                &artifact.name,
+                &artifact.sha256,
+                artifact.file_identity.as_ref(),
+            )
+            .is_err()
         {
             return Ok(false);
         }
     }
     Ok(true)
-}
-
-fn remove_regular_artifact_if_present(dir: &Path, name: &str, sha256: &str) -> Result<(), String> {
-    if physical_entry_exists(dir, name)? {
-        recording::remove_regular_artifact_if_hash(dir, name, sha256)
-    } else {
-        Ok(())
-    }
 }
 
 fn ensure_intent_artifacts_are_absent(dir: &Path, intent: &DeletionIntent) -> Result<(), String> {
@@ -1439,10 +1563,15 @@ fn physical_entry_exists(dir: &Path, name: &str) -> Result<bool, String> {
 }
 
 fn validate_deletion_intent(intent: &DeletionIntent) -> Result<(), String> {
+    let recoverable = intent.reason == "recoverable";
     if intent.schema_version != DELETION_INTENT_SCHEMA_VERSION
-        || (intent.reason != "manual" && intent.reason != "expired-meeting-retention")
-        || intent.commit_file != format!("live-{}.commit.json", intent.session_id)
-        || intent.artifacts.is_empty()
+        || (!recoverable
+            && intent.reason != "manual"
+            && intent.reason != "expired-meeting-retention")
+        || (!recoverable && intent.commit_file != format!("live-{}.commit.json", intent.session_id))
+        || (recoverable
+            && !is_deletion_artifact_for_session(&intent.commit_file, &intent.session_id))
+        || (!recoverable && intent.artifacts.is_empty())
         || intent.artifacts.len() > MAX_DELETION_ARTIFACTS
         || !is_sha256(&intent.commit_sha256)
     {
@@ -1461,8 +1590,17 @@ fn validate_deletion_intent(intent: &DeletionIntent) -> Result<(), String> {
             return Err("recording deletion intent has an invalid artifact hash".into());
         }
     }
-    if !names.contains(&format!("live-{}.wav", intent.session_id))
-        || !names.contains(&format!("live-{}.capture.json", intent.session_id))
+    let identity_bound = intent.commit_file_identity.is_some();
+    if intent
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.file_identity.is_some() != identity_bound)
+    {
+        return Err("recording deletion intent has incomplete identity evidence".into());
+    }
+    if !recoverable
+        && (!names.contains(&format!("live-{}.wav", intent.session_id))
+            || !names.contains(&format!("live-{}.capture.json", intent.session_id)))
     {
         return Err("recording deletion intent is missing required capture artifacts".into());
     }
@@ -1479,8 +1617,14 @@ fn is_deletion_artifact_for_session(
 ) -> bool {
     let stem = format!("live-{session_id}");
     name == format!("{stem}.wav")
+        || name == format!("{stem}.wav.part")
         || name == format!("{stem}.capture.json")
+        || name == format!("{stem}.capture.json.part")
         || name == format!("{stem}.capture.journal.part")
+        || name == format!("{stem}.capture.partial.json")
+        || name == format!("{stem}.capture.partial.json.part")
+        || name == format!("{stem}.commit.json")
+        || name == format!("{stem}.commit.json.part")
         || name == format!("{stem}.txt")
         || name == format!("{stem}.polished.txt")
         || name
@@ -1588,6 +1732,7 @@ fn validated_transcript_sha256(
 fn list_recoverable_live_sessions_from_dir(
     dir: &Path,
 ) -> Result<Vec<RecoverableLiveSession>, String> {
+    let _ownership = session_mutation_ownership();
     list_recoverable_live_sessions_from_scan(
         dir,
         &recording::scan_recordings(dir)?,
@@ -1629,10 +1774,7 @@ fn list_recoverable_live_sessions_from_scan(
         let candidate = recoverable_session_from_dir(dir, session_id)?;
         let now_ms = u64::try_from(now.unix_timestamp_nanos() / 1_000_000).unwrap_or(u64::MAX);
         if candidate.expires_at_ms <= now_ms {
-            let cleanup = {
-                let _ownership = session_mutation_ownership();
-                delete_recoverable_session_artifacts_while_owned(dir, session_id, None)
-            };
+            let cleanup = delete_recoverable_session_artifacts_while_owned(dir, session_id, None);
             if let Err(error) = cleanup {
                 sessions.push(RecoverableLiveSession {
                     reason: format!("{} Cleanup is pending: {error}", candidate.reason),
@@ -1739,7 +1881,7 @@ where
     let _ownership = session_mutation_ownership();
     let session_id = crate::audio::session::SessionId::new(session_id)?;
     if let Some(saved) = saved_recovered_session(dir, &session_id)? {
-        let expected = admit_expected_artifact_identity(
+        let expected = admit_expected_private_artifact_identity(
             Path::new(saved_session_action_artifact_path(&saved)),
             &expected_artifact_path,
         )?;
@@ -1752,8 +1894,10 @@ where
     let artifact_path = recoverable_session_artifact_path(&candidate).ok_or_else(|| {
         "Recoverable live recording has no authoritative artifact identity.".to_string()
     })?;
-    let expected =
-        admit_expected_artifact_identity(Path::new(artifact_path), &expected_artifact_path)?;
+    let expected = admit_expected_private_artifact_identity(
+        Path::new(artifact_path),
+        &expected_artifact_path,
+    )?;
     if candidate.expires_at_ms <= unix_millis_now()? {
         return Err("Recoverable live recording has expired.".into());
     }
@@ -1837,10 +1981,16 @@ where
     let artifact_path = recoverable_session_artifact_path(&candidate).ok_or_else(|| {
         "Recoverable live recording has no authoritative artifact identity.".to_string()
     })?;
-    let expected =
-        admit_expected_artifact_identity(Path::new(artifact_path), &expected_artifact_path)?;
-    mutation_barrier();
-    delete_recoverable_session_artifacts_while_owned(dir, &session_id, Some(&expected))
+    let expected = admit_expected_private_artifact_identity(
+        Path::new(artifact_path),
+        &expected_artifact_path,
+    )?;
+    delete_recoverable_session_artifacts_with_barrier_while_owned(
+        dir,
+        &session_id,
+        Some(&expected),
+        mutation_barrier,
+    )
 }
 
 fn delete_recoverable_session_artifacts_while_owned(
@@ -1848,46 +1998,98 @@ fn delete_recoverable_session_artifacts_while_owned(
     session_id: &crate::audio::session::SessionId,
     expected: Option<&recording::RegularArtifactIdentity>,
 ) -> Result<(), String> {
+    delete_recoverable_session_artifacts_with_barrier_while_owned(dir, session_id, expected, || {})
+}
+
+fn delete_recoverable_session_artifacts_with_barrier_while_owned<F>(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+    expected: Option<&recording::RegularArtifactIdentity>,
+    mutation_barrier: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
     ensure_recoverable_session(dir, session_id)?;
-    let recovered = saved_recovered_session(dir, session_id)?.is_some();
+    let intent = build_recoverable_deletion_intent(dir, session_id, expected)?;
+    let intent_name = deletion_intent_name(session_id);
+    write_deletion_intent_with_publication_barrier_while_owned(
+        &dir.join(&intent_name),
+        &intent,
+        |_| {},
+    )?;
+    mutation_barrier();
+    resume_deletion_intent_while_owned(dir, &intent_name)
+}
+
+fn build_recoverable_deletion_intent(
+    dir: &Path,
+    session_id: &crate::audio::session::SessionId,
+    expected: Option<&recording::RegularArtifactIdentity>,
+) -> Result<DeletionIntent, String> {
+    let mut names = BTreeSet::new();
     for suffix in [
         ".wav.part",
         ".capture.journal.part",
         ".capture.json.part",
         ".capture.partial.json.part",
         ".commit.json.part",
+        ".capture.partial.json",
+        ".commit.json",
+        ".wav",
+        ".txt",
+        ".polished.txt",
     ] {
         let name = format!("live-{session_id}{suffix}");
         if regular_artifact_exists(dir, &name) {
-            remove_recoverable_artifact(dir, &name, expected)?;
+            names.insert(name);
         }
     }
-    let sidecar_name = format!("live-{session_id}.capture.partial.json");
-    if let Ok(text) = recording::read_regular_artifact(dir, &sidecar_name) {
-        if valid_partial_sidecar(&text, session_id) {
-            recording::remove_regular_artifact(dir, &sidecar_name)?;
-        }
-    }
-    if recovered {
-        recording::remove_regular_artifact(dir, &format!("live-{session_id}.commit.json"))?;
-    }
-    let orphan_audio = format!("live-{session_id}.wav");
-    if regular_artifact_exists(dir, &orphan_audio) {
-        remove_recoverable_artifact(dir, &orphan_audio, expected)?;
-    }
-    Ok(())
-}
+    names.extend(transcript_artifact_names(dir, session_id)?);
 
-fn remove_recoverable_artifact(
-    dir: &Path,
-    name: &str,
-    expected: Option<&recording::RegularArtifactIdentity>,
-) -> Result<(), String> {
-    if let Some(expected) = expected.filter(|expected| expected.matches_artifact_name(name)) {
-        recording::remove_regular_artifact_if_identity(dir, name, expected)
-    } else {
-        recording::remove_regular_artifact(dir, name)
+    let sidecar_name = format!("live-{session_id}.capture.partial.json");
+    if names.contains(&sidecar_name)
+        && recording::read_regular_artifact(dir, &sidecar_name)
+            .is_ok_and(|text| !valid_partial_sidecar(&text, session_id))
+    {
+        names.remove(&sidecar_name);
     }
+    let commit_name = format!("live-{session_id}.commit.json");
+    if names.contains(&commit_name) && saved_recovered_session(dir, session_id)?.is_none() {
+        names.remove(&commit_name);
+    }
+
+    let mut artifacts = names
+        .into_iter()
+        .map(|name| admit_deletion_artifact(dir, &name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let anchor_index = if let Some(expected) = expected {
+        artifacts
+            .iter()
+            .position(|artifact| {
+                expected.matches_artifact_name(&artifact.name)
+                    && artifact.file_identity == Some(expected.file_identity())
+            })
+            .ok_or_else(|| {
+                "admitted recovery artifact is absent from the deletion snapshot".to_string()
+            })?
+    } else {
+        (!artifacts.is_empty())
+            .then_some(0)
+            .ok_or_else(|| "Recoverable live recording has no deletable artifacts.".to_string())?
+    };
+    let anchor = artifacts.remove(anchor_index);
+    let intent = DeletionIntent {
+        schema_version: DELETION_INTENT_SCHEMA_VERSION,
+        session_id: session_id.clone(),
+        reason: "recoverable".into(),
+        commit_file: anchor.name,
+        commit_sha256: anchor.sha256,
+        commit_file_identity: anchor.file_identity,
+        artifacts,
+    };
+    validate_deletion_intent(&intent)?;
+    Ok(intent)
 }
 
 fn ensure_recoverable_session(
@@ -2801,7 +3003,10 @@ mod tests {
             let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
             recording.append_pcm16(&[1, 0]).unwrap();
         }
-        recording::recover_partial_wav(&dir, &session).unwrap();
+        let partial = dir.join(format!("live-{session}.wav.part"));
+        let admitted =
+            recording::admit_expected_private_regular_artifact(&partial, &partial).unwrap();
+        recording::recover_partial_wav_with_identity(&dir, &session, &admitted).unwrap();
 
         let recoverable = list_recoverable_live_sessions_from_dir(&dir).unwrap();
 
@@ -2918,6 +3123,33 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rejects_a_multi_link_private_wav_before_mutation() {
+        let dir = test_dir("recover-hardlinked-private-wav");
+        let session = SessionId::new("s-recover-hardlinked-private-wav").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        let partial = dir.join(format!("live-{session}.wav.part"));
+        let external = dir.join("external-session.wav");
+        if std::fs::hard_link(&partial, &external).is_err() {
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+        let original = std::fs::read(&partial).unwrap();
+
+        let result =
+            recover_live_session_in_dir(&dir, session.to_string(), partial.display().to_string());
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&partial).unwrap(), original);
+        assert_eq!(std::fs::read(&external).unwrap(), original);
+        assert!(!dir.join(format!("live-{session}.wav")).exists());
+        assert!(!dir.join(format!("live-{session}.commit.json")).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn recoverable_delete_rejects_a_replacement_after_identity_admission() {
         let dir = test_dir("recover-delete-admission-replacement");
         let session = SessionId::new("s-recover-delete-admission-replacement").unwrap();
@@ -2943,6 +3175,118 @@ mod tests {
         assert!(dir
             .join(format!("live-{session}.capture.journal.part"))
             .is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recoverable_delete_preserves_a_same_content_sibling_replacement() {
+        let dir = test_dir("recover-delete-sibling-replacement");
+        let session = SessionId::new("s-recover-delete-sibling-replacement").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        let expected = dir.join(format!("live-{session}.wav.part"));
+        let journal = dir.join(format!("live-{session}.capture.journal.part"));
+        let original_journal = std::fs::read(&journal).unwrap();
+
+        let result = delete_recoverable_live_session_in_dir_with_mutation_barrier(
+            &dir,
+            session.to_string(),
+            expected.display().to_string(),
+            || {
+                std::fs::remove_file(&journal).unwrap();
+                std::fs::write(&journal, &original_journal).unwrap();
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&journal).unwrap(), original_journal);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recoverable_delete_preserves_a_valid_sidecar_created_after_admission() {
+        let dir = test_dir("recover-delete-late-sidecar");
+        let session = SessionId::new("s-recover-delete-late-sidecar").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        let expected = dir.join(format!("live-{session}.wav.part"));
+        let sidecar = dir.join(format!("live-{session}.capture.partial.json"));
+        let sidecar_text =
+            format!("{{\"schemaVersion\":1,\"sessionId\":\"{session}\",\"status\":\"partial\"}}\n");
+
+        delete_recoverable_live_session_in_dir_with_mutation_barrier(
+            &dir,
+            session.to_string(),
+            expected.display().to_string(),
+            || std::fs::write(&sidecar, &sidecar_text).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), sidecar_text);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recover_delete_and_catalog_threads_share_one_mutation_owner() {
+        let dir = test_dir("recover-delete-list-owner-race");
+        let session = SessionId::new("s-recover-delete-list-owner-race").unwrap();
+        {
+            let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+            recording.append_pcm16(&[1, 0]).unwrap();
+        }
+        let expected = dir.join(format!("live-{session}.wav.part"));
+        let (delete_ready_tx, delete_ready_rx) = std::sync::mpsc::channel();
+        let (release_delete_tx, release_delete_rx) = std::sync::mpsc::channel();
+        let delete_dir = dir.clone();
+        let delete_session = session.clone();
+        let delete_expected = expected.display().to_string();
+        let deleting = std::thread::spawn(move || {
+            delete_recoverable_live_session_in_dir_with_mutation_barrier(
+                &delete_dir,
+                delete_session.to_string(),
+                delete_expected,
+                || {
+                    delete_ready_tx.send(()).unwrap();
+                    release_delete_rx.recv().unwrap();
+                },
+            )
+        });
+        delete_ready_rx.recv().unwrap();
+
+        let recover_dir = dir.clone();
+        let recover_session = session.clone();
+        let recover_expected = expected.display().to_string();
+        let (recover_tx, recover_rx) = std::sync::mpsc::channel();
+        let recovering = std::thread::spawn(move || {
+            recover_tx
+                .send(recover_live_session_in_dir(
+                    &recover_dir,
+                    recover_session.to_string(),
+                    recover_expected,
+                ))
+                .unwrap();
+        });
+        let list_dir = dir.clone();
+        let (list_tx, list_rx) = std::sync::mpsc::channel();
+        let listing = std::thread::spawn(move || {
+            list_tx
+                .send(list_session_catalog_from_dir(&list_dir))
+                .unwrap();
+        });
+
+        assert!(recover_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(list_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        release_delete_tx.send(()).unwrap();
+
+        assert!(deleting.join().unwrap().is_ok());
+        assert!(recover_rx.recv().unwrap().is_err());
+        assert!(list_rx.recv().unwrap().unwrap().sessions.is_empty());
+        recovering.join().unwrap();
+        listing.join().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -3908,9 +4252,11 @@ mod tests {
                 reason: "manual".into(),
                 commit_file: format!("live-{session}.commit.json"),
                 commit_sha256: "0".repeat(64),
+                commit_file_identity: None,
                 artifacts: vec![DeletionArtifact {
                     name: audio.clone(),
                     sha256: "0".repeat(64),
+                    file_identity: None,
                 }],
             };
             std::fs::write(dir.join(audio), b"retained evidence").unwrap();
@@ -4346,18 +4692,22 @@ mod tests {
             reason: "manual".into(),
             commit_file: "live-s-forged-intent.commit.json".into(),
             commit_sha256: "0".repeat(64),
+            commit_file_identity: None,
             artifacts: vec![
                 DeletionArtifact {
                     name: "live-s-forged-intent.wav".into(),
                     sha256: "0".repeat(64),
+                    file_identity: None,
                 },
                 DeletionArtifact {
                     name: "live-s-forged-intent.capture.json".into(),
                     sha256: "0".repeat(64),
+                    file_identity: None,
                 },
                 DeletionArtifact {
                     name: "keep-me.txt".into(),
                     sha256: recording::sha256_file(&arbitrary).unwrap(),
+                    file_identity: None,
                 },
             ],
         };

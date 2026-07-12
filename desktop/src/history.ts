@@ -44,6 +44,7 @@ export type RecoverableLiveSessionActionIdentity = {
 };
 
 const hiddenPruneBatchSize = 200;
+const trustedNativeHistoryIdentities = new Set<string>();
 
 function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
   if (!value || typeof value !== "object") return false;
@@ -153,6 +154,24 @@ function isPreReleaseLiveHistoryEntry(entry: TranscriptHistoryEntry) {
 
 function isCanonicalYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
   return Boolean(entry.captureCommitPath || entry.recoveryState);
+}
+
+function nativeHistoryProvenanceKey(entry: TranscriptHistoryEntry) {
+  const sessionId = validHistorySessionId(entry);
+  if (!sessionId || !isCanonicalYapLiveHistoryEntry(entry)) return undefined;
+  return JSON.stringify([
+    sessionId,
+    transcriptPathIdentity(entry.sourcePath),
+    transcriptPathIdentity(entry.outputPath),
+    entry.captureCommitPath ? transcriptPathIdentity(entry.captureCommitPath) : "",
+    entry.recoveryState ?? "",
+  ]);
+}
+
+function trustNativeTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  const identity = nativeHistoryProvenanceKey(entry);
+  if (identity) trustedNativeHistoryIdentities.add(identity);
+  return entry;
 }
 
 export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
@@ -272,7 +291,12 @@ export function recordVisibleTranscriptHistoryEntries(
 }
 
 export function isNativeLiveTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
-  return isCanonicalYapLiveHistoryEntry(entry);
+  const identity = nativeHistoryProvenanceKey(entry);
+  return identity !== undefined && trustedNativeHistoryIdentities.has(identity);
+}
+
+export function isUntrustedNativeLiveTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  return isCanonicalYapLiveHistoryEntry(entry) && !isNativeLiveTranscriptHistoryEntry(entry);
 }
 
 export function isRecoverableTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
@@ -321,6 +345,7 @@ function historyArtifactPath(path: string) {
 export function savedLiveSessionActionIdentity(
   entry: TranscriptHistoryEntry,
 ): SavedLiveSessionActionIdentity | undefined {
+  if (!isNativeLiveTranscriptHistoryEntry(entry)) return undefined;
   const sessionId = validHistorySessionId(entry);
   const expectedCaptureCommitPath = entry.captureCommitPath;
   if (!sessionId || !expectedCaptureCommitPath || isRecoverableTranscriptHistoryEntry(entry)) {
@@ -349,6 +374,7 @@ export function savedLiveSessionActionIdentity(
 export function recoverableLiveSessionActionIdentity(
   entry: TranscriptHistoryEntry,
 ): RecoverableLiveSessionActionIdentity | undefined {
+  if (!isNativeLiveTranscriptHistoryEntry(entry)) return undefined;
   const sessionId = validHistorySessionId(entry);
   if (!sessionId || !isRecoverableTranscriptHistoryEntry(entry)) return undefined;
   const artifact = historyArtifactPath(entry.sourcePath);
@@ -378,7 +404,7 @@ export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSes
     ? new Date(session.createdAtMs).toISOString()
     : new Date().toISOString();
 
-  return {
+  return trustNativeTranscriptHistoryEntry({
     captureCommitPath: session.captureCommitPath ?? undefined,
     createdAt,
     name: session.name,
@@ -387,5 +413,5 @@ export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSes
     sourcePath: session.sourcePath,
     warning: session.warning ?? undefined,
     recoveryState: session.recoveryState ?? undefined,
-  };
+  });
 }

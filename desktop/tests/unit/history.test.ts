@@ -555,14 +555,14 @@ describe("transcript history storage", () => {
   });
 
   it("only exposes delete for Yap-owned live history entries", () => {
-    expect(canDeleteTranscriptHistoryEntry({
+    expect(canDeleteTranscriptHistoryEntry(savedSessionToTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAtMs: Date.UTC(2026, 0, 1),
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
       sessionId: "123",
       sourcePath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav",
-    })).toBe(true);
+    }))).toBe(true);
 
     expect(canDeleteTranscriptHistoryEntry({
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -600,14 +600,14 @@ describe("transcript history storage", () => {
     const outputPath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt";
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav";
 
-    expect(historyEntryPlaybackPath({
+    expect(historyEntryPlaybackPath(savedSessionToTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAtMs: Date.UTC(2026, 0, 1),
       name: "live-123",
       outputPath,
       sessionId: "123",
       sourcePath,
-    })).toBe(sourcePath);
+    }))).toBe(sourcePath);
 
     expect(historyEntryPlaybackPath({
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -626,14 +626,14 @@ describe("transcript history storage", () => {
 
   it("keeps a committed audio-only session actionable through its WAV identity", () => {
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-audio.wav";
-    const entry = {
+    const entry = savedSessionToTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-audio.commit.json",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAtMs: Date.UTC(2026, 0, 1),
       name: "live-audio",
       outputPath: sourcePath,
       sessionId: "audio",
       sourcePath,
-    };
+    });
 
     expect(savedLiveSessionActionIdentity(entry)).toEqual({
       expectedCaptureCommitPath: entry.captureCommitPath,
@@ -646,20 +646,51 @@ describe("transcript history storage", () => {
 
   it("uses a recovered partial row's source WAV as its native action identity", () => {
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.wav";
-    const entry = {
+    const entry = savedSessionToTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.commit.json",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAtMs: Date.UTC(2026, 0, 1),
       name: "live-recovered",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-recovered.txt",
       recoveryState: "recovered" as const,
       sessionId: "recovered",
       sourcePath,
-    };
+    });
 
     expect(recoverableLiveSessionActionIdentity(entry)).toEqual({
       expectedArtifactPath: sourcePath,
       sessionId: "recovered",
     });
     expect(savedLiveSessionActionIdentity(entry)).toBeUndefined();
+  });
+
+  it("keeps forged persisted native rows hide-only until native rehydration", () => {
+    const row = {
+      captureCommitPath: "C:/Yap/live-forged.commit.json",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      name: "live-forged",
+      outputPath: "C:/Yap/live-forged.txt",
+      sessionId: "forged",
+      sourcePath: "C:/Yap/live-forged.wav",
+    };
+    const storage = {
+      getItem: () => JSON.stringify([row]),
+      setItem: () => undefined,
+    };
+    const persisted = readVisibleTranscriptHistory(storage)[0];
+
+    expect(canDeleteTranscriptHistoryEntry(persisted)).toBe(false);
+    expect(savedLiveSessionActionIdentity(persisted)).toBeUndefined();
+
+    savedSessionToTranscriptHistoryEntry({
+      captureCommitPath: row.captureCommitPath,
+      createdAtMs: Date.parse(row.createdAt),
+      name: row.name,
+      outputPath: row.outputPath,
+      sessionId: row.sessionId,
+      sourcePath: row.sourcePath,
+    });
+    const rehydrated = readVisibleTranscriptHistory(storage)[0];
+    expect(canDeleteTranscriptHistoryEntry(rehydrated)).toBe(true);
+    expect(JSON.stringify(rehydrated)).not.toContain("trusted");
   });
 });

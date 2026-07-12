@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
-import { canDeleteTranscriptHistoryEntry, historyEntryPlaybackPath } from "@/history";
+import {
+  canDeleteTranscriptHistoryEntry,
+  historyEntryPlaybackPath,
+  savedSessionToTranscriptHistoryEntry,
+} from "@/history";
 
 describe("history job projection", () => {
   it("projects partial live saves with their warning", () => {
@@ -22,14 +26,14 @@ describe("history job projection", () => {
 
   it("preserves playback only for matching owned live audio", () => {
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav";
-    const job = historyEntryToRecordingJob({
+    const job = historyEntryToRecordingJob(savedSessionToTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAtMs: Date.UTC(2026, 0, 1),
       name: "live-123",
       outputPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.txt",
       sessionId: "123",
       sourcePath,
-    });
+    }));
 
     expect(job.intent).toBe("live");
     expect(job.path).toBe(sourcePath);
