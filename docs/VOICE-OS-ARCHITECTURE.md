@@ -745,7 +745,7 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
-**Next execution order:** after this hardening branch passes PR/CI and is merged, migrate repo-owned PowerShell scripts and workflows to PowerShell 7 as a tooling-only slice. The next **product** implementation plan remains [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
+**Next execution order:** the tooling-only PowerShell migration now requires Core 7.4 or newer in repo-owned Windows scripts and every Windows CI job, with the supported minor-version floor exercised by a hash-pinned 7.4.17 compatibility lane. The next **product** implementation plan remains [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
 
 ---
 

@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 param(
   [string]$BundleDirectory = "",
   [string]$ExpectedInstallerSha256 = "",

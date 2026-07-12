@@ -1,7 +1,15 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot "nsis-smoke-helpers.psm1") -Force
+
+$powerShellExecutable = Join-Path $PSHOME "pwsh.exe"
+if (-not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
+  throw "The active PowerShell 7 executable was not found at '$powerShellExecutable'."
+}
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
@@ -132,7 +140,7 @@ exit 7
 "@
   $quickEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($quickScript))
   $quick = Invoke-ProcessWithDeadline `
-    -FilePath "powershell.exe" `
+    -FilePath $powerShellExecutable `
     -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $quickEncoded) `
     -TimeoutSeconds 5 `
     -StdoutPath $quickOut `
@@ -155,7 +163,7 @@ exit 7
   Assert-True ($quick.QuiescencePasses -ge 2) "Deadline helper did not verify process-tree quiescence."
   Assert-True (
     -not [string]::IsNullOrWhiteSpace(($quick | ConvertTo-Json -Depth 5))
-  ) "Deadline helper returned evidence that Windows PowerShell cannot serialize."
+  ) "Deadline helper returned evidence that PowerShell 7 cannot serialize."
 
   $membershipPidPath = Join-Path $processRoot "membership.pid"
   $membershipOutPath = Join-Path $processRoot "membership.out.log"
@@ -170,7 +178,7 @@ Start-Sleep -Seconds 10
     $membershipContext = & $helperModule {
       param($Encoded, $StdoutPath, $StderrPath)
       Start-JobContainedProcess `
-        -FilePath "powershell.exe" `
+        -FilePath ([Environment]::ProcessPath) `
         -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $Encoded) `
         -StdoutPath $StdoutPath `
         -StderrPath $StderrPath
@@ -219,7 +227,7 @@ Start-Sleep -Seconds 10
     & $helperModule {
       param($Encoded, $StdoutPath, $StderrPath)
       Start-JobContainedProcess `
-        -FilePath "powershell.exe" `
+        -FilePath ([Environment]::ProcessPath) `
         -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $Encoded) `
         -StdoutPath $StdoutPath `
         -StderrPath $StderrPath `
@@ -259,39 +267,66 @@ Start-Sleep -Seconds 10
 
   $existingEnvironmentKey = "YAP_NSIS_HELPER_EXISTING_$PID"
   $missingEnvironmentKey = "YAP_NSIS_HELPER_MISSING_$PID"
+  $removedEnvironmentKey = "YAP_NSIS_HELPER_REMOVED_$PID"
   $environmentEvidence = Join-Path $processRoot "environment.json"
   [Environment]::SetEnvironmentVariable($existingEnvironmentKey, "parent-value", "Process")
-  [Environment]::SetEnvironmentVariable($missingEnvironmentKey, $null, "Process")
+  [Environment]::SetEnvironmentVariable($removedEnvironmentKey, "parent-removed", "Process")
+  Remove-Item -LiteralPath "Env:$missingEnvironmentKey" -ErrorAction SilentlyContinue
   try {
     $environmentScript = @"
 [ordered]@{
+  edition = `$PSVersionTable.PSEdition
+  version = `$PSVersionTable.PSVersion.ToString()
+  processPath = [Environment]::ProcessPath
   existing = [Environment]::GetEnvironmentVariable('$existingEnvironmentKey', 'Process')
   missing = [Environment]::GetEnvironmentVariable('$missingEnvironmentKey', 'Process')
+  missingPresent = Test-Path -LiteralPath 'Env:$missingEnvironmentKey'
+  removed = [Environment]::GetEnvironmentVariable('$removedEnvironmentKey', 'Process')
+  removedPresent = Test-Path -LiteralPath 'Env:$removedEnvironmentKey'
 } | ConvertTo-Json | Set-Content -LiteralPath '$environmentEvidence' -Encoding utf8
 "@
     $environmentEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($environmentScript))
     $environmentChild = Start-ProcessWithEnvironment `
-      -FilePath "powershell.exe" `
+      -FilePath $powerShellExecutable `
       -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $environmentEncoded) `
       -Environment ([ordered]@{
         $existingEnvironmentKey = "child-existing"
         $missingEnvironmentKey = "child-missing"
+        $removedEnvironmentKey = $null
       })
     $environmentChild.WaitForExit()
     Assert-True ($environmentChild.ExitCode -eq 0) "Environment inheritance child failed."
     $environmentValues = Get-Content -LiteralPath $environmentEvidence -Raw | ConvertFrom-Json
     $environmentChild.Dispose()
+    Assert-True ($environmentValues.edition -ceq "Core") "Environment child did not run in PowerShell Core."
+    Assert-True (
+      [version]$environmentValues.version -ge [version]"7.4"
+    ) "Environment child ran below the supported PowerShell 7.4 floor."
+    Assert-True (
+      [System.IO.Path]::GetFullPath([string]$environmentValues.processPath) -ieq
+      [System.IO.Path]::GetFullPath($powerShellExecutable)
+    ) "Environment child did not reuse the exact PowerShell 7 runtime."
     Assert-True ($environmentValues.existing -ceq "child-existing") "Child missed the overridden existing environment value."
     Assert-True ($environmentValues.missing -ceq "child-missing") "Child missed the new environment value."
+    Assert-True ([bool]$environmentValues.missingPresent) "Child environment omitted its new variable."
+    Assert-True ($null -eq $environmentValues.removed) "Child retained an environment value explicitly removed for that process."
+    Assert-True (-not $environmentValues.removedPresent) "Child environment removal left an empty variable behind."
     Assert-True (
       [Environment]::GetEnvironmentVariable($existingEnvironmentKey, "Process") -ceq "parent-value"
-    ) "Parent environment was not restored."
+    ) "Child override changed the parent environment."
     Assert-True (
       $null -eq [Environment]::GetEnvironmentVariable($missingEnvironmentKey, "Process")
-    ) "Previously absent parent environment value was not removed."
+    ) "Child-only environment setup changed an absent parent value."
+    Assert-True (
+      -not (Test-Path -LiteralPath "Env:$missingEnvironmentKey")
+    ) "Child-only environment setup created an empty parent variable."
+    Assert-True (
+      [Environment]::GetEnvironmentVariable($removedEnvironmentKey, "Process") -ceq "parent-removed"
+    ) "Child-only environment removal changed the parent value."
   } finally {
-    [Environment]::SetEnvironmentVariable($existingEnvironmentKey, $null, "Process")
-    [Environment]::SetEnvironmentVariable($missingEnvironmentKey, $null, "Process")
+    Remove-Item -LiteralPath "Env:$existingEnvironmentKey" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:$missingEnvironmentKey" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:$removedEnvironmentKey" -ErrorAction SilentlyContinue
   }
 
   $timeoutPidPath = Join-Path $processRoot "timeout.pid"
@@ -309,7 +344,7 @@ Start-Sleep -Seconds 6
   $timeoutWatch = [System.Diagnostics.Stopwatch]::StartNew()
   try {
     Invoke-ProcessWithDeadline `
-      -FilePath "powershell.exe" `
+      -FilePath $powerShellExecutable `
       -ArgumentList @("-NoProfile", "-EncodedCommand", $timeoutEncoded) `
       -TimeoutSeconds 0.5 `
       -QuiescenceTimeoutSeconds 0.2 `
@@ -349,7 +384,7 @@ Start-Sleep -Seconds 8
   $snapshotFailureWatch = [System.Diagnostics.Stopwatch]::StartNew()
   try {
     Invoke-ProcessWithDeadline `
-      -FilePath "powershell.exe" `
+      -FilePath $powerShellExecutable `
       -ArgumentList @("-NoProfile", "-EncodedCommand", $snapshotFailureEncoded) `
       -TimeoutSeconds 4 `
       -QuiescenceTimeoutSeconds 0.2 `
@@ -393,7 +428,7 @@ Start-Sleep -Seconds 8
   $fastChildScript = @"
 `$ErrorActionPreference = "Stop"
 try {
-  `$child = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', '$fastDescendantEncoded') -NoNewWindow -PassThru
+  `$child = Start-Process -FilePath ([Environment]::ProcessPath) -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', '$fastDescendantEncoded') -NoNewWindow -PassThru
   `$child.Dispose()
   exit 0
 } catch {
@@ -416,7 +451,7 @@ Start-Sleep -Milliseconds 300
   $fastParentWatch = [System.Diagnostics.Stopwatch]::StartNew()
   try {
     Invoke-ProcessWithDeadline `
-      -FilePath "powershell.exe" `
+      -FilePath $powerShellExecutable `
       -ArgumentList @("-NoProfile", "-EncodedCommand", $fastChildEncoded) `
       -TimeoutSeconds 1 `
       -QuiescenceTimeoutSeconds 0.2 `
@@ -444,12 +479,12 @@ Start-Sleep -Milliseconds 300
 
   $childIdPath = Join-Path $processRoot "child.pid"
   $childScript = @"
-`$child = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru
+`$child = Start-Process -FilePath ([Environment]::ProcessPath) -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru
 `$child.Id | Set-Content -LiteralPath '$childIdPath' -Encoding ascii
 Start-Sleep -Seconds 30
 "@
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
-  $parent = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-EncodedCommand", $encoded) -PassThru -WindowStyle Hidden
+  $parent = Start-Process -FilePath $powerShellExecutable -ArgumentList @("-NoProfile", "-EncodedCommand", $encoded) -PassThru -WindowStyle Hidden
   $deadline = [DateTime]::UtcNow.AddSeconds(5)
   while (-not (Test-Path -LiteralPath $childIdPath) -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 50
@@ -470,7 +505,7 @@ Start-Sleep -Seconds 30
   Assert-True ($cleanup.QuiescencePasses -ge 2) "Cleanup did not wait for repeated quiescence."
   Assert-True (
     -not [string]::IsNullOrWhiteSpace(($cleanup | ConvertTo-Json -Depth 5))
-  ) "Tree cleanup returned evidence that Windows PowerShell cannot serialize."
+  ) "Tree cleanup returned evidence that PowerShell 7 cannot serialize."
   Assert-True (-not (
     Test-ProcessIdentityAlive -ProcessId $parent.Id -ExpectedIdentity $parentIdentity
   )) "Parent process identity survived bounded termination."

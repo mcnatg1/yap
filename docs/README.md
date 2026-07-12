@@ -28,7 +28,7 @@
 
 ## Next execution order
 
-After the current hardening branch passes PR/CI and is merged, the immediate tooling slice migrates repo-owned scripts and workflows to PowerShell 7. That tooling work does not broaden the product architecture or start server inference.
+The tooling-only PowerShell migration is implemented: repo-owned Windows scripts require PowerShell Core 7.4 or newer, executable selectors use `pwsh.exe`, and each Windows CI job validates its isolated runtime. A hash-pinned 7.4.17 compatibility lane parses all tracked scripts and runs the focused native-process suite. This does not broaden the product architecture or start server inference.
 
 The next **product** implementation plan is [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md): the canonical Phase 3 machine-readable contract, capability health service, connector, and SQLite job-ledger prerequisite for Phase 5. It deliberately stops before upload drain, WSS runtime, server ASR, authentication, or diarization.
 
