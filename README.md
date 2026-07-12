@@ -50,7 +50,8 @@ Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects
     |-- vite.config.ts                Vite/Tauri dev server config.
     |-- src/                          React app.
     |   |-- App.tsx                   Main app state and screen composition.
-    |   |-- stt.ts                    Tauri STT event/invoke client.
+    |   |-- live.ts                   Tauri live-session event/invoke client.
+    |   |-- settings.ts               Tauri fallback/setup event/invoke client.
     |   |-- history.ts                localStorage transcript history.
     |   |-- polish.ts                 Text polish client.
     |   |-- components/app/           App chrome, sidebar, status widgets.
