@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use crate::server_connector::ServerCapabilities;
+
 use super::state::{JobRoute, RuntimeState, ServerConnectorState, SetupState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +17,7 @@ pub enum RuntimeError {
 pub struct RuntimeOrchestrator {
     setup: SetupState,
     server: ServerConnectorState,
+    server_capabilities: ServerCapabilities,
     runtime: RuntimeState,
 }
 
@@ -23,6 +26,7 @@ impl Default for RuntimeOrchestrator {
         Self {
             setup: SetupState::Checking,
             server: ServerConnectorState::NotSet,
+            server_capabilities: ServerCapabilities::default(),
             runtime: RuntimeState::Idle,
         }
     }
@@ -39,6 +43,10 @@ impl RuntimeOrchestrator {
 
     pub fn runtime(&self) -> RuntimeState {
         self.runtime
+    }
+
+    pub fn server_capabilities(&self) -> ServerCapabilities {
+        self.server_capabilities
     }
 
     pub fn set_setup(&mut self, setup: SetupState) {
@@ -59,18 +67,27 @@ impl RuntimeOrchestrator {
         }
     }
 
-    pub fn set_server(&mut self, server: ServerConnectorState) {
+    pub fn set_server(&mut self, server: ServerConnectorState, capabilities: ServerCapabilities) {
         self.server = server;
+        self.server_capabilities = capabilities;
     }
 
-    pub fn route_recording(&self, larger_recording: bool) -> Result<JobRoute, RuntimeError> {
-        if larger_recording {
-            return match self.server {
-                ServerConnectorState::Ready => Ok(JobRoute::ServerBatch),
-                _ => Err(RuntimeError::ServerUnavailable),
-            };
-        }
+    pub fn route_recording(&self, _larger_recording: bool) -> Result<JobRoute, RuntimeError> {
+        self.route_imported_recording()
+    }
 
+    pub fn route_imported_recording(&self) -> Result<JobRoute, RuntimeError> {
+        if self.server == ServerConnectorState::Ready && self.server_capabilities.batch_jobs {
+            Ok(JobRoute::ServerBatch)
+        } else {
+            Err(RuntimeError::ServerUnavailable)
+        }
+    }
+
+    pub fn route_live(&self) -> Result<JobRoute, RuntimeError> {
+        if self.server == ServerConnectorState::Ready && self.server_capabilities.live_streaming {
+            return Ok(JobRoute::ServerLive);
+        }
         match self.setup {
             SetupState::FallbackReady => Ok(JobRoute::LocalFallback),
             SetupState::FallbackDisabled => Err(RuntimeError::FallbackDisabled),
@@ -141,8 +158,56 @@ mod tests {
             runtime.route_recording(true),
             Err(RuntimeError::ServerUnavailable)
         );
-        runtime.set_server(ServerConnectorState::Ready);
+        runtime.set_server(
+            ServerConnectorState::Ready,
+            ServerCapabilities {
+                batch_jobs: true,
+                ..ServerCapabilities::default()
+            },
+        );
         assert_eq!(runtime.route_recording(true), Ok(JobRoute::ServerBatch));
+    }
+
+    #[test]
+    fn ready_without_batch_capability_never_routes_imports_locally() {
+        let mut runtime = RuntimeOrchestrator::default();
+        runtime.set_setup(SetupState::FallbackReady);
+        runtime.set_server(ServerConnectorState::Ready, ServerCapabilities::default());
+
+        assert_eq!(
+            runtime.route_imported_recording(),
+            Err(RuntimeError::ServerUnavailable)
+        );
+        assert_eq!(
+            runtime.route_recording(true),
+            Err(RuntimeError::ServerUnavailable)
+        );
+    }
+
+    #[test]
+    fn live_server_route_requires_ready_and_live_streaming() {
+        let mut runtime = RuntimeOrchestrator::default();
+        runtime.set_setup(SetupState::FallbackReady);
+        runtime.set_server(ServerConnectorState::Ready, ServerCapabilities::default());
+        assert_eq!(runtime.route_live(), Ok(JobRoute::LocalFallback));
+
+        runtime.set_server(
+            ServerConnectorState::Ready,
+            ServerCapabilities {
+                live_streaming: true,
+                ..ServerCapabilities::default()
+            },
+        );
+        assert_eq!(runtime.route_live(), Ok(JobRoute::ServerLive));
+
+        runtime.set_server(
+            ServerConnectorState::Offline,
+            ServerCapabilities {
+                live_streaming: true,
+                ..ServerCapabilities::default()
+            },
+        );
+        assert_eq!(runtime.route_live(), Ok(JobRoute::LocalFallback));
     }
 
     #[test]

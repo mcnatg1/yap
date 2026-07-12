@@ -14,6 +14,7 @@ import {
   serverConnectionLabel,
   setupStateLabel,
 } from "@/lib/app-types";
+import { serverCanRouteImportedRecording, serverCanRouteLive } from "@/server";
 
 describe("client recording workflow projection", () => {
   const baseFallbackModel = {
@@ -60,6 +61,33 @@ describe("client recording workflow projection", () => {
     expect(serverConnectionLabel("sign_in_required")).toBe("Sign in");
     expect(serverConnectionLabel("retrying")).toBe("Retrying");
     expect(serverConnectionLabel("disabled")).toBe("Disabled");
+  });
+
+  it("fails closed when projecting server capabilities", () => {
+    const readyWithoutCapabilities = {
+      state: "ready" as const,
+      checkedAtMs: 10,
+      retryAtMs: null,
+      apiVersion: "1",
+      capabilities: { batchJobs: false, liveStreaming: false, jobStatus: false },
+      errorCode: null,
+    };
+
+    expect(serverCanRouteImportedRecording(readyWithoutCapabilities)).toBe(false);
+    expect(serverCanRouteLive(readyWithoutCapabilities)).toBe(false);
+    expect(serverCanRouteImportedRecording({
+      ...readyWithoutCapabilities,
+      capabilities: { ...readyWithoutCapabilities.capabilities, batchJobs: true },
+    })).toBe(true);
+    expect(serverCanRouteLive({
+      ...readyWithoutCapabilities,
+      capabilities: { ...readyWithoutCapabilities.capabilities, liveStreaming: true },
+    })).toBe(true);
+    expect(serverCanRouteLive({
+      ...readyWithoutCapabilities,
+      state: "offline",
+      capabilities: { ...readyWithoutCapabilities.capabilities, liveStreaming: true },
+    })).toBe(false);
   });
 
   it("labels the pinned local fallback model clearly", () => {

@@ -113,7 +113,7 @@ describe("settings model lifecycle bindings", () => {
     expect(invokeMock.mock.calls).toEqual([
       ["server_settings"],
       ["set_server_settings", { settings }],
-      ["server_connection_status"],
+      ["refresh_server_connection"],
     ]);
   });
 

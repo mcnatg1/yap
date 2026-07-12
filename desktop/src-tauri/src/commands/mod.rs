@@ -1,15 +1,15 @@
 mod live;
 pub(crate) mod media_protocol;
-mod recordings;
 mod setup;
 
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     let builder = builder
         .manage(media_protocol::MediaOwner::new())
-        .manage(crate::server_connector::ConnectorGeneration::default());
+        .manage(crate::server_connector::ServerConnector::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
-        recordings::server_connection_status,
+        crate::server_connector::server_connection_status,
+        crate::server_connector::refresh_server_connection,
         crate::server_connector::server_settings,
         crate::server_connector::set_server_settings,
         setup::fallback_model_status,
