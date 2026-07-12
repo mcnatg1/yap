@@ -81,7 +81,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Tracked scripts failed PowerShell 7.4 parsing." }
           & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -File ./tests/scripts/nsis-smoke-helpers.test.ps1
           if ($LASTEXITCODE -ne 0) { throw "Focused PowerShell 7.4 helper suite failed." }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
       - uses: actions/setup-node@v6
@@ -167,7 +167,7 @@ jobs:
           if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
             throw "CI requires PowerShell Core 7.4 or newer."
           }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
       - uses: actions/setup-node@v6
