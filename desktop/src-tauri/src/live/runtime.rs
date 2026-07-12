@@ -236,15 +236,23 @@ struct SharedWarmupLease<T: Send + 'static> {
     warmup: Arc<SharedWarmup<T>>,
 }
 
-#[derive(Clone)]
 struct LatestLevelSender {
-    latest: Arc<Mutex<Option<f32>>>,
-    ready: mpsc::SyncSender<()>,
+    shared: Arc<LatestLevelShared>,
 }
 
 struct LatestLevelReceiver {
-    latest: Arc<Mutex<Option<f32>>>,
-    ready: mpsc::Receiver<()>,
+    shared: Arc<LatestLevelShared>,
+}
+
+struct LatestLevelShared {
+    state: Mutex<LatestLevelState>,
+    changed: Condvar,
+}
+
+struct LatestLevelState {
+    latest: Option<f32>,
+    producers: usize,
+    receiver_open: bool,
 }
 
 struct SessionStream {
@@ -1968,39 +1976,124 @@ fn mark_local_asr_degraded_once(reported: &AtomicBool) -> bool {
 
 impl LatestLevelReceiver {
     fn recv(&self) -> Result<f32, mpsc::RecvError> {
-        self.ready.recv()?;
-        self.latest
+        let mut state = self
+            .shared
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .ok_or(mpsc::RecvError)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(level) = state.latest.take() {
+                return Ok(level);
+            }
+            if state.producers == 0 {
+                return Err(mpsc::RecvError);
+            }
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    #[cfg(test)]
+    fn recv_with_ready_hook(&self, ready: impl FnOnce()) -> Result<f32, mpsc::RecvError> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.latest.is_none() {
+            if state.producers == 0 {
+                return Err(mpsc::RecvError);
+            }
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        drop(state);
+        ready();
+        self.recv()
     }
 }
 
 fn level_channel() -> (LatestLevelSender, LatestLevelReceiver) {
-    let latest = Arc::new(Mutex::new(None));
-    let (ready, receiver) = mpsc::sync_channel(1);
+    let shared = Arc::new(LatestLevelShared {
+        state: Mutex::new(LatestLevelState {
+            latest: None,
+            producers: 1,
+            receiver_open: true,
+        }),
+        changed: Condvar::new(),
+    });
     (
         LatestLevelSender {
-            latest: Arc::clone(&latest),
-            ready,
+            shared: Arc::clone(&shared),
         },
-        LatestLevelReceiver {
-            latest,
-            ready: receiver,
-        },
+        LatestLevelReceiver { shared },
     )
 }
 
 fn publish_level(levels: &LatestLevelSender, level: f32) -> bool {
-    *levels
-        .latest
+    let mut state = levels
+        .shared
+        .state
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(level);
-    matches!(
-        levels.ready.try_send(()),
-        Ok(()) | Err(mpsc::TrySendError::Full(()))
-    )
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !state.receiver_open {
+        return false;
+    }
+    state.latest = Some(level);
+    drop(state);
+    levels.shared.changed.notify_one();
+    true
+}
+
+impl Clone for LatestLevelSender {
+    fn clone(&self) -> Self {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.producers = state.producers.saturating_add(1);
+        drop(state);
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl Drop for LatestLevelSender {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.producers = state.producers.saturating_sub(1);
+        let closed = state.producers == 0;
+        drop(state);
+        if closed {
+            self.shared.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for LatestLevelReceiver {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.receiver_open = false;
+        state.latest = None;
+        drop(state);
+        self.shared.changed.notify_all();
+    }
 }
 
 fn spawn_stream_crash_handler(
@@ -3263,6 +3356,62 @@ mod tests {
         assert!(publish_level(&levels, 0.75));
         assert_eq!(receiver.recv().unwrap(), 0.75);
         assert!(publish_level(&levels, 0.5));
+    }
+
+    #[test]
+    fn level_telemetry_publication_between_readiness_and_take_keeps_consumer_alive() {
+        let (levels, receiver) = level_channel();
+        let (ready_seen_tx, ready_seen_rx) = mpsc::channel();
+        let publication_complete = Arc::new(Barrier::new(2));
+        let consumer_publication_complete = Arc::clone(&publication_complete);
+        let (received_tx, received_rx) = mpsc::channel();
+
+        assert!(publish_level(&levels, 0.25));
+        let consumer = std::thread::spawn(move || {
+            let first = receiver
+                .recv_with_ready_hook(|| {
+                    ready_seen_tx.send(()).unwrap();
+                    consumer_publication_complete.wait();
+                })
+                .unwrap();
+            received_tx.send(first).unwrap();
+            received_tx.send(receiver.recv().unwrap()).unwrap();
+            assert!(receiver.recv().is_err());
+        });
+
+        ready_seen_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(publish_level(&levels, 0.75));
+        publication_complete.wait();
+        assert_eq!(
+            received_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            0.75
+        );
+
+        assert!(publish_level(&levels, 0.5));
+        assert_eq!(
+            received_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            0.5
+        );
+        drop(levels);
+        consumer.join().unwrap();
+    }
+
+    #[test]
+    fn level_telemetry_has_explicit_producer_closure_and_receiver_cancellation() {
+        let (levels, receiver) = level_channel();
+        let remaining_producer = levels.clone();
+        drop(levels);
+
+        assert!(publish_level(&remaining_producer, 0.4));
+        assert_eq!(receiver.recv().unwrap(), 0.4);
+
+        let closed = std::thread::spawn(move || receiver.recv());
+        drop(remaining_producer);
+        assert!(closed.join().unwrap().is_err());
+
+        let (levels, receiver) = level_channel();
+        drop(receiver);
+        assert!(!publish_level(&levels, 0.8));
     }
 
     #[test]
