@@ -13,6 +13,8 @@
 
 **Start here:** [VOICE-OS-ARCHITECTURE.md](VOICE-OS-ARCHITECTURE.md) for the full picture; ADRs for *why*; specs for *how to build*. The canonical roadmap is client/server-shaped.
 
+**Canonical Phase 9 knowledge boundary:** [ADR 0022](adr/0022-google-okf-permission-safe-projections.md) pins Google OKF v0.1 as the curated file/Git format, requires a Postgres typed-relationship and pgvector retrieval baseline, and treats Neo4j as a benchmark-gated challenger. It is a roadmap decision, not authorization to install databases or create Phase 9 infrastructure before the identity and meeting-result prerequisites exist.
+
 ## Implementation specs
 
 | Spec | Roadmap area | Status |
