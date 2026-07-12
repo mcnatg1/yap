@@ -5,6 +5,8 @@ windows, not phone/mobile layouts. See `..\README.md` for the repo map.
 
 `desktop/src-tauri/src/audio/` owns the source-aware capture foundation: callback-safe framing and loss accounting, deterministic preprocessing, explicit timelines/gaps, independently bounded sink fan-out, crash-safe recording/recovery, and evidence/result contracts. Local Nemotron decoding remains under `live/` and `stt/`; server ASR, diarization inference, and other model-heavy processing remain deferred.
 
+Repo-owned Windows automation and installer validation require PowerShell Core 7.4 or newer (`pwsh.exe`). The scripts fail fast under legacy Windows PowerShell or an older Core runtime.
+
 ```powershell
 cd C:\dev\cohere-transcribe-local\desktop
 node -v  # should be v24.x
@@ -58,7 +60,7 @@ Windows account named `YapTest*` or `YapSmoke*` whose profile contains this mark
 ```powershell
 Set-Content "$env:USERPROFILE\.yap-disposable-test-profile" "yap-disposable-profile-v1" -Encoding ascii
 pnpm tauri build --bundles nsis
-.\tests\scripts\smoke-nsis-production-delete.ps1
+pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\scripts\smoke-nsis-production-delete.ps1
 ```
 
 Never create that disposable-profile marker in an everyday account. `RUNNER_ENVIRONMENT` is only

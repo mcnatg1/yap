@@ -20,9 +20,9 @@
     "test:desktop": "pnpm check:node && wdio run ./tests/wdio.conf.ts",
     "test:desktop:build": "pnpm check:node && node ./tests/scripts/tauri-wdio-build.mjs",
     "test:desktop:all": "pnpm test:desktop:build && pnpm test:desktop",
-    "build:nsis:test": "pnpm check:node && powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/build-nsis-test.ps1",
-    "test:nsis:local": "pnpm check:node && powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/smoke-nsis-local.ps1",
-    "test:nsis:test-delete": "pnpm check:node && powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/smoke-nsis-test-delete.ps1"
+    "build:nsis:test": "pnpm check:node && pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/build-nsis-test.ps1",
+    "test:nsis:local": "pnpm check:node && pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/smoke-nsis-local.ps1",
+    "test:nsis:test-delete": "pnpm check:node && pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/smoke-nsis-test-delete.ps1"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

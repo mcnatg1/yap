@@ -420,6 +420,8 @@ function collectBuildEnvironment(repoRoot, commitSha) {
       nsisCompilerSha256: process.env.YAP_RELEASE_NSIS_COMPILER_SHA256 ?? null,
       nsisLauncherSha256: process.env.YAP_RELEASE_NSIS_LAUNCHER_SHA256 ?? null,
       pnpm: process.env.YAP_RELEASE_PNPM_VERSION ?? null,
+      powershellEdition: process.env.YAP_RELEASE_POWERSHELL_EDITION ?? null,
+      powershellVersion: process.env.YAP_RELEASE_POWERSHELL_VERSION ?? null,
       rustcVv: process.env.YAP_RELEASE_RUSTC_VV ?? null,
       tauriCli: process.env.YAP_RELEASE_TAURI_VERSION ?? null,
     },

@@ -119,7 +119,7 @@ if ($candidateCount -ne 1) {
 }
 `;
   await execFileAsync(
-    "powershell.exe",
+    "pwsh.exe",
     ["-NoProfile", "-NonInteractive", "-Command", script],
     { timeout: 10_000, windowsHide: true },
   );

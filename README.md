@@ -18,7 +18,7 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 - Editor-specific config is not tracked. Use whichever editor you want.
 - MVP repo posture: staged monorepo, no Nx/Turborepo, no separate `yap-contracts` yet.
 
-After this hardening branch passes its PR checks and is merged, the immediate tooling slice migrates repo-owned PowerShell scripts and workflows to PowerShell 7. The next **product** implementation plan remains the canonical Phase 3 server contract and durable connector; the tooling migration does not change that architecture order.
+Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects `pwsh.exe` explicitly, and verifies that floor in every Windows CI job. A hash-pinned PowerShell 7.4.17 compatibility lane parses every tracked script and runs the focused native-process suite at the supported minor-version floor. This tooling boundary does not change the product architecture order: the next **product** implementation plan remains the canonical Phase 3 server contract and durable connector.
 
 ## Repository Layout
 

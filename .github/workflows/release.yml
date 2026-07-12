@@ -26,9 +26,18 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: pwsh
     outputs:
       commit_sha: ${{ steps.resolve.outputs.commit_sha }}
     steps:
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "Release staging requires PowerShell Core 7.4 or newer."
+          }
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -68,6 +77,7 @@ jobs:
       RUST_TOOLCHAIN: 1.96.0
     defaults:
       run:
+        shell: pwsh
         working-directory: desktop
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -75,6 +85,12 @@ jobs:
           ref: ${{ needs.resolve-release.outputs.commit_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "Release staging requires PowerShell Core 7.4 or newer."
+          }
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 11.7.0
@@ -131,8 +147,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          "YAP_RELEASE_PNPM_VERSION=$(pnpm --version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "YAP_RELEASE_TAURI_VERSION=$(pnpm exec tauri --version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $pnpmVersion = (& pnpm --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pnpmVersion)) {
+            throw "Failed to capture the pnpm version."
+          }
+          $tauriVersion = (& pnpm exec tauri --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tauriVersion)) {
+            throw "Failed to capture the Tauri CLI version."
+          }
+          "YAP_RELEASE_PNPM_VERSION=$pnpmVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YAP_RELEASE_TAURI_VERSION=$tauriVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YAP_RELEASE_POWERSHELL_EDITION=$($PSVersionTable.PSEdition)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YAP_RELEASE_POWERSHELL_VERSION=$($PSVersionTable.PSVersion)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           $rustcDelimiter = "YAP_RUSTC_$([Guid]::NewGuid().ToString('N'))"
           "YAP_RELEASE_RUSTC_VV<<$rustcDelimiter" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -199,7 +225,16 @@ jobs:
     permissions:
       actions: read
       contents: write
+    defaults:
+      run:
+        shell: pwsh
     steps:
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "Release staging requires PowerShell Core 7.4 or newer."
+          }
       - name: Download immutable release payload
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -229,10 +264,21 @@ jobs:
           if ([long]$metadata.artifact.sizeBytes -ne $installers[0].Length) { throw "Release installer length does not match metadata." }
           if ([string]::IsNullOrWhiteSpace($metadata.buildEnvironment.runner.imageOs)) { throw "Release metadata is missing the runner image." }
           if ([string]::IsNullOrWhiteSpace($metadata.buildEnvironment.runner.imageVersion)) { throw "Release metadata is missing the runner image version." }
-          foreach ($tool in @("node", "nsis", "pnpm", "rustcVv", "tauriCli")) {
+          foreach ($tool in @("node", "nsis", "pnpm", "powershellEdition", "powershellVersion", "rustcVv", "tauriCli")) {
             if ([string]::IsNullOrWhiteSpace($metadata.buildEnvironment.tools.$tool)) {
               throw "Release metadata is missing build tool evidence for $tool."
             }
+          }
+          if ($metadata.buildEnvironment.tools.powershellEdition -cne "Core") {
+            throw "Release metadata must prove a PowerShell Core build."
+          }
+          try {
+            $powerShellVersion = [version][string]$metadata.buildEnvironment.tools.powershellVersion
+          } catch {
+            throw "Release metadata contains an invalid PowerShell version."
+          }
+          if ($powerShellVersion -lt [version]"7.4") {
+            throw "Release metadata records an unsupported PowerShell version."
           }
           foreach ($nsisHash in @("nsisLauncherSha256", "nsisCompilerSha256")) {
             if ($metadata.buildEnvironment.tools.$nsisHash -cnotmatch '^[0-9a-f]{64}$') {

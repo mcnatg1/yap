@@ -272,6 +272,10 @@ test("supported release path binds a default-branch commit to a read-only build 
   assert.match(buildSteps[captureEnvironment].run, /CompilerPath \/VERSION/);
   assert.match(buildSteps[captureEnvironment].run, /NSIS_LAUNCHER_SHA256/);
   assert.match(buildSteps[captureEnvironment].run, /NSIS_COMPILER_SHA256/);
+  assert.match(buildSteps[captureEnvironment].run, /YAP_RELEASE_POWERSHELL_EDITION/);
+  assert.match(buildSteps[captureEnvironment].run, /YAP_RELEASE_POWERSHELL_VERSION/);
+  assert.match(buildSteps[captureEnvironment].run, /\$PSVersionTable\.PSEdition/);
+  assert.match(buildSteps[captureEnvironment].run, /\$PSVersionTable\.PSVersion/);
   assert.match(buildSteps[bind].run, /--seal-path/);
   assert.equal(
     buildSteps[bind].env.SEALED_INSTALLER_SHA256,
@@ -292,6 +296,10 @@ test("supported release path binds a default-branch commit to a read-only build 
   assert.match(verify.run, /RELEASE_TAG/);
   assert.match(verify.run, /metadata\.version/);
   assert.match(verify.run, /buildEnvironment\.runner\.imageOs/);
+  assert.match(verify.run, /"powershellEdition"/);
+  assert.match(verify.run, /"powershellVersion"/);
+  assert.match(verify.run, /powershellEdition -cne "Core"/);
+  assert.match(verify.run, /\$powerShellVersion -lt \[version\]"7\.4"/);
   assert.match(verify.run, /"rustcVv"/);
   assert.match(verify.run, /nsisLauncherSha256/);
   assert.match(verify.run, /nsisCompilerSha256/);
@@ -330,7 +338,11 @@ test("release artifact helper executes exact-ref binding and rejects ambiguous a
   const sealPath = path.join(testRoot, "artifact-seal.json");
   const metadataPath = path.join(testRoot, "metadata.json");
   const githubOutput = path.join(testRoot, "github-output.txt");
+  const previousPowerShellEdition = process.env.YAP_RELEASE_POWERSHELL_EDITION;
+  const previousPowerShellVersion = process.env.YAP_RELEASE_POWERSHELL_VERSION;
   try {
+    process.env.YAP_RELEASE_POWERSHELL_EDITION = "Core";
+    process.env.YAP_RELEASE_POWERSHELL_VERSION = "7.4.0";
     await writeFile(githubOutput, "", "utf8");
     await prepareReleaseContext({
       commitSha,
@@ -362,6 +374,8 @@ test("release artifact helper executes exact-ref binding and rejects ambiguous a
     assert.match(bound.metadata.commitSha, /^[0-9a-f]{40}$/);
     assert.match(bound.metadata.artifact.sha256, /^[0-9a-f]{64}$/);
     assert.equal(bound.metadata.buildEnvironment.tools.node, process.version);
+    assert.equal(bound.metadata.buildEnvironment.tools.powershellEdition, "Core");
+    assert.equal(bound.metadata.buildEnvironment.tools.powershellVersion, "7.4.0");
     assert.match(
       bound.metadata.buildEnvironment.inputsSha256["desktop/src-tauri/Cargo.lock"],
       /^[0-9a-f]{64}$/,
@@ -412,6 +426,16 @@ test("release artifact helper executes exact-ref binding and rejects ambiguous a
     );
     assert.throws(() => validateReleaseCoordinates(commitSha, "--unsafe"), /begin with a dash/);
   } finally {
+    if (previousPowerShellEdition === undefined) {
+      delete process.env.YAP_RELEASE_POWERSHELL_EDITION;
+    } else {
+      process.env.YAP_RELEASE_POWERSHELL_EDITION = previousPowerShellEdition;
+    }
+    if (previousPowerShellVersion === undefined) {
+      delete process.env.YAP_RELEASE_POWERSHELL_VERSION;
+    } else {
+      process.env.YAP_RELEASE_POWERSHELL_VERSION = previousPowerShellVersion;
+    }
     await rm(testRoot, { recursive: true, force: true });
   }
 });
@@ -807,9 +831,204 @@ test("NSIS smoke separates local-safe validation from isolated production deleti
   assert.equal(testConfig.mainBinaryName, "yap-test");
 });
 
-test("NSIS helper behavior passes its focused PowerShell suite", () => {
+test("Windows release automation requires PowerShell 7.4 Core", async () => {
+  const powerShellFiles = [
+    "desktop/tests/scripts/build-nsis-test.ps1",
+    "desktop/tests/scripts/nsis-smoke-helpers.psm1",
+    "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
+    "desktop/tests/scripts/smoke-nsis-local.ps1",
+    "desktop/tests/scripts/smoke-nsis-production-delete.ps1",
+    "desktop/tests/scripts/smoke-nsis-test-delete.ps1",
+    "desktop/tests/scripts/smoke-nsis.ps1",
+  ];
+  const trackedPowerShellFiles = execFileSync(
+    "git",
+    ["ls-files", "--", "*.ps1", "*.psm1"],
+    { cwd: repoRoot, encoding: "utf8" },
+  )
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .sort();
+  assert.deepEqual(
+    trackedPowerShellFiles,
+    [...powerShellFiles].sort(),
+    "PowerShell runtime contract inventory must cover every tracked script and module",
+  );
+  const runtimeRequirement =
+    /^#requires -Version 7\.4\r?\n#requires -PSEdition Core\b/i;
+
+  for (const relativePath of powerShellFiles) {
+    const source = await readRepoFile(relativePath);
+    assert.match(
+      source,
+      runtimeRequirement,
+      `${relativePath} must fail fast outside PowerShell Core 7.4 or newer`,
+    );
+  }
+
+  const nsisBuildScript = await readRepoFile(
+    "desktop/tests/scripts/build-nsis-test.ps1",
+  );
+  assert.match(nsisBuildScript, /Get-Command "pnpm"/);
+  assert.match(nsisBuildScript, /\("\.cmd", "\.exe"\)/);
+  assert.match(nsisBuildScript, /Select-Object -First 1/);
+  assert.match(nsisBuildScript, /-Environment @\{ CARGO_TARGET_DIR = \$targetRoot \}/);
+  assert.match(nsisBuildScript, /\$process\.WaitForExit\(\$buildTimeoutMilliseconds\)/);
+  assert.match(nsisBuildScript, /\$process\.Kill\(\$true\)/);
+  assert.match(nsisBuildScript, /\$process\.WaitForExit\(10000\)/);
+  assert.doesNotMatch(nsisBuildScript, /\s-Wait\b/);
+  assert.doesNotMatch(nsisBuildScript, /SetEnvironmentVariable/);
+  assert.doesNotMatch(nsisBuildScript, /\$env:CARGO_TARGET_DIR\s*=/i);
+
+  const nsisHelpers = await readRepoFile(
+    "desktop/tests/scripts/nsis-smoke-helpers.psm1",
+  );
+  assert.match(nsisHelpers, /Environment = \$childEnvironment/);
+  assert.doesNotMatch(nsisHelpers, /SetEnvironmentVariable/);
+
+  const legacyWindowsPowerShell = ["power", "shell.exe"].join("");
+  const runtimeSelectors = [
+    "desktop/package.json",
+    "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
+    "desktop/tests/scripts/release-evidence.contract.mjs",
+    "desktop/tests/wdio/live-overlay.spec.js",
+  ];
+  for (const relativePath of runtimeSelectors) {
+    const source = (await readRepoFile(relativePath)).toLowerCase();
+    assert.equal(
+      source.includes(legacyWindowsPowerShell),
+      false,
+      `${relativePath} still selects legacy Windows PowerShell`,
+    );
+  }
+  const helperTest = await readRepoFile(
+    "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
+  );
+  assert.match(helperTest, /Join-Path \$PSHOME "pwsh\.exe"/);
+  const releaseContract = await readRepoFile(
+    "desktop/tests/scripts/release-evidence.contract.mjs",
+  );
+  assert.match(releaseContract, /spawnSync\(\s*"pwsh\.exe"/);
+  const liveOverlaySpec = await readRepoFile(
+    "desktop/tests/wdio/live-overlay.spec.js",
+  );
+  assert.match(liveOverlaySpec, /execFileAsync\(\s*"pwsh\.exe"/);
+
+  const packageJson = JSON.parse(await readRepoFile("desktop/package.json"));
+  for (const scriptName of [
+    "build:nsis:test",
+    "test:nsis:local",
+    "test:nsis:test-delete",
+  ]) {
+    assert.match(
+      packageJson.scripts[scriptName],
+      /(?:^|\s)pwsh\.exe\s/i,
+      `${scriptName} must select PowerShell 7 explicitly`,
+    );
+  }
+
+  for (const relativePath of [
+    ".github/workflows/ci.yml",
+    ".github/workflows/nsis-smoke.yml",
+    ".github/workflows/release.yml",
+  ]) {
+    const workflow = await readWorkflow(relativePath);
+    for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+      const runsOn = String(job["runs-on"] ?? "");
+      if (!runsOn.startsWith("windows-")) continue;
+
+      assert.equal(
+        job.defaults?.run?.shell,
+        "pwsh",
+        `${relativePath} ${jobName} must explicitly default run steps to PowerShell Core`,
+      );
+      const guard = job.steps?.find(
+        (step) => step.name === "Verify PowerShell 7.4 Core",
+      );
+      assert.ok(
+        guard,
+        `${relativePath} ${jobName} must validate its isolated runner's PowerShell runtime`,
+      );
+      assert.equal(guard.shell, "pwsh");
+      assert.equal(
+        job.steps.find((step) => step.run),
+        guard,
+        `${relativePath} ${jobName} must validate PowerShell before any other run step`,
+      );
+      assert.match(
+        guard.run,
+        /\$PSVersionTable\.PSEdition\s+-cne\s+["']Core["']/,
+      );
+      assert.match(
+        guard.run,
+        /\$PSVersionTable\.PSVersion\s+-lt\s+\[version\]["']7\.4["']/,
+      );
+      assert.match(guard.run, /\bthrow\b/);
+      assert.equal(
+        job.steps.some((step) =>
+          /^powershell(?:\.exe)?$/i.test(String(step.shell ?? ""))),
+        false,
+        `${relativePath} ${jobName} overrides a run step back to legacy PowerShell`,
+      );
+    }
+  }
+
+  const ciWorkflow = await readWorkflow(".github/workflows/ci.yml");
+  const compatibilityJob = ciWorkflow.jobs?.frontend;
+  assert.ok(compatibilityJob, "required frontend CI job is missing");
+  assert.equal(compatibilityJob.env.POWERSHELL_74_VERSION, "7.4.17");
+  assert.equal(compatibilityJob.env.POWERSHELL_TELEMETRY_OPTOUT, "1");
+  assert.equal(
+    compatibilityJob.env.POWERSHELL_74_SHA256,
+    "266479A93B82CD0DC0F043419388FD4A738A51082821C301FFF497212FAF6760",
+  );
+  const installPowerShell = compatibilityJob.steps.find(
+    (step) => step.name === "Install pinned PowerShell 7.4 runtime",
+  );
+  assert.match(installPowerShell.run, /PowerShell\/PowerShell\/releases\/download/);
+  assert.match(installPowerShell.run, /Get-FileHash/);
+  assert.match(installPowerShell.run, /POWERSHELL_74_SHA256/);
+  assert.match(installPowerShell.run, /Expand-Archive/);
+  assert.match(installPowerShell.run, /GITHUB_PATH/);
+  const runCompatibilitySuite = compatibilityJob.steps.find(
+    (step) => step.name === "Run focused suite under PowerShell 7.4",
+  );
+  assert.match(runCompatibilitySuite.run, /YAP_POWERSHELL_74/);
+  assert.match(runCompatibilitySuite.run, /nsis-smoke-helpers\.test\.ps1/);
+  assert.match(runCompatibilitySuite.run, /Language\.Parser/);
+  assert.match(runCompatibilitySuite.run, /nestedRuntime/);
+  assert.match(runCompatibilitySuite.run, /PSEdition -cne "Core"/);
+  assert.match(runCompatibilitySuite.run, /PSVersion\.ToString\(\)/);
+  assert.match(runCompatibilitySuite.run, /POWERSHELL_74_VERSION/);
+
+  const helperModulePath = path
+    .join(repoRoot, "desktop/tests/scripts/nsis-smoke-helpers.psm1")
+    .replaceAll("'", "''");
+  const legacyResult = spawnSync(
+    legacyWindowsPowerShell,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Import-Module '${helperModulePath}' -Force`,
+    ],
+    { cwd: repoRoot, encoding: "utf8", timeout: 10_000 },
+  );
+  assert.notEqual(
+    legacyResult.status,
+    0,
+    "legacy Windows PowerShell unexpectedly loaded release automation",
+  );
+  assert.match(
+    `${legacyResult.stdout}\n${legacyResult.stderr}`,
+    /#requires[\s\S]*PowerShell 7\.4|PSEdition Core/i,
+  );
+});
+
+test("NSIS helper behavior passes its focused PowerShell 7 suite", () => {
   const result = spawnSync(
-    "powershell.exe",
+    "pwsh.exe",
     [
       "-NoProfile",
       "-NonInteractive",

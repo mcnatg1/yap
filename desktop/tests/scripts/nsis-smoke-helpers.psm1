@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 $script:YapTestTreeSentinelName = ".yap-test-tree-sentinel"
 $script:YapTestTreeSentinelContents = "yap-test-owned-tree-v1"
 
@@ -1254,34 +1257,26 @@ function Start-ProcessWithEnvironment {
   ) {
     throw "Process stdout and stderr paths must be different."
   }
-  $previous = @{}
-  try {
-    foreach ($entry in $Environment.GetEnumerator()) {
-      $key = [string]$entry.Key
-      $previous[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-      [Environment]::SetEnvironmentVariable($key, [string]$entry.Value, "Process")
-    }
-    $parameters = @{
-      FilePath = $FilePath
-      PassThru = $true
-      WindowStyle = "Hidden"
-    }
-    if ($ArgumentList.Count -gt 0) {
-      $parameters.ArgumentList = $ArgumentList
-    }
-    if (-not [string]::IsNullOrWhiteSpace($StdoutPath)) {
-      $parameters.RedirectStandardOutput = $StdoutPath
-    }
-    if (-not [string]::IsNullOrWhiteSpace($StderrPath)) {
-      $parameters.RedirectStandardError = $StderrPath
-    }
-    return Start-Process @parameters
-  } finally {
-    foreach ($entry in $Environment.GetEnumerator()) {
-      $key = [string]$entry.Key
-      [Environment]::SetEnvironmentVariable($key, $previous[$key], "Process")
-    }
+  $childEnvironment = @{}
+  foreach ($entry in $Environment.GetEnumerator()) {
+    $childEnvironment[[string]$entry.Key] = $entry.Value
   }
+  $parameters = @{
+    FilePath = $FilePath
+    PassThru = $true
+    WindowStyle = "Hidden"
+    Environment = $childEnvironment
+  }
+  if ($ArgumentList.Count -gt 0) {
+    $parameters.ArgumentList = $ArgumentList
+  }
+  if (-not [string]::IsNullOrWhiteSpace($StdoutPath)) {
+    $parameters.RedirectStandardOutput = $StdoutPath
+  }
+  if (-not [string]::IsNullOrWhiteSpace($StderrPath)) {
+    $parameters.RedirectStandardError = $StderrPath
+  }
+  return Start-Process @parameters
 }
 
 function Enter-SmokeRunLock {

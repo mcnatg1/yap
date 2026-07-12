@@ -13,11 +13,74 @@ jobs:
   frontend:
     runs-on: windows-latest
     timeout-minutes: 15
+    env:
+      POWERSHELL_74_SHA256: 266479A93B82CD0DC0F043419388FD4A738A51082821C301FFF497212FAF6760
+      POWERSHELL_74_VERSION: 7.4.17
+      POWERSHELL_TELEMETRY_OPTOUT: "1"
     defaults:
       run:
+        shell: pwsh
         working-directory: desktop
     steps:
       - uses: actions/checkout@v7
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "CI requires PowerShell Core 7.4 or newer."
+          }
+      - name: Install pinned PowerShell 7.4 runtime
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "PowerShell-$env:POWERSHELL_74_VERSION-win-x64.zip"
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "powershell-$env:POWERSHELL_74_VERSION"
+          $uri = "https://github.com/PowerShell/PowerShell/releases/download/v$env:POWERSHELL_74_VERSION/PowerShell-$env:POWERSHELL_74_VERSION-win-x64.zip"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actualSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actualSha256 -cne $env:POWERSHELL_74_SHA256) {
+            throw "Pinned PowerShell archive hash mismatch."
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $runtimeRoot -Force
+          $runtime = Join-Path $runtimeRoot "pwsh.exe"
+          if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
+            throw "Pinned PowerShell runtime was not extracted."
+          }
+          "YAP_POWERSHELL_74=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $runtimeRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Run focused suite under PowerShell 7.4
+        run: |
+          $identityJson = & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -Command '[ordered]@{ PSEdition = $PSVersionTable.PSEdition; PSVersion = $PSVersionTable.PSVersion.ToString() } | ConvertTo-Json -Compress'
+          if ($LASTEXITCODE -ne 0) { throw "Pinned PowerShell identity probe failed." }
+          $identity = $identityJson | ConvertFrom-Json
+          if ($identity.PSEdition -cne "Core" -or [version]$identity.PSVersion -ne [version]$env:POWERSHELL_74_VERSION) {
+            throw "Pinned PowerShell runtime identity does not match the compatibility lane."
+          }
+
+          $nestedRuntime = & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -Command '(Get-Command pwsh.exe -CommandType Application | Select-Object -First 1).Source'
+          if ($LASTEXITCODE -ne 0 -or [System.IO.Path]::GetFullPath($nestedRuntime) -ine [System.IO.Path]::GetFullPath($env:YAP_POWERSHELL_74)) {
+            throw "Nested PowerShell commands do not resolve to the pinned compatibility runtime."
+          }
+
+          $parserProbe = @'
+          $ErrorActionPreference = "Stop"
+          $files = @(git ls-files -- "*.ps1" "*.psm1")
+          if ($files.Count -eq 0) { throw "No tracked PowerShell files were found." }
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw "$file failed PowerShell 7.4 parsing: $($errors.Message -join '; ')"
+            }
+          }
+          '@
+          & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -Command $parserProbe
+          if ($LASTEXITCODE -ne 0) { throw "Tracked scripts failed PowerShell 7.4 parsing." }
+          & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -File ./tests/scripts/nsis-smoke-helpers.test.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Focused PowerShell 7.4 helper suite failed." }
       - uses: pnpm/action-setup@v4
         with:
           version: 11.7.0
@@ -49,9 +112,16 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
+        shell: pwsh
         working-directory: desktop/src-tauri
     steps:
       - uses: actions/checkout@v7
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "CI requires PowerShell Core 7.4 or newer."
+          }
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v6
         with:
@@ -87,9 +157,16 @@ jobs:
       RUST_TOOLCHAIN: stable
     defaults:
       run:
+        shell: pwsh
         working-directory: desktop
     steps:
       - uses: actions/checkout@v7
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "CI requires PowerShell Core 7.4 or newer."
+          }
       - uses: pnpm/action-setup@v4
         with:
           version: 11.7.0
@@ -137,7 +214,16 @@ jobs:
     timeout-minutes: 10
     env:
       PYTHONPATH: server/src
+    defaults:
+      run:
+        shell: pwsh
     steps:
+      - name: Verify PowerShell 7.4 Core
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
+            throw "CI requires PowerShell Core 7.4 or newer."
+          }
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
