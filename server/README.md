@@ -81,4 +81,24 @@ Run only the wire-contract tests while editing the JSON documents:
 $env:PYTHONPATH = "server/src"; python -m unittest server.tests.contract.test_contract -v
 ```
 
+## Run the Phase 3 health service
+
+The service uses Python's bounded, single-request-at-a-time `HTTPServer` and has
+no runtime dependencies. It binds to loopback by default:
+
+```powershell
+$env:PYTHONPATH = "server/src"
+python -m yap_server
+Invoke-RestMethod http://127.0.0.1:18765/v1/health
+```
+
+`YAP_SERVER_HOST` and `YAP_SERVER_PORT` override the address. A wildcard or
+non-loopback host is rejected unless the process explicitly sets
+`YAP_SERVER_ALLOW_PRIVATE_BIND=1`. Binding does not change firewall rules; the
+server-node runbook keeps port 18765 tunnel-only by default.
+
+Only `GET /v1/health` is implemented. Contract-only job, chunk, commit, and live
+routes return a stable `501 NOT_IMPLEMENTED` JSON error. Request bodies are
+capped at 1 MiB before any body read.
+
 Skipped for now: Nx/Turborepo, package workspace wiring, framework/server dependencies, checked-in model weights, and fake GB300 profiles.
