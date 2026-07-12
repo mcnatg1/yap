@@ -1562,7 +1562,7 @@
       "CreateRecordingJobRequest": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Phase 5 upload-intake request. metadata, captureManifest, and every chunk replay key MUST name one session; every chunk track MUST belong to the unique declared track set; replay keys MUST be unique; and the accepted manifest reference and chunk declaration become immutable. Identity ownership is server-derived after token validation; privacyPolicyVersion unconfigured cannot authorize a team upload once policy gating ships.",
+        "description": "Phase 5 upload-intake request. metadata, captureManifest, and every chunk replay key MUST name one session; every chunk track MUST belong to the unique declared track set; replay keys MUST be unique; and the accepted manifest reference and chunk declaration become immutable. metadata.origin MUST agree with every track source kind: imported_file requires imported tracks, live_capture requires captured tracks, and an imported physical-source hint is valid only as user_declared provenance. Identity ownership is server-derived after token validation; privacyPolicyVersion unconfigured cannot authorize a team upload once policy gating ships.",
         "x-yap-source-identity-invariants": {
           "singleSessionIdentity": {
             "rule": "all_equal",
@@ -1593,6 +1593,120 @@
             ]
           }
         },
+        "x-yap-source-provenance-invariants": {
+          "originTrackCoherence": {
+            "rule": "origin_matches_all_track_source_kinds",
+            "cases": {
+              "imported_file": "imported",
+              "live_capture": "captured"
+            }
+          },
+          "importedPhysicalSourceHint": {
+            "rule": "physical_source_requires_user_declared",
+            "provenancePath": "tracks[*].source.provenance",
+            "allowedObjectKind": "user_declared"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "metadata"
+              ],
+              "properties": {
+                "metadata": {
+                  "type": "object",
+                  "required": [
+                    "origin"
+                  ],
+                  "properties": {
+                    "origin": {
+                      "const": "imported_file"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "tracks"
+              ],
+              "properties": {
+                "tracks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "source"
+                    ],
+                    "properties": {
+                      "source": {
+                        "type": "object",
+                        "required": [
+                          "kind"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "const": "imported"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "metadata"
+              ],
+              "properties": {
+                "metadata": {
+                  "type": "object",
+                  "required": [
+                    "origin"
+                  ],
+                  "properties": {
+                    "origin": {
+                      "const": "live_capture"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "tracks"
+              ],
+              "properties": {
+                "tracks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "source"
+                    ],
+                    "properties": {
+                      "source": {
+                        "type": "object",
+                        "required": [
+                          "kind"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "const": "captured"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
         "required": [
           "displayName",
           "metadata",

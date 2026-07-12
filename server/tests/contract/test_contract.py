@@ -267,6 +267,29 @@ LIVE_FINAL_IDENTITY_INVARIANTS = {
     }
 }
 
+BATCH_PROVENANCE_INVARIANTS = {
+    "originTrackCoherence": {
+        "rule": "origin_matches_all_track_source_kinds",
+        "cases": {
+            "imported_file": "imported",
+            "live_capture": "captured",
+        },
+    },
+    "importedPhysicalSourceHint": {
+        "rule": "physical_source_requires_user_declared",
+        "provenancePath": "tracks[*].source.provenance",
+        "allowedObjectKind": "user_declared",
+    },
+}
+
+LIVE_PROVENANCE_INVARIANTS = {
+    "requiredOrigin": "live_capture",
+    "originTrackCoherence": {
+        "rule": "origin_matches_all_track_source_kinds",
+        "cases": {"live_capture": "captured"},
+    },
+}
+
 RECORDING_JOB_STATUSES = [
     "accepted",
     "preflighting",
@@ -314,6 +337,78 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AssertionError(f"{path} must contain a JSON object")
     return value
+
+
+def make_job_request(origin: str, track_source: dict[str, Any]) -> dict[str, Any]:
+    session_id = "s-provenance-test"
+    track_id = "track-1"
+    return {
+        "displayName": "Provenance contract test",
+        "metadata": {
+            "sessionId": session_id,
+            "mode": "dictation",
+            "origin": origin,
+            "triggerMode": "toggle",
+            "startedAtUtc": "2026-07-12T16:00:00Z",
+            "utcOffsetMinutesAtStart": None,
+            "localeHintBcp47": None,
+            "countryCodeHint": None,
+            "preferredLanguagesBcp47": [],
+            "appVersion": "0.1.0",
+            "platform": "windows",
+            "privacyPolicyVersion": "unconfigured",
+            "retentionExpiresAtUtc": None,
+        },
+        "tracks": [
+            {
+                "trackId": track_id,
+                "source": deepcopy(track_source),
+                "deviceId": None,
+                "originalSampleRateHz": 48000,
+                "originalChannels": 1,
+            }
+        ],
+        "route": "server_batch",
+        "captureManifest": {
+            "schemaVersion": 1,
+            "sessionId": session_id,
+            "sha256": "a" * 64,
+            "byteLength": 4096,
+        },
+        "chunks": [
+            {
+                "replayKey": {
+                    "schemaVersion": 1,
+                    "sessionId": session_id,
+                    "trackId": track_id,
+                    "sequenceStart": 0,
+                    "sequenceEnd": 159,
+                },
+                "contentIdentity": {
+                    "sha256": "b" * 64,
+                    "byteLength": 320,
+                },
+                "audioCodec": "pcm_s16le",
+                "sampleRateHz": 16000,
+                "channels": 1,
+                "startMs": 0,
+                "durationMs": 10,
+            }
+        ],
+    }
+
+
+def make_live_start(origin: str, track_source: dict[str, Any]) -> dict[str, Any]:
+    job_request = make_job_request(origin, track_source)
+    return {
+        "schemaVersion": 1,
+        "sessionId": job_request["metadata"]["sessionId"],
+        "eventSequence": 0,
+        "eventType": "session.start",
+        "metadata": job_request["metadata"],
+        "tracks": job_request["tracks"],
+        "route": "server_live",
+    }
 
 
 def resolve_pointer(document: dict[str, Any], pointer: str) -> Any:
@@ -439,6 +534,29 @@ def assert_schema_subset(
             documents=documents,
             path=path,
         )
+
+    condition = schema.get("if")
+    if isinstance(condition, dict):
+        condition_matches = True
+        try:
+            assert_schema_subset(
+                value,
+                condition,
+                document_name=document_name,
+                documents=documents,
+                path=path,
+            )
+        except AssertionError:
+            condition_matches = False
+        branch = schema.get("then" if condition_matches else "else")
+        if isinstance(branch, dict):
+            assert_schema_subset(
+                value,
+                branch,
+                document_name=document_name,
+                documents=documents,
+                path=path,
+            )
 
     one_of = schema.get("oneOf")
     if isinstance(one_of, list):
@@ -701,6 +819,125 @@ class ContractTests(unittest.TestCase):
         self.assertIs(
             schemas["CaptureManifestReference"].get("x-yap-immutable"), True
         )
+
+    def test_session_origin_and_track_provenance_are_coherent(self) -> None:
+        openapi = load_json(OPENAPI_PATH)
+        live_schema = load_json(LIVE_EVENTS_PATH)
+        documents = {
+            "openapi.json": openapi,
+            "live-events.schema.json": live_schema,
+        }
+        create_schema = openapi["components"]["schemas"][
+            "CreateRecordingJobRequest"
+        ]
+        live_start_schema = live_schema["$defs"]["SessionStartEvent"]
+
+        with self.subTest(contract="batch provenance metadata"):
+            self.assertEqual(
+                create_schema.get("x-yap-source-provenance-invariants"),
+                BATCH_PROVENANCE_INVARIANTS,
+            )
+        with self.subTest(contract="live provenance metadata"):
+            self.assertEqual(
+                live_start_schema["allOf"][1].get(
+                    "x-yap-source-provenance-invariants"
+                ),
+                LIVE_PROVENANCE_INVARIANTS,
+            )
+
+        captured = {"kind": "captured", "source": "microphone"}
+        imported = {"kind": "imported", "provenance": "unknown"}
+        user_declared = {
+            "kind": "imported",
+            "provenance": {
+                "kind": "user_declared",
+                "source": "microphone",
+            },
+        }
+
+        positive_cases = [
+            (
+                "batch imported unknown",
+                make_job_request("imported_file", imported),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "batch imported user-declared microphone",
+                make_job_request("imported_file", user_declared),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "batch live capture",
+                make_job_request("live_capture", captured),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "live start captured microphone",
+                make_live_start("live_capture", captured),
+                live_start_schema,
+                "live-events.schema.json",
+            ),
+        ]
+        for label, value, schema, document_name in positive_cases:
+            with self.subTest(valid=label):
+                assert_schema_subset(
+                    value,
+                    schema,
+                    document_name=document_name,
+                    documents=documents,
+                )
+
+        invalid_hint = {
+            "kind": "imported",
+            "provenance": {
+                "kind": "inferred",
+                "source": "microphone",
+            },
+        }
+        negative_cases = [
+            (
+                "batch imported origin cannot claim captured track",
+                make_job_request("imported_file", captured),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "batch live origin cannot claim imported track",
+                make_job_request("live_capture", imported),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "imported physical hint must be user-declared",
+                make_job_request("imported_file", invalid_hint),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "live start cannot claim imported track",
+                make_live_start("live_capture", imported),
+                live_start_schema,
+                "live-events.schema.json",
+            ),
+            (
+                "live start cannot use imported origin",
+                make_live_start("imported_file", imported),
+                live_start_schema,
+                "live-events.schema.json",
+            ),
+        ]
+        for label, value, schema, document_name in negative_cases:
+            with self.subTest(invalid=label):
+                with self.assertRaises(AssertionError):
+                    assert_schema_subset(
+                        value,
+                        schema,
+                        document_name=document_name,
+                        documents=documents,
+                    )
 
     def test_http_operation_schema_links_are_frozen(self) -> None:
         document = load_json(OPENAPI_PATH)
