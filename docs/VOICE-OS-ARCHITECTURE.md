@@ -1,13 +1,13 @@
 # Yap & Voice OS — System Architecture
 
 **Status:** Living document (2026-07-12)
-**Authority:** Decisions are normative in [ADR 0001–0020](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
+**Authority:** Decisions are normative according to status in [ADR 0001–0021](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 For implementation truth rather than decision intent, use the living [ADR implementation status audit](ADR-IMPLEMENTATION-STATUS.md). An accepted ADR or a documented flowchart node is not proof that its code exists.
 
 > **2026-07-08 — Local model reset:** Yap keeps one local live/offline fallback model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Client-side fusion routing is rejected; model routing belongs on the server.
 
-> **ADR precedence:** ADR 0014-0020 define the current thin-client, server, local-fallback, and meeting-processing direction. ADR 0020 supersedes conflicting diarization details in ADR 0004 and ADR 0015. The desktop owns capture, deterministic preprocessing, recording, hotkey/UI, local live fallback, optional anonymous speaker evidence, and future transport packaging. The server owns official long-recording STT, authoritative meeting reconciliation, purpose-authorized named identity, team storage, KB compilation, and agent workloads.
+> **ADR precedence:** ADR 0014-0021 define the current thin-client, server, local-fallback, meeting-processing, and transport-evolution direction. ADR 0020 supersedes conflicting diarization details in ADR 0004 and ADR 0015. ADR 0021 makes HTTP/3 a gated future secure-edge target without changing the bounded Phase 3 loopback service. The desktop owns capture, deterministic preprocessing, recording, hotkey/UI, local live fallback, optional anonymous speaker evidence, and future transport packaging. The server owns official long-recording STT, authoritative meeting reconciliation, purpose-authorized named identity, team storage, KB compilation, and agent workloads.
 
 ---
 
@@ -71,13 +71,13 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | Diarization | Optional local `Unknown` / `Speaker N`; no durable profiles | Server-authoritative reconciliation; algorithms selected by benchmark (ADR 0020) |
 | Identity | Per-transcript contact labels only; no biometric matching | Entra ID / MSAL + explicit voice enrollment (ADR 0016/0020) |
 | Knowledge base | Future local OKF Markdown; canonical schema pending Phase 9 | Future `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
-| Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
+| Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node; future HTTP/3 secure edge with HTTP/2 or HTTP/1.1 fallback |
 
 The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, and local Nemotron fallback are implemented. Opus encoding and the server connector remain deferred. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
-Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0020](adr/0020-meeting-capture-diarization-authority.md) (meeting capture and diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth and purpose-authorized identity) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos)
+Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0020](adr/0020-meeting-capture-diarization-authority.md) (meeting capture and diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth and purpose-authorized identity) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos) · [ADR 0021](adr/0021-http3-secure-edge-transport.md) (gated HTTP/3 edge)
 
 ---
 
@@ -93,14 +93,15 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 8. **On-prem GPU** = "our hardware, our network" — not cloud; extends local-first trust to the org's LAN (team profile).
 9. **Auth** = Entra ID / MSAL; `(tid, oid)` principal key; Yap API audience validation; explicit consent before any durable voice profile.
 10. **KB compiler** = Git source-of-truth + deterministic compile → Postgres + Redis + vector DB (all indexes disposable).
+11. **Transport evolution** = bounded loopback service now; authenticated HTTP/3 secure edge later, with TCP fallback and benchmark gates.
 
-Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md) · [0020](adr/0020-meeting-capture-diarization-authority.md)
+Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md) · [0020](adr/0020-meeting-capture-diarization-authority.md) · [0021](adr/0021-http3-secure-edge-transport.md)
 
 ---
 
 ## Pipeline charts
 
-Two views of the same target architecture - **high-level** for orientation, **low-level** for implementation. They include deferred components so each future boundary has a home; a node is current only when its label or the implementation-status sections below say so. Normative rules live in [ADR 0001–0020](adr/README.md); sections below expand each box.
+Two views of the same target architecture - **high-level** for orientation, **low-level** for implementation. They include deferred components so each future boundary has a home; a node is current only when its label or the implementation-status sections below say so. Normative rules live in [ADR 0001–0021](adr/README.md); sections below expand each box.
 
 **Target read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. If the deferred local LLM product is activated, **Polish** and **Scribe** share **llama-server** via the mutex rules in [ADR 0006](adr/0006-silero-agents-state-machine.md). Today Polish is a development-only Ollama call and Scribe/llama-server are absent.
 
@@ -177,11 +178,12 @@ flowchart TB
         UI["Transcribe · Live · History · KB agents"]
         Mic["Capture · VAD hints · track manifest<br/>mic now · system loopback later"]
         Hotkey["Global hotkey · inject (ADR 0013)"]
-        Conn["Server connector\n(WSS live · HTTP batch)"]
+        Conn["Server connector\n(WSS live · HTTPS batch)"]
         LocalFB["Local fallback sidecar\n(offline / degraded)"]
     end
 
     subgraph Server["yap-server - GB-class node (org LAN/VPN)"]
+        Edge["Secure transport edge\n(future HTTP/3 · TCP fallback · ADR 0021)"]
         Router["Workload router\n(per-tenant queues · fairness)"]
         ASR["Streaming ASR pool\n(WSS)"]
         Batch["Cohere batch pool\n(concurrent GPU workers)"]
@@ -197,8 +199,9 @@ flowchart TB
     User --> UI
     UI --> Conn
     Mic --> Conn
-    Conn -->|"Opus stream (WSS)"| Router
-    Conn -->|"file upload (HTTP)"| Router
+    Conn -->|"live stream + control"| Edge
+    Conn -->|"durable file upload"| Edge
+    Edge --> Router
     Router --> ASR & Batch & LLM
     ASR & Batch --> Diar
     ASR -->|"tokens"| Conn
@@ -349,6 +352,8 @@ flowchart TB
 ```
 
 **Meeting transport:** bounded windows may align to VAD boundaries but never grow without bound. Full retained source audio remains available for authoritative reprocessing; client VAD is advisory ([ADR 0020](adr/0020-meeting-capture-diarization-authority.md)).
+
+**Transport evolution:** the Phase 3 application stays on bounded loopback HTTP/1.1. After the remote transport and authentication baselines exist, the client-facing edge may promote HTTP/3 with HTTP/2 or HTTP/1.1 fallback. WSS over HTTP/3 and a supported WebTransport candidate must be benchmarked against the authenticated WSS baseline before promotion ([ADR 0021](adr/0021-http3-secure-edge-transport.md)).
 
 ---
 
@@ -658,9 +663,10 @@ The host bootstrap plus health value/route-selector tests exist. The connector, 
 yap-desktop (Tauri) — thin client shell
   ├─ Track-aware capture       VAD hints + source manifests + explicit gaps
   ├─ sherpa recognizer         Offline fallback only (Nemotron INT8)
-  └─ Server connector          [deferred] WSS (live) + HTTP (batch)
+  └─ Server connector          [deferred] WSS (live) + HTTPS (batch); future HTTP/3 negotiation
 
 yap-server (GB-class server node, org LAN/VPN)
+  ├─ Secure transport edge      [future] HTTP/3 + HTTP/2 or HTTP/1.1 fallback (ADR 0021)
   ├─ Workload router            per-tenant queues, fairness, backpressure
   ├─ Streaming ASR pool         WSS endpoint
   ├─ Cohere batch pool          concurrent GPU workers
@@ -715,7 +721,7 @@ timeline
 | **7** | identity/access | Entra/MSAL bridge, Yap API audience, purpose grants, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
 | **8** | meeting evidence | Local anonymous speaker evidence, timestamped result revisions, server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
 | **9** | knowledge | OKF, KB compiler, agents, RAG, MCP, and permission-filtered views. | Old 7c-7e/11; ADR 0010/0011/0012/0017 |
-| **10** | enterprise/release | Zscaler/corporate access hardening, production publication governance/evidence, audit/deploy runbooks, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
+| **10** | enterprise/release | Zscaler/corporate access hardening, HTTP/3 secure-edge evaluation, production publication governance/evidence, audit/deploy runbooks, and eventual repo split. | Old 7+/12; ADR 0013/0018/0021 |
 
 ### Current phase status
 
@@ -731,7 +737,7 @@ timeline
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
 | **8** | Capture prerequisites implemented; diarization deferred | ADR 0020 and the source-aware design are canonical. Track/timeline/recording prerequisites are implemented; the anonymous speaker model, real benchmark, result production, and server reconciliation are not. |
 | **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
-| **10** | Later | Corporate access hardening, production publication governance, and repo split come after the MVP server is real. Installer packaging already exists and has local test-identity proof. |
+| **10** | Later | Corporate access hardening, HTTP/3 edge promotion, production publication governance, and repo split come after the remote transport and authentication baselines are real. Installer packaging already exists and has local test-identity proof. |
 
 Solo/local fallback and team/server mode share concepts, but the server path is now canonical for the main roadmap.
 
@@ -739,13 +745,13 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Capture persistence rule:** current `live-s-...` sessions use one canonical recording contract (`PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`) and are complete only after immutable sidecar/commit publication. Partial artifacts are recoverable/deletable. Pre-release timestamp-era recordings remain untouched and unindexed; no migration adapter or alternate fixture path is planned.
 
-**Deferred after the verified capture foundation:** the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release workflow proof; and per-OS real-model/native hardware CI.
+**Deferred after the verified capture foundation:** the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; the HTTP/3 secure edge and transport benchmark; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release workflow proof; and per-OS real-model/native hardware CI.
 
 **Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
-**Next execution order:** the tooling-only PowerShell migration now requires Core 7.4 or newer in repo-owned Windows scripts and every Windows CI job, with the supported minor-version floor exercised by a hash-pinned 7.4.17 compatibility lane. The next **product** implementation plan remains [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
+**Next execution order:** the tooling-only PowerShell migration now requires Core 7.4 or newer in repo-owned Windows scripts and every Windows CI job, with the supported minor-version floor exercised by a hash-pinned 7.4.17 compatibility lane. The next **product** implementation plan remains [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, diarization, and the HTTP/3 edge remain gated by their canonical phases. ADR 0021 does not authorize UDP exposure during Phase 3.
 
 ---
 
@@ -764,7 +770,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | **7** Identity/access | Entra sign-in, Yap API token validation, purpose grants, tenant-scoped identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
 | **8** Meeting evidence | Anonymous local labels, timestamped result revisions, benchmark gates, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) |
 | **9** Knowledge/agents | OKF, KB compiler, RAG, MCP | KB compiler spec; permission compile SLA |
-| **10** Enterprise/release | Zscaler/corp access, packaging, repo split | CI/CD migration; cross-repo link update |
+| **10** Enterprise/release | Zscaler/corp access, HTTP/3 secure-edge benchmark/promotion, packaging, repo split | ADR 0021 transport evidence; CI/CD migration; cross-repo link update |
 
 ---
 
@@ -838,6 +844,7 @@ Current implementation ownership and completeness for all decisions: [ADR implem
 | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | [0018](adr/0018-three-repo-topology.md) |
 | Local Nemotron INT8 streaming fallback | [0019](adr/0019-local-streaming-model-selection.md) |
 | Meeting capture, anonymous evidence, server reconciliation, contact/privacy boundary | [0020](adr/0020-meeting-capture-diarization-authority.md) |
+| HTTP/3 secure-edge evolution with TCP fallback and benchmark gates | [0021](adr/0021-http3-secure-edge-transport.md) |
 
 ### Build specs (how to implement)
 
