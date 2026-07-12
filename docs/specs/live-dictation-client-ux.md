@@ -10,6 +10,8 @@
 
 > **2026-07-09 injection amendment:** Windows live completion captures and revalidates the stop-time external foreground/focused control, then inserts cleaned transcript text with Unicode `SendInput`. The overlay remains non-focusable, paste-last repeats only the dedicated last-completed transcript, and a visible clipboard fallback handles focus changes, held modifiers, or OS blocks. ADR 0013 owns this behavior.
 
+> **2026-07-12 native-interaction gap:** Core Windows hotkey/injection behavior works, but the settings UI still accepts typed chord strings, paste-last has no default, and the island still uses a fixed native frame with a narrow idle sensor. Those are current defects, not accepted UX. The convergence client must use one continuously reused tray-owned island window whose native bounds match the visible collapsed/expanded surface, plus deliberate physical-chord recording with usable defaults, Cancel, and Reset.
+
 ---
 
 ## 1. Scope
@@ -17,7 +19,7 @@
 ### Implemented baseline
 - Mic permission + device selection.
 - Top-positioned live overlay foundation and typed live session state.
-- Configurable dictation and paste-last hotkeys.
+- Transactional dictation and paste-last shortcut commands; the safe recorder/default UX remains open below.
 - CPAL capture → bounded channels → mono conversion/linear resampling → warm in-process sherpa Nemotron recognizer.
 - 1120 ms local chunks with partial/final state updates.
 - Windows stop-time target revalidation, Unicode insertion, and visible clipboard fallback.
@@ -25,6 +27,8 @@
 - Orchestrator states wired to UI.
 
 ### Follow-on client/server work
+- One visible-bounds island window: hover expands the same surface downward without focus, and transparent space never catches clicks.
+- A deliberate "Change shortcut" recorder that stores only one normalized physical chord, ships dictation and paste-last defaults, supports Cancel/Reset, rejects bare printable or reserved/conflicting chords, and preserves the previous registration on failure.
 - Rust Silero VAD and reusable `vad_segments`.
 - Opus chunk writer and server-ready manifests.
 - Server live WSS connector, reconnect/backpressure policy, and local fallback handoff.
@@ -144,6 +148,14 @@ When Silero lands, it is owned by **Rust on the audio path** ([ADR 0006](../adr/
 - [ ] Paste-last repeats only the dedicated last completed transcript and never an active partial.
 - [ ] Mic-denied path is recoverable (no dead end).
 - [ ] `prefers-reduced-motion` honored.
+
+### Native interaction convergence
+
+- [ ] Collapsed and expanded native bounds match the visible island; hover expands the same tray-owned window downward without activating the app.
+- [ ] Only visible island pixels are interactive, with a collapse grace period that preserves the pointer target.
+- [ ] Dictation and paste-last work immediately from documented defaults.
+- [ ] Shortcut recording starts only after an explicit user action, stores only the final normalized chord, never logs raw events, and supports Cancel and Reset.
+- [ ] Invalid, reserved, conflicting, or failed registrations leave the previous working shortcut active.
 
 ### Follow-on preprocessing/server path
 

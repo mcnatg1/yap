@@ -462,7 +462,7 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - [x] No new inference framework was added.
 - [x] Rust, frontend unit, Playwright, and native WDIO checks are green; deterministic Rust contracts precede real-device evidence.
 
-Still deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; release packaging; and native hardware CI smoke.
+Still deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release proof; and per-OS real-model/native hardware CI.
 
 ## Acceptance For The Phase 8 Local Baseline Plan
 

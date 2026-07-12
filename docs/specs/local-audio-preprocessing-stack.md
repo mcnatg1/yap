@@ -61,7 +61,7 @@ Implemented and connected in the production microphone path after required Nemot
 
 The evidence and server-transport ports are implemented and independently bounded, but their production consumers are currently `None`. Production capture does not yet run recording-only: `start_local` must construct the Nemotron stream and local-ASR adapter before it opens CPAL capture.
 
-Deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; release packaging; and native hardware CI smoke.
+Deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release proof; and per-OS real-model/native hardware CI.
 
 Pre-release timestamp-era recordings remain untouched and unindexed. There is no migration adapter or second fixture/recording contract for them.
 

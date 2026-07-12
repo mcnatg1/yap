@@ -1,5 +1,7 @@
 # Server Contract And Durable Connector Implementation Plan
 
+> **Implementation status (2026-07-12):** Next **product** execution plan, after the post-branch PowerShell 7 tooling slice. Product implementation has not started beyond the pre-existing server health/router skeleton and Rust route vocabulary. There is no machine-readable contract, network service, capability-aware connector, SQLite ledger, migration, or Rust-owned imported queue yet.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Complete Yap's canonical Phase 3 boundary with a versioned server API/WSS contract, a real desktop reachability connector, and a Rust-owned SQLite job ledger that can safely support later upload and reconnect drain.

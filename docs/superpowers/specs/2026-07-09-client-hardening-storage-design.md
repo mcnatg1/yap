@@ -1,18 +1,20 @@
 # Client Hardening And Storage Design
 
-**Status:** Reviewed
+**Status:** Reviewed design; scoped implementation landed on the hardening branch
 **Date:** 2026-07-09
 **Scope:** Remaining desktop maintainability, storage, and native trust-boundary hardening on `hardening/yap-maintainability`.
+
+> **Current truth (2026-07-12):** The quantitative bullets below are a pre-implementation snapshot, not current file sizes. `App.tsx` is now 457 lines and `src-tauri/src/lib.rs` is 17 lines; command ownership moved into focused modules. Rust now authorizes playback/open/reveal paths and the local verification suite passes. Durable imported-job ownership still waits for Phase 3, and the branch still requires a green PR/CI before merge.
 
 ## Problem
 
 The desktop client is now smaller and easier to inspect, but several seams still need a clear contract before more implementation work:
 
-- `desktop/src/App.tsx` is down to roughly 950 lines, but still owns queue execution, setup/model state, status labels, and history actions.
-- `desktop/src-tauri/src/lib.rs` is down to roughly 1,070 lines, but still owns command definitions, setup glue, global-shortcut registration, and the invoke list.
+- At this snapshot, `desktop/src/App.tsx` was roughly 950 lines and still owned queue execution, setup/model state, status labels, and history actions.
+- At this snapshot, `desktop/src-tauri/src/lib.rs` was roughly 1,070 lines and still owned command definitions, setup glue, global-shortcut registration, and the invoke list.
 - History uses bounded windowing, not a measured virtual scroller.
 - Search can still inspect all bounded history entries and load transcript previews.
-- Playback paths are Rust-minted, but the broader import/open/reveal/transcribe path boundary still accepts raw frontend strings.
+- Playback paths were Rust-minted, but the broader import/open/reveal/transcribe boundary still accepted raw frontend strings; open/reveal authorization has since been hardened and the old local transcribe path is absent.
 - Local storage is split across app-data files, bounded frontend projections, and artifact-correlated hidden tombstones, so we need an explicit answer on SQLite.
 
 ## Decision

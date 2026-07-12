@@ -1,6 +1,6 @@
 # Spec: Model Download UX
 
-**Status:** Implemented baseline; artifact licensing, native CI, and release verification remain
+**Status:** Implemented baseline; model-artifact licensing, hosted real-model/native CI, and production-release proof remain
 **Scope:** User-facing lifecycle for Yap's single pinned local fallback model.
 
 This spec improves setup/settings UX for the local Nemotron fallback without adding a local model router. The desktop still owns exactly one local audio inference path: Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`. Server-side model routing, batch ASR, diarization, and fusion stay out of the desktop client.

@@ -1,5 +1,7 @@
 # Client Hardening And Storage Implementation Plan
 
+> **Implementation status (2026-07-12):** Scoped implementation is present and the local unit, Rust, Playwright, required WDIO, release-contract, provenance, build, and test-identity installer gates pass. Treat its boxes as historical work notes; branch closure still requires a green PR/CI and merge, not checkbox count.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish the remaining Yap desktop hardening without adding SQLite or server connector scope.

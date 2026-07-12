@@ -1,9 +1,11 @@
 # Local Nemotron Live Transcription
 
-**Status:** Current branch target
+**Status:** Implemented baseline; historical implementation design
 **Date:** 2026-07-05, amended 2026-07-08
 **Scope:** Make live dictation real through one local fallback: Nemotron 3.5 ASR Streaming 0.6B INT8 via in-process `sherpa-onnx`. The client captures mic audio, streams it to the warm recognizer, saves live WAV/TXT output into Home history, and stays explicit that larger official recordings belong to the server path.
 **Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0019-local-streaming-model-selection.md](../../adr/0019-local-streaming-model-selection.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
+
+> **Current truth (2026-07-12):** The in-process Nemotron path, live WAV/TXT history, and Windows text injection are implemented. Remaining gates are model-artifact licensing, licensed speech/WER evidence, hosted real-model/native CI, measured performance, and cross-platform proof. The scope language below records the implementation slice rather than current backlog.
 
 ## Problem
 
@@ -13,7 +15,7 @@ The live overlay and hotkey are product-critical, but the client must not become
 - Runs under real time on CPU.
 - Saves transcript and audio artifacts in the same history surface.
 - Blocks or queues larger recordings when the server is unavailable.
-- Leaves server WSS, Opus, Silero chunk manifests, Scribe, diarization, and text injection as separate phases.
+- Left server WSS, Opus, Silero chunk manifests, Scribe, diarization, and text injection as separate phases; Windows text injection has since landed.
 
 ## Decision
 

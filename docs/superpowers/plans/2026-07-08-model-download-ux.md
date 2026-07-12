@@ -1,5 +1,7 @@
 # Model Download UX Implementation Plan
 
+> **Implementation status (2026-07-12):** Baseline implemented: install, progress, cancel, verify, remove, disable/enable, and open-folder flows exist. Model-artifact licensing, hosted real-model/native CI, and production-release proof remain; task boxes below are historical execution notes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the single local fallback model lifecycle explicit in setup and settings: install, progress, cancel, verify, remove, disable, enable, and open folder.

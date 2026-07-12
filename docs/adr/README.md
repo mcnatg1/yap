@@ -31,6 +31,8 @@ Keep ADRs focused on one decision (or one tightly related cluster). Prefer updat
 
 **Readable synthesis:** [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md) — layers, roadmap, two deployment profiles, hardening, viability assessment.
 
+**Implementation audit:** [ADR-IMPLEMENTATION-STATUS.md](../ADR-IMPLEMENTATION-STATUS.md) — current client/server ownership, executable evidence, gaps, and 0–200 scores. Decision acceptance does not imply implementation completeness.
+
 ADRs 0001–0013 cover the original **solo / local-first profile**. ADRs 0014–0018 introduce the **team / server profile**. ADR 0019 amends the local streaming model choice. ADR 0020 reconciles meeting capture, local anonymous speaker evidence, server-authoritative diarization, and identity privacy across both profiles. Later ADRs supersede conflicting details in earlier records.
 
 ## Applicability and precedence
@@ -58,7 +60,7 @@ Every implementation plan must list its applied ADRs, superseded details it inte
 | [0007](0007-forced-alignment-engine.md) | Forced-alignment engine for word→speaker | Accepted principle (canonical Phase 6); engine requires revalidation |
 | [0008](0008-speechbrain-lid-gate.md) | SpeechBrain LID language gate | Accepted gate behavior (canonical Phase 6); model/runtime requires revalidation |
 | [0009](0009-knowledge-worker-protocol.md) | Knowledge worker IPC protocol | Solo/local only; team protocol superseded by [0017](0017-knowledge-base-compiler.md) |
-| [0010](0010-okf-conversation-schema.md) | OKF conversation schema | Accepted schema (canonical Phase 9) |
+| [0010](0010-okf-conversation-schema.md) | OKF conversation schema | Accepted Markdown/YAML and raw-preservation principles; 0020-compatible Phase 9 schema pending |
 | [0011](0011-vector-rag-retrieval.md) | Vector index + RAG retrieval (L6–L7) | Accepted principles; team storage amended by [0017](0017-knowledge-base-compiler.md) |
 | [0012](0012-mcp-server-surface.md) | MCP server surface | Accepted surface; team hosting amended by [0017](0017-knowledge-base-compiler.md) |
 | [0013](0013-global-hotkey-injection.md) | Global hotkey + cross-app injection (L1) | Accepted (Windows active; cross-platform follow-on) |

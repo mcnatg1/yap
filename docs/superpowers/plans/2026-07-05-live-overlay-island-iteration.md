@@ -1,5 +1,7 @@
 # Live Overlay Island Iteration Implementation Plan
 
+> **Implementation status (2026-07-12):** Historical UI implementation record. The overlay baseline landed, but its separate hover/geometry ownership assumptions are not the next design authority. Current direction is one continuously reused tray-owned island window with native bounds matching the visible collapsed/expanded surface.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the live overlay into a richer top-bezel island with peek actions, active recording feedback, processing, success/copy, and failure/retry states.

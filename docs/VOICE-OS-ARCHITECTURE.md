@@ -1,7 +1,9 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-11)
+**Status:** Living document (2026-07-12)
 **Authority:** Decisions are normative in [ADR 0001–0020](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
+
+For implementation truth rather than decision intent, use the living [ADR implementation status audit](ADR-IMPLEMENTATION-STATUS.md). An accepted ADR or a documented flowchart node is not proof that its code exists.
 
 > **2026-07-08 — Local model reset:** Yap keeps one local live/offline fallback model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Client-side fusion routing is rejected; model routing belongs on the server.
 
@@ -18,7 +20,7 @@
 | Principle | Why it works |
 |-----------|--------------|
 | **Local-first (solo profile)** | Offline, privacy-max; no cloud STT lock-in for individual users. |
-| **On-prem GPU (team profile)** | The GB-class server node is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. GPU removes the CPU bottleneck (~26-min batch drops to a few minutes; exact wall time unbenchmarked). |
+| **On-prem GPU (team profile)** | The GB-class server node is org-owned hardware on an org-controlled LAN — "our hardware, our network." Not cloud. Moving batch work off the client is promising, but GB10 wall time and safe concurrency remain benchmark gates. |
 | **Critical path isolation** | Live stays fast; heavy work (diarization, OKF, agents) never blocks typing. |
 | **Right model per job** | Nemotron INT8 for local live/offline fallback; server router for official recordings/live; **LLM pool** for polish/agents — not one model for everything. |
 | **Revisioned diarization** | Local results may use anonymous `Unknown` and `Speaker N`; server reconciliation may refine boundaries and attach purpose-authorized names. |
@@ -31,7 +33,7 @@
 | Risk | Mitigation (in ADRs) |
 |------|----------------------|
 | **Scope creep** | Ship desktop history/playback → local live fallback → server STT → preprocessing → diarization → L3 OKF in that order. |
-| **Three processes** | sherpa live recognizer in the Tauri process + llama-server + knowledge worker; worker idles out after 5 min. |
+| **Target local runtimes** | Today only the in-process sherpa live recognizer exists. If the deferred solo LLM and evidence workers ship, keep their lifecycle bounded and release them by measured idle/resource policy. |
 | **Local ASR dependency** | Pin artifacts; verify hashes; profile chunk/latency; CI smoke tests. |
 | **Wispr comparison on v1** | Keep hotkey + focused-field injection client-owned and regression-tested; never make insertion depend on the server. |
 | **OKF/agents before core STT** | Transcripts history first; OKF Phase 9. |
@@ -46,13 +48,13 @@
 
 ## What Yap is today vs where we’re going
 
-| | **Yap v1 target** | **Voice OS (long-term)** |
+| | **Current + next Yap boundary** | **Voice OS (long-term)** |
 |--|---------------------|---------------------------|
-| Primary input | Thin client live/offline fallback + recording queue shell | + live mic, eventually global hotkey |
+| Primary input | File imports + explicit live mic + global dictation hotkey; paste-last is optional and imports remain a queue shell | Same client inputs plus future connected server routes |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
 | STT runtime | **Nemotron INT8 sherpa fallback** + future server connector | Same client shell; heavier pools move server-side |
-| Polish | **llama-server** (bundled, CPU `-ngl 0`) | Scribe + agents; Ollama dev fallback |
+| Polish | Development-only Ollama call today; bundled `llama-server` is deferred | Scribe + agents through a governed client/server LLM boundary |
 | Speakers | Plain dictation; optional anonymous meeting labels later | Revisioned diarization + purpose-authorized server identity + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Git + compiler (team) | OKF + glossary agents + Q&A |
 
@@ -65,10 +67,10 @@
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
 | STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server streaming ASR pool (WSS) |
 | STT (batch) | Queue/block when offline; official larger recordings use the server path | Server Cohere batch pool (concurrent GPU workers) |
-| LLM | Local llama-server (`-ngl 0`) | Server LLM pool (GPU, multi-tenant) |
+| LLM | No shipped local LLM; development Polish currently calls Ollama | Future server LLM pool (GPU, multi-tenant) |
 | Diarization | Optional local `Unknown` / `Speaker N`; no durable profiles | Server-authoritative reconciliation; algorithms selected by benchmark (ADR 0020) |
 | Identity | Per-transcript contact labels only; no biometric matching | Entra ID / MSAL + explicit voice enrollment (ADR 0016/0020) |
-| Knowledge base | Local OKF markdown (old 7c, ADR 0010) | `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
+| Knowledge base | Future local OKF Markdown; canonical schema pending Phase 9 | Future `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
 The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, and local Nemotron fallback are implemented. Opus encoding and the server connector remain deferred. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
@@ -98,28 +100,28 @@ Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-u
 
 ## Pipeline charts
 
-Two views of the same architecture - **high-level** for orientation, **low-level** for implementation. These charts depict the current direction: a thin desktop client, local Nemotron INT8 fallback, source-aware meeting evidence, and server model pools for official processing. Normative rules live in [ADR 0001–0020](adr/README.md); sections below expand each box.
+Two views of the same target architecture - **high-level** for orientation, **low-level** for implementation. They include deferred components so each future boundary has a home; a node is current only when its label or the implementation-status sections below say so. Normative rules live in [ADR 0001–0020](adr/README.md); sections below expand each box.
 
-**Read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. **Polish panel** (batch) and **Scribe** (live) share **llama-server** via mutex rules ([ADR 0006](adr/0006-silero-agents-state-machine.md)).
+**Target read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. If the deferred local LLM product is activated, **Polish** and **Scribe** share **llama-server** via the mutex rules in [ADR 0006](adr/0006-silero-agents-state-machine.md). Today Polish is a development-only Ollama call and Scribe/llama-server are absent.
 
 ### High-level overview
 
-Layers, dual inputs, three processes, and async handoff — no per-node detail.
+Current and deferred layers, dual inputs, and async handoff — no per-node detail.
 
 ```mermaid
 flowchart TB
     User["User"]
 
     subgraph Yap["Yap — Tauri + React"]
-        UI["Transcribe · Live · Polish · History · KB agents"]
+        UI["Transcribe · Live · History<br/>Polish dev-only · KB agents Phase 9"]
     end
 
-    Orch["RuntimeOrchestrator<br/>Nemotron fallback · server connector · bounded LLM"]
+    Orch["RuntimeOrchestrator<br/>Nemotron lifecycle now<br/>server connector + bounded LLM deferred"]
 
-    subgraph Sidecars["Local runtimes — client-owned"]
+    subgraph Sidecars["Local runtimes — current + deferred"]
         CR["in-process sherpa-onnx<br/>Nemotron INT8 fallback"]
-        LL["llama-server<br/>Scribe + agents · -ngl 0"]
-        KW["optional speaker-evidence worker<br/>anonymous · bounded · cold"]
+        LL["DEFERRED llama-server<br/>Scribe + agents · -ngl 0"]
+        KW["DEFERRED speaker-evidence worker<br/>anonymous · bounded · cold"]
     end
 
     subgraph L1["L1 — OS + pre-warm · current client seam"]
@@ -131,7 +133,7 @@ flowchart TB
         Batch["File drop → server Cohere path / queue → History"]
     end
 
-    Handoff["Async handoff<br/>track-aware bounded chunks · explicit gaps · manifest"]
+    Handoff["Async handoff<br/>capture/gaps current · transport deferred"]
 
     subgraph L3["L3 — background enrich · Phase 8"]
         L3n["Anonymous speaker timeline · result revisions<br/>server reconciliation when connected"]
@@ -147,11 +149,13 @@ flowchart TB
     L1 --> Live
     UI --> Live
     UI --> Batch
-    Live --> CR & LL
+    Live --> CR
+    Live -.->|future Scribe| LL
     UI -.->|Polish panel| LL
     Live --> Handoff
     Batch --> Handoff
-    Handoff --> KW --> L3
+    Handoff -.-> KW
+    KW -.-> L3
     L3 -.->|authoritative server result| L4
     L4 --> L5 & L6 & L7
     L5 --> LL
@@ -207,9 +211,9 @@ flowchart TB
     Hotkey --> UI
 ```
 
-### Low-level detail — 7 layers
+### Low-level target detail — 7 layers
 
-Full Voice OS flowchart reconciled for Yap — **live + batch**, orchestrator, local runtimes, manifests, and canonical Phases 8–9 enrichment.
+Full Voice OS target flowchart reconciled for Yap — **live + batch**, orchestrator, local runtimes, manifests, and canonical Phases 8–9 enrichment. Arrows show intended flow, not landed integration; deferred nodes are labeled directly.
 
 ```mermaid
 flowchart TB
@@ -219,47 +223,47 @@ flowchart TB
     subgraph UI["Yap UI — Tauri + React"]
         Transcribe["Transcribe / queue panel"]
         LiveUI["Live EN panel"]
-        PolishUI["Polish panel"]
+        PolishUI["Polish panel · development-only Ollama today"]
         History["Transcripts history"]
         AgentsUI["KB Q&A · Phase 9"]
     end
 
     subgraph Orch["RuntimeOrchestrator — Rust"]
         States["Idle · FallbackReady · FallbackRunning · ServerQueued · ServerUploading · DegradedBackground"]
-        Inv["Nemotron local fallback · server ASR request · 1 HOT Scribe · 1 bg LLM queue · worker 1 chunk · FIFO ≤ 3"]
+        Inv["Nemotron lifecycle current<br/>server ASR · LLM queues · evidence worker deferred"]
     end
 
-    subgraph Sidecars["Local runtime / sidecars"]
+    subgraph Sidecars["Local runtime / deferred sidecars"]
         CR["sherpa-onnx<br/>Nemotron INT8 fallback"]
-        LL["llama-server<br/>~2B Q4 · CPU -ngl 0"]
-        KW["speaker-evidence worker<br/>optional · anonymous · bounded"]
+        LL["DEFERRED llama-server<br/>~2B Q4 · CPU -ngl 0"]
+        KW["DEFERRED speaker-evidence worker<br/>optional · anonymous · bounded"]
     end
 
     subgraph L1["L1 — OS listeners + pre-warm · client-owned"]
         OSHooks["Global listeners · Tauri/Rust"]
-        PreWarm["Pre-warm Nemotron + llama-server · open mic · Silero ready"]
+        PreWarm["Warm Nemotron + mic now<br/>llama-server + Silero deferred"]
     end
 
     subgraph L2Live["L2 live — hot path · must stay fast"]
         Mic["Mic capture"]
-        AGC["Optional WebRTC/AGC"]
-        Silero["Silero VAD · Rust ONNX · audio thread"]
+        AGC["DEFERRED optional WebRTC/AGC"]
+        Silero["DEFERRED Silero VAD · Rust ONNX"]
         MS["Nemotron INT8 · sherpa-onnx · English"]
-        ScribeL["Scribe · llama-server · ≤ 400 ms · dual-track raw+polished"]
+        ScribeL["DEFERRED Scribe · llama-server<br/>≤ 400 ms · dual-track raw+polished"]
         Ghost["Ghost / in-app preview · v1"]
         Injector["Windows focused-field inject<br/>clipboard fallback"]
     end
 
     subgraph L2Batch["L2 batch — server path · Yap recording quality"]
         Drop["File drop / queue"]
-        LID["SpeechBrain LID gate · user confirms lang · Phase 6"]
-        COH["GB-class server Cohere · job API · 14 langs"]
-        Save["Write .txt · append Transcripts/ history"]
-        ScribeB["Polish panel · optional Scribe on saved text"]
+        LID["DEFERRED SpeechBrain LID gate · Phase 6"]
+        COH["DEFERRED GB-class Cohere · Phase 5 job API"]
+        Save["DEFERRED server result → .txt/history"]
+        ScribeB["Dev Ollama today<br/>target governed Scribe deferred"]
     end
 
     subgraph Handoff["Handoff — non-blocking · never on L2 hot thread"]
-        Chunk["Bounded transport windows · VAD boundary hints"]
+        Chunk["DEFERRED transport windows · VAD hints"]
         Writer["Async source-track writer · explicit gaps"]
         Manifest["Versioned track manifest · hashes · VAD hints · degraded"]
         FIFO["Independent bounded sinks"]
@@ -348,25 +352,25 @@ flowchart TB
 
 ---
 
-## Coverage matrix
+## Decision-coverage matrix
 
-Everything from the original 7-layer flowchart and master spec is captured below. **Reconciled** items differ from the original diagram on purpose (ADRs override).
+Everything from the original 7-layer flowchart and master spec is represented below. **Reconciled** items differ from the original diagram on purpose (ADRs override). The checkmark means the decision is documented, not implemented; current implementation scores live in [ADR-IMPLEMENTATION-STATUS.md](ADR-IMPLEMENTATION-STATUS.md).
 
-| Original flowchart node | Documented? | Where | Yap decision (if changed) |
+| Original flowchart node | Decision documented? | Where | Yap decision (if changed) |
 |-------------------------|-------------|-------|---------------------------|
 | **L1** Global OS listeners | ✅ | ADR 0013 | Tauri hotkeys + Windows target-validated injection are active; other platforms follow |
-| **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005, 0019 | Warm **Nemotron recognizer** + **llama-server** + mic |
-| **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Optional AGC; Silero required |
+| **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005, 0019 | Warm **Nemotron recognizer** is implemented; llama-server and Silero are deferred |
+| **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Capture foundation is implemented; AGC and Silero are deferred |
 | **L2** VAD | ✅ Reconciled | Local audio spec, ADR 0020 | Advisory boundaries and endpointing; false negatives never erase source audio |
 | **L2** SpeechBrain LangID | ✅ | ADR 0003 | **Off L2**; batch gate is canonical Phase 6 |
 | **L2** ASR | ✅ Reconciled | ADR 0001–0002/0014/0019 | **Nemotron local fallback**; **server router** for official recordings/live |
-| **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | **llama-server** ~2B Q4, `-ngl 0` |
+| **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | Deferred **llama-server** target; current development Polish uses Ollama |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
 | **L2** Cross-app injector | ✅ | ADR 0013 + `live/injection.rs` | Revalidate stop-time target; Unicode input; visible clipboard fallback |
 | **L2** Bounded track handoff | ✅ Reconciled | Local audio spec, ADR 0020 | Independent sinks, content identity, and explicit gaps |
 | **L3** Handoff audio + raw text | ✅ Reconciled | ADR 0020 | Versioned source tracks and immutable raw artifacts |
 | **L3** Forced alignment | ✅ Reconciled | ADR 0007, ADR 0020 | Align raw text only; server result is authoritative |
-| **L3** Anonymous local speaker evidence | ✅ Reconciled | ADR 0020 | `Unknown` / `Speaker N`; existing sherpa APIs provide the first baseline |
+| **L3** Anonymous local speaker evidence | ✅ Reconciled | ADR 0020 | Contracts permit `Unknown` / `Speaker N`; no production speaker model is wired |
 | **L3** Server diarization + identity | ✅ Reconciled | ADR 0016, ADR 0020 | Revisioned reconciliation; names require active purpose grants and provenance |
 | **L3** Word-to-speaker timeline | ✅ Reconciled | ADR 0020 | Model-derived boundaries with result revision and confidence |
 | **L3** OKF parser | ✅ | ADR 0004 §6 | Phase 9 |
@@ -418,12 +422,14 @@ Mic → bounded capture/preprocess → Nemotron INT8 (sherpa-onnx)
       → hash-validated history, partial recovery, and deletion
 ```
 
-### Implemented fan-out and deferred preprocessing/server consumers
+### Target fan-out beyond the implemented baseline
+
+The following includes deferred components. Today the production coordinator wires recording and local Nemotron ASR only; it does not run Silero, llama-server/Scribe, speaker inference, or server transport.
 
 ```
-Mic → optional AGC → Silero VAD
+Mic → optional AGC → Silero VAD                         [deferred]
   → Nemotron INT8 (sherpa-onnx, English)       ← live tokens
-  → llama-server polish (Scribe) if <400ms budget   ← else raw only
+  → llama-server polish (Scribe) if <400ms budget   [deferred]
   → ghost UI + focused-field injection (Windows)   ← clipboard fallback if blocked
 
 Parallel (never blocks above):
@@ -441,7 +447,9 @@ The production coordinator currently supplies recording and local-ASR consumers;
 
 ## Background path (L3) — hardened
 
-### Chunk manifest (required fields)
+### Conceptual future server chunk payload
+
+This snake_case example is explanatory server-contract material, not the current Rust serialization. The implemented client contracts serialize camelCase fields and include nested replay/content identity and revision information. The machine-readable Phase 3 contract must be generated from or tested against those current types rather than copying this example.
 
 ```json
 {
@@ -551,7 +559,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 ## Runtime orchestration (summary)
 
-**State machine** (Rust in Tauri) — full spec in [ADR 0006](adr/0006-silero-agents-state-machine.md):
+**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust skeleton enforces the local Nemotron lifecycle; LLM scheduling, Silero, and the server connector are not wired:
 
 | Rule | Limit |
 |------|--------|
@@ -574,14 +582,16 @@ Idle ↔ ServerQueued ↔ ServerUploading   (GB-class server Cohere)
 
 These rules prevent the repeated UI and runtime churn we have been seeing. They are part of the architecture contract, not polish notes.
 
+**Current gaps:** these guardrails are not all landed. The current implementation uses a fixed 260×40 native overlay frame, a 260×8 Windows idle interaction region, and frontend-issued surface changes. Shortcut settings still accept typed chord strings; only dictation has a default and paste-last starts off. The convergence client must close those gaps without weakening the working Windows injection path.
+
 | Surface | Do | Do not |
 |---------|----|--------|
-| Live overlay geometry | Keep one owner for native window size and position. Rust owns the Tauri window frame; React owns only the visible island inside that frame. | Do not resize/reposition the native overlay from both Rust and React. Do not shrink the hover sensor to the visible island width. |
-| Live overlay motion | Animate transforms and opacity inside a stable frame. Keep the hover sensor fixed and test the motion while it is moving. | Do not animate layout dimensions that move the cursor out of the hit area. Do not rely only on settled screenshots. |
+| Live island geometry | Keep one continuously reused tray-owned island window and one owner for native bounds. Collapsed bounds match the visible island; hover expands the same window downward to match the visible controls. | Do not use a second island window, an oversized transparent click-catcher, or competing Rust/React geometry owners. |
+| Live island motion | Keep a visible hover target through the collapse grace period and animate content inside the current native bounds. Test hit testing and focus while the surface is moving. | Do not leave transparent native-window area intercepting clicks or let expansion activate/focus the app. Do not rely only on settled screenshots. |
 | Overlay permissions | Give the overlay window only the capabilities it needs for its owner boundary. | Do not grant frontend `set_size`, `set_position`, or monitor permissions if Rust owns geometry. |
 | Live transcription process | Prefer one session owner and explicit lifecycle boundaries. Until the sidecar exposes reset/ack/session tags, stale stdout must not be able to enter a new dictation session. | Do not hide clipping or stale-session risk behind warm reuse unless there is a protocol-level ready/reset signal. |
 | Recording history | Keep one canonical transcript/review surface and one cache owner. | Do not maintain separate preview dialogs, separate read-through caches, or fake recording adapters for the same transcript row. |
-| Settings and controls | Use native controls or already-installed primitives when they cover the job. Keep copy user-facing. | Do not add bespoke controls for simple select/radio/toggle behavior or explain CPU/GPU plumbing in normal settings copy. |
+| Settings and controls | Ship usable dictation and paste-last defaults. Enter an explicit "Change shortcut" mode that records one physical chord, normalizes it on release, supports Cancel and Reset, and preserves the previous registration on failure. | Do not require users to type chord strings, accept bare printable/OS-reserved chords, capture outside deliberate recording mode, or log/store raw key events. |
 | Docs and code | Update the ADR/spec/product surface in the same phase as the code. | Do not ship behavior that contradicts the client/server split: live local fallback is allowed; official long recordings queue for server. |
 | Speaker privacy | Persist anonymous timelines and user labels; keep local embeddings transient. | Do not turn contact import, transcript renaming, or meeting attendance into passive voice enrollment. |
 | Server staging | Keep `server/` to health, contract, route selection, and tests until the API/WSS contract is real. | Do not add placeholder pools/config/schema packages, app firewall exposure, Docker deployment, or service-disabling host tweaks before Phase 3-4 need them. |
@@ -616,18 +626,20 @@ UI copy: **“Local fallback: English · Server files: 14 languages”**
 
 ## Process & data layout
 
-### Solo / local-first profile
+### Target solo / local-first profile
+
+Only the in-process sherpa recognizer, model cache, transcripts/history artifacts, and normal logs exist today. The other entries below are deferred targets.
 
 ```
 Yap (Tauri)  [yap-desktop]
   ├─ sherpa recognizer         STT — Nemotron INT8 fallback
-  ├─ llama-server sidecar      Polish + LLM agents (CPU -ngl 0)
-  └─ speaker-evidence worker   optional anonymous meeting labels; no durable identity
+  ├─ llama-server sidecar      [deferred] Polish + LLM agents (CPU -ngl 0)
+  └─ speaker-evidence worker   [deferred] anonymous meeting labels; no durable identity
 
 %LOCALAPPDATA%/Yap/
   models/                      pinned model cache
   Transcripts/                 Yap history (ship first)
-  knowledge_base/              OKF (Phase 9)
+  knowledge_base/              [deferred] OKF (Phase 9)
     conversations/
     jargon_glossary/
     work_artifacts/
@@ -635,16 +647,18 @@ Yap (Tauri)  [yap-desktop]
     media_cache/
     quarantine/
   logs/
-    knowledge-worker.log
+    knowledge-worker.log       [deferred]
 ```
 
-### Team / server profile
+### Target team / server profile
+
+The host bootstrap plus health value/route-selector tests exist. The connector, network service, pools, databases, and `yap-knowledge` repository below are deferred.
 
 ```
 yap-desktop (Tauri) — thin client shell
   ├─ Track-aware capture       VAD hints + source manifests + explicit gaps
   ├─ sherpa recognizer         Offline fallback only (Nemotron INT8)
-  └─ Server connector          WSS (live) + HTTP (batch) to yap-server
+  └─ Server connector          [deferred] WSS (live) + HTTP (batch)
 
 yap-server (GB-class server node, org LAN/VPN)
   ├─ Workload router            per-tenant queues, fairness, backpressure
@@ -692,7 +706,7 @@ timeline
 | Phase | Boundary | Deliverable | Old refs |
 |-------|----------|-------------|----------|
 | **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
-| **1** | desktop foundation | Recordings home, playback, setup, Rust-owned job state, source-aware capture contracts, bounded sink fan-out, and crash-safe recording. | Phase 3 UI work; ADR 0020 prerequisite slices |
+| **1** | desktop foundation | Recordings home, playback, setup, typed job projection seams, source-aware capture contracts, bounded sink fan-out, and crash-safe recording. | Phase 3 UI work; ADR 0020 prerequisite slices |
 | **2** | desktop fallback | Local Nemotron INT8 live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002/0019 |
 | **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; server-tier spec |
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
@@ -701,7 +715,7 @@ timeline
 | **7** | identity/access | Entra/MSAL bridge, Yap API audience, purpose grants, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
 | **8** | meeting evidence | Local anonymous speaker evidence, timestamped result revisions, server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
 | **9** | knowledge | OKF, KB compiler, agents, RAG, MCP, and permission-filtered views. | Old 7c-7e/11; ADR 0010/0011/0012/0017 |
-| **10** | enterprise/release | Zscaler/corporate access hardening, audit/deploy runbooks, packaging, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
+| **10** | enterprise/release | Zscaler/corporate access hardening, production publication governance/evidence, audit/deploy runbooks, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
 
 ### Current phase status
 
@@ -709,15 +723,15 @@ timeline
 |-------|--------|------------------|
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
 | **1** | Capture foundation implemented; job ledger remains | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, and a Rust orchestrator skeleton exist. The Rust-owned SQLite server-job ledger is still deferred. |
-| **2** | Implemented baseline; hardening remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Native CI smoke, release packaging, and measured latency/accuracy gates remain. |
-| **3** | Starting now | `server/` exists as a small staging area; the real API/WSS contract still needs to be written. |
-| **4** | Starting now | `infra/yap-server-node/` and the runbook exist; production service deployment is not started. |
+| **2** | Implemented baseline; hosted proof remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Windows native WDIO, NSIS packaging, local test-identity installer smokes, and release-artifact contract tests pass; hosted real-model/native release CI and measured latency/accuracy gates remain. |
+| **3** | Skeleton only | `server/` contains a health value and route-selector tests; no network service, machine-readable contract, connector, or durable job ledger exists. |
+| **4** | Host bootstrap only | `infra/yap-server-node/` and the runbook exist; no Yap application service is deployed. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
 | **8** | Capture prerequisites implemented; diarization deferred | ADR 0020 and the source-aware design are canonical. Track/timeline/recording prerequisites are implemented; the anonymous speaker model, real benchmark, result production, and server reconciliation are not. |
 | **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
-| **10** | Later | Corporate access hardening, release packaging, and repo split come after the MVP server is real. |
+| **10** | Later | Corporate access hardening, production publication governance, and repo split come after the MVP server is real. Installer packaging already exists and has local test-identity proof. |
 
 Solo/local fallback and team/server mode share concepts, but the server path is now canonical for the main roadmap.
 
@@ -725,13 +739,13 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Capture persistence rule:** current `live-s-...` sessions use one canonical recording contract (`PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`) and are complete only after immutable sidecar/commit publication. Partial artifacts are recoverable/deletable. Pre-release timestamp-era recordings remain untouched and unindexed; no migration adapter or alternate fixture path is planned.
 
-**Deferred after the verified capture foundation:** the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; release packaging; and native hardware CI smoke.
+**Deferred after the verified capture foundation:** the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release workflow proof; and per-OS real-model/native hardware CI.
 
 **Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
-**Next implementation order:** [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
+**Next execution order:** after this hardening branch passes PR/CI and is merged, migrate repo-owned PowerShell scripts and workflows to PowerShell 7 as a tooling-only slice. The next **product** implementation plan remains [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
 
 ---
 
@@ -739,11 +753,11 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 Each phase ships **code + doc/product sync** together, so positioning never lags shipped features.
 
-| Gate | Code done | Docs/product to update |
-|------|-----------|------------------------|
-| **1** Desktop foundation | Recordings home/playback, Rust-owned jobs, source-aware manifests, bounded fan-out, crash-safe recording | Client state spec; source-aware design; connected/offline and partial-recovery UX |
+| Gate | Exit criteria | Docs/product to update |
+|------|---------------|------------------------|
+| **1** Desktop foundation | Recordings home/playback, typed job projection seam, source-aware manifests, bounded fan-out, crash-safe recording | Client state spec; source-aware design; connected/offline and partial-recovery UX |
 | **2** Local fallback | Nemotron INT8 live/offline fallback, explicit install/remove/disable | Mark [STT spec](specs/local-live-fallback-sidecar.md) Accepted; setup download docs |
-| **3** Server contract | Health, jobs, WSS, errors, client connector | [Server tier MVP spec](specs/server-tier-mvp.md); OpenAPI/WSS docs |
+| **3** Server contract | Health, job/WSS contracts, errors, client connector, Rust-owned SQLite ledger | [Server tier MVP spec](specs/server-tier-mvp.md); OpenAPI/WSS docs |
 | **4** Server node | Workload router, model pools, node runbook | [ADR 0014](adr/0014-server-tier-compute-topology.md); firewall/deploy runbook |
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
 | **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
@@ -760,7 +774,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 - [x] In-process local Nemotron fallback
 - [x] Pin Nemotron artifacts by revision and SHA-256
-- [ ] Add native CI smoke and release-artifact verification
+- [x] Add required Windows native WDIO, release-artifact contract tests, and local test-identity installer verification
+- [ ] Run hosted production-release proof and per-OS real-model/native CI
 - [x] Model/runtime readiness in Setup UI
 - [x] Stable Rust error codes and frontend projections
 - [ ] Complete actionable toast/recovery coverage for every native error
@@ -788,7 +803,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 
 **Meeting evidence and diarization (Phase 8)**
 
-- [ ] Local `Unknown` / `Speaker N` state and immutable result revisions
+- [x] Evidence/result contracts restrict local attribution to `Unknown` / `Speaker N` and support immutable revisions
+- [ ] Production speaker inference and result publication
 - [ ] Transient client embeddings; no passive contact/profile enrollment
 - [ ] Server-authoritative reconciliation and purpose-authorized identity
 - [ ] Align raw STT only
@@ -797,6 +813,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 ---
 
 ## Document map
+
+Current implementation ownership and completeness for all decisions: [ADR implementation status](ADR-IMPLEMENTATION-STATUS.md).
 
 | Topic | ADR |
 |-------|-----|

@@ -1,9 +1,11 @@
 # Spec: Testing strategy
 
-**Status:** Living verification contract (updated 2026-07-10); future phase gates activate only when their fixtures exist
+**Status:** Living verification contract (updated 2026-07-12); future phase gates activate only when their fixtures exist
 **Scope:** Cross-cutting tests for the desktop runtime, track-aware audio contracts, local fallback, source-aware diarization, server contracts, and native UI.
 
 This is the shared reference the phase specs point to for their acceptance tests.
+
+**Current activation:** deterministic generated-tone and contract fixtures exist. The licensed speech clips/golden transcripts, `tests/wer_check.py`, meeting RTTM manifest, diarization benchmark harness, bundled llama-server, and per-OS real-model matrix described below do not exist yet. Their tables are target gates, not claims about active CI.
 
 ---
 
@@ -21,6 +23,28 @@ This is the shared reference the phase specs point to for their acceptance tests
 
 Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
 
+### Windows installer safety boundary
+
+| Validation lane | Where it runs | Identity and storage | Destructive scope |
+|---|---|---|---|
+| Local enterprise-machine validation | Representative developer/corporate Windows host | `Yap.Test`, `com.mcnatg1.yap.test`, `%LOCALAPPDATA%\Yap.Test` | Default uninstall plus sentinel-owned test cleanup only; never `/DELETEAPPDATA` |
+| Local test-identity deletion | Representative Windows host | `Yap.Test`, `com.mcnatg1.yap.test`, `%LOCALAPPDATA%\Yap.Test` | `/DELETEAPPDATA` may remove only the sentinel-owned test namespace |
+| Isolated local destructive validation | Windows Sandbox or a dedicated `YapTest*`/`YapSmoke*` disposable account | Production installer inside a disposable Windows profile | May verify production app-data deletion after exact-target and per-run sentinel checks |
+| GitHub-hosted destructive verification | Fresh `windows-2025` runner | Production `Yap` identity in the ephemeral runner profile | Verifies default preservation followed by explicit production-data deletion |
+
+The local-safe script must reject production installer metadata before execution. Every
+script-owned recursive deletion is fail-closed: the target is a strict child of its expected root,
+contains the exact test-tree sentinel, contains no reparse point, and is not `Yap` or
+`com.mcnatg1.yap`. Explicit data deletion additionally requires a per-run token that matches the
+sentinel read by the uninstaller, and smoke runs serialize access to each installer identity.
+`RUNNER_ENVIRONMENT=github-hosted` reduces accidental misuse but is not treated as an authorization
+or cryptographic boundary.
+
+The supported release workflow stages a verified GitHub draft from an immutable commit on `main`.
+The private repository plan does not support required-reviewer environment rules, so the workflow
+never publishes the draft itself. Final publication is an explicit GitHub UI action after reviewing
+the draft assets and `release-metadata.json`.
+
 ### Overlay and motion contract
 
 The live overlay has two test owners:
@@ -30,7 +54,7 @@ The live overlay has two test owners:
 | Playwright preview mode | DOM layout, visible island dimensions, hover/recording/processing/success states, reduced-motion behavior | One-frame layout jumps, hit-area shrink, overlap, text overflow |
 | WebdriverIO desktop smoke | Real Tauri overlay window properties and tray/app-window behavior | Taskbar/Alt-Tab exposure, focusability, native frame size drift |
 
-For overlay changes, settled screenshots are not enough. Add a short `requestAnimationFrame` sampler around hover/state churn and fail on unexpected rect drift. The native hover sensor must stay stable while the visible island animates inside it.
+For overlay changes, settled screenshots are not enough. Add a short `requestAnimationFrame` sampler around hover/state churn and fail on unexpected rect drift. During native resize, the top hover target must remain reachable through the collapse grace period while window bounds continue to match the visible island.
 
 ---
 

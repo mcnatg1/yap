@@ -4,6 +4,7 @@
 |----------|---------|
 | [**VOICE-OS-ARCHITECTURE.md**](VOICE-OS-ARCHITECTURE.md) | **Master spec** — high/low pipeline charts, 7 layers, coverage matrix, agents, failure states, roadmap |
 | [**adr/README.md**](adr/README.md) | Architecture Decision Records (normative decisions) |
+| [**ADR-IMPLEMENTATION-STATUS.md**](ADR-IMPLEMENTATION-STATUS.md) | Living client/server ownership and implementation audit for every ADR |
 | [**specs/**](specs/) | Buildable implementation specs (IPC, error codes, lifecycle, acceptance) |
 | [**runbooks/**](runbooks/) | Operational setup notes for local/server environments |
 | [../PRODUCT.md](../PRODUCT.md) | Product purpose and UX principles |
@@ -15,24 +16,23 @@
 
 | Spec | Roadmap area | Status |
 |------|--------------|--------|
-| [client-state-machine.md](specs/client-state-machine.md) | Desktop client workflow | Accepted contract; local/setup partial, server transitions unimplemented |
-| [model-download-ux.md](specs/model-download-ux.md) | Local fallback setup | Implemented baseline; licensing, CI, and release gates remain |
-| [local-audio-preprocessing-stack.md](specs/local-audio-preprocessing-stack.md) | Local audio preparation | Accepted design; production capture integration not implemented |
-| [local-live-fallback-sidecar.md](specs/local-live-fallback-sidecar.md) | Local live fallback | Implemented baseline; CI, performance, and release gates remain |
+| [client-state-machine.md](specs/client-state-machine.md) | Desktop client workflow | Accepted target; current imported queue remains a transitional React/localStorage projection |
+| [model-download-ux.md](specs/model-download-ux.md) | Local fallback setup | Implemented baseline; model licensing, hosted real-model/native CI, and production-release proof remain |
+| [local-audio-preprocessing-stack.md](specs/local-audio-preprocessing-stack.md) | Local audio preparation | Capture/timeline/recording foundation implemented; Silero, meeting inference, and transport remain |
+| [local-live-fallback-sidecar.md](specs/local-live-fallback-sidecar.md) | Local live fallback | Implemented baseline; model licensing, hosted real-model/native CI, performance, and production-release proof remain |
 | [local-llm-sidecar.md](specs/local-llm-sidecar.md) | Local LLM polish | Deferred draft; solo profile only |
-| [live-dictation-client-ux.md](specs/live-dictation-client-ux.md) | Live dictation client | Implemented baseline; hardening remains |
+| [live-dictation-client-ux.md](specs/live-dictation-client-ux.md) | Live dictation client | Windows baseline implemented; visible-bounds island and safe shortcut-recorder/default UX remain |
 | [server-tier-mvp.md](specs/server-tier-mvp.md) | Server tier MVP | Canonical Phase 3 draft; health/router skeleton only |
-| [2026-07-10-source-aware-diarization-design.md](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Capture foundation and meeting evidence | Accepted design; foundation prerequisites are next, inference not implemented |
+| [2026-07-10-source-aware-diarization-design.md](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Capture foundation and meeting evidence | Capture/contract prerequisites implemented; speaker inference and server reconciliation not implemented |
 | [testing-strategy.md](specs/testing-strategy.md) | All | Living verification contract |
 
-## Next implementation plans
+## Next execution order
 
-Execute these in order:
+After the current hardening branch passes PR/CI and is merged, the immediate tooling slice migrates repo-owned scripts and workflows to PowerShell 7. That tooling work does not broaden the product architecture or start server inference.
 
-1. [Client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md) - canonical Phase 1 capture contracts, bounded sinks, crash-safe recording, and recovery.
-2. [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) - canonical Phase 3 contract/health connector and the SQLite job-ledger prerequisite for Phase 5.
+The next **product** implementation plan is [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md): the canonical Phase 3 machine-readable contract, capability health service, connector, and SQLite job-ledger prerequisite for Phase 5. It deliberately stops before upload drain, WSS runtime, server ASR, authentication, or diarization.
 
-The second plan deliberately stops before upload drain, WSS runtime, server ASR, authentication, or diarization.
+The [client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md) is a landed implementation record. Its unchecked future inference/transport gates are not evidence that the capture foundation is absent.
 
 ## Runbooks
 

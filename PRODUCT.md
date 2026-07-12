@@ -12,18 +12,18 @@ They usually arrive with files already on disk (MP3, M4A, WAV, MP4, and similar 
 
 ## Product Purpose
 
-Yap is a desktop transcription app (Tauri + React in `desktop/`). Users drop audio or video files, transcribe through the best available trusted runtime, and get readable text saved beside the source or in a local transcripts folder. Local Parakeet Q4 is the offline/live fallback; higher-quality recording transcription belongs on the DGX/server path.
+Yap is a desktop transcription app (Tauri + React in `desktop/`). The current desktop implementation records and transcribes explicit live sessions locally with Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Users can also import, review, and queue audio or video files, but official imported-file transcription still waits for the private organization-server connector; disconnected imports remain queued or blocked instead of receiving official-looking fallback output.
 
-Success looks like: files in, accurate transcripts out, with minimal friction between drop → queue → transcript → copy/export. The interface should make the current file and its transcript the center of attention; model names, auth paths, and runner details stay in secondary status unless something needs attention.
+The target product loop is files in, accurate transcripts out, with minimal friction between drop → durable queue → private server transcript → copy/export. Until that connected path lands, the implemented offline loop is explicit live capture → local transcript → history/playback/copy or reveal. The interface should make the current file and its transcript the center of attention; model names, auth paths, and runner details stay in secondary status unless something needs attention.
 
-Primary navigation:
+Current production navigation:
 
 - **Home** — hub with recent transcripts and a quick path back into work
 - **Transcribe** — the workbench: drop zone, queue, progress, and live transcript preview
-- **Transcripts** — history grouped by day for reopening past work
-- **Polish** — rewrite/cleanup pass on a selected transcript before export
 
-This is not live-only dictation or a Wispr Flow clone. Batch recordings remain the core loop; live capture is a compact, explicit companion path.
+Transcript history currently lives on Home; there is no separate Transcripts navigation item or dedicated export command yet. A development-only, opt-in Polish surface exists but is hidden from production builds. A later product slice may split history into its own destination and promote Polish only after a governed LLM route exists.
+
+This is not live-only dictation or a Wispr Flow clone. Batch recordings remain the target core loop once the trusted server route exists; live capture is the implemented compact, explicit companion path.
 
 ## Brand Personality
 
@@ -51,9 +51,9 @@ Emotional goal: users trust the visible route — local fallback on this device,
 ## Design Principles
 
 1. **Drop audio, get text.** Every screen should reinforce the core loop; secondary capabilities (polish, history, setup) support it, they don't compete with it.
-2. **The transcript is the reward.** When transcription completes, the text surface becomes the hero; export and copy actions stay adjacent to the content.
+2. **The transcript is the reward.** When transcription completes, the text surface becomes the hero; copy and reveal actions stay adjacent to the content, with dedicated export remaining a target capability.
 3. **Trusted route, stated simply.** Say "Private on this device" for local fallback and "Org server" for team/server work — not implementation details — unless an error requires technical context.
-4. **One primary action per state.** Empty → drop; queued → transcribe; running → progress + cancel; done → read and export. Avoid competing primary buttons.
+4. **One primary action per state.** Empty → drop; queued → wait for the trusted route; running → progress + cancel; done → read, copy, or reveal. Avoid competing primary buttons.
 5. **Technical setup is secondary.** Model, auth, runner, and output path belong in details/status areas until something needs attention.
 
 ## Accessibility & Inclusion

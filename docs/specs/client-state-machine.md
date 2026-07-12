@@ -17,7 +17,7 @@ This is the build contract for the client workflow. It replaces the cosmetic rea
 
 The long-term state machine belongs in Tauri Rust as a `RuntimeOrchestrator` or equivalent. React should project typed snapshots/events from that orchestrator.
 
-The current desktop bridge is allowed to keep React as the temporary owner of queue projection while we refactor the UI, but it must use the same vocabulary the Rust orchestrator will own later. Do not add a standalone readiness helper.
+The current desktop bridge still stores imported jobs in React/localStorage with numeric IDs and legacy `intent`/`path` fields. That is a transitional projection, not durable authority. The Phase 3 connector work replaces it with Rust-minted string IDs, a SQLite ledger, and typed snapshots/events. Do not add a second readiness or queue owner in the meantime.
 
 ## State Axes
 
@@ -37,8 +37,8 @@ The current desktop bridge is allowed to keep React as the temporary owner of qu
 | State | Meaning | Phase |
 |-------|---------|-------|
 | `not_set` | No server URL/profile is configured. | 1 |
-| `connecting` | Health/auth check is running. | 3 |
-| `ready` | Health and auth passed. | 3 |
+| `connecting` | Version, health, auth state, and capability checks are running. | 3 |
+| `ready` | Version and auth state are valid and the required route capabilities were advertised. | 3 |
 | `offline` | Server URL exists but health timed out or failed. | 3 |
 | `sign_in_required` | Server is reachable but sign-in is required. | 7 |
 | `retrying` | Connector is retrying after network loss. | 3/5 |
@@ -139,7 +139,7 @@ Rust can use snake_case names internally and serialize typed snapshots/events to
 | Larger recording | No | Any | `blocked_server_unavailable` or `queued_server` for retry |
 | Explicit local fallback test/dev file | No | Yes | `localFallback` |
 
-The current desktop bridge may still run selected files through local fallback while the server does not exist, but the state model must label that path as fallback/dev behavior, not the official large-recording product path.
+The current desktop bridge never executes an ordinary imported file through local Nemotron; imports remain queued or blocked. The explicit test/dev-file row is a contract-only diagnostic route and must not become reachable from normal import UX.
 
 ## Transitions
 
@@ -193,10 +193,10 @@ Client cleanup changes should touch existing state owners before adding runtime 
 - `desktop/src/components/panels/queue-panel.tsx` renders queue controls and progress.
 - `desktop/src/components/panels/app-sheets.tsx` renders setup/server labels.
 - `desktop/src/lib/history-utils.ts` maps history into `complete` recording views.
-- `desktop/src-tauri/src/runtime/` becomes the Rust `RuntimeOrchestrator` home when implementation reaches the backend state-machine slice.
-- `desktop/src-tauri/src/stt/dispatch.rs` keeps local fallback transcription but reports job/runtime events instead of only path-based progress.
+- `desktop/src-tauri/src/runtime/` contains the current `RuntimeOrchestrator` state skeleton; Phase 3 extends it with validated connector and durable-job snapshots.
+- `desktop/src-tauri/src/stt/dispatch.rs` now holds only shared busy/error projection state. Live transcription is owned by `live/runtime.rs` and `live/stream.rs`.
 
-No server HTTP/WSS calls, diarization engine, preprocessing engine, or local Cohere fallback are introduced by this client cleanup.
+This state-machine cleanup does not itself add server HTTP/WSS calls, diarization inference, or a local Cohere fallback. The source-aware capture/preprocessing foundation landed separately under `desktop/src-tauri/src/audio/`.
 
 ## Acceptance
 

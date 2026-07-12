@@ -1,5 +1,7 @@
 # Client Audio Foundation Implementation Plan
 
+> **Implementation status (2026-07-12):** Capture/session contracts, exact loss accounting, bounded sink fan-out, crash-safe streaming recording, immutable commit metadata, and recovery/deletion are implemented and unit/integration tested. Speaker inference, system loopback, server transport, and the durable job ledger remain separate future gates; unchecked boxes below are not reliable landed-state evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish Yap's source-aware desktop capture foundation so dictation and meetings share one bounded, testable audio path with explicit gaps and crash-safe recordings.

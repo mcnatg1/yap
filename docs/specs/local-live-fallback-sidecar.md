@@ -1,6 +1,6 @@
 # Spec: Local Nemotron Live Fallback
 
-**Status:** Implemented baseline; native CI smoke, performance gates, and release packaging remain
+**Status:** Implemented baseline; model licensing, hosted real-model/native CI, performance gates, and production-release proof remain
 
 ## Scope
 
