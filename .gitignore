@@ -18,6 +18,7 @@ desktop/playwright-report/
 desktop/test-results/
 desktop/tests/results/
 desktop/src-tauri/target/
+desktop/src-tauri/target-test/
 .vite/
 .tools/
 .xwin-cache/
