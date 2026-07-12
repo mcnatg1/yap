@@ -72,15 +72,12 @@ export type ServerConnectionState =
 export type RecordingJobStatus =
   | "accepted"
   | "preflighting"
-  | "blocked_setup_required"
   | "blocked_server_unavailable"
   | "blocked_sign_in_required"
-  | "queued_local_fallback"
   | "queued_server"
   | "preprocessing"
   | "uploading"
   | "server_processing"
-  | "local_transcribing"
   | "saving"
   | "diarization_queued"
   | "diarization_running"
@@ -181,7 +178,6 @@ const activeRecordingStatuses = new Set<RecordingJobStatus>([
   "preprocessing",
   "uploading",
   "server_processing",
-  "local_transcribing",
   "saving",
   "diarization_running",
 ]);
@@ -254,32 +250,6 @@ export function isRecordingActive(status: RecordingJobStatus) {
 
 export function isRecordingFinished(status?: RecordingJobStatus) {
   return status ? finishedRecordingStatuses.has(status) : false;
-}
-
-export function isRecordingRunnable(status: RecordingJobStatus) {
-  return status === "queued_local_fallback" || status === "failed";
-}
-
-export function isRecordingRetryable(status: RecordingJobStatus) {
-  return (
-    status === "failed" ||
-    status === "blocked_sign_in_required"
-  );
-}
-
-export function recordingStatusForStartFailure(code?: string): RecordingJobStatus {
-  switch (code) {
-    case "MODEL_MISSING":
-    case "FALLBACK_DISABLED":
-      return "blocked_setup_required";
-    case "SERVER_UNAVAILABLE":
-    case "SERVER_OFFLINE":
-      return "blocked_server_unavailable";
-    case "SIGN_IN_REQUIRED":
-      return "blocked_sign_in_required";
-    default:
-      return "failed";
-  }
 }
 
 export function setupStateLabel(state: SetupState) {

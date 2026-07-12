@@ -15,8 +15,8 @@ import { WorkspaceHeader } from "@/components/panels/workspace-header";
 import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog";
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { useHistoryActions } from "@/hooks/use-history-actions";
+import { useImportedRecordingQueue } from "@/hooks/use-imported-recording-queue";
 import { useLiveHistorySync } from "@/hooks/use-live-history-sync";
 import { useRecordingSelection } from "@/hooks/use-recording-selection";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
@@ -29,32 +29,16 @@ import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
 import { type TranscriptHistoryEntry } from "@/history";
 import {
-  acceptedFormats,
-  acceptedRecordingDrops,
   audioExtensions,
-  isRecordingActive,
   isRecordingFinished,
-  isRecordingRetryable,
-  isRecordingRunnable,
-  queuedServerMessage,
-  recordingStatusForStartFailure,
   type RailAction,
   type RecordingJobView,
   workspaceCopy,
 } from "@/lib/app-types";
-import {
-  allowRecordingPlaybackPath,
-} from "@/lib/playback-registry";
-import { unblockFallbackReadyQueue } from "@/lib/setup-model-state";
 import { cn } from "@/lib/utils";
-import {
-  availableQueuedServerSlots,
-  createQueuedServerRecordingJobs,
-  nextRecordingQueueId,
-  readRecordingQueue,
-  writeRecordingQueue,
-} from "@/recording-queue";
-import { SttInvokeError, startTranscribe } from "@/stt";
+
+const ignoreFallbackReady = () => undefined;
+const unavailableRecordingRetry = () => undefined;
 
 function withHistoryPlaybackByteLength(
   item: RecordingJobView | undefined,
@@ -66,15 +50,7 @@ function withHistoryPlaybackByteLength(
 }
 
 export default function App() {
-  const initialQueue = useMemo(() => readRecordingQueue(), []);
-  const [queue, setQueue] = useState<RecordingJobView[]>(initialQueue);
-  const nextRecordingId = useRef(nextRecordingQueueId(initialQueue));
-  const [running, setRunning] = useState(false);
-  const [runningSince, setRunningSince] = useState<number>();
   const [status, setStatus] = useState("Starting");
-  const unblockFallbackReady = useCallback(() => {
-    setQueue(unblockFallbackReadyQueue);
-  }, []);
   const settingsRefreshRef = useRef<() => Promise<void>>(async () => undefined);
   const {
     clearTranscriptText,
@@ -85,6 +61,13 @@ export default function App() {
     rememberPolishedText,
     transcriptText,
   } = useTranscriptText();
+  const {
+    addPaths: enqueueImportedPaths,
+    clearQueue,
+    queue,
+    removeItem,
+    setQueue,
+  } = useImportedRecordingQueue(clearTranscriptText);
   const {
     copyTranscript,
     openAppPath,
@@ -110,7 +93,6 @@ export default function App() {
     reviewMorphOrigin,
     selectHistoryEntry,
     selectQueueItem,
-    selectQueueItemOnly,
     selectedHistoryItem: selectedHistoryItemWithoutPlaybackMetadata,
     selectedHistoryOutput,
     selectedId,
@@ -130,17 +112,6 @@ export default function App() {
     ),
     [historyPlaybackByteLengths, selectedItemWithoutPlaybackMetadata],
   );
-  const queueRef = useRef(queue);
-  const recordingDrop = useRecordingDrop(addPaths);
-
-  const hasRunnable = useMemo(
-    () => queue.some((item) => isRecordingRunnable(item.status)),
-    [queue],
-  );
-  const completed = queue.filter((item) => isRecordingFinished(item.status)).length;
-  const queueProgress = queue.length ? Math.round((completed / queue.length) * 100) : 0;
-  const runningItem = queue.find((item) => isRecordingActive(item.status));
-  const elapsedSeconds = useElapsedSeconds(runningSince);
   const {
     activeRail,
     closeDetails,
@@ -156,7 +127,7 @@ export default function App() {
   } = useWorkspaceNavigation({
     onOpenDetails: () => void settingsRefreshRef.current(),
     onOpenPolish: () => {
-      setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Transcribe a file first");
+      setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Select a finished transcript first");
     },
   });
   const setAppModal = useCallback((modal: "settings" | "help" | null) => {
@@ -181,6 +152,13 @@ export default function App() {
     if (open) setAppModal("help");
     else setHelpOpen(false);
   }, [setAppModal, setHelpOpen]);
+  const addPaths = useCallback(async (paths: string[]) => {
+    const selectedQueueId = await enqueueImportedPaths(paths);
+    if (selectedQueueId === undefined) return;
+    openWorkspace("transcribe");
+    selectQueueItem(selectedQueueId);
+  }, [enqueueImportedPaths, openWorkspace, selectQueueItem]);
+  const recordingDrop = useRecordingDrop(addPaths);
   const onLiveSessionSaved = useCallback((entry: TranscriptHistoryEntry) => {
     selectHistoryEntry(entry);
     openWorkspace("home");
@@ -207,7 +185,7 @@ export default function App() {
     selectHistoryEntry,
   });
   const settings = useSettingsControl({
-    onFallbackReady: unblockFallbackReady,
+    onFallbackReady: ignoreFallbackReady,
     onStatusChange: setStatus,
   });
   settingsRefreshRef.current = settings.refresh;
@@ -222,87 +200,10 @@ export default function App() {
   }, [settings.setupPromptRequest, showDetails]);
 
   useEffect(() => {
-    queueRef.current = queue;
-    try {
-      writeRecordingQueue(queue);
-    } catch (error) {
-      console.warn("Queued recordings could not be saved.", error);
-      toast.warning("Queued recordings could not be saved.");
-    }
-  }, [queue]);
-
-  useEffect(() => {
     if (selectedItem?.output && !Object.prototype.hasOwnProperty.call(transcriptText, selectedItem.output)) {
       void loadTranscriptText(selectedItem.output).catch(() => toast.error("Preview unavailable"));
     }
   }, [selectedItem?.output, transcriptText]);
-
-  async function addPaths(paths: string[]) {
-    const firstId = nextRecordingId.current;
-    nextRecordingId.current += paths.length;
-    const incoming = paths.map((path, index) => ({ id: firstId + index, path }));
-
-    const acceptedCandidates = acceptedRecordingDrops(queueRef.current.map((item) => item.path), incoming);
-    const accepted = acceptedCandidates.slice(0, availableQueuedServerSlots(queueRef.current));
-    if (paths.length && !acceptedCandidates.length) {
-      toast.warning(`Drop ${acceptedFormats} files.`);
-      return;
-    }
-    if (acceptedCandidates.length > accepted.length) {
-      toast.warning(
-        accepted.length
-          ? `Queued ${accepted.length} of ${acceptedCandidates.length} recordings. Connect to your organization's transcription server before adding more.`
-          : "The organization server queue is full. Connect before adding more recordings.",
-      );
-    }
-
-    const approved = (
-      await Promise.all(
-        accepted.map(async (item) => {
-          try {
-            const admission = await allowRecordingPlaybackPath(item.path);
-            return {
-              ...item,
-              playbackByteLength: admission.byteLength,
-              playbackPath: admission.playbackPath,
-            };
-          } catch {
-            return undefined;
-          }
-        }),
-      )
-    ).filter((item): item is {
-      id: number;
-      path: string;
-      playbackByteLength: number;
-      playbackPath: string;
-    } => Boolean(item));
-
-    if (accepted.length && approved.length < accepted.length) {
-      toast.warning("Some recordings could not be prepared for playback.");
-    }
-    if (!approved.length) return;
-
-    const current = queueRef.current;
-    const acceptedApprovedIds = new Set(
-      acceptedRecordingDrops(current.map((item) => item.path), approved).map((item) => item.id),
-    );
-    const addable = approved
-      .filter((item) => acceptedApprovedIds.has(item.id))
-      .slice(0, availableQueuedServerSlots(current));
-    if (!addable.length) return;
-
-    const playbackByteLengths = new Map(
-      addable.map((item) => [item.id, item.playbackByteLength]),
-    );
-    const newItems = createQueuedServerRecordingJobs(addable).map((item) => ({
-      ...item,
-      playbackByteLength: playbackByteLengths.get(item.id),
-    }));
-    setQueue((current) => [...current, ...newItems]);
-    openWorkspace("transcribe");
-    selectQueueItem(newItems[newItems.length - 1].id);
-  }
 
   function goToTranscribe() {
     openWorkspace("transcribe");
@@ -329,118 +230,6 @@ export default function App() {
     }
   }
 
-  async function transcribeItems(pending: RecordingJobView[]) {
-    if (!pending.length || running || !isTauri()) return;
-    if (pending.some((item) => item.intent === "recording")) {
-      toast.error(queuedServerMessage);
-      return;
-    }
-
-    setRunning(true);
-    setRunningSince(Date.now());
-    setStatus(`Transcribing 0/${pending.length}`);
-
-    for (const [index, item] of pending.entries()) {
-      if (index === 0) selectQueueItemOnly(item.id);
-      setQueue((items) =>
-        items.map((entry) =>
-          entry.id === item.id
-            ? {
-                ...entry,
-                error: undefined,
-                pipeline: {
-                  ...entry.pipeline,
-                  intake: "done",
-                  transcription: index === 0 ? "running" : "queued",
-                },
-                progressPhase: index === 0 ? "starting" : undefined,
-                progressPercent: index === 0 ? 0 : undefined,
-                progressMessage: index === 0 ? "Preparing..." : undefined,
-                route: "localFallback",
-                status: index === 0 ? "local_transcribing" : "queued_local_fallback",
-              }
-            : entry,
-        ),
-      );
-    }
-
-    try {
-      await startTranscribe(pending.map((item) => item.path));
-    } catch (error) {
-      const failure = error instanceof SttInvokeError ? error : undefined;
-      const message = failure?.message ?? String(error || "Transcription failed");
-      const status = recordingStatusForStartFailure(failure?.code);
-      const pendingIds = new Set(pending.map((entry) => entry.id));
-      setQueue((items) =>
-        items.map((entry) =>
-          pendingIds.has(entry.id)
-            ? {
-                ...entry,
-                error: message,
-                pipeline: {
-                  ...entry.pipeline,
-                  transcription: status === "failed" ? "error" : "notStarted",
-                },
-                progressMessage: undefined,
-                progressPercent: undefined,
-                progressPhase: undefined,
-                status,
-              }
-            : entry,
-        ),
-      );
-      setRunning(false);
-      setRunningSince(undefined);
-      setStatus("Needs attention");
-      toast.error(message);
-    }
-  }
-
-  async function runQueue() {
-    const pending = queue.filter((item) => isRecordingRunnable(item.status));
-    await transcribeItems(pending);
-  }
-
-  async function retryItem(id: number) {
-    const item = queue.find((entry) => entry.id === id);
-    if (!item || !isRecordingRetryable(item.status) || running) return;
-
-    selectQueueItemOnly(id);
-    await transcribeItems([{ ...item, status: "queued_local_fallback", error: undefined }]);
-  }
-
-  function removeItem(id: number) {
-    setQueue((items) => {
-      const item = items.find((entry) => entry.id === id);
-      if (!item || isRecordingActive(item.status)) return items;
-      if (item.status === "cancelled") return items.filter((entry) => entry.id !== id);
-
-      return items.map((entry) =>
-        entry.id === id
-          ? {
-              ...entry,
-              error: undefined,
-              pipeline: {
-                ...entry.pipeline,
-                transcription: entry.pipeline.transcription === "running" ? "skipped" : entry.pipeline.transcription,
-              },
-              progressMessage: undefined,
-              progressPercent: undefined,
-              progressPhase: undefined,
-              status: "cancelled",
-            }
-          : entry,
-      );
-    });
-  }
-
-  function clearQueue() {
-    if (!running) {
-      setQueue([]);
-      clearTranscriptText();
-    }
-  }
-
   const loadHistoryPreviewText = useCallback(
     (entry: TranscriptHistoryEntry) => loadTranscriptPreviewText(entry.outputPath),
     [loadTranscriptPreviewText],
@@ -461,19 +250,11 @@ export default function App() {
     <>
       {showQueue ? (
         <QueuePanel
-          completed={completed}
-          elapsedSeconds={elapsedSeconds}
-          hasRunnable={hasRunnable}
           onClear={clearQueue}
           onRemove={removeItem}
-          onRetry={(id) => void retryItem(id)}
           onReveal={(path) => void revealPath(path)}
-          onRun={() => void runQueue()}
           onSelect={selectQueueItem}
           queue={queue}
-          queueProgress={queueProgress}
-          running={running}
-          runningItem={runningItem}
           selectedId={selectedId}
         />
       ) : null}
@@ -515,14 +296,14 @@ export default function App() {
   const workspaceTranscriptPane = showTranscript ? (
     <div className="h-full min-w-0">
       <TranscriptPanel
-        elapsedSeconds={elapsedSeconds}
+        elapsedSeconds={0}
         item={selectedItem}
         onCopy={copyTranscript}
         onOpen={(path) => void openAppPath(path)}
         onOpenHelp={() => openWorkspace("help")}
-        onRetry={(id) => void retryItem(id)}
+        onRetry={unavailableRecordingRetry}
         onReveal={(path) => void revealPath(path)}
-        running={running}
+        running={false}
         text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
       />
     </div>
@@ -624,7 +405,7 @@ export default function App() {
         open={helpOpen}
       />
       <TranscriptReviewDialog
-        elapsedSeconds={elapsedSeconds}
+        elapsedSeconds={0}
         item={selectedHistoryItem}
         morphOrigin={reviewMorphOrigin}
         onCopy={copyTranscript}
@@ -633,10 +414,10 @@ export default function App() {
           if (!open) closeHistoryReview();
         }}
         onOpenHelp={() => openWorkspace("help")}
-        onRetry={(id) => void retryItem(id)}
+        onRetry={unavailableRecordingRetry}
         onReveal={(path) => void revealPath(path)}
         open={workspaceView === "home" && Boolean(selectedHistoryItem)}
-        running={running}
+        running={false}
         text={selectedHistoryItem?.output ? transcriptText[selectedHistoryItem.output] : undefined}
       />
       <TranscriptPreviewDialog

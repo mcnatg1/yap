@@ -1,7 +1,6 @@
 import {
   deriveSetupStateFromFallbackModel,
   type FallbackModelView,
-  type RecordingJobView,
   type SetupState,
 } from "@/lib/app-types";
 
@@ -84,26 +83,10 @@ export function projectFallbackModelState({
     engineReady,
     fallbackEnabled,
     modelInstalled,
-    requestQueueUnblock: setupState === "fallback_ready",
+    requestQueueUnblock: false,
     requestSetupPrompt,
     setupPrompted: alreadyPrompted || requestSetupPrompt,
     setupState,
     status: overrides.statusText ?? fallbackStatusText(view, fallbackEnabled),
   };
-}
-
-export function unblockFallbackReadyQueue(items: RecordingJobView[]) {
-  return items.map((item) =>
-    item.status === "blocked_setup_required"
-      ? {
-          ...item,
-          error: undefined,
-          pipeline: {
-            ...item.pipeline,
-            transcription: "notStarted" as const,
-          },
-          status: "queued_local_fallback" as const,
-        }
-      : item,
-  );
 }

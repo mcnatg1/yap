@@ -1,17 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  createInitialPipelineState,
   deriveSetupStateFromFallbackModel,
   type FallbackModelStatus,
   type FallbackModelView,
-  type RecordingJobView,
 } from "@/lib/app-types";
 import {
   fallbackStatusText,
   projectFallbackModelState,
   shouldOpenSetupPrompt,
-  unblockFallbackReadyQueue,
 } from "@/lib/setup-model-state";
 
 function fallbackView(status: FallbackModelStatus, message?: string): FallbackModelView {
@@ -20,18 +17,6 @@ function fallbackView(status: FallbackModelStatus, message?: string): FallbackMo
     label: "Nemotron",
     message,
     modelsDir: "C:/Yap/models",
-    status,
-  };
-}
-
-function job(status: RecordingJobView["status"], id = 1): RecordingJobView {
-  return {
-    id,
-    intent: "recording",
-    name: `take-${id}.wav`,
-    path: `C:/take-${id}.wav`,
-    pipeline: { ...createInitialPipelineState(), transcription: "error" },
-    route: "localFallback",
     status,
   };
 }
@@ -90,18 +75,16 @@ describe("setup model state", () => {
     ).toBe(false);
   });
 
-  it("unblocks only fallback setup-blocked jobs when fallback becomes ready", () => {
-    const queuedServer = job("queued_server", 1);
-    const blocked = job("blocked_setup_required", 2);
-
-    const next = unblockFallbackReadyQueue([queuedServer, blocked]);
-
-    expect(next[0]).toBe(queuedServer);
-    expect(next[1]).toMatchObject({
-      error: undefined,
-      status: "queued_local_fallback",
-      pipeline: { transcription: "notStarted" },
+  it("never requests imported queue mutation when the fallback model becomes ready", () => {
+    const projection = projectFallbackModelState({
+      alreadyPrompted: true,
+      currentFallbackEnabled: false,
+      currentModelInstalled: false,
+      skipped: false,
+      view: fallbackView("ready"),
     });
+
+    expect(projection.requestQueueUnblock).toBe(false);
   });
 
   it.each([
@@ -113,7 +96,7 @@ describe("setup model state", () => {
         engineReady: true,
         fallbackEnabled: true,
         modelInstalled: true,
-        requestQueueUnblock: true,
+        requestQueueUnblock: false,
         setupState: "fallback_ready",
         status: "Transcription engine ready",
       },

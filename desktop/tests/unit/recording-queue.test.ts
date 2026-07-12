@@ -114,6 +114,26 @@ describe("recording queue storage", () => {
     expect(jobs.at(-1)).toMatchObject({ id: 200, path: "C:/take-205.wav" });
   });
 
+  it("round-trips only the newest bounded queued-server payload", () => {
+    const storage = storageWith("[]");
+    const jobs = createQueuedServerRecordingJobs(
+      Array.from({ length: maxStoredQueueJobs + 5 }, (_, index) => ({
+        id: index + 1,
+        path: `C:/take-${index + 1}.wav`,
+        playbackPath: `http://127.0.0.1/media/${index + 1}`,
+      })),
+    );
+
+    writeRecordingQueue(jobs, storage);
+
+    const restored = readRecordingQueue(storage);
+    expect(restored).toHaveLength(maxStoredQueueJobs);
+    expect(restored[0].path).toBe("C:/take-6.wav");
+    expect(restored.at(-1)?.path).toBe("C:/take-205.wav");
+    expect(restored.every((job) => job.route === "serverBatch" && job.status === "queued_server"))
+      .toBe(true);
+  });
+
   it("projects approved selected recordings into queued server jobs", () => {
     const jobs = createQueuedServerRecordingJobs(
       [{ id: 9, path: "C:/meeting.wav", playbackPath: "\\\\?\\C:\\meeting.wav" }],
