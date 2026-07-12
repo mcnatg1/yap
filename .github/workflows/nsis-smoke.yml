@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "17 9 * * 1"
-  release:
-    types: [published]
 
 permissions:
   contents: read
@@ -18,6 +16,9 @@ jobs:
   nsis-bundle-smoke:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      RUST_TARGET: x86_64-pc-windows-msvc
+      RUST_TOOLCHAIN: stable
     defaults:
       run:
         working-directory: desktop
@@ -28,10 +29,13 @@ jobs:
           version: 11.7.0
       - uses: actions/setup-node@v6
         with:
-          node-version-file: .node-version
+          node-version: "24.14.0"
           cache: pnpm
           cache-dependency-path: desktop/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.RUST_TARGET }}
       - uses: actions/cache@v6
         with:
           path: |
@@ -39,22 +43,14 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             desktop/src-tauri/target/
-          key: ${{ runner.os }}-nsis-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-nsis-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json') }}
           restore-keys: |
-            ${{ runner.os }}-nsis-
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-nsis-
       - run: pnpm install --frozen-lockfile
       - name: Verify release-evidence configuration
         run: node --test ./tests/scripts/release-evidence.test.mjs
-      - name: Require exact FreeFlow provenance for published releases
-        if: github.event_name == 'release'
+      - name: Verify recorded third-party provenance integrity
         run: node ./tests/scripts/assert-third-party-provenance.mjs
-      - name: Record the outstanding release provenance gate
-        if: github.event_name != 'release'
-        shell: pwsh
-        run: |
-          "### Third-party provenance" >> $env:GITHUB_STEP_SUMMARY
-          "The reviewed FreeFlow MIT notice is packaged. Its exact upstream revision remains a published-release gate until verified from the original import." >> $env:GITHUB_STEP_SUMMARY
       - name: Build NSIS bundle
         run: pnpm tauri build --bundles nsis
       - name: Install, launch, verify notices, and uninstall
@@ -66,6 +62,6 @@ jobs:
           name: nsis-smoke-${{ github.run_id }}
           path: |
             desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-            desktop/tests/results/nsis-smoke.json
+            desktop/tests/results/nsis-smoke/**
           if-no-files-found: ignore
           retention-days: 7

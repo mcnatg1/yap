@@ -42,4 +42,44 @@ describe("Yap desktop shell", () => {
     expect(Array.isArray(commands.recordings.sessions)).toBe(true);
     expect(Array.isArray(commands.recordings.maintenanceWarnings)).toBe(true);
   });
+
+  it("reports an enforced CSP violation for a disallowed remote script", async () => {
+    await browser.tauri.switchWindow("main");
+    const violation = await browser.executeAsync((done) => {
+      const probeUrl = "https://example.invalid/yap-csp-probe.js";
+      const script = document.createElement("script");
+      let settled = false;
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        document.removeEventListener("securitypolicyviolation", onViolation);
+        script.remove();
+        done(result);
+      };
+      const onViolation = (event) => {
+        const blockedURI = String(event.blockedURI ?? "");
+        if (!blockedURI.includes("yap-csp-probe")) return;
+        finish({
+          blockedURI,
+          disposition: event.disposition,
+          effectiveDirective: event.effectiveDirective,
+        });
+      };
+      const timeout = window.setTimeout(
+        () => finish({ error: "No securitypolicyviolation event was emitted." }),
+        3_000,
+      );
+
+      document.addEventListener("securitypolicyviolation", onViolation);
+      script.src = probeUrl;
+      document.head.append(script);
+    });
+
+    expect(violation.error).toBeUndefined();
+    expect(violation.blockedURI).toContain("yap-csp-probe.js");
+    expect(["script-src", "script-src-elem"]).toContain(violation.effectiveDirective);
+    expect(violation.disposition).toBe("enforce");
+  });
 });

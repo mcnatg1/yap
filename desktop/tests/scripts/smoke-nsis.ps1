@@ -1,9 +1,9 @@
-param(
-  [string]$BundleDirectory = ""
-)
+param([string]$BundleDirectory = "")
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+Import-Module (Join-Path $PSScriptRoot "nsis-smoke-helpers.psm1") -Force
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 $desktopRoot = Join-Path $repoRoot "desktop"
@@ -12,7 +12,7 @@ if ([string]::IsNullOrWhiteSpace($BundleDirectory)) {
 }
 $BundleDirectory = [System.IO.Path]::GetFullPath($BundleDirectory)
 
-$installers = @(Get-ChildItem -LiteralPath $BundleDirectory -Filter "*-setup.exe" -File)
+$installers = @(Get-ChildItem -LiteralPath $BundleDirectory -Filter "*-setup.exe" -File -ErrorAction Stop)
 if ($installers.Count -ne 1) {
   throw "Expected exactly one NSIS installer in $BundleDirectory; found $($installers.Count)."
 }
@@ -22,44 +22,104 @@ $tempRoot = if ($env:RUNNER_TEMP) {
 } else {
   [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 }
-$runToken = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { $PID.ToString() }
-$smokeRoot = [System.IO.Path]::GetFullPath((Join-Path $tempRoot "yap-nsis-smoke-$runToken"))
-if (-not $smokeRoot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-  throw "Refusing to use an NSIS smoke directory outside the configured temporary root."
-}
-
-$installRoot = Join-Path $smokeRoot "install"
-$resultsRoot = Join-Path $desktopRoot "tests\results"
-$evidencePath = Join-Path $resultsRoot "nsis-smoke.json"
+$runToken = Assert-SafePathToken -Token $(if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { $PID.ToString() })
+$smokeRoot = Get-ValidatedChildPath -Root $tempRoot -Token "yap-nsis-smoke-$runToken"
+$installRoot = Get-ValidatedChildPath -Root $smokeRoot -Token "install"
+$resultsBase = Join-Path $desktopRoot "tests\results\nsis-smoke"
+$resultsRoot = Get-ValidatedChildPath -Root $resultsBase -Token $runToken
+$evidencePath = Join-Path $resultsRoot "evidence.json"
+$activityLog = Join-Path $resultsRoot "activity.log"
 $expectedNotice = Join-Path $repoRoot "THIRD_PARTY_NOTICES.md"
-$appProcess = $null
-$uninstallAttempted = $false
-$evidence = [ordered]@{
-  status = "running"
-  installer = $installers[0].FullName
-  installedBinary = $null
-  noticeSha256 = $null
-  launched = $false
-  uninstalled = $false
-  timestampUtc = [DateTime]::UtcNow.ToString("o")
-}
+$expectedProvenance = Join-Path $repoRoot "THIRD_PARTY_PROVENANCE.json"
+$installTimeoutSeconds = 120
+$launchProbeSeconds = 3
+$uninstallTimeoutSeconds = 60
+$cleanupTimeoutSeconds = 10
 
+Assert-PathIsNotReparsePoint -Path $tempRoot
 New-Item -ItemType Directory -Force $resultsRoot | Out-Null
 
+$events = [System.Collections.Generic.List[object]]::new()
+$trackedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+$evidence = [ordered]@{
+  schemaVersion = 1
+  status = "running"
+  phase = "initialized"
+  installer = $installers[0].FullName
+  installRoot = $installRoot
+  installedBinary = $null
+  noticeSha256 = $null
+  provenanceSha256 = $null
+  launched = $false
+  uninstalled = $false
+  deadlinesSeconds = [ordered]@{
+    install = $installTimeoutSeconds
+    launchProbe = $launchProbeSeconds
+    uninstall = $uninstallTimeoutSeconds
+    cleanup = $cleanupTimeoutSeconds
+  }
+  processes = [ordered]@{
+    install = $null
+    app = $null
+    uninstall = $null
+    cleanupUninstall = $null
+  }
+  trackedProcessIds = @()
+  events = $events
+  errors = @()
+  startedAtUtc = [DateTime]::UtcNow.ToString("o")
+  finishedAtUtc = $null
+}
+
+function Write-Evidence {
+  $temporaryPath = "$evidencePath.tmp"
+  $evidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporaryPath -Encoding utf8
+  Move-Item -LiteralPath $temporaryPath -Destination $evidencePath -Force
+}
+
+function Set-EvidencePhase([string]$Phase, [string]$Message) {
+  $evidence.phase = $Phase
+  $event = [ordered]@{
+    atUtc = [DateTime]::UtcNow.ToString("o")
+    phase = $Phase
+    message = $Message
+  }
+  $events.Add($event)
+  "[$($event.atUtc)] [$Phase] $Message" | Add-Content -LiteralPath $activityLog -Encoding utf8
+  Write-Evidence
+}
+
+function Add-TrackedProcess([int]$ProcessId) {
+  if ($ProcessId -gt 0) { [void]$trackedProcessIds.Add($ProcessId) }
+}
+
+$appProcessId = $null
+$primaryError = $null
+$cleanupErrors = [System.Collections.Generic.List[Exception]]::new()
+
 try {
+  Write-Evidence
+  Set-EvidencePhase -Phase "preparing" -Message "Creating isolated custom install root."
+  if (Test-Path -LiteralPath $smokeRoot) {
+    Remove-ValidatedTree -Root $tempRoot -Candidate $smokeRoot
+  }
   New-Item -ItemType Directory -Force $smokeRoot | Out-Null
-  $install = Start-Process `
+  Assert-NoReparsePoints -Path $smokeRoot
+
+  Set-EvidencePhase -Phase "installing" -Message "Starting silent NSIS installation with a bounded deadline."
+  $install = Invoke-ProcessWithDeadline `
     -FilePath $installers[0].FullName `
     -ArgumentList @("/S", "/D=$installRoot") `
-    -PassThru `
-    -Wait `
-    -WindowStyle Hidden
-  if ($install.ExitCode -ne 0) {
-    throw "NSIS installer exited with code $($install.ExitCode)."
-  }
+    -TimeoutSeconds $installTimeoutSeconds `
+    -StdoutPath (Join-Path $resultsRoot "install.stdout.log") `
+    -StderrPath (Join-Path $resultsRoot "install.stderr.log")
+  Add-TrackedProcess -ProcessId $install.ProcessId
+  $evidence.processes.install = $install
+  if ($install.ExitCode -ne 0) { throw "NSIS installer exited with code $($install.ExitCode)." }
+  Assert-NoReparsePoints -Path $smokeRoot
 
   $appCandidates = @(
-    Get-ChildItem -LiteralPath $installRoot -Filter "*.exe" -File |
+    Get-ChildItem -LiteralPath $installRoot -Filter "*.exe" -File -ErrorAction Stop |
       Where-Object { $_.Name -ne "uninstall.exe" }
   )
   if ($appCandidates.Count -ne 1) {
@@ -67,68 +127,148 @@ try {
   }
   $appBinary = $appCandidates[0].FullName
   $installedNotice = Join-Path $installRoot "THIRD_PARTY_NOTICES.md"
-  if (-not (Test-Path -LiteralPath $installedNotice -PathType Leaf)) {
-    throw "The installed application is missing THIRD_PARTY_NOTICES.md."
+  $installedProvenance = Join-Path $installRoot "THIRD_PARTY_PROVENANCE.json"
+  foreach ($requiredFile in @($installedNotice, $installedProvenance)) {
+    if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+      throw "The installed application is missing $([System.IO.Path]::GetFileName($requiredFile))."
+    }
   }
 
-  $expectedHash = (Get-FileHash -LiteralPath $expectedNotice -Algorithm SHA256).Hash
-  $installedHash = (Get-FileHash -LiteralPath $installedNotice -Algorithm SHA256).Hash
-  if ($installedHash -ne $expectedHash) {
+  $noticeHash = (Get-FileHash -LiteralPath $installedNotice -Algorithm SHA256).Hash
+  $provenanceHash = (Get-FileHash -LiteralPath $installedProvenance -Algorithm SHA256).Hash
+  if ($noticeHash -ne (Get-FileHash -LiteralPath $expectedNotice -Algorithm SHA256).Hash) {
     throw "The installed third-party notice does not match the reviewed repository notice."
   }
-  $evidence.installedBinary = $appBinary
-  $evidence.noticeSha256 = $installedHash
-
-  $appProcess = Start-Process -FilePath $appBinary -PassThru -WindowStyle Hidden
-  Start-Sleep -Seconds 3
-  $appProcess.Refresh()
-  if ($appProcess.HasExited) {
-    throw "The installed Yap executable exited during the launch smoke with code $($appProcess.ExitCode)."
+  if ($provenanceHash -ne (Get-FileHash -LiteralPath $expectedProvenance -Algorithm SHA256).Hash) {
+    throw "The installed provenance manifest does not match the reviewed repository manifest."
   }
+  $evidence.installedBinary = $appBinary
+  $evidence.noticeSha256 = $noticeHash
+  $evidence.provenanceSha256 = $provenanceHash
+
+  Set-EvidencePhase -Phase "launching" -Message "Launching the installed app for a bounded survival probe."
+  $appProcess = Start-Process `
+    -FilePath $appBinary `
+    -PassThru `
+    -RedirectStandardOutput (Join-Path $resultsRoot "app.stdout.log") `
+    -RedirectStandardError (Join-Path $resultsRoot "app.stderr.log") `
+    -WindowStyle Hidden
+  $appProcessId = $appProcess.Id
+  Start-Sleep -Milliseconds 250
+  foreach ($processId in Get-ProcessTreeIds -RootProcessId $appProcessId) {
+    Add-TrackedProcess -ProcessId $processId
+  }
+  $evidence.processes.app = [ordered]@{
+    processId = $appProcessId
+    treeProcessIds = @($trackedProcessIds)
+    survivalProbeSeconds = $launchProbeSeconds
+  }
+  Assert-ProcessSurvives -ProcessId $appProcessId -DurationSeconds $launchProbeSeconds
   $evidence.launched = $true
-  Stop-Process -Id $appProcess.Id -Force
-  $appProcess.WaitForExit()
+  Stop-ProcessTreeBounded -RootProcessId $appProcessId -TimeoutSeconds $cleanupTimeoutSeconds | Out-Null
+  foreach ($processId in $trackedProcessIds) {
+    if (Test-ProcessAlive -ProcessId $processId) { throw "Tracked process $processId survived app shutdown." }
+  }
+  $appProcessId = $null
 
   $uninstaller = Join-Path $installRoot "uninstall.exe"
   if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
     throw "The NSIS installation did not create uninstall.exe."
   }
-  $uninstallAttempted = $true
-  $uninstall = Start-Process `
+  Set-EvidencePhase -Phase "uninstalling" -Message "Starting silent NSIS uninstall with a bounded deadline."
+  $uninstall = Invoke-ProcessWithDeadline `
     -FilePath $uninstaller `
     -ArgumentList @("/S") `
-    -PassThru `
-    -Wait `
-    -WindowStyle Hidden
-  if ($uninstall.ExitCode -ne 0) {
-    throw "NSIS uninstaller exited with code $($uninstall.ExitCode)."
-  }
+    -TimeoutSeconds $uninstallTimeoutSeconds `
+    -StdoutPath (Join-Path $resultsRoot "uninstall.stdout.log") `
+    -StderrPath (Join-Path $resultsRoot "uninstall.stderr.log")
+  Add-TrackedProcess -ProcessId $uninstall.ProcessId
+  $evidence.processes.uninstall = $uninstall
+  if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstaller exited with code $($uninstall.ExitCode)." }
 
-  $deadline = [DateTime]::UtcNow.AddSeconds(10)
-  while ((Test-Path -LiteralPath $appBinary -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) {
-    Start-Sleep -Milliseconds 250
+  Wait-PathAbsent -Path $installRoot -TimeoutSeconds $cleanupTimeoutSeconds
+  Assert-NoProcessesUnderPath -Root $installRoot
+  foreach ($processId in $trackedProcessIds) {
+    if (Test-ProcessAlive -ProcessId $processId) { throw "Tracked process $processId survived uninstall." }
   }
-  if ((Test-Path -LiteralPath $appBinary) -or (Test-Path -LiteralPath $installedNotice)) {
-    throw "NSIS uninstall left application or notice artifacts behind."
-  }
-
   $evidence.uninstalled = $true
-  $evidence.status = "passed"
+  Set-EvidencePhase -Phase "verified" -Message "Install directory, uninstaller, and process footprint are absent."
 } catch {
-  $evidence.status = "failed"
-  $evidence.error = $_.Exception.Message
-  throw
+  $primaryError = $_.Exception
+  $evidence.errors = @($evidence.errors) + $primaryError.Message
+  try {
+    Set-EvidencePhase -Phase "failed" -Message $primaryError.Message
+  } catch {
+    $cleanupErrors.Add([Exception]::new("Failure evidence write failed: $($_.Exception.Message)", $_.Exception))
+  }
 } finally {
-  if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+  if ($null -ne $appProcessId -and (Test-ProcessAlive -ProcessId $appProcessId)) {
+    try {
+      Stop-ProcessTreeBounded -RootProcessId $appProcessId -TimeoutSeconds $cleanupTimeoutSeconds | Out-Null
+    } catch {
+      $cleanupErrors.Add([Exception]::new("App process cleanup failed: $($_.Exception.Message)", $_.Exception))
+    }
   }
-  $uninstaller = Join-Path $installRoot "uninstall.exe"
-  if (-not $uninstallAttempted -and (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
-    Start-Process -FilePath $uninstaller -ArgumentList @("/S") -Wait -WindowStyle Hidden |
-      Out-Null
+
+  if (Test-Path -LiteralPath $installRoot) {
+    try {
+      Assert-NoReparsePoints -Path $installRoot
+      $uninstaller = Join-Path $installRoot "uninstall.exe"
+      if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+        $cleanupUninstall = Invoke-ProcessWithDeadline `
+          -FilePath $uninstaller `
+          -ArgumentList @("/S") `
+          -TimeoutSeconds $uninstallTimeoutSeconds `
+          -StdoutPath (Join-Path $resultsRoot "cleanup-uninstall.stdout.log") `
+          -StderrPath (Join-Path $resultsRoot "cleanup-uninstall.stderr.log")
+        Add-TrackedProcess -ProcessId $cleanupUninstall.ProcessId
+        $evidence.processes.cleanupUninstall = $cleanupUninstall
+        if ($cleanupUninstall.ExitCode -ne 0) {
+          throw "Cleanup uninstaller exited with code $($cleanupUninstall.ExitCode)."
+        }
+        Wait-PathAbsent -Path $installRoot -TimeoutSeconds $cleanupTimeoutSeconds
+      } else {
+        throw "Cleanup could not find the installed uninstaller."
+      }
+    } catch {
+      $cleanupErrors.Add([Exception]::new("NSIS cleanup failed: $($_.Exception.Message)", $_.Exception))
+    }
   }
-  $evidence | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+
+  try {
+    Assert-NoProcessesUnderPath -Root $installRoot
+    foreach ($processId in $trackedProcessIds) {
+      if (Test-ProcessAlive -ProcessId $processId) { throw "Tracked process $processId remains after cleanup." }
+    }
+  } catch {
+    $cleanupErrors.Add([Exception]::new("Process-footprint cleanup failed: $($_.Exception.Message)", $_.Exception))
+  }
+
   if (Test-Path -LiteralPath $smokeRoot) {
-    Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+      Remove-ValidatedTree -Root $tempRoot -Candidate $smokeRoot
+    } catch {
+      $cleanupErrors.Add([Exception]::new("Temporary-tree cleanup failed: $($_.Exception.Message)", $_.Exception))
+    }
   }
+
+  foreach ($cleanupError in $cleanupErrors) {
+    $evidence.errors = @($evidence.errors) + $cleanupError.Message
+  }
+  $evidence.finishedAtUtc = [DateTime]::UtcNow.ToString("o")
+  $evidence.trackedProcessIds = @($trackedProcessIds | Sort-Object)
+  $evidence.status = if ($null -eq $primaryError -and $cleanupErrors.Count -eq 0) { "passed" } else { "failed" }
+  $evidence.phase = "finished"
+  try {
+    Write-Evidence
+  } catch {
+    $cleanupErrors.Add([Exception]::new("Final evidence write failed: $($_.Exception.Message)", $_.Exception))
+  }
+}
+
+$allErrors = [System.Collections.Generic.List[Exception]]::new()
+if ($null -ne $primaryError) { $allErrors.Add($primaryError) }
+foreach ($cleanupError in $cleanupErrors) { $allErrors.Add($cleanupError) }
+if ($allErrors.Count -gt 0) {
+  throw [AggregateException]::new("NSIS bundle smoke failed.", $allErrors.ToArray())
 }

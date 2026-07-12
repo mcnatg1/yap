@@ -87,6 +87,9 @@ jobs:
     name: Native WDIO smoke (required, no hardware)
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      RUST_TARGET: x86_64-pc-windows-msvc
+      RUST_TOOLCHAIN: stable
     defaults:
       run:
         working-directory: desktop
@@ -97,10 +100,13 @@ jobs:
           version: 11.7.0
       - uses: actions/setup-node@v6
         with:
-          node-version-file: .node-version
+          node-version: "24.14.0"
           cache: pnpm
           cache-dependency-path: desktop/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.RUST_TARGET }}
       - uses: actions/cache@v6
         with:
           path: |
@@ -108,10 +114,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             desktop/src-tauri/target/
-          key: ${{ runner.os }}-native-wdio-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri*.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-native-wdio-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri*.json') }}
           restore-keys: |
-            ${{ runner.os }}-native-wdio-
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-native-wdio-
       - run: pnpm install --frozen-lockfile
       - name: Verify release-evidence configuration
         run: node --test ./tests/scripts/release-evidence.test.mjs
@@ -122,7 +127,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force tests/results | Out-Null
           & pnpm exec wdio run ./tests/wdio.required.conf.ts 2>&1 |
-            Tee-Object -FilePath tests/results/native-wdio-trace.log
+            Tee-Object -FilePath tests/results/native-wdio-run.log
           $wdioExitCode = $LASTEXITCODE
           if ($wdioExitCode -ne 0) {
             exit $wdioExitCode

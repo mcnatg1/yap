@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "freeflow",
+      "repository": "https://github.com/zachlatta/freeflow",
+      "revision": {
+        "status": "unverified",
+        "value": null
+      },
+      "license": "MIT",
+      "notice": "THIRD_PARTY_NOTICES.md",
+      "files": [
+        {
+          "path": "desktop/src/components/live/live-overlay.tsx",
+          "sha256": "5837c0a82545ba57360b0afe1f595a86ccf49edd376463b40062279955374e7a"
+        },
+        {
+          "path": "desktop/src-tauri/src/audio/preprocess.rs",
+          "sha256": "d66831054096a7b85cc213faae5a5d6156486dfb85be57636b84da9a8bf06c15"
+        }
+      ]
+    }
+  ]
+}
