@@ -17,8 +17,8 @@ server/
   README.md
   openapi/
     README.md
-    yap-server.v1.yaml      # later
-    live-wss.md             # later
+    openapi.json            # Phase 3 health + later HTTP contracts
+    live-events.schema.json # contract only until live transport ships
   src/
     yap_server/
       api/

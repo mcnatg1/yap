@@ -9,15 +9,41 @@ set -euo pipefail
 : "${YAP_PRIVATE_ADDR:=192.168.50.1/24}"
 : "${YAP_PRIVATE_SSH_FROM=192.168.50.63}"
 : "${YAP_CONFIGURE_PRIVATE_ETHERNET:=0}"
-: "${YAP_LAN_SSH_CIDR=192.168.68.0/22}"
+: "${YAP_LAN_SSH_CIDR=}"
 : "${YAP_OVERLAY_SSH_CIDR=}"
 : "${YAP_ZSCALER_APP_CIDR=}"
 : "${YAP_ZSCALER_SSH_CIDR=}"
 : "${YAP_APP_PORT=}"
 : "${YAP_APP_CIDR=}"
-: "${YAP_FIREWALL_RESET:=1}"
-: "${YAP_DISABLE_NOISE_SERVICES:=1}"
-: "${YAP_TUNNEL_ONLY_PORTS:=11000 11434 5909 3389}"
+: "${YAP_FIREWALL_RESET:=0}"
+: "${YAP_FIREWALL_RESET_CONFIRM=}"
+: "${YAP_DISABLE_NOISE_SERVICES:=0}"
+: "${YAP_TUNNEL_ONLY_PORTS:=3389 5909 11000 11434 18765}"
+: "${YAP_VALIDATE_ONLY:=0}"
+
+FIREWALL_RESET_IN_PROGRESS=0
+YAP_VALIDATION_PYTHON=
+
+die() {
+  echo "$1" >&2
+  exit 1
+}
+
+on_exit() {
+  status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$FIREWALL_RESET_IN_PROGRESS" = "1" ]; then
+    echo "Setup failed after resetting UFW; attempting management-rule recovery" >&2
+    if apply_management_ssh_rules && ufw --force enable; then
+      echo "UFW was re-enabled with the configured management rules" >&2
+    else
+      echo "CRITICAL: automatic UFW recovery failed; repair it from the local console" >&2
+    fi
+  fi
+  exit "$status"
+}
+
+trap on_exit EXIT
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -28,6 +54,119 @@ need_root() {
 
 valid_user() {
   printf '%s' "$1" | grep -Eq '^[a-z_][a-z0-9_-]*[$]?$'
+}
+
+valid_toggle() {
+  [ "$1" = "0" ] || [ "$1" = "1" ]
+}
+
+select_validation_python() {
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'import ipaddress' >/dev/null 2>&1; then
+      YAP_VALIDATION_PYTHON=$candidate
+      return 0
+    fi
+  done
+  die "Python with the standard-library ipaddress module is required for network validation"
+}
+
+valid_ip_network() {
+  "$YAP_VALIDATION_PYTHON" - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError:
+    raise SystemExit(1)
+PY
+}
+
+valid_ip_interface() {
+  "$YAP_VALIDATION_PYTHON" - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_interface(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+PY
+}
+
+validate_config() {
+  valid_user "$YAP_OWNER" || die "Refusing invalid YAP_OWNER: $YAP_OWNER"
+  select_validation_python
+
+  case "$YAP_PRIVATE_IFACE" in
+    ''|*[!a-zA-Z0-9_.:-]*) die "YAP_PRIVATE_IFACE contains unsupported characters" ;;
+  esac
+  valid_ip_interface "$YAP_PRIVATE_ADDR" \
+    || die "YAP_PRIVATE_ADDR must be a valid IP interface with prefix length"
+
+  for setting in \
+    YAP_CONFIGURE_PRIVATE_ETHERNET \
+    YAP_FIREWALL_RESET \
+    YAP_DISABLE_NOISE_SERVICES \
+    YAP_VALIDATE_ONLY; do
+    value=${!setting}
+    valid_toggle "$value" || die "$setting must be 0 or 1"
+  done
+
+  for setting in \
+    YAP_PRIVATE_SSH_FROM \
+    YAP_LAN_SSH_CIDR \
+    YAP_OVERLAY_SSH_CIDR \
+    YAP_ZSCALER_APP_CIDR \
+    YAP_ZSCALER_SSH_CIDR \
+    YAP_APP_CIDR; do
+    value=${!setting}
+    if [ -n "$value" ]; then
+      valid_ip_network "$value" || die "$setting must be a valid IP address or CIDR"
+    fi
+  done
+
+  for port in $YAP_TUNNEL_ONLY_PORTS; do
+    case "$port" in
+      *[!0-9]*) die "YAP_TUNNEL_ONLY_PORTS must contain only integer ports" ;;
+    esac
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      die "YAP_TUNNEL_ONLY_PORTS must contain ports from 1 through 65535"
+    fi
+  done
+
+  if [ -n "$YAP_APP_PORT" ]; then
+    case "$YAP_APP_PORT" in
+      *[!0-9]*) die "YAP_APP_PORT must be an integer from 1 through 65535" ;;
+    esac
+    if [ "$YAP_APP_PORT" -lt 1 ] || [ "$YAP_APP_PORT" -gt 65535 ]; then
+      die "YAP_APP_PORT must be an integer from 1 through 65535"
+    fi
+    if [ -z "$YAP_APP_CIDR" ] && [ -z "$YAP_ZSCALER_APP_CIDR" ]; then
+      die "YAP_APP_PORT is set, but no YAP_APP_CIDR or YAP_ZSCALER_APP_CIDR is set"
+    fi
+    for port in $YAP_TUNNEL_ONLY_PORTS; do
+      if [ "$port" = "$YAP_APP_PORT" ]; then
+        die "YAP_APP_PORT $YAP_APP_PORT is also listed in YAP_TUNNEL_ONLY_PORTS"
+      fi
+    done
+  fi
+
+  if [ "$YAP_CONFIGURE_PRIVATE_ETHERNET" = "1" ]; then
+    command -v nmcli >/dev/null || die "nmcli is required when YAP_CONFIGURE_PRIVATE_ETHERNET=1"
+  fi
+
+  if [ "$YAP_FIREWALL_RESET" = "1" ]; then
+    if [ -z "$YAP_PRIVATE_SSH_FROM" ] && \
+      [ -z "$YAP_LAN_SSH_CIDR" ] && \
+      [ -z "$YAP_OVERLAY_SSH_CIDR" ] && \
+      [ -z "$YAP_ZSCALER_SSH_CIDR" ]; then
+      die "YAP_FIREWALL_RESET=1 requires at least one explicit SSH allow source"
+    fi
+    [ "$YAP_FIREWALL_RESET_CONFIRM" = "local-console" ] \
+      || die "YAP_FIREWALL_RESET=1 requires YAP_FIREWALL_RESET_CONFIRM=local-console"
+  fi
 }
 
 install_basics() {
@@ -72,11 +211,6 @@ EOF
 }
 
 setup_ssh() {
-  if ! valid_user "$YAP_OWNER"; then
-    echo "Refusing invalid YAP_OWNER: $YAP_OWNER" >&2
-    exit 1
-  fi
-
   install -d -m 0755 /etc/ssh/sshd_config.d
   cat >/etc/ssh/sshd_config.d/98-yap-access.conf <<EOF
 AuthenticationMethods publickey
@@ -103,10 +237,6 @@ EOF
 
 setup_private_ethernet() {
   [ "$YAP_CONFIGURE_PRIVATE_ETHERNET" = "1" ] || return 0
-  command -v nmcli >/dev/null || {
-    echo "nmcli not found; skipping private Ethernet profile" >&2
-    return 0
-  }
 
   if nmcli -t -f NAME con show | grep -Fxq laptop-link; then
     nmcli con mod laptop-link connection.interface-name "$YAP_PRIVATE_IFACE" \
@@ -119,26 +249,50 @@ setup_private_ethernet() {
       ipv4.method manual ipv4.addresses "$YAP_PRIVATE_ADDR" \
       ipv4.never-default yes ipv6.method link-local
   fi
-  nmcli con up laptop-link || true
+  nmcli con up laptop-link
+}
+
+verify_private_management_address() {
+  [ -n "$YAP_PRIVATE_SSH_FROM" ] || return 0
+  command -v ip >/dev/null || die "ip is required to verify the private management interface"
+  ip -4 -o address show dev "$YAP_PRIVATE_IFACE" 2>/dev/null \
+    | awk '{print $4}' \
+    | grep -Fxq "$YAP_PRIVATE_ADDR" \
+    || die "Private management address $YAP_PRIVATE_ADDR is not active on $YAP_PRIVATE_IFACE"
+}
+
+apply_management_ssh_rules() {
+  if [ -n "$YAP_PRIVATE_SSH_FROM" ]; then
+    ufw allow in on "$YAP_PRIVATE_IFACE" from "$YAP_PRIVATE_SSH_FROM" to any port 22 proto tcp comment 'SSH from private management link' >/dev/null \
+      || return 1
+  fi
+  if [ -n "$YAP_LAN_SSH_CIDR" ]; then
+    ufw allow from "$YAP_LAN_SSH_CIDR" to any port 22 proto tcp comment 'SSH from LAN/VPN' >/dev/null \
+      || return 1
+  fi
+  if [ -n "$YAP_OVERLAY_SSH_CIDR" ]; then
+    ufw allow from "$YAP_OVERLAY_SSH_CIDR" to any port 22 proto tcp comment 'SSH from overlay' >/dev/null \
+      || return 1
+  fi
+  if [ -n "$YAP_ZSCALER_SSH_CIDR" ]; then
+    ufw allow from "$YAP_ZSCALER_SSH_CIDR" to any port 22 proto tcp comment 'SSH from Zscaler/ZPA' >/dev/null \
+      || return 1
+  fi
 }
 
 setup_firewall() {
-  [ "$YAP_FIREWALL_RESET" = "1" ] && ufw --force reset >/dev/null
+  if [ "$YAP_FIREWALL_RESET" = "1" ]; then
+    FIREWALL_RESET_IN_PROGRESS=1
+    ufw --force reset >/dev/null
+  fi
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   ufw default deny routed >/dev/null
+  apply_management_ssh_rules
 
-  if [ -n "$YAP_PRIVATE_SSH_FROM" ]; then
-    ufw allow in on "$YAP_PRIVATE_IFACE" from "$YAP_PRIVATE_SSH_FROM" to any port 22 proto tcp comment 'SSH from private management link' >/dev/null
-  fi
-  if [ -n "$YAP_LAN_SSH_CIDR" ]; then
-    ufw allow from "$YAP_LAN_SSH_CIDR" to any port 22 proto tcp comment 'SSH from LAN/VPN' >/dev/null
-  fi
-  if [ -n "$YAP_OVERLAY_SSH_CIDR" ]; then
-    ufw allow from "$YAP_OVERLAY_SSH_CIDR" to any port 22 proto tcp comment 'SSH from overlay' >/dev/null
-  fi
-  if [ -n "$YAP_ZSCALER_SSH_CIDR" ]; then
-    ufw allow from "$YAP_ZSCALER_SSH_CIDR" to any port 22 proto tcp comment 'SSH from Zscaler/ZPA' >/dev/null
+  if [ "$YAP_FIREWALL_RESET" = "1" ]; then
+    ufw --force enable >/dev/null
+    FIREWALL_RESET_IN_PROGRESS=0
   fi
 
   for port in $YAP_TUNNEL_ONLY_PORTS; do
@@ -155,10 +309,7 @@ setup_firewall() {
       ufw allow from "$YAP_ZSCALER_APP_CIDR" to any port "$YAP_APP_PORT" proto tcp comment 'Yap server via Zscaler/ZPA' >/dev/null
       app_rules=$((app_rules + 1))
     fi
-    if [ "$app_rules" -eq 0 ]; then
-      echo "YAP_APP_PORT is set, but no YAP_APP_CIDR or YAP_ZSCALER_APP_CIDR is set" >&2
-      exit 1
-    fi
+    [ "$app_rules" -gt 0 ] || die "No application firewall rule was created"
   fi
 
   ufw --force enable >/dev/null
@@ -221,13 +372,26 @@ report() {
   find "$YAP_SERVER_ROOT" -maxdepth 1 -mindepth 0 -printf '%M %u %g %p\n' | sort
 }
 
-need_root
-install_basics
-setup_dirs
-setup_ssh
-setup_private_ethernet
-setup_firewall
-setup_logs
-setup_docker_logs
-disable_noise
-report
+main() {
+  validate_config
+  if [ "$YAP_VALIDATE_ONLY" = "1" ]; then
+    echo "Yap server setup configuration is valid"
+    return 0
+  fi
+
+  need_root
+  install_basics
+  setup_dirs
+  setup_ssh
+  setup_private_ethernet
+  verify_private_management_address
+  setup_firewall
+  setup_logs
+  setup_docker_logs
+  disable_noise
+  report
+}
+
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
