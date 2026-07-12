@@ -3029,13 +3029,27 @@ mod tests {
             inner
         });
 
-        let completed_without_joining = done_rx.recv_timeout(Duration::from_millis(100));
+        let completed_without_joining = done_rx.recv_timeout(Duration::from_secs(1));
         release_worker.wait();
         let mut inner = cleanup.join().unwrap();
 
         assert!(completed_without_joining.is_ok());
         assert!(inner.retiring_stream.is_some());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while inner
+            .retiring_stream
+            .as_ref()
+            .and_then(|stream| stream.worker.as_ref())
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "retired recognizer did not finish"
+            );
+            std::thread::yield_now();
+        }
         assert_eq!(inner.reap_retiring_stream(), Ok(()));
+        assert!(inner.retiring_stream.is_none());
     }
 
     #[test]
