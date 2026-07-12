@@ -59,7 +59,7 @@ export function modelFromLiveView(view: LiveSessionView): OverlayModel {
 
   switch (view.status) {
     case "armed":
-      return { ...base, audioLevel: 0, phase: "recording", recordingTriggerMode: triggerMode };
+      return { ...base, audioLevel: 0, phase: "initializing", recordingTriggerMode: triggerMode };
     case "listening":
     case "speaking":
       return { ...base, audioLevel: view.level ?? 0, phase: "recording", recordingTriggerMode: triggerMode };

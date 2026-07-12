@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::sync::Mutex;
 
 use tauri::Manager;
 use tauri_plugin_global_shortcut::Shortcut;
@@ -10,6 +7,80 @@ use crate::{authorization, live, runtime, runtime_policy, stt};
 
 const INJECTION_COPIED_ERROR: &str = "Couldn't insert text here. Transcript copied; press Ctrl+V.";
 const INJECTION_FAILED_ERROR: &str = "Couldn't insert or copy this transcript.";
+
+pub(crate) struct QuitCoordinator {
+    state: Mutex<QuitState>,
+}
+
+enum QuitState {
+    Ready,
+    Finalizing,
+    Failed(String),
+    ExitAuthorized,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QuitClaim {
+    Finalize,
+    Coalesced,
+    Blocked(String),
+    ExitAuthorized,
+}
+
+impl QuitCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(QuitState::Ready),
+        }
+    }
+
+    fn claim(&self) -> QuitClaim {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*state {
+            QuitState::Ready => {
+                *state = QuitState::Finalizing;
+                QuitClaim::Finalize
+            }
+            QuitState::Finalizing => QuitClaim::Coalesced,
+            QuitState::Failed(error) => QuitClaim::Blocked(error.clone()),
+            QuitState::ExitAuthorized => QuitClaim::ExitAuthorized,
+        }
+    }
+
+    fn finish(&self, result: Result<(), String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = match result {
+            Ok(()) => QuitState::ExitAuthorized,
+            Err(error) => QuitState::Failed(error),
+        };
+    }
+
+    fn worker_start_failed(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, QuitState::Finalizing) {
+            *state = QuitState::Ready;
+        }
+    }
+
+    pub(crate) fn exit_authorized(&self) -> bool {
+        matches!(
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            QuitState::ExitAuthorized
+        )
+    }
+}
 
 fn append_error(existing: Option<String>, message: &str) -> String {
     match existing {
@@ -39,15 +110,38 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub(crate) fn quit_from_app(app: &tauri::AppHandle) {
+    let quit = app.state::<QuitCoordinator>();
+    match quit.claim() {
+        QuitClaim::Finalize => {}
+        QuitClaim::Coalesced => return,
+        QuitClaim::Blocked(error) => {
+            stt::log_yap(&format!(
+                "quit remains blocked by an unacknowledged save failure: {error}"
+            ));
+            present_quit_failure(app);
+            return;
+        }
+        QuitClaim::ExitAuthorized => {
+            app.exit(0);
+            return;
+        }
+    }
+
     let worker_app = app.clone();
     if let Err(error) = std::thread::Builder::new()
         .name("live-semantic-quit".into())
         .spawn(move || {
             let result = run_quit_with(
                 || finalize_live_before_quit(&worker_app),
-                || worker_app.exit(0),
+                || {
+                    worker_app.state::<QuitCoordinator>().finish(Ok(()));
+                    worker_app.exit(0);
+                },
             );
             if let Err(error) = result {
+                worker_app
+                    .state::<QuitCoordinator>()
+                    .finish(Err(error.clone()));
                 stt::log_yap(&format!(
                     "quit deferred after live finalization failed: {error}"
                 ));
@@ -55,6 +149,7 @@ pub(crate) fn quit_from_app(app: &tauri::AppHandle) {
             }
         })
     {
+        app.state::<QuitCoordinator>().worker_start_failed();
         stt::log_yap(&format!("quit worker failed to start: {error}"));
         present_quit_failure(app);
     }
@@ -140,6 +235,11 @@ enum CompletionMode {
 struct FinalizationOutcome {
     view: live::state::LiveSessionView,
     save_error: Option<String>,
+}
+
+enum StartLifecycleResult {
+    Complete(live::state::LiveSessionView),
+    CaptureInstalled(live::runtime::LocalCaptureStart),
 }
 
 #[cfg(test)]
@@ -240,25 +340,11 @@ pub(crate) fn warm_on_intent(app: &tauri::AppHandle, live_runtime: &live::runtim
 
 pub(crate) fn handle_live_shortcut_action(
     app: tauri::AppHandle,
-    interaction: Arc<Mutex<live::hotkeys::LiveShortcutInteraction>>,
     action: live::hotkeys::LiveShortcutAction,
-) {
+) -> Option<live::state::LiveCaptureMode> {
     match action {
-        live::hotkeys::LiveShortcutAction::None => {}
-        live::hotkeys::LiveShortcutAction::ScheduleHold(press_id) => {
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(live::hotkeys::SHORTCUT_HOLD_MS));
-                let active_mode = {
-                    let live = app.state::<live::LiveSessionState>();
-                    live.snapshot().active_capture_mode
-                };
-                let action = interaction
-                    .lock()
-                    .expect("live shortcut state poisoned")
-                    .hold_elapsed(press_id, Instant::now(), active_mode);
-                handle_live_shortcut_action(app, interaction, action);
-            });
-        }
+        live::hotkeys::LiveShortcutAction::None
+        | live::hotkeys::LiveShortcutAction::ScheduleHold(_) => None,
         live::hotkeys::LiveShortcutAction::Start(capture_mode) => {
             let live = app.state::<live::LiveSessionState>();
             let live_runtime = app.state::<live::runtime::LiveRuntime>();
@@ -272,22 +358,11 @@ pub(crate) fn handle_live_shortcut_action(
                 &orchestrator,
                 capture_mode,
             );
-            if capture_mode == live::state::LiveCaptureMode::PushToTalk {
-                let should_stop = interaction
-                    .lock()
-                    .expect("live shortcut state poisoned")
-                    .finish_push_to_talk_start();
-                if should_stop
-                    && view.active_capture_mode == Some(live::state::LiveCaptureMode::PushToTalk)
-                {
-                    stop_live_from_app(&app);
-                }
-            }
+            view.active_capture_mode
         }
         live::hotkeys::LiveShortcutAction::Stop => {
-            std::thread::spawn(move || {
-                stop_live_from_app(&app);
-            });
+            stop_live_from_app(&app);
+            None
         }
     }
 }
@@ -301,19 +376,44 @@ pub(crate) fn start_live_runtime(
     active_capture_mode: live::state::LiveCaptureMode,
 ) -> live::state::LiveSessionView {
     let intent = live_runtime.capture_start_intent();
-    live_runtime
-        .run_start_lifecycle(intent, || {
-            start_live_runtime_serialized(
-                app,
-                live,
-                live_runtime,
-                stt,
-                orchestrator,
-                active_capture_mode,
-                intent,
-            )
-        })
-        .unwrap_or_else(|| live.snapshot())
+    let start_app = app.clone();
+    let result = live_runtime.run_start_lifecycle(intent, || {
+        start_live_runtime_serialized(
+            start_app,
+            live,
+            live_runtime,
+            stt,
+            orchestrator,
+            active_capture_mode,
+            intent,
+        )
+    });
+    match result {
+        None => live.snapshot(),
+        Some(StartLifecycleResult::Complete(view)) => view,
+        Some(StartLifecycleResult::CaptureInstalled(start)) => {
+            match live_runtime.complete_local_start(app.clone(), start, intent) {
+                Ok(_) => live.snapshot(),
+                Err(failure) => {
+                    let Some(message) = live_runtime.claim_start_failure(failure) else {
+                        return live.snapshot();
+                    };
+                    let _ = stop_live_runtime(app.clone(), live, live_runtime, orchestrator);
+                    let view = live.update(|view| {
+                        view.error = Some(append_error(view.error.take(), &message));
+                        view.route = live::state::LiveRoute::Blocked;
+                        view.status = live::state::LiveSessionStatus::Blocked;
+                        view.active_capture_mode = None;
+                    });
+                    if let Err(error) = live::overlay_window::ensure_active(&app) {
+                        stt::log_yap(&format!("live overlay model failure show failed: {error}"));
+                    }
+                    live::events::emit_session(&app, &view);
+                    view
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,9 +425,9 @@ fn start_live_runtime_serialized(
     orchestrator: &runtime::RuntimeOrchestratorState,
     active_capture_mode: live::state::LiveCaptureMode,
     intent: live::runtime::StartIntent,
-) -> live::state::LiveSessionView {
+) -> StartLifecycleResult {
     if live::state::is_live_session_started(live.snapshot().status) || live_runtime.is_active() {
-        return live.snapshot();
+        return StartLifecycleResult::Complete(live.snapshot());
     }
 
     if stt.is_transcribing() {
@@ -338,7 +438,7 @@ fn start_live_runtime_serialized(
             }
         }
         live::events::emit_session(&app, &view);
-        return view;
+        return StartLifecycleResult::Complete(view);
     }
 
     let setup = runtime_policy::current_setup_status().runtime_setup_state();
@@ -351,18 +451,22 @@ fn start_live_runtime_serialized(
             }
         }
         live::events::emit_session(&app, &view);
-        return view;
+        return StartLifecycleResult::Complete(view);
     }
 
     let requested_device_id = live.snapshot().input_device_id;
     let resolved = live::devices::resolve_input_device(requested_device_id.as_deref());
-    let Some(_) = live.try_begin_local_start(
+    let Some(armed) = live.try_begin_local_start(
         active_capture_mode,
         requested_device_id.clone(),
         resolved.label.clone(),
     ) else {
-        return live.snapshot();
+        return StartLifecycleResult::Complete(live.snapshot());
     };
+    if let Err(error) = live::overlay_window::ensure_active(&app) {
+        stt::log_yap(&format!("live overlay initializing show failed: {error}"));
+    }
+    live::events::emit_session(&app, &armed);
 
     if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
         let view = live.block_with_error(&runtime_policy::runtime_error_to_stt(error).message);
@@ -372,16 +476,16 @@ fn start_live_runtime_serialized(
             }
         }
         live::events::emit_session(&app, &view);
-        return view;
+        return StartLifecycleResult::Complete(view);
     }
 
-    match live_runtime.start_local(
+    match live_runtime.start_local_capture(
         app.clone(),
         requested_device_id,
         active_capture_mode,
         intent,
     ) {
-        Ok(()) => {
+        Ok(Some(start)) => {
             let view = if resolved.recovered
                 && live::state::is_live_capture_active(live.snapshot().status)
             {
@@ -397,11 +501,12 @@ fn start_live_runtime_serialized(
                 }
                 live::events::emit_session(&app, &view);
             }
-            view
+            StartLifecycleResult::CaptureInstalled(start)
         }
+        Ok(None) => StartLifecycleResult::Complete(live.snapshot()),
         Err(failure) => {
             let Some(message) = live_runtime.claim_start_failure(failure) else {
-                return live.snapshot();
+                return StartLifecycleResult::Complete(live.snapshot());
             };
             orchestrator.with(|orchestrator| orchestrator.finish_active_work());
             let view = live.block_with_error(&message);
@@ -409,7 +514,7 @@ fn start_live_runtime_serialized(
                 stt::log_yap(&format!("live overlay start failure show failed: {error}"));
             }
             live::events::emit_session(&app, &view);
-            view
+            StartLifecycleResult::Complete(view)
         }
     }
 }
@@ -583,7 +688,8 @@ mod tests {
 
     use super::{
         apply_injection_result, block_for_setup, run_completion_effects_with,
-        run_completion_effects_with_mode, run_quit_with, CompletionMode, INJECTION_COPIED_ERROR,
+        run_completion_effects_with_mode, run_quit_with, CompletionMode, QuitClaim,
+        QuitCoordinator, INJECTION_COPIED_ERROR,
     };
     use crate::live::{
         injection::InjectionOutcome,
@@ -756,6 +862,29 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(events.into_inner(), vec!["finalize", "exit"]);
+    }
+
+    #[test]
+    fn repeated_quit_coalesces_and_cannot_bypass_an_unacknowledged_save_failure() {
+        let quit = QuitCoordinator::new();
+
+        assert_eq!(quit.claim(), QuitClaim::Finalize);
+        assert_eq!(quit.claim(), QuitClaim::Coalesced);
+        quit.finish(Err("save failed".into()));
+
+        assert_eq!(quit.claim(), QuitClaim::Blocked("save failed".to_string()));
+        assert!(!quit.exit_authorized());
+    }
+
+    #[test]
+    fn successful_quit_authorizes_only_the_semantic_exit_it_started() {
+        let quit = QuitCoordinator::new();
+
+        assert_eq!(quit.claim(), QuitClaim::Finalize);
+        quit.finish(Ok(()));
+
+        assert!(quit.exit_authorized());
+        assert_eq!(quit.claim(), QuitClaim::ExitAuthorized);
     }
 
     #[test]

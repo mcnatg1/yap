@@ -146,53 +146,64 @@ pub enum LiveShortcutAction {
 
 #[derive(Debug, Default)]
 pub struct LiveShortcutInteraction {
-    ignore_next_release: bool,
+    active_mode: Option<LiveCaptureMode>,
     key_down: bool,
     last_tap_at: Option<Instant>,
     pending_press_at: Option<Instant>,
     pending_press_id: u64,
-    starting_push_to_talk: bool,
-    stop_push_to_talk_after_start: bool,
+    pending_start_mode: Option<LiveCaptureMode>,
+    suppress_release: bool,
+    toggle_stop_armed: bool,
 }
 
 impl LiveShortcutInteraction {
     pub fn reset(&mut self) {
-        self.ignore_next_release = false;
+        self.active_mode = None;
         self.key_down = false;
         self.last_tap_at = None;
         self.pending_press_at = None;
-        self.starting_push_to_talk = false;
-        self.stop_push_to_talk_after_start = false;
+        self.pending_start_mode = None;
+        self.suppress_release = false;
+        self.toggle_stop_armed = false;
     }
 
-    pub fn finish_push_to_talk_start(&mut self) -> bool {
-        self.starting_push_to_talk = false;
-        std::mem::take(&mut self.stop_push_to_talk_after_start)
+    pub fn finish_start(&mut self, active_mode: Option<LiveCaptureMode>) {
+        let Some(started_mode) = self.pending_start_mode.take() else {
+            return;
+        };
+        if self.active_mode == Some(started_mode) && active_mode != Some(started_mode) {
+            self.clear_active_session();
+            self.suppress_release = self.key_down;
+        }
     }
 
     pub fn pressed(
         &mut self,
         now: Instant,
-        active_mode: Option<LiveCaptureMode>,
+        projected_mode: Option<LiveCaptureMode>,
     ) -> LiveShortcutAction {
+        self.reconcile(projected_mode);
         if self.key_down {
             return LiveShortcutAction::None;
         }
         self.key_down = true;
-        if active_mode == Some(LiveCaptureMode::Toggle) {
-            self.ignore_next_release = true;
-            self.pending_press_at = None;
-            self.last_tap_at = None;
-            return LiveShortcutAction::Stop;
-        }
-        if active_mode.is_some() {
-            return LiveShortcutAction::None;
+        match self.active_mode {
+            Some(LiveCaptureMode::Toggle) if self.toggle_stop_armed => {
+                self.clear_active_session();
+                self.suppress_release = true;
+                self.pending_press_at = None;
+                self.last_tap_at = None;
+                return LiveShortcutAction::Stop;
+            }
+            Some(_) => return LiveShortcutAction::None,
+            None => {}
         }
         if self.last_tap_at.is_some_and(|then| {
             now.duration_since(then) <= Duration::from_millis(SHORTCUT_DOUBLE_TAP_MS)
         }) {
             self.pending_press_at = None;
             self.last_tap_at = None;
+            self.begin_session(LiveCaptureMode::Toggle);
             return LiveShortcutAction::Start(LiveCaptureMode::Toggle);
         }
 
@@ -206,13 +217,14 @@ impl LiveShortcutInteraction {
         &mut self,
         press_id: u64,
         now: Instant,
-        active_mode: Option<LiveCaptureMode>,
+        projected_mode: Option<LiveCaptureMode>,
     ) -> LiveShortcutAction {
+        self.reconcile(projected_mode);
         let Some(pressed_at) = self.pending_press_at else {
             return LiveShortcutAction::None;
         };
         if press_id != self.pending_press_id
-            || active_mode.is_some()
+            || self.active_mode.is_some()
             || now.duration_since(pressed_at) < Duration::from_millis(SHORTCUT_HOLD_MS)
         {
             return LiveShortcutAction::None;
@@ -220,34 +232,65 @@ impl LiveShortcutInteraction {
 
         self.pending_press_at = None;
         self.last_tap_at = None;
-        self.starting_push_to_talk = true;
+        self.begin_session(LiveCaptureMode::PushToTalk);
         LiveShortcutAction::Start(LiveCaptureMode::PushToTalk)
     }
 
     pub fn released(
         &mut self,
         now: Instant,
-        active_mode: Option<LiveCaptureMode>,
+        projected_mode: Option<LiveCaptureMode>,
     ) -> LiveShortcutAction {
+        self.reconcile(projected_mode);
         self.key_down = false;
-        if self.ignore_next_release {
-            self.ignore_next_release = false;
+        if self.suppress_release {
+            self.suppress_release = false;
             return LiveShortcutAction::None;
         }
-        if active_mode == Some(LiveCaptureMode::PushToTalk) {
-            return LiveShortcutAction::Stop;
-        }
-        if active_mode == Some(LiveCaptureMode::Toggle) {
-            return LiveShortcutAction::None;
-        }
-        if self.starting_push_to_talk {
-            self.stop_push_to_talk_after_start = true;
-            return LiveShortcutAction::None;
+        match self.active_mode {
+            Some(LiveCaptureMode::PushToTalk) => {
+                self.clear_active_session();
+                return LiveShortcutAction::Stop;
+            }
+            Some(LiveCaptureMode::Toggle) => {
+                self.toggle_stop_armed = true;
+                return LiveShortcutAction::None;
+            }
+            None => {}
         }
         if self.pending_press_at.take().is_some() {
             self.last_tap_at = Some(now);
         }
         LiveShortcutAction::None
+    }
+
+    fn begin_session(&mut self, mode: LiveCaptureMode) {
+        self.active_mode = Some(mode);
+        self.pending_start_mode = Some(mode);
+        self.toggle_stop_armed = false;
+    }
+
+    fn clear_active_session(&mut self) {
+        self.active_mode = None;
+        self.toggle_stop_armed = false;
+    }
+
+    fn reconcile(&mut self, projected_mode: Option<LiveCaptureMode>) {
+        if self.pending_start_mode.is_some() || self.suppress_release {
+            return;
+        }
+        match (self.active_mode, projected_mode) {
+            (None, Some(mode)) => {
+                self.active_mode = Some(mode);
+                self.toggle_stop_armed = mode == LiveCaptureMode::Toggle;
+            }
+            (Some(active), Some(projected)) if active != projected => {
+                self.active_mode = Some(projected);
+                self.toggle_stop_armed = projected == LiveCaptureMode::Toggle;
+            }
+            (Some(_), None) => self.clear_active_session(),
+            _ => {}
+        }
     }
 }
 
@@ -284,17 +327,11 @@ mod tests {
             LiveShortcutAction::Start(LiveCaptureMode::Toggle)
         );
         assert_eq!(
-            shortcut.released(
-                now + Duration::from_millis(150),
-                Some(LiveCaptureMode::Toggle),
-            ),
+            shortcut.released(now + Duration::from_millis(150), None),
             LiveShortcutAction::None
         );
         assert_eq!(
-            shortcut.pressed(
-                now + Duration::from_millis(240),
-                Some(LiveCaptureMode::Toggle),
-            ),
+            shortcut.pressed(now + Duration::from_millis(240), None),
             LiveShortcutAction::Stop
         );
         assert_eq!(
@@ -344,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_release_during_push_to_talk_start_requests_stop_after_start() {
+    fn shortcut_release_during_push_to_talk_start_stops_without_waiting_for_projection() {
         let mut shortcut = LiveShortcutInteraction::default();
         let now = Instant::now();
 
@@ -358,9 +395,8 @@ mod tests {
         );
         assert_eq!(
             shortcut.released(now + Duration::from_millis(180), None),
-            LiveShortcutAction::None
+            LiveShortcutAction::Stop
         );
-        assert!(shortcut.finish_push_to_talk_start());
     }
 
     #[test]
@@ -400,6 +436,110 @@ mod tests {
         );
         assert_eq!(
             shortcut.hold_elapsed(1, now + Duration::from_millis(SHORTCUT_HOLD_MS + 1), None,),
+            LiveShortcutAction::None
+        );
+    }
+
+    #[test]
+    fn projected_session_end_clears_owned_mode_after_start_is_acknowledged() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(30), None),
+            LiveShortcutAction::None
+        );
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(90), None),
+            LiveShortcutAction::Start(LiveCaptureMode::Toggle)
+        );
+        assert_eq!(
+            shortcut.released(now + Duration::from_millis(120), None),
+            LiveShortcutAction::None
+        );
+        shortcut.finish_start(Some(LiveCaptureMode::Toggle));
+
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(500), None),
+            LiveShortcutAction::ScheduleHold(2)
+        );
+    }
+
+    #[test]
+    fn failed_toggle_start_clears_the_toggle_stop_latch() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        shortcut.released(now + Duration::from_millis(25), None);
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(75), None),
+            LiveShortcutAction::Start(LiveCaptureMode::Toggle)
+        );
+        shortcut.released(now + Duration::from_millis(100), None);
+        shortcut.finish_start(None);
+
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(450), None),
+            LiveShortcutAction::ScheduleHold(2)
+        );
+    }
+
+    #[test]
+    fn projected_modes_stop_with_their_own_contract_without_cross_mode_taps() {
+        let mut push_to_talk = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            push_to_talk.pressed(now, Some(LiveCaptureMode::PushToTalk)),
+            LiveShortcutAction::None
+        );
+        assert_eq!(
+            push_to_talk.released(
+                now + Duration::from_millis(20),
+                Some(LiveCaptureMode::PushToTalk),
+            ),
+            LiveShortcutAction::Stop
+        );
+        assert_eq!(
+            push_to_talk.released(now + Duration::from_millis(40), None),
+            LiveShortcutAction::None
+        );
+
+        let mut toggle = LiveShortcutInteraction::default();
+        assert_eq!(
+            toggle.pressed(now, Some(LiveCaptureMode::Toggle)),
+            LiveShortcutAction::Stop
+        );
+        assert_eq!(
+            toggle.released(now + Duration::from_millis(20), None),
+            LiveShortcutAction::None
+        );
+    }
+
+    #[test]
+    fn delayed_hold_timer_cannot_convert_a_double_tap_into_push_to_talk() {
+        let mut shortcut = LiveShortcutInteraction::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            shortcut.pressed(now, None),
+            LiveShortcutAction::ScheduleHold(1)
+        );
+        shortcut.released(now + Duration::from_millis(30), None);
+        assert_eq!(
+            shortcut.pressed(now + Duration::from_millis(80), None),
+            LiveShortcutAction::Start(LiveCaptureMode::Toggle)
+        );
+        assert_eq!(
+            shortcut.hold_elapsed(1, now + Duration::from_millis(SHORTCUT_HOLD_MS + 40), None,),
             LiveShortcutAction::None
         );
     }

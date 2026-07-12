@@ -1,12 +1,70 @@
 use std::{
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    time::{Duration, Instant},
 };
 
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::{live, stt};
+
+#[derive(Default)]
+struct ShortcutInputNormalizer {
+    key_down: AtomicBool,
+}
+
+impl ShortcutInputNormalizer {
+    fn accept(&self, state: ShortcutState) -> bool {
+        match state {
+            ShortcutState::Pressed => self
+                .key_down
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            ShortcutState::Released => self.key_down.swap(false, Ordering::AcqRel),
+        }
+    }
+
+    fn reset(&self) {
+        self.key_down.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+struct LiveShortcutDispatcher {
+    events: mpsc::Sender<ShortcutDispatchEvent>,
+    normalizer: Arc<ShortcutInputNormalizer>,
+}
+
+enum ShortcutDispatchEvent {
+    Input {
+        at: Instant,
+        projected_mode: Option<live::state::LiveCaptureMode>,
+        state: ShortcutState,
+    },
+    Reset,
+    StartFinished(Option<live::state::LiveCaptureMode>),
+}
+
+impl LiveShortcutDispatcher {
+    fn input(&self, state: ShortcutState, projected_mode: Option<live::state::LiveCaptureMode>) {
+        if !self.normalizer.accept(state) {
+            return;
+        }
+        let _ = self.events.send(ShortcutDispatchEvent::Input {
+            at: Instant::now(),
+            projected_mode,
+            state,
+        });
+    }
+
+    fn reset(&self) {
+        self.normalizer.reset();
+        let _ = self.events.send(ShortcutDispatchEvent::Reset);
+    }
+}
 
 #[derive(Debug)]
 struct LiveShortcutRegistration {
@@ -47,9 +105,9 @@ pub(crate) fn prepare(settings: &live::settings::LiveSettings) -> StartupShortcu
 }
 
 pub(crate) fn install(app: &mut tauri::App, plan: StartupShortcutPlan) -> tauri::Result<()> {
-    let shortcut_interaction =
-        Arc::new(Mutex::new(live::hotkeys::LiveShortcutInteraction::default()));
-    let handler_interaction = Arc::clone(&shortcut_interaction);
+    let shortcut_dispatcher = spawn_shortcut_dispatcher(app.handle().clone());
+    let handler_dispatcher = shortcut_dispatcher.clone();
+    app.manage(shortcut_dispatcher);
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
@@ -75,28 +133,11 @@ pub(crate) fn install(app: &mut tauri::App, plan: StartupShortcutPlan) -> tauri:
                 if !live::actions::configured_hotkey_matches_shortcut(&snapshot.hotkey, shortcut) {
                     return;
                 }
-                let action = {
-                    let mut interaction = handler_interaction
-                        .lock()
-                        .expect("live shortcut state poisoned");
-                    if snapshot.status == live::state::LiveSessionStatus::Saving {
-                        interaction.reset();
-                        return;
-                    }
-                    match event.state() {
-                        ShortcutState::Pressed => {
-                            interaction.pressed(Instant::now(), snapshot.active_capture_mode)
-                        }
-                        ShortcutState::Released => {
-                            interaction.released(Instant::now(), snapshot.active_capture_mode)
-                        }
-                    }
-                };
-                live::actions::handle_live_shortcut_action(
-                    app.clone(),
-                    Arc::clone(&handler_interaction),
-                    action,
-                );
+                if snapshot.status == live::state::LiveSessionStatus::Saving {
+                    handler_dispatcher.reset();
+                    return;
+                }
+                handler_dispatcher.input(event.state(), snapshot.active_capture_mode);
             })
             .build(),
     )?;
@@ -114,6 +155,125 @@ pub(crate) fn install(app: &mut tauri::App, plan: StartupShortcutPlan) -> tauri:
         }
     }
     Ok(())
+}
+
+pub(crate) fn reset(app: &tauri::AppHandle) {
+    app.state::<LiveShortcutDispatcher>().reset();
+}
+
+fn spawn_shortcut_dispatcher(app: tauri::AppHandle) -> LiveShortcutDispatcher {
+    let (events, event_rx) = mpsc::channel();
+    let (actions, action_rx) = mpsc::channel();
+    let normalizer = Arc::new(ShortcutInputNormalizer::default());
+    let action_events = events.clone();
+    let action_app = app.clone();
+    std::thread::Builder::new()
+        .name("live-shortcut-actions".into())
+        .spawn(move || run_shortcut_actions(action_app, action_rx, action_events))
+        .expect("live shortcut action worker must start");
+    std::thread::Builder::new()
+        .name("live-shortcut-input".into())
+        .spawn(move || run_shortcut_input(app, event_rx, actions))
+        .expect("live shortcut input worker must start");
+    LiveShortcutDispatcher { events, normalizer }
+}
+
+fn run_shortcut_input(
+    app: tauri::AppHandle,
+    events: mpsc::Receiver<ShortcutDispatchEvent>,
+    actions: mpsc::Sender<live::hotkeys::LiveShortcutAction>,
+) {
+    let mut interaction = live::hotkeys::LiveShortcutInteraction::default();
+    let mut hold_deadline: Option<(u64, Instant)> = None;
+    loop {
+        let event = if let Some((press_id, deadline)) = hold_deadline {
+            match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    hold_deadline = None;
+                    let projected_mode = app
+                        .state::<live::LiveSessionState>()
+                        .snapshot()
+                        .active_capture_mode;
+                    let action = interaction.hold_elapsed(press_id, Instant::now(), projected_mode);
+                    queue_shortcut_action(&app, &actions, action);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match events.recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            }
+        };
+
+        match event {
+            ShortcutDispatchEvent::Input {
+                at,
+                projected_mode,
+                state: ShortcutState::Pressed,
+            } => {
+                let action = interaction.pressed(at, projected_mode);
+                if let live::hotkeys::LiveShortcutAction::ScheduleHold(press_id) = action {
+                    hold_deadline = Some((
+                        press_id,
+                        at + Duration::from_millis(live::hotkeys::SHORTCUT_HOLD_MS),
+                    ));
+                } else {
+                    queue_shortcut_action(&app, &actions, action);
+                }
+            }
+            ShortcutDispatchEvent::Input {
+                at,
+                projected_mode,
+                state: ShortcutState::Released,
+            } => {
+                hold_deadline = None;
+                let action = interaction.released(at, projected_mode);
+                queue_shortcut_action(&app, &actions, action);
+            }
+            ShortcutDispatchEvent::Reset => {
+                hold_deadline = None;
+                interaction.reset();
+            }
+            ShortcutDispatchEvent::StartFinished(active_mode) => {
+                interaction.finish_start(active_mode);
+            }
+        }
+    }
+}
+
+fn queue_shortcut_action(
+    app: &tauri::AppHandle,
+    actions: &mpsc::Sender<live::hotkeys::LiveShortcutAction>,
+    action: live::hotkeys::LiveShortcutAction,
+) {
+    if matches!(action, live::hotkeys::LiveShortcutAction::Stop) {
+        app.state::<live::runtime::LiveRuntime>()
+            .cancel_pending_start();
+    }
+    if !matches!(
+        action,
+        live::hotkeys::LiveShortcutAction::None
+            | live::hotkeys::LiveShortcutAction::ScheduleHold(_)
+    ) {
+        let _ = actions.send(action);
+    }
+}
+
+fn run_shortcut_actions(
+    app: tauri::AppHandle,
+    actions: mpsc::Receiver<live::hotkeys::LiveShortcutAction>,
+    events: mpsc::Sender<ShortcutDispatchEvent>,
+) {
+    while let Ok(action) = actions.recv() {
+        let started = matches!(action, live::hotkeys::LiveShortcutAction::Start(_));
+        let active_mode = live::actions::handle_live_shortcut_action(app.clone(), action);
+        if started {
+            let _ = events.send(ShortcutDispatchEvent::StartFinished(active_mode));
+        }
+    }
 }
 
 fn apply_startup_shortcut_failure(
@@ -163,6 +323,21 @@ fn record_startup_shortcut_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_backend_normalizes_repeat_delayed_release_and_reset() {
+        let normalizer = ShortcutInputNormalizer::default();
+
+        assert!(normalizer.accept(ShortcutState::Pressed));
+        assert!(!normalizer.accept(ShortcutState::Pressed));
+        assert!(normalizer.accept(ShortcutState::Released));
+        assert!(!normalizer.accept(ShortcutState::Released));
+
+        assert!(normalizer.accept(ShortcutState::Pressed));
+        normalizer.reset();
+        assert!(!normalizer.accept(ShortcutState::Released));
+        assert!(normalizer.accept(ShortcutState::Pressed));
+    }
 
     #[test]
     fn startup_shortcut_plan_keeps_dictation_and_paste_hotkeys() {

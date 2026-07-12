@@ -2,6 +2,20 @@ use tauri::Manager;
 
 use crate::{authorization, commands, live, runtime, stt, tray};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitRequestDisposition {
+    PreventAndFinalize,
+    Allow,
+}
+
+fn exit_request_disposition(exit_authorized: bool) -> ExitRequestDisposition {
+    if exit_authorized {
+        ExitRequestDisposition::Allow
+    } else {
+        ExitRequestDisposition::PreventAndFinalize
+    }
+}
+
 pub(crate) fn run() {
     std::panic::set_hook(Box::new(|panic| {
         stt::log_yap(&format!("panic: {panic}"));
@@ -33,6 +47,7 @@ pub(crate) fn run() {
         .manage(stt_state)
         .manage(live_state)
         .manage(live_runtime)
+        .manage(live::actions::QuitCoordinator::new())
         .manage(fallback_model_install_state)
         .manage(runtime_state)
         .setup(move |app| {
@@ -84,10 +99,39 @@ pub(crate) fn run() {
             } if label == authorization::LIVE_OVERLAY_WINDOW_LABEL => {
                 api.prevent_close();
             }
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                let quit = app_handle.state::<live::actions::QuitCoordinator>();
+                if exit_request_disposition(quit.exit_authorized())
+                    == ExitRequestDisposition::PreventAndFinalize
+                {
+                    api.prevent_exit();
+                    live::actions::quit_from_app(app_handle);
+                }
+            }
             tauri::RunEvent::Exit => {
-                stt::log_yap("process exit reached degraded live shutdown fallback");
-                live_runtime_for_exit.shutdown();
+                let quit = app_handle.state::<live::actions::QuitCoordinator>();
+                if !quit.exit_authorized() {
+                    stt::log_yap("process exit reached degraded live shutdown fallback");
+                    live_runtime_for_exit.shutdown();
+                }
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exit_request_disposition, ExitRequestDisposition};
+
+    #[test]
+    fn exit_request_requires_semantic_quit_authorization() {
+        assert_eq!(
+            exit_request_disposition(false),
+            ExitRequestDisposition::PreventAndFinalize
+        );
+        assert_eq!(
+            exit_request_disposition(true),
+            ExitRequestDisposition::Allow
+        );
+    }
 }

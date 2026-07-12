@@ -32,8 +32,12 @@ describe("live overlay state projection", () => {
     expect(overlayIslandWidth("peek", model)).toBe(150);
   });
 
-  it("treats armed, listening, and speaking as active recording surfaces", () => {
-    for (const status of ["armed", "listening", "speaking"] as const) {
+  it("shows armed as initializing before capture is installed", () => {
+    expect(modelFromLiveView({ ...baseView, status: "armed" }).phase).toBe("initializing");
+  });
+
+  it("treats listening and speaking as active recording surfaces", () => {
+    for (const status of ["listening", "speaking"] as const) {
       expect(modelFromLiveView({ ...baseView, status }).phase).toBe("recording");
     }
   });

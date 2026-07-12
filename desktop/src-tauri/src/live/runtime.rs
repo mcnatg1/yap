@@ -25,7 +25,6 @@ use super::stream::{self, LiveStreamEngine, StreamMessage};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
-const LEVEL_QUEUE_CAPACITY: usize = 1;
 const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
 const ASR_ADAPTER_CANCEL_GRACE: Duration = Duration::from_millis(100);
@@ -45,7 +44,7 @@ pub struct LiveRuntime {
     recording_finalization: Arc<RecordingFinalization>,
     stop_completion: Arc<StopCompletion>,
     transition: Arc<LifecycleGate>,
-    warming: Arc<AtomicBool>,
+    model_warmup: Arc<SharedWarmup<LiveStreamEngine>>,
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +93,7 @@ struct LiveRuntimeInner {
     capture: Option<CaptureAdapter>,
     stream: Option<SessionStream>,
     retiring_stream: Option<SessionStream>,
+    pending_asr: Option<PendingAsrAdapter>,
     asr_adapter: Option<SessionAsrAdapter>,
     recording: Option<RecordingSinkHandle>,
     level: Option<JoinHandle<()>>,
@@ -197,8 +197,14 @@ impl Drop for RecordingFinalizationLease<'_> {
 }
 
 struct LifecycleGate {
-    state: Mutex<LifecycleState>,
+    state: Mutex<LifecycleQueue>,
     changed: Condvar,
+}
+
+struct LifecycleQueue {
+    active: LifecycleState,
+    next_ticket: u64,
+    serving_ticket: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,13 +218,41 @@ struct LifecycleOperation<'a> {
     gate: &'a LifecycleGate,
 }
 
-struct WarmupRelease(Arc<AtomicBool>);
+struct SharedWarmup<T> {
+    state: Mutex<SharedWarmupState<T>>,
+    changed: Condvar,
+}
+
+enum SharedWarmupState<T> {
+    Empty,
+    Loading { cancelled: Arc<AtomicBool> },
+    Ready(T),
+    InUse,
+    Failed(String),
+}
+
+struct SharedWarmupLease<T: Send + 'static> {
+    value: Option<T>,
+    warmup: Arc<SharedWarmup<T>>,
+}
+
+#[derive(Clone)]
+struct LatestLevelSender {
+    latest: Arc<Mutex<Option<f32>>>,
+    ready: mpsc::SyncSender<()>,
+}
+
+struct LatestLevelReceiver {
+    latest: Arc<Mutex<Option<f32>>>,
+    ready: mpsc::Receiver<()>,
+}
 
 struct SessionStream {
     session: Arc<AtomicU64>,
     samples_tx: mpsc::SyncSender<StreamMessage>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    model_warmup: Option<Arc<SharedWarmup<LiveStreamEngine>>>,
 }
 
 struct SessionAsrAdapter {
@@ -227,6 +261,11 @@ struct SessionAsrAdapter {
     completed_rx: Option<mpsc::Receiver<()>>,
     worker: Option<JoinHandle<()>>,
     cleanup_error: Option<String>,
+}
+
+struct PendingAsrAdapter {
+    frames_tx: BoundedSink<PreparedFrame>,
+    frames_rx: Option<BoundedReceiver<PreparedFrame>>,
 }
 
 struct AdapterReapPayload {
@@ -251,6 +290,10 @@ pub(crate) struct LiveStartFailure {
     message: String,
 }
 
+pub(crate) struct LocalCaptureStart {
+    session: u64,
+}
+
 impl LiveStartFailure {
     fn new(session: u64, message: String) -> Self {
         Self { session, message }
@@ -260,7 +303,11 @@ impl LiveStartFailure {
 impl LifecycleGate {
     fn new() -> Self {
         Self {
-            state: Mutex::new(LifecycleState::Idle),
+            state: Mutex::new(LifecycleQueue {
+                active: LifecycleState::Idle,
+                next_ticket: 0,
+                serving_ticket: 0,
+            }),
             changed: Condvar::new(),
         }
     }
@@ -281,6 +328,14 @@ impl LifecycleGate {
         self.begin(LifecycleState::Stopping)
     }
 
+    #[cfg(test)]
+    fn begin_stop_with_wait_hook<F>(&self, on_wait: F) -> LifecycleOperation<'_>
+    where
+        F: FnOnce(),
+    {
+        self.begin_with_wait_hook(LifecycleState::Stopping, Some(on_wait))
+    }
+
     fn begin(&self, next: LifecycleState) -> LifecycleOperation<'_> {
         self.begin_with_wait_hook(next, None::<fn()>)
     }
@@ -294,7 +349,9 @@ impl LifecycleGate {
         F: FnOnce(),
     {
         let mut state = self.state.lock().expect("live transition gate poisoned");
-        while *state != LifecycleState::Idle {
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.wrapping_add(1);
+        while state.active != LifecycleState::Idle || state.serving_ticket != ticket {
             if let Some(on_wait) = on_wait.take() {
                 on_wait();
             }
@@ -303,13 +360,14 @@ impl LifecycleGate {
                 .wait(state)
                 .expect("live transition gate poisoned");
         }
-        *state = next;
+        state.active = next;
         LifecycleOperation { gate: self }
     }
 
     fn complete(&self) {
         let mut state = self.state.lock().expect("live transition gate poisoned");
-        *state = LifecycleState::Idle;
+        state.active = LifecycleState::Idle;
+        state.serving_ticket = state.serving_ticket.wrapping_add(1);
         self.changed.notify_all();
     }
 }
@@ -320,9 +378,202 @@ impl Drop for LifecycleOperation<'_> {
     }
 }
 
-impl Drop for WarmupRelease {
+impl<T> SharedWarmup<T>
+where
+    T: Send + 'static,
+{
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SharedWarmupState::Empty),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn request<F>(self: &Arc<Self>, worker_name: &str, load: F) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        let cancelled = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &*state {
+                SharedWarmupState::Loading { cancelled } => {
+                    cancelled.store(false, Ordering::Release);
+                    return Ok(false);
+                }
+                SharedWarmupState::Ready(_) | SharedWarmupState::InUse => return Ok(false),
+                SharedWarmupState::Empty | SharedWarmupState::Failed(_) => {}
+            }
+            let cancelled = Arc::new(AtomicBool::new(false));
+            *state = SharedWarmupState::Loading {
+                cancelled: Arc::clone(&cancelled),
+            };
+            cancelled
+        };
+
+        let warmup = Arc::clone(self);
+        let worker_cancelled = Arc::clone(&cancelled);
+        if let Err(error) = thread::Builder::new()
+            .name(worker_name.to_string())
+            .spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(load))
+                    .unwrap_or_else(|_| Err("Live model warmup panicked.".to_string()));
+                warmup.complete_loading(&worker_cancelled, result);
+            })
+        {
+            self.reset_failed_spawn(&cancelled);
+            return Err(format!("Live model warmup worker could not start: {error}"));
+        }
+        Ok(true)
+    }
+
+    fn wait_cancellable<F>(
+        self: &Arc<Self>,
+        cancelled: F,
+    ) -> Result<Option<SharedWarmupLease<T>>, String>
+    where
+        F: Fn() -> bool,
+    {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if cancelled() {
+                return Ok(None);
+            }
+            match &*state {
+                SharedWarmupState::Ready(_) => {
+                    let SharedWarmupState::Ready(value) =
+                        std::mem::replace(&mut *state, SharedWarmupState::InUse)
+                    else {
+                        unreachable!("ready warmup state was just matched")
+                    };
+                    return Ok(Some(SharedWarmupLease {
+                        value: Some(value),
+                        warmup: Arc::clone(self),
+                    }));
+                }
+                SharedWarmupState::Failed(error) => return Err(error.clone()),
+                SharedWarmupState::Empty => {
+                    return Err("Live model warmup was not requested.".to_string())
+                }
+                SharedWarmupState::InUse => {
+                    return Err("Live model is already owned by a stream.".to_string())
+                }
+                SharedWarmupState::Loading { .. } => {
+                    let (next, _) = self
+                        .changed
+                        .wait_timeout(state, Duration::from_millis(25))
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state = next;
+                }
+            }
+        }
+    }
+
+    fn cancel_loading(&self) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let SharedWarmupState::Loading { cancelled } = &*state {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.changed.notify_all();
+    }
+
+    fn complete_loading(&self, cancelled: &Arc<AtomicBool>, result: Result<T, String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owns_load = matches!(
+            &*state,
+            SharedWarmupState::Loading { cancelled: current }
+                if Arc::ptr_eq(current, cancelled)
+        );
+        if !owns_load {
+            return;
+        }
+        *state = if cancelled.load(Ordering::Acquire) {
+            SharedWarmupState::Empty
+        } else {
+            match result {
+                Ok(value) => SharedWarmupState::Ready(value),
+                Err(error) => SharedWarmupState::Failed(error),
+            }
+        };
+        self.changed.notify_all();
+    }
+
+    fn reset_failed_spawn(&self, cancelled: &Arc<AtomicBool>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(
+            &*state,
+            SharedWarmupState::Loading { cancelled: current }
+                if Arc::ptr_eq(current, cancelled)
+        ) {
+            *state = SharedWarmupState::Empty;
+        }
+        self.changed.notify_all();
+    }
+
+    fn restore_ready(&self, value: T) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, SharedWarmupState::InUse) {
+            *state = SharedWarmupState::Ready(value);
+        }
+        self.changed.notify_all();
+    }
+
+    fn release_in_use(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, SharedWarmupState::InUse) {
+            *state = SharedWarmupState::Empty;
+        }
+        self.changed.notify_all();
+    }
+
+    #[cfg(test)]
+    fn is_loading_for_test(&self) -> bool {
+        matches!(
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            SharedWarmupState::Loading { .. }
+        )
+    }
+}
+
+impl<T> SharedWarmupLease<T>
+where
+    T: Send + 'static,
+{
+    fn commit(mut self) -> T {
+        self.value
+            .take()
+            .expect("warmup lease commits exactly one model")
+    }
+}
+
+impl<T: Send + 'static> Drop for SharedWarmupLease<T> {
     fn drop(&mut self) {
-        release_warmup(&self.0);
+        if let Some(value) = self.value.take() {
+            self.warmup.restore_ready(value);
+        }
     }
 }
 
@@ -335,7 +586,7 @@ impl LiveRuntime {
             recording_finalization: Arc::new(RecordingFinalization::new()),
             stop_completion: Arc::new(StopCompletion::new()),
             transition: Arc::new(LifecycleGate::new()),
-            warming: Arc::new(AtomicBool::new(false)),
+            model_warmup: Arc::new(SharedWarmup::new()),
         }
     }
 
@@ -357,6 +608,7 @@ impl LiveRuntime {
 
     pub(crate) fn cancel_pending_start(&self) {
         self.start_generation.fetch_add(1, Ordering::AcqRel);
+        self.model_warmup.cancel_loading();
     }
 
     pub(crate) fn run_start_lifecycle<T>(
@@ -373,64 +625,45 @@ impl LiveRuntime {
         run()
     }
 
-    pub(crate) fn start_local(
+    pub(crate) fn start_local_capture(
         &self,
         app: tauri::AppHandle,
         selected_device_id: Option<String>,
         capture_mode: super::state::LiveCaptureMode,
         intent: StartIntent,
-    ) -> Result<(), LiveStartFailure> {
-        let (session, local_asr) = {
+    ) -> Result<Option<LocalCaptureStart>, LiveStartFailure> {
+        let session = {
             let inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
-                return Ok(());
+                return Ok(None);
             }
             drop(inner);
             self.ensure_recording_ready_to_start()
                 .map_err(|message| LiveStartFailure::new(0, message))?;
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_some() {
-                return Ok(());
+                return Ok(None);
             }
             inner.session = inner.session.saturating_add(1);
             inner.last_used = Instant::now();
             let session = inner.session;
             self.active_session.store(session, Ordering::SeqCst);
-            if let Err(message) = inner.ensure_stream(self.clone(), app.clone(), session) {
-                return Err(LiveStartFailure::new(session, message));
-            }
-            if !self.start_intent_is_current(intent) {
-                return Ok(());
-            }
-            let local_asr = inner
-                .start_asr_adapter(session)
-                .map_err(|message| LiveStartFailure::new(session, message))?;
-            (session, local_asr)
+            session
         };
 
         if !self.start_intent_is_current(intent) {
-            let _ = self
-                .inner
-                .lock()
-                .expect("live runtime poisoned")
-                .cancel_asr_adapter();
-            return Ok(());
+            return Ok(None);
         }
 
         let resolved = match super::devices::resolve_capture_device(selected_device_id.as_deref()) {
             Ok(resolved) => resolved,
-            Err(error) => {
-                let _ = self
-                    .inner
-                    .lock()
-                    .expect("live runtime poisoned")
-                    .cancel_asr_adapter();
-                return Err(LiveStartFailure::new(session, error));
-            }
+            Err(error) => return Err(LiveStartFailure::new(session, error)),
         };
         let stream_config = resolved.config.config();
         let sample_format = resolved.config.sample_format();
         let (level_tx, level) = level_channel();
+        let pending_asr = PendingAsrAdapter::new();
+        let local_asr = pending_asr.sink();
         let capture_runtime = self.clone();
         let capture_app = app.clone();
         let capture_active_session = Arc::clone(&self.active_session);
@@ -471,12 +704,7 @@ impl LiveRuntime {
             || self.active_session.load(Ordering::Acquire) != session
         {
             let _ = recording_handle.abort("live start cancelled before capture opened");
-            let _ = self
-                .inner
-                .lock()
-                .expect("live runtime poisoned")
-                .cancel_asr_adapter();
-            return Ok(());
+            return Ok(None);
         }
         let capture = match CaptureAdapter::open(
             resolved.device,
@@ -508,39 +736,28 @@ impl LiveRuntime {
                         "live recording abort after capture-open failure failed: {finalize_error}"
                     ));
                 }
-                let _ = self
-                    .inner
-                    .lock()
-                    .expect("live runtime poisoned")
-                    .cancel_asr_adapter();
                 return Err(LiveStartFailure::new(session, error));
             }
         };
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        if !self.start_intent_is_current(intent)
-            || !should_install_capture(
-                session,
-                inner.session,
-                self.active_session.load(Ordering::SeqCst),
-                inner.capture.is_some(),
-            )
-        {
+        if !should_install_capture(
+            session,
+            inner.session,
+            self.active_session.load(Ordering::SeqCst),
+            inner.capture.is_some(),
+        ) {
             inner.last_used = Instant::now();
             drop(inner);
             if let Err(error) = capture.shutdown() {
                 crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
             }
             let _ = recording_handle.finalize();
-            let _ = self
-                .inner
-                .lock()
-                .expect("live runtime poisoned")
-                .cancel_asr_adapter();
             drop(level);
-            return Ok(());
+            return Ok(None);
         }
         inner.capture = Some(capture);
         inner.recording = Some(recording_handle);
+        inner.pending_asr = Some(pending_asr);
         inner.start_level_worker(
             app.clone(),
             level,
@@ -556,13 +773,70 @@ impl LiveRuntime {
             drop(inner);
             log_worker_shutdown_errors(shutdown_errors);
             let _ = self.finalize_recording();
-            return Ok(());
+            return Ok(None);
         };
         let _ = app.emit("live-session", &view);
-        Ok(())
+        Ok(Some(LocalCaptureStart { session }))
     }
 
-    pub fn request_warm(&self, app: tauri::AppHandle) -> Result<bool, String> {
+    pub(crate) fn complete_local_start(
+        &self,
+        app: tauri::AppHandle,
+        start: LocalCaptureStart,
+        intent: StartIntent,
+    ) -> Result<bool, LiveStartFailure> {
+        let session = start.session;
+        let reused = self.run_start_lifecycle(intent, || {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            if !self.capture_session_is_current(&inner, session) {
+                return Ok(false);
+            }
+            if inner.reuse_stream(session)? {
+                inner.start_pending_asr_adapter(session)?;
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        match reused {
+            None => return Ok(false),
+            Some(Ok(true)) => return Ok(true),
+            Some(Ok(false)) => {}
+            Some(Err(message)) => return Err(LiveStartFailure::new(session, message)),
+        }
+
+        self.request_model_warmup()
+            .map_err(|message| LiveStartFailure::new(session, message))?;
+        let Some(model) = self
+            .model_warmup
+            .wait_cancellable(|| !self.start_intent_is_current(intent))
+            .map_err(|message| LiveStartFailure::new(session, message))?
+        else {
+            return Ok(false);
+        };
+        let model_warmup = Arc::clone(&self.model_warmup);
+        self.run_start_lifecycle(intent, move || {
+            let mut inner = self.inner.lock().expect("live runtime poisoned");
+            if !self.capture_session_is_current(&inner, session) {
+                return Ok(false);
+            }
+            if !inner.reuse_stream(session)? {
+                inner.install_stream(self.clone(), app, session, model.commit(), model_warmup)?;
+            }
+            inner.start_pending_asr_adapter(session)?;
+            Ok(true)
+        })
+        .unwrap_or(Ok(false))
+        .map_err(|message| LiveStartFailure::new(session, message))
+    }
+
+    fn capture_session_is_current(&self, inner: &LiveRuntimeInner, session: u64) -> bool {
+        session != 0
+            && inner.session == session
+            && inner.capture.is_some()
+            && self.active_session.load(Ordering::Acquire) == session
+    }
+
+    pub fn request_warm(&self, _app: tauri::AppHandle) -> Result<bool, String> {
         if self
             .inner
             .lock()
@@ -574,29 +848,13 @@ impl LiveRuntime {
             return Ok(false);
         }
 
-        let runtime = self.clone();
-        spawn_warm_request(&self.warming, move || {
-            thread::Builder::new()
-                .name("live-model-warmup".into())
-                .spawn(move || {
-                    let _release = WarmupRelease(Arc::clone(&runtime.warming));
-                    let _transition = runtime.transition.begin_start();
-                    if let Err(error) = runtime.warm_claimed(app) {
-                        crate::stt::log_yap(&format!("live warmup skipped: {error}"));
-                    }
-                })
-                .map(|_| ())
-                .map_err(|error| format!("Live warmup worker could not start: {error}"))
-        })
+        self.request_model_warmup()
     }
 
-    fn warm_claimed(&self, app: tauri::AppHandle) -> Result<(), String> {
-        let result = {
-            let mut inner = self.inner.lock().expect("live runtime poisoned");
-            let session = inner.session;
-            inner.ensure_stream(self.clone(), app, session)
-        };
-        result
+    fn request_model_warmup(&self) -> Result<bool, String> {
+        self.model_warmup.request("live-model-warmup", || {
+            LiveStreamEngine::new().map_err(|error| error.user_message().to_string())
+        })
     }
 
     pub fn stop(&self) -> LiveStopResult {
@@ -838,6 +1096,7 @@ impl LiveRuntimeInner {
             capture: None,
             stream: None,
             retiring_stream: None,
+            pending_asr: None,
             asr_adapter: None,
             recording: None,
             level: None,
@@ -849,22 +1108,24 @@ impl LiveRuntimeInner {
         }
     }
 
-    fn ensure_stream(
+    fn reuse_stream(&mut self, session: u64) -> Result<bool, String> {
+        self.reap_retiring_stream()?;
+        if let Some(stream) = self.stream.as_ref().filter(|stream| stream.is_running()) {
+            stream.session.store(session, Ordering::SeqCst);
+            return Ok(true);
+        }
+        self.retire_stream();
+        Ok(false)
+    }
+
+    fn install_stream(
         &mut self,
         runtime: LiveRuntime,
         app: tauri::AppHandle,
         session: u64,
+        engine: LiveStreamEngine,
+        model_warmup: Arc<SharedWarmup<LiveStreamEngine>>,
     ) -> Result<(), String> {
-        self.reap_retiring_stream()?;
-        if self.stream.as_ref().is_some_and(SessionStream::is_running) {
-            if let Some(stream) = self.stream.as_ref() {
-                stream.session.store(session, Ordering::SeqCst);
-            }
-            return Ok(());
-        }
-        self.retire_stream();
-
-        let engine = LiveStreamEngine::new().map_err(|err| err.user_message().to_string())?;
         let (samples_tx, samples_rx) = mpsc::sync_channel::<StreamMessage>(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let stream_session = Arc::new(AtomicU64::new(session));
@@ -890,27 +1151,31 @@ impl LiveRuntimeInner {
             samples_tx,
             cancelled,
             worker: Some(worker),
+            model_warmup: Some(model_warmup),
         });
         Ok(())
     }
 
-    fn start_asr_adapter(&mut self, session: u64) -> Result<BoundedSink<PreparedFrame>, String> {
+    fn start_pending_asr_adapter(&mut self, session: u64) -> Result<(), String> {
         self.cancel_asr_adapter()?;
         let samples_tx = self
             .stream
             .as_ref()
             .map(|stream| stream.samples_tx.clone())
             .ok_or_else(|| "Live stream is unavailable.".to_string())?;
-        let adapter = SessionAsrAdapter::start(samples_tx, session);
-        let frames_tx = adapter.sink();
+        let pending = self
+            .pending_asr
+            .take()
+            .ok_or_else(|| "Live pre-roll is unavailable.".to_string())?;
+        let adapter = pending.start(samples_tx, session);
         self.asr_adapter = Some(adapter);
-        Ok(frames_tx)
+        Ok(())
     }
 
     fn start_level_worker(
         &mut self,
         app: tauri::AppHandle,
-        level: mpsc::Receiver<f32>,
+        level: LatestLevelReceiver,
         session: u64,
         active_session: Arc<AtomicU64>,
     ) {
@@ -921,11 +1186,7 @@ impl LiveRuntimeInner {
         }
         let handle = std::thread::spawn(move || {
             let state = app.state::<LiveSessionState>();
-            while let Ok(first) = level.recv() {
-                let mut value = first;
-                while let Ok(next) = level.try_recv() {
-                    value = next;
-                }
+            while let Ok(value) = level.recv() {
                 if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
                     break;
                 }
@@ -946,6 +1207,7 @@ impl LiveRuntimeInner {
                 errors.push(error);
             }
         }
+        self.pending_asr.take();
         if let Some(mut adapter) = self.asr_adapter.take() {
             match adapter.drain_after_capture(STREAM_DRAIN_ON_STOP) {
                 Ok(AdapterDrainStatus::Drained) => {}
@@ -1077,20 +1339,29 @@ impl SessionStream {
     fn shutdown(mut self, join_reader: bool) -> Result<(), String> {
         self.cancelled.store(true, Ordering::SeqCst);
         drop(self.samples_tx);
-        if join_reader {
+        let result = if join_reader {
             if let Some(handle) = self.worker.take() {
-                return join_worker(handle);
+                join_worker(handle)
+            } else {
+                Ok(())
             }
+        } else {
+            Ok(())
+        };
+        if let Some(warmup) = self.model_warmup.take() {
+            warmup.release_in_use();
         }
-        Ok(())
+        result
     }
 }
 
 impl SessionAsrAdapter {
+    #[cfg(test)]
     fn start(samples_tx: mpsc::SyncSender<StreamMessage>, session: u64) -> Self {
-        Self::start_with_completion_hook(samples_tx, session, || {})
+        PendingAsrAdapter::new().start(samples_tx, session)
     }
 
+    #[cfg(test)]
     fn start_with_completion_hook<F>(
         samples_tx: mpsc::SyncSender<StreamMessage>,
         session: u64,
@@ -1099,22 +1370,7 @@ impl SessionAsrAdapter {
     where
         F: FnOnce() + Send + 'static,
     {
-        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
-        let worker = std::thread::spawn(move || {
-            run_session_asr_adapter_worker(frames_rx, samples_tx, session, worker_cancelled);
-            completion_hook();
-            let _ = completed_tx.send(());
-        });
-        Self {
-            frames_tx,
-            cancelled,
-            completed_rx: Some(completed_rx),
-            worker: Some(worker),
-            cleanup_error: None,
-        }
+        PendingAsrAdapter::new().start_with_completion_hook(samples_tx, session, completion_hook)
     }
 
     #[cfg(test)]
@@ -1128,6 +1384,7 @@ impl SessionAsrAdapter {
         })
     }
 
+    #[cfg(test)]
     fn sink(&self) -> BoundedSink<PreparedFrame> {
         self.frames_tx.clone()
     }
@@ -1252,6 +1509,54 @@ impl SessionAsrAdapter {
     }
 }
 
+impl PendingAsrAdapter {
+    fn new() -> Self {
+        let (frames_tx, frames_rx) = bounded_sink(SinkKind::LocalAsr, LOCAL_ASR_QUEUE_CAPACITY);
+        Self {
+            frames_tx,
+            frames_rx: Some(frames_rx),
+        }
+    }
+
+    fn sink(&self) -> BoundedSink<PreparedFrame> {
+        self.frames_tx.clone()
+    }
+
+    fn start(self, samples_tx: mpsc::SyncSender<StreamMessage>, session: u64) -> SessionAsrAdapter {
+        self.start_with_completion_hook(samples_tx, session, || {})
+    }
+
+    fn start_with_completion_hook<F>(
+        mut self,
+        samples_tx: mpsc::SyncSender<StreamMessage>,
+        session: u64,
+        completion_hook: F,
+    ) -> SessionAsrAdapter
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let frames_rx = self
+            .frames_rx
+            .take()
+            .expect("pending ASR adapter starts one worker");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            run_session_asr_adapter_worker(frames_rx, samples_tx, session, worker_cancelled);
+            completion_hook();
+            let _ = completed_tx.send(());
+        });
+        SessionAsrAdapter {
+            frames_tx: self.frames_tx,
+            cancelled,
+            completed_rx: Some(completed_rx),
+            worker: Some(worker),
+            cleanup_error: None,
+        }
+    }
+}
+
 fn spawn_adapter_reaper<F>(run: F) -> Result<JoinHandle<()>, String>
 where
     F: FnOnce() + Send + 'static,
@@ -1359,7 +1664,7 @@ struct CaptureWorkerContext {
     active_session: Arc<AtomicU64>,
     recording: BoundedSink<RecordingInput>,
     local_asr: BoundedSink<PreparedFrame>,
-    level_tx: mpsc::SyncSender<f32>,
+    level_tx: LatestLevelSender,
 }
 
 fn run_capture_worker(
@@ -1661,12 +1966,41 @@ fn mark_local_asr_degraded_once(reported: &AtomicBool) -> bool {
         .is_ok()
 }
 
-fn level_channel() -> (mpsc::SyncSender<f32>, mpsc::Receiver<f32>) {
-    mpsc::sync_channel(LEVEL_QUEUE_CAPACITY)
+impl LatestLevelReceiver {
+    fn recv(&self) -> Result<f32, mpsc::RecvError> {
+        self.ready.recv()?;
+        self.latest
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or(mpsc::RecvError)
+    }
 }
 
-fn publish_level(levels: &mpsc::SyncSender<f32>, level: f32) -> bool {
-    levels.try_send(level).is_ok()
+fn level_channel() -> (LatestLevelSender, LatestLevelReceiver) {
+    let latest = Arc::new(Mutex::new(None));
+    let (ready, receiver) = mpsc::sync_channel(1);
+    (
+        LatestLevelSender {
+            latest: Arc::clone(&latest),
+            ready,
+        },
+        LatestLevelReceiver {
+            latest,
+            ready: receiver,
+        },
+    )
+}
+
+fn publish_level(levels: &LatestLevelSender, level: f32) -> bool {
+    *levels
+        .latest
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(level);
+    matches!(
+        levels.ready.try_send(()),
+        Ok(()) | Err(mpsc::TrySendError::Full(()))
+    )
 }
 
 fn spawn_stream_crash_handler(
@@ -1691,30 +2025,6 @@ fn log_worker_shutdown_errors(errors: Vec<String>) {
     for error in errors {
         crate::stt::log_yap(&format!("live worker shutdown failed: {error}"));
     }
-}
-
-fn claim_warmup(warming: &AtomicBool) -> bool {
-    warming
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-}
-
-fn release_warmup(warming: &AtomicBool) {
-    warming.store(false, Ordering::Release);
-}
-
-fn spawn_warm_request(
-    warming: &AtomicBool,
-    spawn: impl FnOnce() -> Result<(), String>,
-) -> Result<bool, String> {
-    if !claim_warmup(warming) {
-        return Ok(false);
-    }
-    if let Err(error) = spawn() {
-        release_warmup(warming);
-        return Err(error);
-    }
-    Ok(true)
 }
 
 fn run_stream_worker(
@@ -2576,6 +2886,7 @@ mod tests {
             samples_tx,
             cancelled: Arc::new(AtomicBool::new(false)),
             worker: Some(worker),
+            model_warmup: None,
         });
 
         inner.retire_stream_detached_reader();
@@ -2616,6 +2927,7 @@ mod tests {
             samples_tx,
             cancelled: Arc::new(AtomicBool::new(true)),
             worker: Some(worker),
+            model_warmup: None,
         });
         let (done_tx, done_rx) = mpsc::channel();
         let cleanup = std::thread::spawn(move || {
@@ -2661,34 +2973,93 @@ mod tests {
     }
 
     #[test]
-    fn warmup_latch_allows_one_in_flight_warm() {
-        let warming = AtomicBool::new(false);
+    fn cancellation_after_capture_handoff_keeps_the_recording_for_stop_cataloging() {
+        let runtime = LiveRuntime::new();
+        let directory = std::env::temp_dir().join(format!(
+            "yap-runtime-cancelled-start-recording-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        let session_id = SessionId::new("cancelled-after-open").unwrap();
+        let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
+        {
+            let mut inner = runtime.inner.lock().unwrap();
+            inner.session = 7;
+            inner.recording = Some(RecordingSinkHandle::spawn(
+                directory.clone(),
+                session_id.clone(),
+                sink,
+                receiver,
+            ));
+        }
+        runtime.active_session.store(7, Ordering::SeqCst);
+        let intent = runtime.capture_start_intent();
 
-        assert!(claim_warmup(&warming));
-        assert!(!claim_warmup(&warming));
-        release_warmup(&warming);
-        assert!(claim_warmup(&warming));
+        runtime.cancel_pending_start();
+        assert!(!runtime.start_intent_is_current(intent));
+        assert_eq!(runtime.active_session.load(Ordering::SeqCst), 7);
+
+        let stopped = runtime.stop();
+        let recording = stopped.recording.unwrap().unwrap();
+        assert_eq!(recording.session_id, session_id);
+        assert_eq!(recording.status, CaptureStatus::Complete);
+        let catalog = scan_recordings(&directory).unwrap();
+        assert_eq!(catalog.complete.len(), 1);
+        assert_eq!(catalog.complete[0].manifest.session_id, session_id);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn warm_request_is_coalesced_before_spawning_a_worker() {
-        let warming = AtomicBool::new(false);
-        let spawned = std::sync::atomic::AtomicUsize::new(0);
+    fn shared_warmup_is_cancellable_reentrant_and_never_duplicates_the_model() {
+        let warmup = Arc::new(SharedWarmup::<usize>::new());
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (loader_entered_tx, loader_entered_rx) = mpsc::channel();
+        let (release_loader_tx, release_loader_rx) = mpsc::channel();
+        let loader_warmup = Arc::clone(&warmup);
+        let loader_loads = Arc::clone(&loads);
 
-        assert!(spawn_warm_request(&warming, || {
-            spawned.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .unwrap());
-        assert!(!spawn_warm_request(&warming, || {
-            spawned.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .unwrap());
-        assert_eq!(spawned.load(Ordering::SeqCst), 1);
+        assert!(warmup
+            .request("test-live-warmup", move || {
+                loader_loads.fetch_add(1, Ordering::SeqCst);
+                assert!(loader_warmup.is_loading_for_test());
+                loader_entered_tx.send(()).unwrap();
+                release_loader_rx.recv().unwrap();
+                Ok(7)
+            })
+            .unwrap());
+        loader_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(!warmup
+            .request("duplicate-live-warmup", || panic!("duplicate model load"))
+            .unwrap());
 
-        release_warmup(&warming);
-        assert!(spawn_warm_request(&warming, || Ok(())).unwrap());
+        let waiter_warmup = Arc::clone(&warmup);
+        let waiter_cancelled = Arc::clone(&cancelled);
+        let (waiter_done_tx, waiter_done_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = waiter_warmup
+                .wait_cancellable(|| waiter_cancelled.load(Ordering::Acquire))
+                .unwrap();
+            waiter_done_tx.send(result.is_none()).unwrap();
+        });
+        cancelled.store(true, Ordering::Release);
+        warmup.cancel_loading();
+        assert!(waiter_done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        waiter.join().unwrap();
+
+        assert!(!warmup
+            .request("adopt-live-warmup", || panic!("duplicate model load"))
+            .unwrap());
+        release_loader_tx.send(()).unwrap();
+        let lease = warmup
+            .wait_cancellable(|| false)
+            .unwrap()
+            .expect("adopted warmup must publish its model");
+        assert_eq!(lease.commit(), 7);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        warmup.release_in_use();
     }
 
     #[test]
@@ -2885,12 +3256,12 @@ mod tests {
     }
 
     #[test]
-    fn level_telemetry_is_bounded_when_the_consumer_stalls() {
+    fn level_telemetry_overwrites_with_the_latest_value_when_the_consumer_stalls() {
         let (levels, receiver) = level_channel();
 
         assert!(publish_level(&levels, 0.25));
-        assert!(!publish_level(&levels, 0.75));
-        assert_eq!(receiver.recv().unwrap(), 0.25);
+        assert!(publish_level(&levels, 0.75));
+        assert_eq!(receiver.recv().unwrap(), 0.75);
         assert!(publish_level(&levels, 0.5));
     }
 
@@ -2909,6 +3280,27 @@ mod tests {
                 assert_eq!(samples, vec![0.25]);
             }
             StreamMessage::Finish { .. } => panic!("expected the accepted frame"),
+        }
+    }
+
+    #[test]
+    fn pending_asr_adapter_keeps_bounded_pre_roll_until_the_model_is_ready() {
+        let pending = PendingAsrAdapter::new();
+        let port = pending.sink();
+        port.try_send(prepared_frame(0.4)).unwrap();
+        assert_eq!(port.high_water_mark(), 1);
+        let (samples_tx, samples_rx) = mpsc::sync_channel(1);
+
+        let mut adapter = pending.start(samples_tx, 11);
+        port.close();
+        adapter.join_after_capture().unwrap();
+
+        match samples_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            StreamMessage::Samples { session, samples } => {
+                assert_eq!(session, 11);
+                assert_eq!(samples, vec![0.4]);
+            }
+            StreamMessage::Finish { .. } => panic!("expected queued pre-roll"),
         }
     }
 
@@ -3066,6 +3458,53 @@ mod tests {
                 (2, Vec::new()),
             ]
         );
+    }
+
+    #[test]
+    fn queued_stop_runs_before_a_later_start() {
+        let lifecycle = Arc::new(LifecycleGate::new());
+        let held = lifecycle.begin_start();
+        let (stop_queued_tx, stop_queued_rx) = mpsc::channel();
+        let (stop_entered_tx, stop_entered_rx) = mpsc::channel();
+        let (release_stop_tx, release_stop_rx) = mpsc::channel();
+        let stop_lifecycle = Arc::clone(&lifecycle);
+        let stopper = std::thread::spawn(move || {
+            let _stop = stop_lifecycle.begin_stop_with_wait_hook(|| {
+                stop_queued_tx.send(()).unwrap();
+            });
+            stop_entered_tx.send(()).unwrap();
+            release_stop_rx.recv().unwrap();
+        });
+        stop_queued_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (start_queued_tx, start_queued_rx) = mpsc::channel();
+        let (start_entered_tx, start_entered_rx) = mpsc::channel();
+        let start_lifecycle = Arc::clone(&lifecycle);
+        let starter = std::thread::spawn(move || {
+            let _start = start_lifecycle.begin_start_with_wait_hook(|| {
+                start_queued_tx.send(()).unwrap();
+            });
+            start_entered_tx.send(()).unwrap();
+        });
+        start_queued_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        drop(held);
+        stop_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            start_entered_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        release_stop_tx.send(()).unwrap();
+        start_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        stopper.join().unwrap();
+        starter.join().unwrap();
     }
 
     #[test]

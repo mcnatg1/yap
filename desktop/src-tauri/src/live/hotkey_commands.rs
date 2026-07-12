@@ -152,6 +152,7 @@ fn change_live_hotkey(
         },
         || live::settings::save_view(&prospective),
     )?;
+    live::shortcut_runtime::reset(&app);
 
     let recovered_startup_failure = state.take_startup_shortcut_failure(kind.is_paste());
     let view = state.update(|view| {
