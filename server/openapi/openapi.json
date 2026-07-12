@@ -178,7 +178,7 @@
           "jobs"
         ],
         "summary": "Upload one immutable audio chunk",
-        "description": "Phase 5 contract only. The body is raw little-endian PCM bytes. Replay identity and byte content identity are independent. Every explicit Yap header and path range must match the chunk entry in the referenced capture manifest; a mismatch is rejected before bytes are accepted.",
+        "description": "Phase 5 contract only. The body is raw little-endian PCM bytes. Replay identity and byte content identity are independent. The job, idempotency-key session, manifest session, track, sequence range, and content hash MUST satisfy x-yap-source-identity-invariants. Every explicit Yap header and path range MUST match exactly one chunk entry in the immutable capture manifest; a mismatch is rejected before bytes are accepted.",
         "operationId": "uploadJobChunk",
         "x-yap-phase-3-behavior": "Contract only",
         "x-yap-later-owner": "Phase 5 resumable upload",
@@ -190,6 +190,50 @@
           },
           "differentKeySameHash": "allowed",
           "headerManifestMismatch": "reject_before_accept"
+        },
+        "x-yap-source-identity-invariants": {
+          "jobManifestContinuity": {
+            "rule": "resolved_from_job",
+            "jobPath": "path.jobId",
+            "sourcePath": "CreateRecordingJobRequest"
+          },
+          "singleSessionIdentity": {
+            "rule": "all_equal",
+            "paths": [
+              "job.sessionId",
+              "job.captureManifest.sessionId",
+              "headers.Idempotency-Key.session",
+              "manifestChunk.replayKey.sessionId"
+            ]
+          },
+          "chunkTrackMembership": {
+            "rule": "all_equal_and_declared",
+            "paths": [
+              "path.trackId",
+              "headers.Idempotency-Key.track",
+              "manifestChunk.replayKey.trackId"
+            ],
+            "setPath": "CreateRecordingJobRequest.tracks[*].trackId"
+          },
+          "sequenceIdentity": {
+            "rule": "all_equal",
+            "paths": [
+              "path.sequenceStart-path.sequenceEnd",
+              "headers.Idempotency-Key.sequenceStart-sequenceEnd",
+              "manifestChunk.replayKey.sequenceStart-sequenceEnd"
+            ]
+          },
+          "contentIdentity": {
+            "rule": "all_equal",
+            "paths": [
+              "headers.X-Yap-Content-SHA256",
+              "manifestChunk.contentIdentity.sha256"
+            ]
+          },
+          "uniqueReplayKey": {
+            "rule": "unique_by",
+            "path": "CreateRecordingJobRequest.chunks[*].replayKey"
+          }
         },
         "parameters": [
           {
@@ -900,7 +944,8 @@
       "CaptureManifestReference": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Immutable capture-manifest identity. This hash is distinct from every chunk content hash and every later result-revision hash.",
+        "description": "Immutable capture-manifest identity. Every field MUST remain exactly equal to the object accepted at job creation for the full job lifetime and at commit. This hash is distinct from every chunk content hash and every later result-revision hash.",
+        "x-yap-immutable": true,
         "required": [
           "schemaVersion",
           "sessionId",
@@ -1420,6 +1465,21 @@
       "RecordingJob": {
         "type": "object",
         "additionalProperties": false,
+        "description": "Server job projection. sessionId MUST equal captureManifest.sessionId, and captureManifest MUST be exactly the immutable reference accepted at job creation.",
+        "x-yap-source-identity-invariants": {
+          "singleSessionIdentity": {
+            "rule": "all_equal",
+            "paths": [
+              "sessionId",
+              "captureManifest.sessionId"
+            ]
+          },
+          "manifestContinuity": {
+            "rule": "exact_object_equality",
+            "path": "captureManifest",
+            "sourcePath": "CreateRecordingJobRequest.captureManifest"
+          }
+        },
         "required": [
           "jobId",
           "sessionId",
@@ -1502,7 +1562,37 @@
       "CreateRecordingJobRequest": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Phase 5 upload-intake request. Identity ownership is server-derived after token validation; privacyPolicyVersion unconfigured cannot authorize a team upload once policy gating ships.",
+        "description": "Phase 5 upload-intake request. metadata, captureManifest, and every chunk replay key MUST name one session; every chunk track MUST belong to the unique declared track set; replay keys MUST be unique; and the accepted manifest reference and chunk declaration become immutable. Identity ownership is server-derived after token validation; privacyPolicyVersion unconfigured cannot authorize a team upload once policy gating ships.",
+        "x-yap-source-identity-invariants": {
+          "singleSessionIdentity": {
+            "rule": "all_equal",
+            "paths": [
+              "metadata.sessionId",
+              "captureManifest.sessionId",
+              "chunks[*].replayKey.sessionId"
+            ]
+          },
+          "chunkTrackMembership": {
+            "rule": "member_of",
+            "path": "chunks[*].replayKey.trackId",
+            "setPath": "tracks[*].trackId"
+          },
+          "uniqueTrackIds": {
+            "rule": "unique_by",
+            "path": "tracks[*].trackId"
+          },
+          "uniqueReplayKeys": {
+            "rule": "unique_by",
+            "path": "chunks[*].replayKey"
+          },
+          "manifestImmutability": {
+            "rule": "immutable_after_accept",
+            "paths": [
+              "captureManifest",
+              "chunks"
+            ]
+          }
+        },
         "required": [
           "displayName",
           "metadata",
@@ -1546,6 +1636,28 @@
       "CommitRecordingJobRequest": {
         "type": "object",
         "additionalProperties": false,
+        "description": "Commit continuity is exact: captureManifest MUST equal the full immutable object accepted at job creation, its session MUST equal the selected job session, and chunkCount MUST equal the number of unique declared replay keys. Any mismatch is rejected before processing.",
+        "x-yap-source-identity-invariants": {
+          "singleSessionIdentity": {
+            "rule": "all_equal",
+            "paths": [
+              "job.sessionId",
+              "job.captureManifest.sessionId",
+              "captureManifest.sessionId"
+            ]
+          },
+          "exactManifestContinuity": {
+            "rule": "exact_object_equality",
+            "path": "captureManifest",
+            "sourcePath": "CreateRecordingJobRequest.captureManifest"
+          },
+          "chunkCountContinuity": {
+            "rule": "equals_unique_count",
+            "path": "chunkCount",
+            "sourcePath": "CreateRecordingJobRequest.chunks[*].replayKey"
+          },
+          "mismatchDisposition": "reject_before_processing"
+        },
         "required": [
           "captureManifest",
           "chunkCount"

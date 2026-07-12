@@ -1,5 +1,6 @@
 import json
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -37,6 +38,233 @@ PHASE_BOUNDARY = {
         "Phase 5 upload commit",
     ),
     ("/v1/live", "get"): ("Event schema only", "Phase 5 WSS streaming"),
+}
+
+CHUNK_PATH = "/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}"
+
+HTTP_SCHEMA_CONTRACTS: list[dict[str, Any]] = [
+    {
+        "path": "/v1/health",
+        "method": "get",
+        "request": None,
+        "success": {"200": "#/components/schemas/HealthView"},
+        "errors": ["500"],
+    },
+    {
+        "path": "/v1/jobs",
+        "method": "post",
+        "request": (
+            "application/json",
+            "#/components/schemas/CreateRecordingJobRequest",
+        ),
+        "success": {"202": "#/components/schemas/RecordingJob"},
+        "errors": ["400", "429", "501"],
+    },
+    {
+        "path": "/v1/jobs/{jobId}",
+        "method": "get",
+        "request": None,
+        "success": {"200": "#/components/schemas/RecordingJob"},
+        "errors": ["404", "501"],
+    },
+    {
+        "path": "/v1/jobs/{jobId}",
+        "method": "delete",
+        "request": None,
+        "success": {"202": "#/components/schemas/RecordingJob"},
+        "errors": ["404", "409", "501"],
+    },
+    {
+        "path": CHUNK_PATH,
+        "method": "put",
+        "request": (
+            "application/octet-stream",
+            {"type": "string", "format": "binary"},
+        ),
+        "success": {
+            "200": "#/components/schemas/ChunkUploadReceipt",
+            "201": "#/components/schemas/ChunkUploadReceipt",
+        },
+        "errors": ["400", "404", "409", "415", "501"],
+    },
+    {
+        "path": "/v1/jobs/{jobId}/commit",
+        "method": "post",
+        "request": (
+            "application/json",
+            "#/components/schemas/CommitRecordingJobRequest",
+        ),
+        "success": {"202": "#/components/schemas/RecordingJob"},
+        "errors": ["400", "404", "409", "501"],
+    },
+    {
+        "path": "/v1/live",
+        "method": "get",
+        "request": None,
+        "success": {"101": None},
+        "errors": ["400", "501"],
+    },
+]
+
+CREATE_JOB_IDENTITY_INVARIANTS = {
+    "singleSessionIdentity": {
+        "rule": "all_equal",
+        "paths": [
+            "metadata.sessionId",
+            "captureManifest.sessionId",
+            "chunks[*].replayKey.sessionId",
+        ],
+    },
+    "chunkTrackMembership": {
+        "rule": "member_of",
+        "path": "chunks[*].replayKey.trackId",
+        "setPath": "tracks[*].trackId",
+    },
+    "uniqueTrackIds": {"rule": "unique_by", "path": "tracks[*].trackId"},
+    "uniqueReplayKeys": {
+        "rule": "unique_by",
+        "path": "chunks[*].replayKey",
+    },
+    "manifestImmutability": {
+        "rule": "immutable_after_accept",
+        "paths": ["captureManifest", "chunks"],
+    },
+}
+
+RECORDING_JOB_IDENTITY_INVARIANTS = {
+    "singleSessionIdentity": {
+        "rule": "all_equal",
+        "paths": ["sessionId", "captureManifest.sessionId"],
+    },
+    "manifestContinuity": {
+        "rule": "exact_object_equality",
+        "path": "captureManifest",
+        "sourcePath": "CreateRecordingJobRequest.captureManifest",
+    },
+}
+
+COMMIT_IDENTITY_INVARIANTS = {
+    "singleSessionIdentity": {
+        "rule": "all_equal",
+        "paths": [
+            "job.sessionId",
+            "job.captureManifest.sessionId",
+            "captureManifest.sessionId",
+        ],
+    },
+    "exactManifestContinuity": {
+        "rule": "exact_object_equality",
+        "path": "captureManifest",
+        "sourcePath": "CreateRecordingJobRequest.captureManifest",
+    },
+    "chunkCountContinuity": {
+        "rule": "equals_unique_count",
+        "path": "chunkCount",
+        "sourcePath": "CreateRecordingJobRequest.chunks[*].replayKey",
+    },
+    "mismatchDisposition": "reject_before_processing",
+}
+
+CHUNK_IDENTITY_INVARIANTS = {
+    "jobManifestContinuity": {
+        "rule": "resolved_from_job",
+        "jobPath": "path.jobId",
+        "sourcePath": "CreateRecordingJobRequest",
+    },
+    "singleSessionIdentity": {
+        "rule": "all_equal",
+        "paths": [
+            "job.sessionId",
+            "job.captureManifest.sessionId",
+            "headers.Idempotency-Key.session",
+            "manifestChunk.replayKey.sessionId",
+        ],
+    },
+    "chunkTrackMembership": {
+        "rule": "all_equal_and_declared",
+        "paths": [
+            "path.trackId",
+            "headers.Idempotency-Key.track",
+            "manifestChunk.replayKey.trackId",
+        ],
+        "setPath": "CreateRecordingJobRequest.tracks[*].trackId",
+    },
+    "sequenceIdentity": {
+        "rule": "all_equal",
+        "paths": [
+            "path.sequenceStart-path.sequenceEnd",
+            "headers.Idempotency-Key.sequenceStart-sequenceEnd",
+            "manifestChunk.replayKey.sequenceStart-sequenceEnd",
+        ],
+    },
+    "contentIdentity": {
+        "rule": "all_equal",
+        "paths": [
+            "headers.X-Yap-Content-SHA256",
+            "manifestChunk.contentIdentity.sha256",
+        ],
+    },
+    "uniqueReplayKey": {
+        "rule": "unique_by",
+        "path": "CreateRecordingJobRequest.chunks[*].replayKey",
+    },
+}
+
+LIVE_ENVELOPE_IDENTITY_INVARIANTS = {
+    "authoritativeSessionPath": "sessionId",
+    "nestedSessionIdentity": {
+        "rule": "all_equal",
+        "pathPattern": "**.sessionId",
+        "authoritativePath": "sessionId",
+    },
+}
+
+LIVE_START_IDENTITY_INVARIANTS = {
+    "sessionIdentity": {
+        "rule": "all_equal",
+        "paths": ["sessionId", "metadata.sessionId"],
+    },
+    "declaredTrackIds": {"rule": "unique_by", "path": "tracks[*].trackId"},
+}
+
+LIVE_CHUNK_IDENTITY_INVARIANTS = {
+    "sessionIdentity": {
+        "rule": "all_equal",
+        "paths": ["sessionId", "replayKey.sessionId"],
+    },
+    "trackMembership": {
+        "rule": "member_of",
+        "path": "replayKey.trackId",
+        "setPath": "session.start.tracks[*].trackId",
+    },
+    "uniqueReplayKey": {
+        "rule": "unique_by",
+        "path": "replayKey",
+        "scopePath": "sessionId",
+    },
+    "duplicateReplay": {
+        "rule": "same_key_requires_same_content_identity",
+        "contentPath": "contentIdentity",
+    },
+}
+
+LIVE_GAP_IDENTITY_INVARIANTS = {
+    "sessionIdentity": {
+        "rule": "all_equal",
+        "paths": ["sessionId", "gap.sessionId"],
+    },
+    "trackMembership": {
+        "rule": "member_of",
+        "path": "gap.trackId",
+        "setPath": "session.start.tracks[*].trackId",
+    },
+}
+
+LIVE_FINAL_IDENTITY_INVARIANTS = {
+    "sessionIdentity": {
+        "rule": "all_equal",
+        "paths": ["sessionId", "result.sessionId"],
+    }
 }
 
 RECORDING_JOB_STATUSES = [
@@ -88,12 +316,209 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def assert_required_fields(
-    test: unittest.TestCase,
+def resolve_pointer(document: dict[str, Any], pointer: str) -> Any:
+    if not pointer.startswith("#/"):
+        raise AssertionError(f"unsupported JSON pointer: {pointer}")
+    value: Any = document
+    for token in pointer[2:].split("/"):
+        decoded = token.replace("~1", "/").replace("~0", "~")
+        value = value[decoded]
+    return value
+
+
+def resolve_reference(
+    reference: str,
+    document_name: str,
+    documents: dict[str, dict[str, Any]],
+) -> tuple[Any, str]:
+    if reference.startswith("#/"):
+        target_name = document_name
+        pointer = reference
+    else:
+        target_name, separator, fragment = reference.partition("#")
+        if not separator or target_name not in documents:
+            raise AssertionError(f"unsupported schema reference: {reference}")
+        pointer = f"#{fragment}"
+    return resolve_pointer(documents[target_name], pointer), target_name
+
+
+def iter_references(value: Any) -> list[str]:
+    references: list[str] = []
+    if isinstance(value, dict):
+        reference = value.get("$ref")
+        if isinstance(reference, str):
+            references.append(reference)
+        for child in value.values():
+            references.extend(iter_references(child))
+    elif isinstance(value, list):
+        for child in value:
+            references.extend(iter_references(child))
+    return references
+
+
+def json_type_matches(value: Any, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    raise AssertionError(f"unsupported schema type in subset checker: {expected}")
+
+
+def evaluated_property_names(
     schema: dict[str, Any],
-    value: dict[str, Any],
+    *,
+    document_name: str,
+    documents: dict[str, dict[str, Any]],
+    seen: set[tuple[str, str]] | None = None,
+) -> set[str]:
+    seen = set() if seen is None else seen
+    names = set(schema.get("properties", {}))
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        key = (document_name, reference)
+        if key not in seen:
+            seen.add(key)
+            target, target_name = resolve_reference(reference, document_name, documents)
+            if isinstance(target, dict):
+                names.update(
+                    evaluated_property_names(
+                        target,
+                        document_name=target_name,
+                        documents=documents,
+                        seen=seen,
+                    )
+                )
+    for subschema in schema.get("allOf", []):
+        names.update(
+            evaluated_property_names(
+                subschema,
+                document_name=document_name,
+                documents=documents,
+                seen=seen,
+            )
+        )
+    return names
+
+
+def assert_schema_subset(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    document_name: str,
+    documents: dict[str, dict[str, Any]],
+    path: str = "$",
 ) -> None:
-    test.assertTrue(set(schema["required"]).issubset(value))
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        target, target_name = resolve_reference(reference, document_name, documents)
+        if not isinstance(target, dict):
+            raise AssertionError(f"{path}: $ref must resolve to a schema object")
+        assert_schema_subset(
+            value,
+            target,
+            document_name=target_name,
+            documents=documents,
+            path=path,
+        )
+
+    for subschema in schema.get("allOf", []):
+        assert_schema_subset(
+            value,
+            subschema,
+            document_name=document_name,
+            documents=documents,
+            path=path,
+        )
+
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list):
+        matches = 0
+        for candidate in one_of:
+            try:
+                assert_schema_subset(
+                    value,
+                    candidate,
+                    document_name=document_name,
+                    documents=documents,
+                    path=path,
+                )
+            except AssertionError:
+                continue
+            matches += 1
+        if matches != 1:
+            raise AssertionError(f"{path}: expected exactly one oneOf match, got {matches}")
+
+    if "const" in schema and value != schema["const"]:
+        raise AssertionError(f"{path}: expected const {schema['const']!r}, got {value!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise AssertionError(f"{path}: {value!r} is not in {schema['enum']!r}")
+
+    expected_types = schema.get("type")
+    if expected_types is not None:
+        if isinstance(expected_types, str):
+            expected_types = [expected_types]
+        if not any(json_type_matches(value, expected) for expected in expected_types):
+            raise AssertionError(
+                f"{path}: expected type {expected_types!r}, got {type(value).__name__}"
+            )
+
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        missing = [name for name in required if name not in value]
+        if missing:
+            raise AssertionError(f"{path}: missing required fields {missing!r}")
+        properties = schema.get("properties", {})
+        for name, child in value.items():
+            if name in properties:
+                assert_schema_subset(
+                    child,
+                    properties[name],
+                    document_name=document_name,
+                    documents=documents,
+                    path=f"{path}.{name}",
+                )
+                continue
+            additional = schema.get("additionalProperties", True)
+            if additional is False:
+                raise AssertionError(f"{path}: unexpected field {name!r}")
+            if isinstance(additional, dict):
+                assert_schema_subset(
+                    child,
+                    additional,
+                    document_name=document_name,
+                    documents=documents,
+                    path=f"{path}.{name}",
+                )
+
+        if schema.get("unevaluatedProperties") is False:
+            allowed = evaluated_property_names(
+                schema,
+                document_name=document_name,
+                documents=documents,
+            )
+            extras = sorted(set(value) - allowed)
+            if extras:
+                raise AssertionError(f"{path}: unexpected fields {extras!r}")
+
+    if isinstance(value, list) and "items" in schema:
+        for index, child in enumerate(value):
+            assert_schema_subset(
+                child,
+                schema["items"],
+                document_name=document_name,
+                documents=documents,
+                path=f"{path}[{index}]",
+            )
 
 
 def schema_property_names(value: Any) -> list[str]:
@@ -238,29 +663,114 @@ class ContractTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(
-            document["paths"]["/v1/health"]["get"]["responses"]["200"][
-                "content"
-            ]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/HealthView",
+    def test_http_source_identity_and_manifest_invariants_are_normative(self) -> None:
+        document = load_json(OPENAPI_PATH)
+        schemas = document["components"]["schemas"]
+        cases = [
+            (
+                "CreateRecordingJobRequest",
+                schemas["CreateRecordingJobRequest"].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                CREATE_JOB_IDENTITY_INVARIANTS,
+            ),
+            (
+                "RecordingJob",
+                schemas["RecordingJob"].get("x-yap-source-identity-invariants"),
+                RECORDING_JOB_IDENTITY_INVARIANTS,
+            ),
+            (
+                "CommitRecordingJobRequest",
+                schemas["CommitRecordingJobRequest"].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                COMMIT_IDENTITY_INVARIANTS,
+            ),
+            (
+                "uploadJobChunk",
+                document["paths"][CHUNK_PATH]["put"].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                CHUNK_IDENTITY_INVARIANTS,
+            ),
+        ]
+        for label, actual, expected in cases:
+            with self.subTest(contract=label):
+                self.assertEqual(actual, expected)
+
+        self.assertIs(
+            schemas["CaptureManifestReference"].get("x-yap-immutable"), True
         )
-        self.assertEqual(
-            document["paths"]["/v1/jobs"]["post"]["requestBody"]["content"][
-                "application/json"
-            ]["schema"]["$ref"],
-            "#/components/schemas/CreateRecordingJobRequest",
-        )
-        for path, method, status in [
-            ("/v1/jobs", "post", "202"),
-            ("/v1/jobs/{jobId}", "get", "200"),
-            ("/v1/jobs/{jobId}", "delete", "202"),
-            ("/v1/jobs/{jobId}/commit", "post", "202"),
-        ]:
-            response = document["paths"][path][method]["responses"][status]
-            self.assertEqual(
-                response["content"]["application/json"]["schema"]["$ref"],
-                "#/components/schemas/RecordingJob",
-            )
+
+    def test_http_operation_schema_links_are_frozen(self) -> None:
+        document = load_json(OPENAPI_PATH)
+        documents = {"openapi.json": document}
+
+        for contract in HTTP_SCHEMA_CONTRACTS:
+            path = contract["path"]
+            method = contract["method"]
+            operation = document["paths"][path][method]
+            with self.subTest(path=path, method=method, link="responses"):
+                self.assertEqual(
+                    set(operation["responses"]),
+                    set(contract["success"]) | set(contract["errors"]),
+                )
+
+            expected_request = contract["request"]
+            with self.subTest(path=path, method=method, link="request"):
+                if expected_request is None:
+                    self.assertNotIn("requestBody", operation)
+                else:
+                    media_type, expected_schema = expected_request
+                    request_body = operation["requestBody"]
+                    self.assertTrue(request_body["required"])
+                    self.assertEqual(set(request_body["content"]), {media_type})
+                    actual_schema = request_body["content"][media_type]["schema"]
+                    if isinstance(expected_schema, str):
+                        self.assertEqual(actual_schema, {"$ref": expected_schema})
+                        resolve_reference(expected_schema, "openapi.json", documents)
+                    else:
+                        self.assertEqual(actual_schema, expected_schema)
+
+            for status, expected_schema in contract["success"].items():
+                with self.subTest(path=path, method=method, success=status):
+                    response = operation["responses"][status]
+                    if "$ref" in response:
+                        response, _ = resolve_reference(
+                            response["$ref"], "openapi.json", documents
+                        )
+                    if expected_schema is None:
+                        self.assertNotIn("content", response)
+                    else:
+                        self.assertEqual(set(response["content"]), {"application/json"})
+                        actual_schema = response["content"]["application/json"][
+                            "schema"
+                        ]
+                        self.assertEqual(actual_schema, {"$ref": expected_schema})
+                        resolve_reference(expected_schema, "openapi.json", documents)
+
+            for status in contract["errors"]:
+                with self.subTest(path=path, method=method, error=status):
+                    response = operation["responses"][status]
+                    if "$ref" in response:
+                        response, _ = resolve_reference(
+                            response["$ref"], "openapi.json", documents
+                        )
+                    self.assertEqual(set(response["content"]), {"application/json"})
+                    error_schema = response["content"]["application/json"]["schema"]
+                    self.assertEqual(
+                        error_schema, {"$ref": "#/components/schemas/ApiError"}
+                    )
+
+        for reference in iter_references(document):
+            with self.subTest(component_reference=reference):
+                try:
+                    resolved, _ = resolve_reference(
+                        reference, "openapi.json", documents
+                    )
+                except (AssertionError, KeyError, TypeError) as error:
+                    self.fail(f"unresolved OpenAPI component reference {reference}: {error}")
+                self.assertIsNotNone(resolved)
 
     def test_chunk_contract_separates_replay_key_from_content_hash(self) -> None:
         document = load_json(OPENAPI_PATH)
@@ -399,28 +909,147 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(live_operation["x-yap-phase-3-behavior"], "Event schema only")
 
+    def test_live_source_identity_invariants_are_normative(self) -> None:
+        live_schema = load_json(LIVE_EVENTS_PATH)
+        openapi = load_json(OPENAPI_PATH)
+        definitions = live_schema["$defs"]
+        cases = [
+            (
+                "EventEnvelope",
+                definitions["EventEnvelope"].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                LIVE_ENVELOPE_IDENTITY_INVARIANTS,
+            ),
+            (
+                "SessionStartEvent",
+                definitions["SessionStartEvent"]["allOf"][1].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                LIVE_START_IDENTITY_INVARIANTS,
+            ),
+            (
+                "AudioChunkEvent",
+                definitions["AudioChunkEvent"]["allOf"][1].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                LIVE_CHUNK_IDENTITY_INVARIANTS,
+            ),
+            (
+                "AudioGapEvent",
+                definitions["AudioGapEvent"]["allOf"][1].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                LIVE_GAP_IDENTITY_INVARIANTS,
+            ),
+            (
+                "TranscriptFinalEvent",
+                definitions["TranscriptFinalEvent"]["allOf"][1].get(
+                    "x-yap-source-identity-invariants"
+                ),
+                LIVE_FINAL_IDENTITY_INVARIANTS,
+            ),
+        ]
+        for label, actual, expected in cases:
+            with self.subTest(contract=label):
+                self.assertEqual(actual, expected)
+
+        documents = {
+            "live-events.schema.json": live_schema,
+            "openapi.json": openapi,
+        }
+        for reference in iter_references(live_schema):
+            with self.subTest(schema_reference=reference):
+                try:
+                    resolved, _ = resolve_reference(
+                        reference, "live-events.schema.json", documents
+                    )
+                except (AssertionError, KeyError, TypeError) as error:
+                    self.fail(f"unresolved live schema reference {reference}: {error}")
+                self.assertIsNotNone(resolved)
+
     def test_examples_conform_to_required_contract_fields(self) -> None:
         document = load_json(OPENAPI_PATH)
         live_schema = load_json(LIVE_EVENTS_PATH)
+        documents = {
+            "openapi.json": document,
+            "live-events.schema.json": live_schema,
+        }
         health_example = load_json(EXAMPLES_ROOT / "health.ok.json")
         job_example = load_json(EXAMPLES_ROOT / "job.accepted.json")
         partial_example = load_json(EXAMPLES_ROOT / "live.partial.json")
 
         schemas = document["components"]["schemas"]
-        assert_required_fields(self, schemas["HealthView"], health_example)
-        assert_required_fields(self, schemas["ServerCapabilities"], health_example["capabilities"])
+        assert_schema_subset(
+            health_example,
+            schemas["HealthView"],
+            document_name="openapi.json",
+            documents=documents,
+        )
+        assert_schema_subset(
+            job_example,
+            schemas["RecordingJob"],
+            document_name="openapi.json",
+            documents=documents,
+        )
+        assert_schema_subset(
+            partial_example,
+            live_schema["$defs"]["TranscriptPartialEvent"],
+            document_name="live-events.schema.json",
+            documents=documents,
+        )
+        assert_schema_subset(
+            ["en-US", "es-MX"],
+            schemas["SessionMetadata"]["properties"]["preferredLanguagesBcp47"],
+            document_name="openapi.json",
+            documents=documents,
+        )
+
+        invalid_health = deepcopy(health_example)
+        del invalid_health["capabilities"]["jobStatus"]
+        with self.assertRaisesRegex(AssertionError, "missing required fields"):
+            assert_schema_subset(
+                invalid_health,
+                schemas["HealthView"],
+                document_name="openapi.json",
+                documents=documents,
+            )
+
+        invalid_job = deepcopy(job_example)
+        invalid_job["captureManifest"]["byteLength"] = "4096"
+        with self.assertRaisesRegex(AssertionError, "expected type"):
+            assert_schema_subset(
+                invalid_job,
+                schemas["RecordingJob"],
+                document_name="openapi.json",
+                documents=documents,
+            )
+
+        invalid_job = deepcopy(job_example)
+        invalid_job["unexpected"] = True
+        with self.assertRaisesRegex(AssertionError, "unexpected field"):
+            assert_schema_subset(
+                invalid_job,
+                schemas["RecordingJob"],
+                document_name="openapi.json",
+                documents=documents,
+            )
+
+        invalid_partial = deepcopy(partial_example)
+        invalid_partial["unexpected"] = True
+        with self.assertRaisesRegex(AssertionError, "unexpected field"):
+            assert_schema_subset(
+                invalid_partial,
+                live_schema["$defs"]["TranscriptPartialEvent"],
+                document_name="live-events.schema.json",
+                documents=documents,
+            )
+
         self.assertEqual(health_example["status"], "ok")
         self.assertEqual(health_example["auth"], "not_configured")
-
-        assert_required_fields(self, schemas["RecordingJob"], job_example)
         self.assertEqual(job_example["status"], "accepted")
         self.assertEqual(job_example["sessionOrigin"], "imported_file")
         self.assertEqual(job_example["route"], "server_batch")
-
-        envelope = live_schema["$defs"]["EventEnvelope"]
-        partial = live_schema["$defs"]["TranscriptPartialEvent"]["allOf"][1]
-        assert_required_fields(self, envelope, partial_example)
-        assert_required_fields(self, partial, partial_example)
         self.assertEqual(partial_example["eventType"], "transcript.partial")
         self.assertEqual(partial_example["schemaVersion"], 1)
         self.assertGreaterEqual(partial_example["eventSequence"], 0)

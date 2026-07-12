@@ -88,7 +88,15 @@
   "$defs": {
     "EventEnvelope": {
       "type": "object",
-      "description": "Common envelope. Each peer maintains a strictly increasing eventSequence for each session; reconnect replay never rewinds applied state.",
+      "description": "Common envelope. sessionId is authoritative and every nested sessionId MUST equal it. Each peer maintains a strictly increasing eventSequence for each session; reconnect replay never rewinds applied state.",
+      "x-yap-source-identity-invariants": {
+        "authoritativeSessionPath": "sessionId",
+        "nestedSessionIdentity": {
+          "rule": "all_equal",
+          "pathPattern": "**.sessionId",
+          "authoritativePath": "sessionId"
+        }
+      },
       "required": [
         "schemaVersion",
         "sessionId",
@@ -138,7 +146,20 @@
         },
         {
           "type": "object",
-          "description": "Opens a live server session using immutable client capture metadata.",
+          "description": "Opens a live server session using immutable client capture metadata. metadata.sessionId MUST equal the envelope sessionId, and tracks MUST declare a unique trackId set for all later chunk and gap membership checks.",
+          "x-yap-source-identity-invariants": {
+            "sessionIdentity": {
+              "rule": "all_equal",
+              "paths": [
+                "sessionId",
+                "metadata.sessionId"
+              ]
+            },
+            "declaredTrackIds": {
+              "rule": "unique_by",
+              "path": "tracks[*].trackId"
+            }
+          },
           "required": [
             "eventType",
             "metadata",
@@ -176,7 +197,30 @@
         },
         {
           "type": "object",
-          "description": "Declares chunk replay and content identity. The encoded audio bytes arrive in the immediately following WebSocket binary message; no other JSON event may intervene.",
+          "description": "Declares chunk replay and content identity. replayKey.sessionId MUST equal the envelope sessionId, replayKey.trackId MUST belong to the session.start track set, and replay keys MUST be unique except for an idempotent duplicate with the same contentIdentity. The encoded audio bytes arrive in the immediately following WebSocket binary message; no other JSON event may intervene.",
+          "x-yap-source-identity-invariants": {
+            "sessionIdentity": {
+              "rule": "all_equal",
+              "paths": [
+                "sessionId",
+                "replayKey.sessionId"
+              ]
+            },
+            "trackMembership": {
+              "rule": "member_of",
+              "path": "replayKey.trackId",
+              "setPath": "session.start.tracks[*].trackId"
+            },
+            "uniqueReplayKey": {
+              "rule": "unique_by",
+              "path": "replayKey",
+              "scopePath": "sessionId"
+            },
+            "duplicateReplay": {
+              "rule": "same_key_requires_same_content_identity",
+              "contentPath": "contentIdentity"
+            }
+          },
           "required": [
             "eventType",
             "replayKey",
@@ -225,7 +269,21 @@
         },
         {
           "type": "object",
-          "description": "Reports a source timeline gap explicitly so missing audio is never represented as silence.",
+          "description": "Reports a source timeline gap explicitly so missing audio is never represented as silence. gap.sessionId MUST equal the envelope sessionId and gap.trackId MUST belong to the session.start track set.",
+          "x-yap-source-identity-invariants": {
+            "sessionIdentity": {
+              "rule": "all_equal",
+              "paths": [
+                "sessionId",
+                "gap.sessionId"
+              ]
+            },
+            "trackMembership": {
+              "rule": "member_of",
+              "path": "gap.trackId",
+              "setPath": "session.start.tracks[*].trackId"
+            }
+          },
           "required": [
             "eventType",
             "gap"
@@ -390,7 +448,16 @@
         },
         {
           "type": "object",
-          "description": "Immutable final transcript publication. Duplicate deliveries with the same finalEventId are idempotent.",
+          "description": "Immutable final transcript publication. result.sessionId MUST equal the envelope sessionId. Duplicate deliveries with the same finalEventId are idempotent.",
+          "x-yap-source-identity-invariants": {
+            "sessionIdentity": {
+              "rule": "all_equal",
+              "paths": [
+                "sessionId",
+                "result.sessionId"
+              ]
+            }
+          },
           "required": [
             "eventType",
             "finalEventId",
