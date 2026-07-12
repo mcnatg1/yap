@@ -1,23 +1,96 @@
 import { polishNumGpuLayers } from "@/settings";
+import {
+  developmentPolishAvailable,
+} from "@/lib/product-features";
 
 const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
 
-export function isDevelopmentPolishAvailable({
-  explicitlyEnabled,
-  isDevelopment,
-}: {
-  explicitlyEnabled: boolean;
-  isDevelopment: boolean;
-}) {
-  return isDevelopment && explicitlyEnabled;
-}
-
-export const developmentPolishAvailable = isDevelopmentPolishAvailable({
-  explicitlyEnabled: import.meta.env.VITE_ENABLE_DEVELOPMENT_POLISH === "true",
-  isDevelopment: import.meta.env.DEV,
-});
-
 export type PolishTone = "light" | "clean" | "notes";
+
+export type PolishRunToken = Readonly<{
+  context: string;
+  id: number;
+  kind: "run";
+}>;
+
+export type PolishDraftToken = Readonly<{
+  context: string;
+  runId: number;
+}>;
+
+export type PolishSaveToken = Readonly<{
+  draft: PolishDraftToken;
+  id: number;
+  kind: "save";
+}>;
+
+export function createPolishOperationOwner() {
+  let nextRunId = 0;
+  let nextSaveId = 0;
+  let activeRun: PolishRunToken | undefined;
+  let activeSave: PolishSaveToken | undefined;
+  let draft: PolishDraftToken | undefined;
+
+  const ownsSave = (token: PolishSaveToken) => (
+    activeSave === token && draft === token.draft
+  );
+
+  return {
+    acceptRun(token: PolishRunToken) {
+      if (activeRun !== token) return undefined;
+      draft = Object.freeze({ context: token.context, runId: token.id });
+      return draft;
+    },
+    acceptSave(token: PolishSaveToken) {
+      return ownsSave(token);
+    },
+    currentDraft(context: string) {
+      return draft?.context === context ? draft : undefined;
+    },
+    finishRun(token: PolishRunToken) {
+      if (activeRun !== token) return false;
+      activeRun = undefined;
+      return true;
+    },
+    finishSave(token: PolishSaveToken) {
+      if (!ownsSave(token)) return false;
+      activeSave = undefined;
+      return true;
+    },
+    invalidate() {
+      activeRun = undefined;
+      activeSave = undefined;
+      draft = undefined;
+    },
+    isRunCurrent(token: PolishRunToken) {
+      return activeRun === token;
+    },
+    isSaving() {
+      return activeSave !== undefined;
+    },
+    startRun(context: string) {
+      if (!context || activeRun || activeSave) return undefined;
+      const token: PolishRunToken = Object.freeze({
+        context,
+        id: ++nextRunId,
+        kind: "run",
+      });
+      activeRun = token;
+      draft = undefined;
+      return token;
+    },
+    startSave(candidate: PolishDraftToken) {
+      if (activeSave || draft !== candidate) return undefined;
+      const token: PolishSaveToken = Object.freeze({
+        draft: candidate,
+        id: ++nextSaveId,
+        kind: "save",
+      });
+      activeSave = token;
+      return token;
+    },
+  };
+}
 
 export function isPolishDraftCurrent({
   currentContext,

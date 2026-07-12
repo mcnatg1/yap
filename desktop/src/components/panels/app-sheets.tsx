@@ -691,7 +691,12 @@ export function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean
           <SheetDescription>Core controls.</SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-3 px-4">
-          <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />
+          <StatusRow
+            icon={UploadCloud}
+            label="Add files"
+            value="Choose files or drag recordings onto Transcribe. They wait in the organization server queue."
+            wrap
+          />
           <StatusRow
             icon={Sparkles}
             label="Transcribe"

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { isWorkspaceView, type RailAction, type WorkspaceView } from "@/lib/app-types";
+import { developmentPolishAvailable } from "@/lib/product-features";
 
 export type WorkspaceNavigationState = {
   activeRail: RailAction;
@@ -93,6 +94,7 @@ export function useWorkspaceNavigation({
   }, [onOpenDetails, onOpenPolish]);
 
   const openWorkspace = useCallback((action: RailAction) => {
+    if (action === "polish" && !developmentPolishAvailable) return;
     setNavigation((state) => workspaceNavigationStateForAction(state, { type: "openWorkspace", action }));
     const effect = workspaceNavigationEffectForIntent({ type: "openWorkspace", action });
     if (effect === "refreshDetails") onOpenDetailsRef.current();

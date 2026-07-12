@@ -96,7 +96,7 @@ export function QueuePanel({
                 <span className="tabular-nums">{completed}</span> transcript{completed === 1 ? "" : "s"} ready
               </>
             ) : (
-              "Drop files to run"
+              "Choose files above to add them to the organization server queue."
             )}
           </CardDescription>
         </div>
@@ -130,12 +130,14 @@ export function QueuePanel({
                 </AlertDialogFooter>
               </AlertDialogContent>
             </AlertDialog>
-            <Button disabled={running || !hasRunnable} onClick={onRun} size="sm" type="button">
-              <span className="relative inline-flex size-4 shrink-0 items-center justify-center" data-icon="inline-start">
-                <TranscribeIcon />
-              </span>
-              Transcribe
-            </Button>
+            {running || hasRunnable ? (
+              <Button disabled={running || !hasRunnable} onClick={onRun} size="sm" type="button">
+                <span className="relative inline-flex size-4 shrink-0 items-center justify-center" data-icon="inline-start">
+                  <TranscribeIcon />
+                </span>
+                Transcribe
+              </Button>
+            ) : null}
           </ButtonGroup>
         </CardAction>
       </CardHeader>

@@ -76,6 +76,22 @@ export function projectHistorySearchDisplay({
   return indexingBodies ? "indexing" : "empty";
 }
 
+export function isHistoryBodySearchPending({
+  cachedOutputPaths,
+  hasPreviewLoader,
+  outputPaths,
+  query,
+}: {
+  cachedOutputPaths: ReadonlySet<string>;
+  hasPreviewLoader: boolean;
+  outputPaths: readonly string[];
+  query: string;
+}) {
+  return hasPreviewLoader
+    && shouldSearchTranscriptBodies(query)
+    && outputPaths.some((outputPath) => !cachedOutputPaths.has(outputPath));
+}
+
 function HistoryActionMenu({
   entry,
   onCopy,
@@ -225,7 +241,6 @@ export function HistoryPanel({
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
-  const [indexingBodies, setIndexingBodies] = useState(false);
   const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
   const previewTextByPathRef = useRef(previewTextByPath);
@@ -252,50 +267,46 @@ export function HistoryPanel({
   }, [onLoadPreviewText]);
 
   const searchableEntries = useMemo(() => previewSearchEntries(entries), [entries]);
+  const searchableOutputPaths = useMemo(
+    () => searchableEntries.map((entry) => entry.outputPath),
+    [searchableEntries],
+  );
+  const cachedOutputPaths = useMemo(
+    () => new Set(Object.keys(previewTextByPath)),
+    [previewTextByPath],
+  );
+  const indexingBodies = isHistoryBodySearchPending({
+    cachedOutputPaths,
+    hasPreviewLoader: Boolean(onLoadPreviewText),
+    outputPaths: searchableOutputPaths,
+    query: searchFilter,
+  });
 
   useEffect(() => {
-    if (!shouldSearchTranscriptBodies(searchFilter) || !onLoadPreviewText) {
-      setIndexingBodies(false);
-      return;
-    }
-
-    const hasUnindexedBodies = searchableEntries.some(
-      (entry) => previewTextByPathRef.current[entry.outputPath] === undefined,
-    );
-    if (!hasUnindexedBodies) {
-      setIndexingBodies(false);
-      return;
-    }
+    if (!indexingBodies || !onLoadPreviewText) return;
 
     let cancelled = false;
     const generation = previewSearchGenerationRef.current.begin();
-    setIndexingBodies(true);
     void (async () => {
-      try {
-        for (const entry of searchableEntries) {
-          if (cancelled) break;
-          if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
-          try {
-            await previewLoaderRef.current.load(
-              entry,
-              previewTextByPathRef.current,
-              onLoadPreviewText,
-              (outputPath, text) => {
-                if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
-                setPreviewTextByPath((current) =>
-                  current[outputPath] === undefined
-                    ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
-                    : current,
-                );
-              },
-            );
-          } catch {
-            // Keep search indexing the rest of history when one transcript moved or is unreadable.
-          }
-        }
-      } finally {
-        if (!cancelled && previewSearchGenerationRef.current.isCurrent(generation)) {
-          setIndexingBodies(false);
+      for (const entry of searchableEntries) {
+        if (cancelled) break;
+        if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
+        try {
+          await previewLoaderRef.current.load(
+            entry,
+            previewTextByPathRef.current,
+            onLoadPreviewText,
+            (outputPath, text) => {
+              if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
+              setPreviewTextByPath((current) =>
+                current[outputPath] === undefined
+                  ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
+                  : current,
+              );
+            },
+          );
+        } catch {
+          // Keep search indexing the rest of history when one transcript moved or is unreadable.
         }
       }
     })();
@@ -303,7 +314,7 @@ export function HistoryPanel({
     return () => {
       cancelled = true;
     };
-  }, [onLoadPreviewText, searchFilter, searchableEntries]);
+  }, [indexingBodies, onLoadPreviewText, searchFilter, searchableEntries]);
 
   useEffect(() => {
     setRenderLimit(historyRenderWindowSize);

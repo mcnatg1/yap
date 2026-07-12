@@ -187,7 +187,7 @@ export function StackedUpload({ elapsedSeconds, items, onRemove, onRetry, onReve
         </EmptyMedia>
         <div>
           <EmptyTitle>No audio queued</EmptyTitle>
-          <EmptyDescription>Drop files to begin.</EmptyDescription>
+          <EmptyDescription>No files are waiting for the organization server.</EmptyDescription>
         </div>
       </Empty>
     );

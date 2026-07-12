@@ -1,5 +1,4 @@
 import { type DragEvent } from "react";
-import { LockKey as LockKeyhole } from "@phosphor-icons/react/LockKey";
 import { CloudArrowUp as UploadCloud } from "@phosphor-icons/react/CloudArrowUp";
 
 import { Badge } from "@/components/ui/badge";
@@ -39,7 +38,7 @@ export function DropHero({
         <div className="max-w-md">
           <h2 className="text-lg font-semibold tracking-tight">Drop recordings here</h2>
           <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
-            Or choose files to transcribe locally. {acceptedFormats}.
+            Choose files to add them to your organization's transcription server queue. {acceptedFormats}.
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-center gap-3">
@@ -48,8 +47,8 @@ export function DropHero({
             Choose files
           </Button>
           <Badge className="border-primary/20 bg-[var(--primary-soft)] text-primary hover:bg-[var(--primary-soft)]" variant="outline">
-            <LockKeyhole data-icon="inline-start" />
-            Private on this device
+            <UploadCloud data-icon="inline-start" />
+            Organization server queue
           </Badge>
           {onOpenHelp ? (
             <Button
