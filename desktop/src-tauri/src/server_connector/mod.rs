@@ -19,7 +19,7 @@ pub(crate) fn server_settings(
     window: tauri::WebviewWindow,
 ) -> Result<config::ServerSettings, String> {
     crate::authorization::ensure_main(&window)?;
-    Ok(config::load())
+    config::load().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
