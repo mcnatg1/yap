@@ -201,14 +201,17 @@ flowchart TB
     Mic --> Conn
     Conn -->|"live stream + control"| Edge
     Conn -->|"durable file upload"| Edge
-    Edge --> Router
+    Edge -->|"authenticated requests"| Router
+    Router -->|"bounded responses"| Edge
+    Edge -->|"live + batch responses"| Conn
     Router --> ASR & Batch & LLM
     ASR & Batch --> Diar
-    ASR -->|"tokens"| Conn
-    Diar -->|"revisioned speaker result"| Conn
-    Batch -->|"transcript JSON"| Conn
-    LLM -->|"polish / agent response"| Conn
-    KB -->|"permission-filtered KB view"| Conn
+    ASR -->|"tokens"| Router
+    Diar -->|"revisioned speaker result"| Router
+    Batch -->|"transcript JSON"| Router
+    LLM -->|"polish / agent response"| Router
+    Router --> KB
+    KB -->|"permission-filtered KB view"| Router
     KBData -->|"webhook → compile"| KB
     Conn -.->|"server unreachable"| LocalFB
     Hotkey --> UI
@@ -657,7 +660,7 @@ Yap (Tauri)  [yap-desktop]
 
 ### Target team / server profile
 
-The host bootstrap plus health value/route-selector tests exist. The connector, network service, pools, databases, and `yap-knowledge` repository below are deferred.
+The hardened host bootstrap, machine-readable HTTP/live contracts, and bounded loopback capability-health service exist. The desktop connector, durable jobs, pools, databases, secure transport edge, and `yap-knowledge` repository below are deferred.
 
 ```
 yap-desktop (Tauri) — thin client shell
@@ -730,7 +733,7 @@ timeline
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
 | **1** | Capture foundation implemented; job ledger remains | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, and a Rust orchestrator skeleton exist. The Rust-owned SQLite server-job ledger is still deferred. |
 | **2** | Implemented baseline; hosted proof remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Windows native WDIO, NSIS packaging, local test-identity installer smokes, and release-artifact contract tests pass; hosted real-model/native release CI and measured latency/accuracy gates remain. |
-| **3** | Skeleton only | `server/` contains a health value and route-selector tests; no network service, machine-readable contract, connector, or durable job ledger exists. |
+| **3** | Contract and private health service implemented; connector/ledger in progress | `server/` contains versioned HTTP/live contracts and a bounded loopback capability-health service with stable errors and safe binding. The desktop connector, reachability/retry state, and Rust-owned durable job ledger remain. |
 | **4** | Host bootstrap only | `infra/yap-server-node/` and the runbook exist; no Yap application service is deployed. |
 | **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |

@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-12 at merged main `51931e5`
+**As of:** 2026-07-12, Phase 3 implementation through `d1d8093`
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -35,7 +35,7 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 | [0011](adr/0011-vector-rag-retrieval.md) | Accepted Phase 9 target | Server | **0** | None | No FTS/vector store, embeddings, chunker, RRF, calibration, citations, or permission filtering | Phase 9 after authoritative KB and access boundaries |
 | [0012](adr/0012-mcp-server-surface.md) | Accepted Phase 9 target; team hosting amended by 0017 | Server | **0** | None | No MCP runtime, tools/resources, transport, opt-in, authorization, or tests | Phase 9 after permission-filtered KB APIs |
 | [0013](adr/0013-global-hotkey-injection.md) | Accepted; Windows implementation active | Client | **160** | Dual shortcut commands, transactional registration, persistence, non-focusable overlay, target revalidation, Unicode injection, clipboard fallback, required native WDIO, and installer smoke evidence | Settings still use typed chord fields; paste-last has no default; no deliberate chord recorder/Cancel/Reset flow, macOS/Linux adapters, or broad real-app/elevation matrix | Replace the text fields with safe physical-chord capture and usable defaults, then expand native compatibility evidence |
-| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020 | Shared | **45** | Client route vocabulary/orchestrator skeleton, server health value/router tests, and host bootstrap | No network API, capability health, connector, durable jobs, queues, workers, TLS, or auth | Canonical Phase 3 contract/connector, then Phase 5 remote STT |
+| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021 | Shared | **70** | Client route vocabulary/orchestrator skeleton, versioned OpenAPI/live contracts, bounded loopback capability-health API, stable errors, safe binding, and hardened host bootstrap | No desktop connector, durable jobs, queue drain, workers, TLS/QUIC edge, auth, or server inference | Finish the Phase 3 connector/ledger, then Phase 5 remote STT |
 | [0015](adr/0015-two-pass-diarization-speaker-identity.md) | Superseded by 0020 | Server | **0** | No implementation of the retired ECAPA/VBx design | Entire retired design absent by intent | Do not implement; use 0020 |
 | [0016](adr/0016-auth-identity-bridge.md) | Canonical Phase 7 decision | Shared | **15** | Evidence/result contracts require provenance for named server assertions | No MSAL, credential storage, Yap-token validation, identity DB, grants, enrollment, deletion, or audit | Phase 7 after the server boundary works privately |
 | [0017](adr/0017-knowledge-base-compiler.md) | Canonical team KB decision | Server | **0** | None beyond repository documentation | No Lane 1 store, `yap-knowledge`, compiler, databases, permission inheritance, APIs, or IaC | Phase 9 after identity and result authority |
@@ -50,7 +50,7 @@ Current branch evidence at this audit:
 
 - Frontend unit tests: **262/262 passed**.
 - Rust: **548 library tests plus 15 integration/parity tests passed**; Clippy passed with warnings denied.
-- Server skeleton: **4/4 tests passed**.
+- Server contract, health service, and infra: **49/49 tests passed**.
 - Production frontend build: passed.
 - Playwright: **17/17 passed** after correcting stale history/recovery authority fixtures.
 - Required native WDIO: **9/9 passed**, including overlay close-to-tray, shared tray restore, and real tray quit.

@@ -6,7 +6,8 @@
 **Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the team profile still defaults to server-hosted live ASR when connected, but the desktop-local offline/degraded fallback is Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`.
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
-**Implementation status:** Client capture/local fallback and a server health/router skeleton exist. The network service, capability contract, connector, durable jobs, upload/WSS, auth, and server inference are not implemented.
+**Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
+**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, a bounded loopback capability-health service, and the router skeleton exist. The desktop connector, durable jobs, upload/WSS, auth, TLS/QUIC edge, and server inference are not implemented.
 
 ## Context
 

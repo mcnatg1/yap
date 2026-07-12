@@ -51,7 +51,7 @@ After that baseline works, benchmark these client-facing candidates through the 
 2. WebSockets bootstrapped over HTTP/3 Extended CONNECT as defined by RFC 9220;
 3. WebTransport over HTTP/3 when the chosen Rust client, edge, and server implementations are mature enough for a supported product path.
 
-HTTP/3 datagrams are not a license to make audio loss invisible. Any unreliable live-media experiment must still emit exact source gaps and preserve the durable recording/upload path. Final transcript events, job mutations, commits, and acknowledgements remain reliable and idempotent.
+Unreliable QUIC DATAGRAM frames carried through the HTTP Datagram extension are not a license to make audio loss invisible. Any such live-media experiment must still emit exact source gaps and preserve the durable recording/upload path. Reliable Capsule carriage is a distinct fallback and must be measured as such. Final transcript events, job mutations, commits, and acknowledgements remain reliable and idempotent.
 
 ### 4. Gate UDP exposure behind the security boundary
 
@@ -69,7 +69,7 @@ Loopback remains the application service default even after the edge exists. The
 
 ### 5. Negotiate capability and preserve fallback
 
-A later versioned contract may advertise supported transports and live carriers. Until that schema is accepted, the desktop discovers HTTP/3 through normal HTTPS negotiation and treats it as an optimization rather than a required capability.
+A later versioned contract may advertise supported transports and live carriers. Until that schema is accepted, deployment configuration, a direct QUIC attempt, or an HTTPS `Alt-Svc` advertisement selects an HTTP/3 endpoint; the QUIC TLS handshake then negotiates `h3` through ALPN. The desktop treats HTTP/3 as an optimization rather than a required capability.
 
 The connector must record which transport was negotiated, retry through the bounded route policy, and fall back without duplicating a logical job, chunk, commit, or final transcript event. Fallback must never weaken authentication or certificate validation.
 
@@ -137,7 +137,7 @@ Rejected. Live partials may tolerate loss, but source audio gaps, final results,
 
 ## Implementation sequence
 
-1. Finish the Phase 3 loopback health, connector, cancellation/retry, and Rust SQLite ledger work.
+1. Retain and verify the Phase 3 loopback health service while finishing the connector, cancellation/retry, and Rust SQLite ledger work.
 2. Deliver the WSS live and durable HTTP batch paths in Phase 5, then apply the Phase 7 authentication boundary before transport promotion.
 3. Select a maintained HTTP/3 edge and Rust client candidate; pin versions and complete license/security review.
 4. Add local certificate, QUIC, UDP-blocked fallback, loss/jitter, migration, and restart fixtures without opening a broad LAN listener.
