@@ -45,6 +45,8 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::file_actions::read_text_preview,
         crate::file_actions::write_polished_text,
         crate::file_actions::open_app_path,
-        crate::file_actions::reveal_app_path
+        crate::file_actions::reveal_app_path,
+        #[cfg(feature = "wdio")]
+        crate::tray::wdio_dispatch_tray_action
     ])
 }

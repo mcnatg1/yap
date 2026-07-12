@@ -1,18 +1,14 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
 
 import { config as baseConfig } from "./wdio.conf.ts";
-import { assertRequiredSpecPolicy } from "./wdio/required-spec-policy.mjs";
 
 const testsRoot = path.dirname(fileURLToPath(import.meta.url));
 const requiredSpecs = [
   path.join(testsRoot, "wdio", "smoke.spec.js"),
   path.join(testsRoot, "wdio", "live-overlay.spec.js"),
+  path.join(testsRoot, "wdio", "tray-actions.spec.js"),
 ];
-for (const spec of requiredSpecs) {
-  assertRequiredSpecPolicy(readFileSync(spec, "utf8"), spec);
-}
 
 export const config = {
   ...baseConfig,

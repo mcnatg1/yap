@@ -127,55 +127,168 @@ function Test-ProcessAlive {
 function Get-ProcessTreeIds {
   param([Parameter(Mandatory)][int]$RootProcessId)
 
-  $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-  $children = @{}
-  foreach ($process in $processes) {
-    $parentId = [int]$process.ParentProcessId
-    if (-not $children.ContainsKey($parentId)) {
-      $children[$parentId] = [System.Collections.Generic.List[int]]::new()
-    }
-    $children[$parentId].Add([int]$process.ProcessId)
-  }
+  $tracked = [System.Collections.Generic.HashSet[int]]::new()
+  [void]$tracked.Add($RootProcessId)
+  $snapshot = @(Get-ProcessSnapshot)
+  Update-TrackedProcessIds -TrackedProcessIds $tracked -Snapshot $snapshot
+  return @($tracked | Sort-Object)
+}
 
-  $result = [System.Collections.Generic.List[int]]::new()
-  $pending = [System.Collections.Generic.Stack[int]]::new()
-  $pending.Push($RootProcessId)
-  while ($pending.Count -gt 0) {
-    $current = $pending.Pop()
-    if ($result.Contains($current)) { continue }
-    $result.Add($current)
-    if ($children.ContainsKey($current)) {
-      foreach ($childId in $children[$current]) { $pending.Push($childId) }
+function Get-ProcessSnapshot {
+  return @(
+    Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+      [pscustomobject]@{
+        ProcessId = [int]$_.ProcessId
+        ParentProcessId = [int]$_.ParentProcessId
+        ExecutablePath = $_.ExecutablePath
+      }
+    }
+  )
+}
+
+function Update-TrackedProcessIds {
+  param(
+    [Parameter(Mandatory)][System.Collections.Generic.HashSet[int]]$TrackedProcessIds,
+    [Parameter(Mandatory)][object[]]$Snapshot
+  )
+
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($process in $Snapshot) {
+      $processId = [int]$process.ProcessId
+      $parentProcessId = [int]$process.ParentProcessId
+      if (
+        $processId -le 0 -or
+        $processId -eq $PID -or
+        $TrackedProcessIds.Contains($processId) -or
+        -not $TrackedProcessIds.Contains($parentProcessId)
+      ) {
+        continue
+      }
+      [void]$TrackedProcessIds.Add($processId)
+      $changed = $true
     }
   }
-  return @($result)
+}
+
+function Get-TrackedProcessDepth {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][hashtable]$ParentById,
+    [Parameter(Mandatory)][System.Collections.Generic.HashSet[int]]$TrackedProcessIds
+  )
+
+  $depth = 0
+  $current = $ProcessId
+  $visited = [System.Collections.Generic.HashSet[int]]::new()
+  while ($ParentById.ContainsKey($current) -and $visited.Add($current)) {
+    $parent = [int]$ParentById[$current]
+    if (-not $TrackedProcessIds.Contains($parent)) { break }
+    $depth++
+    $current = $parent
+  }
+  return $depth
+}
+
+function Stop-TrackedProcessesBounded {
+  param(
+    [Parameter(Mandatory)][int[]]$ProcessIds,
+    [double]$TimeoutSeconds = 5,
+    [int]$QuiescencePasses = 2
+  )
+
+  if ($TimeoutSeconds -le 0) { throw "Process termination timeout must be positive." }
+  if ($QuiescencePasses -lt 2) { throw "Process cleanup requires at least two quiescence passes." }
+  $tracked = [System.Collections.Generic.HashSet[int]]::new()
+  foreach ($processId in $ProcessIds) {
+    if ($processId -le 0 -or $processId -eq $PID) {
+      throw "Invalid process ID for bounded cleanup: $processId"
+    }
+    [void]$tracked.Add($processId)
+  }
+  if ($tracked.Count -eq 0) { throw "Bounded cleanup requires at least one process ID." }
+
+  $terminated = [System.Collections.Generic.HashSet[int]]::new()
+  $terminationErrors = [System.Collections.Generic.List[string]]::new()
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  $iterations = 0
+  $quietPasses = 0
+  do {
+    $iterations++
+    $snapshot = @(Get-ProcessSnapshot)
+    Update-TrackedProcessIds -TrackedProcessIds $tracked -Snapshot $snapshot
+    $alive = @($snapshot | Where-Object { $tracked.Contains([int]$_.ProcessId) })
+    if ($alive.Count -eq 0) {
+      $quietPasses++
+      if ($quietPasses -ge $QuiescencePasses) {
+        return [pscustomobject]@{
+          DiscoveredProcessIds = @($tracked | Sort-Object)
+          TerminatedProcessIds = @($terminated | Sort-Object)
+          ResidualProcessIds = @()
+          TerminationErrors = @($terminationErrors)
+          Iterations = $iterations
+          QuiescencePasses = $quietPasses
+        }
+      }
+    } else {
+      $quietPasses = 0
+      $parentById = @{}
+      foreach ($process in $snapshot) {
+        $parentById[[int]$process.ProcessId] = [int]$process.ParentProcessId
+      }
+      $ordered = @(
+        $alive | Sort-Object {
+          -(Get-TrackedProcessDepth `
+            -ProcessId ([int]$_.ProcessId) `
+            -ParentById $parentById `
+            -TrackedProcessIds $tracked)
+        }
+      )
+      foreach ($process in $ordered) {
+        $processId = [int]$process.ProcessId
+        try {
+          Stop-Process -Id $processId -Force -ErrorAction Stop
+          [void]$terminated.Add($processId)
+        } catch {
+          if (Test-ProcessAlive -ProcessId $processId) {
+            $terminationErrors.Add("${processId}:$($_.Exception.Message)")
+          }
+        }
+      }
+    }
+    Start-Sleep -Milliseconds 50
+  } while ([DateTime]::UtcNow -lt $deadline)
+
+  $snapshot = @(Get-ProcessSnapshot)
+  Update-TrackedProcessIds -TrackedProcessIds $tracked -Snapshot $snapshot
+  $residuals = @(
+    $snapshot |
+      Where-Object { $tracked.Contains([int]$_.ProcessId) } |
+      ForEach-Object { [int]$_.ProcessId } |
+      Sort-Object
+  )
+  $report = [ordered]@{
+    discoveredProcessIds = @($tracked | Sort-Object)
+    terminatedProcessIds = @($terminated | Sort-Object)
+    residualProcessIds = $residuals
+    terminationErrors = @($terminationErrors)
+    iterations = $iterations
+    quiescencePasses = $quietPasses
+  }
+  throw "Process cleanup did not reach quiescence: $($report | ConvertTo-Json -Compress -Depth 4)"
 }
 
 function Stop-ProcessTreeBounded {
   param(
     [Parameter(Mandatory)][int]$RootProcessId,
+    [int[]]$SeedProcessIds = @(),
     [double]$TimeoutSeconds = 5
   )
 
-  if ($TimeoutSeconds -le 0) { throw "Process termination timeout must be positive." }
-  $processIds = @(Get-ProcessTreeIds -RootProcessId $RootProcessId)
-  [array]::Reverse($processIds)
-  foreach ($processId in $processIds) {
-    if (-not (Test-ProcessAlive -ProcessId $processId)) { continue }
-    try {
-      Stop-Process -Id $processId -Force -ErrorAction Stop
-    } catch {
-      if (Test-ProcessAlive -ProcessId $processId) { throw }
-    }
-  }
-
-  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-  do {
-    $alive = @($processIds | Where-Object { Test-ProcessAlive -ProcessId $_ })
-    if ($alive.Count -eq 0) { return $processIds }
-    Start-Sleep -Milliseconds 50
-  } while ([DateTime]::UtcNow -lt $deadline)
-  throw "Process tree did not terminate before the deadline: $($alive -join ', ')."
+  return Stop-TrackedProcessesBounded `
+    -ProcessIds (@($RootProcessId) + @($SeedProcessIds)) `
+    -TimeoutSeconds $TimeoutSeconds
 }
 
 function Invoke-ProcessWithDeadline {
@@ -205,26 +318,48 @@ function Invoke-ProcessWithDeadline {
   [void]$process.Handle
   $startedAt = [DateTime]::UtcNow
   $deadline = $startedAt.AddSeconds($TimeoutSeconds)
-  while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-    Start-Sleep -Milliseconds 50
+  $tracked = [System.Collections.Generic.HashSet[int]]::new()
+  [void]$tracked.Add($process.Id)
+  $quietPasses = 0
+  $iterations = 0
+  do {
+    $iterations++
+    $snapshot = @(Get-ProcessSnapshot)
+    Update-TrackedProcessIds -TrackedProcessIds $tracked -Snapshot $snapshot
+    $alive = @($snapshot | Where-Object { $tracked.Contains([int]$_.ProcessId) })
     $process.Refresh()
-  }
-  if (-not $process.HasExited) {
-    $terminationError = $null
-    try {
-      Stop-ProcessTreeBounded -RootProcessId $process.Id -TimeoutSeconds 5 | Out-Null
-    } catch {
-      $terminationError = $_.Exception.Message
+    if ($process.HasExited -and $alive.Count -eq 0) {
+      $quietPasses++
+      if ($quietPasses -ge 2) { break }
+    } else {
+      $quietPasses = 0
     }
-    $message = "Process $($process.Id) exceeded its $TimeoutSeconds second deadline."
-    if ($terminationError) { $message += " Termination also failed: $terminationError" }
-    throw $message
+    Start-Sleep -Milliseconds 50
+  } while ([DateTime]::UtcNow -lt $deadline)
+
+  if (-not $process.HasExited -or $quietPasses -lt 2) {
+    $cleanupEvidence = "cleanup was not attempted"
+    try {
+      $cleanup = Stop-ProcessTreeBounded `
+        -RootProcessId $process.Id `
+        -SeedProcessIds @($tracked) `
+        -TimeoutSeconds 5
+      $cleanupEvidence = $cleanup | ConvertTo-Json -Compress -Depth 4
+    } catch {
+      $cleanupEvidence = $_.Exception.Message
+    }
+    throw "Process $($process.Id) or its descendants exceeded the $TimeoutSeconds second deadline. Cleanup evidence: $cleanupEvidence"
   }
+
   $process.WaitForExit()
   return [pscustomobject]@{
     ProcessId = $process.Id
+    ProcessIds = @($tracked | Sort-Object)
     ExitCode = $process.ExitCode
     DurationMs = [int]([DateTime]::UtcNow - $startedAt).TotalMilliseconds
+    DiscoveryIterations = $iterations
+    QuiescencePasses = $quietPasses
+    ResidualProcessIds = @()
   }
 }
 
@@ -297,6 +432,7 @@ Export-ModuleMember -Function `
   Invoke-ProcessWithDeadline, `
   Remove-ValidatedTree, `
   Stop-ProcessTreeBounded, `
+  Stop-TrackedProcessesBounded, `
   Test-ProcessAlive, `
   Test-StrictChildPath, `
   Wait-PathAbsent

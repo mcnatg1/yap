@@ -4,19 +4,19 @@ import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 const manifestPath = path.join(repoRoot, "THIRD_PARTY_PROVENANCE.json");
-const requireVerified = process.argv.includes("--require-verified");
-const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--require-verified");
+const requireReviewed = process.argv.includes("--require-reviewed");
+const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--require-reviewed");
 
 if (unknownArgs.length > 0) {
   throw new Error(`Unknown provenance arguments: ${unknownArgs.join(", ")}`);
 }
 
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-assert(manifest.schemaVersion === 1, "Unsupported third-party provenance schema.");
+assert(manifest.schemaVersion === 2, "Unsupported third-party provenance schema.");
 assert(Array.isArray(manifest.sources) && manifest.sources.length > 0, "Provenance has no sources.");
 
 const sourceIds = new Set();
-const unverified = [];
+const unreviewed = [];
 for (const source of manifest.sources) {
   assert(typeof source.id === "string" && /^[a-z0-9-]+$/.test(source.id), "Invalid source ID.");
   assert(!sourceIds.has(source.id), `Duplicate provenance source ID: ${source.id}`);
@@ -25,12 +25,12 @@ for (const source of manifest.sources) {
   assert(typeof source.license === "string" && source.license.length > 0, `Source ${source.id} has no license.`);
 
   const revision = source.revision;
-  assert(revision && ["unverified", "verified"].includes(revision.status), `Source ${source.id} has an invalid revision status.`);
+  assert(revision && ["unverified", "reviewed"].includes(revision.status), `Source ${source.id} has an invalid revision status.`);
   if (revision.status === "unverified") {
     assert(revision.value === null, `Unverified source ${source.id} must not claim a revision.`);
-    unverified.push(source.id);
+    unreviewed.push(source.id);
   } else {
-    assert(/^[0-9a-f]{40}$/.test(revision.value), `Verified source ${source.id} must record a full Git revision.`);
+    assertReviewedRevision(source);
   }
 
   await readRepoPath(source.notice, `notice for ${source.id}`);
@@ -46,16 +46,40 @@ for (const source of manifest.sources) {
   }
 }
 
-if (requireVerified && unverified.length > 0) {
+if (requireReviewed && unreviewed.length > 0) {
   console.error(
-    `Pre-publication provenance failed: revision is explicitly unverified for ${unverified.join(", ")}.`,
+    `Pre-publication provenance failed: no exact reviewed revision for ${unreviewed.join(", ")}.`,
   );
   process.exitCode = 1;
 } else {
-  const qualifier = unverified.length > 0
-    ? `; unverified revisions: ${unverified.join(", ")}`
-    : "; all revisions verified";
+  const qualifier = unreviewed.length > 0
+    ? `; unreviewed revisions: ${unreviewed.join(", ")}`
+    : "; all revisions have exact review evidence";
   console.log(`Third-party provenance integrity passed${qualifier}.`);
+}
+
+export function assertReviewedRevision(source) {
+  const revision = source.revision;
+  assert(/^[0-9a-f]{40}$/.test(revision.value), `Reviewed source ${source.id} must record a full Git revision.`);
+  const evidence = revision.evidence;
+  assert(evidence && typeof evidence === "object", `Reviewed source ${source.id} has no review evidence.`);
+  assert(
+    evidence.commitUrl === `${source.repository}/commit/${revision.value}`,
+    `Reviewed source ${source.id} does not bind its evidence to the recorded revision.`,
+  );
+  assert(evidence.licensePath === "LICENSE", `Reviewed source ${source.id} has no reviewed LICENSE path.`);
+  assert(
+    /^[0-9a-f]{64}$/.test(evidence.licenseSha256),
+    `Reviewed source ${source.id} has no reviewed LICENSE SHA-256.`,
+  );
+  assert(
+    evidence.reviewScope === "upstream revision and license attribution",
+    `Reviewed source ${source.id} overstates or omits its review scope.`,
+  );
+  assert(
+    evidence.localFileEvidence === "integrity-only",
+    `Reviewed source ${source.id} must describe local hashes as integrity-only evidence.`,
+  );
 }
 
 async function readRepoPath(relativePath, label) {

@@ -1,0 +1,117 @@
+name: Publish NSIS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build and publish
+        required: true
+        type: string
+      tag:
+        description: GitHub release tag to create
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nsis-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish-nsis:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: write
+    env:
+      RUST_TARGET: x86_64-pc-windows-msvc
+      RUST_TOOLCHAIN: stable
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.14.0"
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.RUST_TARGET }}
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-release-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/nsis-hooks.nsh') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Resolve selected release ref
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          SELECTED_REF: ${{ inputs.ref }}
+        run: >-
+          node ./tests/scripts/release-artifact.mjs prepare
+          --repo-root "$env:GITHUB_WORKSPACE"
+          --selected-ref "$env:SELECTED_REF"
+          --release-tag "$env:RELEASE_TAG"
+          --context-path ./tests/results/release/context.json
+      - name: Verify release contract
+        run: pnpm test:release-contract
+      - name: Require reviewed third-party provenance
+        run: node ./tests/scripts/assert-third-party-provenance.mjs --require-reviewed
+      - name: Build NSIS release artifact
+        run: pnpm tauri build --bundles nsis
+      - name: Smoke the exact NSIS release artifact
+        shell: pwsh
+        run: ./tests/scripts/smoke-nsis.ps1 -BundleDirectory ./src-tauri/target/release/bundle/nsis
+      - name: Bind artifact evidence to selected ref
+        id: bind
+        run: >-
+          node ./tests/scripts/release-artifact.mjs bind
+          --repo-root "$env:GITHUB_WORKSPACE"
+          --context-path ./tests/results/release/context.json
+          --bundle-directory ./src-tauri/target/release/bundle/nsis
+          --metadata-path ./tests/results/release/release-metadata.json
+          --github-output "$env:GITHUB_OUTPUT"
+      - name: Publish gated GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_NAME: ${{ steps.bind.outputs.installer_name }}
+          INSTALLER_PATH: ${{ steps.bind.outputs.installer_path }}
+          METADATA_PATH: ${{ steps.bind.outputs.metadata_path }}
+          RELEASE_SHA: ${{ steps.bind.outputs.release_sha }}
+          RELEASE_TAG: ${{ steps.bind.outputs.release_tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release create $env:RELEASE_TAG `
+            "$env:INSTALLER_PATH#$env:INSTALLER_NAME" `
+            "$env:METADATA_PATH#release-metadata.json" `
+            --draft `
+            --generate-notes `
+            --target $env:RELEASE_SHA `
+            --title "Yap $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Draft GitHub release creation failed." }
+          gh release edit $env:RELEASE_TAG --draft=false
+          if ($LASTEXITCODE -ne 0) { throw "Publishing the verified draft release failed." }
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: nsis-release-evidence-${{ github.run_id }}
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            desktop/tests/results/release/**
+            desktop/tests/results/nsis-smoke/**
+          if-no-files-found: ignore
+          retention-days: 14

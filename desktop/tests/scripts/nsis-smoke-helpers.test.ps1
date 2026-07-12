@@ -48,6 +48,8 @@ try {
     -StdoutPath $quickOut `
     -StderrPath $quickErr
   Assert-True ($quick.ExitCode -eq 7) "Deadline helper lost the process exit code."
+  Assert-True ($quick.ProcessIds -contains $quick.ProcessId) "Deadline helper omitted its root process evidence."
+  Assert-True ($quick.QuiescencePasses -ge 2) "Deadline helper did not verify process-tree quiescence."
 
   $timeoutPidPath = Join-Path $processRoot "timeout.pid"
   $timeoutScript = "`$PID | Set-Content -LiteralPath '$timeoutPidPath' -Encoding ascii; Start-Sleep -Seconds 30"
@@ -59,7 +61,7 @@ try {
       -TimeoutSeconds 1.5 `
       -StdoutPath (Join-Path $processRoot "timeout.out.log") `
       -StderrPath (Join-Path $processRoot "timeout.err.log")
-  } "exceeded its 1.5 second deadline"
+  } "exceeded the 1.5 second deadline"
   Assert-True (Test-Path -LiteralPath $timeoutPidPath -PathType Leaf) "Timed process did not report its PID."
   $timedProcessId = [int](Get-Content -LiteralPath $timeoutPidPath -Raw)
   Assert-True (-not (Test-ProcessAlive -ProcessId $timedProcessId)) "Timed process survived deadline cleanup."
@@ -80,7 +82,9 @@ Start-Sleep -Seconds 30
   $childId = [int](Get-Content -LiteralPath $childIdPath -Raw)
   $tree = @(Get-ProcessTreeIds -RootProcessId $parent.Id)
   Assert-True ($tree -contains $childId) "Process-tree discovery omitted the child."
-  Stop-ProcessTreeBounded -RootProcessId $parent.Id -TimeoutSeconds 5 | Out-Null
+  $cleanup = Stop-ProcessTreeBounded -RootProcessId $parent.Id -TimeoutSeconds 5
+  Assert-True ($cleanup.DiscoveredProcessIds -contains $childId) "Cleanup evidence omitted the child."
+  Assert-True ($cleanup.QuiescencePasses -ge 2) "Cleanup did not wait for repeated quiescence."
   Assert-True (-not (Test-ProcessAlive -ProcessId $parent.Id)) "Parent process survived bounded termination."
   Assert-True (-not (Test-ProcessAlive -ProcessId $childId)) "Child process survived bounded termination."
 

@@ -1,12 +1,19 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sources": [
     {
       "id": "freeflow",
       "repository": "https://github.com/zachlatta/freeflow",
       "revision": {
-        "status": "unverified",
-        "value": null
+        "status": "reviewed",
+        "value": "7427ca982c19746770f5357ced16e993f2eb27fd",
+        "evidence": {
+          "commitUrl": "https://github.com/zachlatta/freeflow/commit/7427ca982c19746770f5357ced16e993f2eb27fd",
+          "licensePath": "LICENSE",
+          "licenseSha256": "ae62240a06e155ca3dd97664c34a4ffe70cafeb18bbf8c14717855b96d9d317c",
+          "reviewScope": "upstream revision and license attribution",
+          "localFileEvidence": "integrity-only"
+        }
       },
       "license": "MIT",
       "notice": "THIRD_PARTY_NOTICES.md",

@@ -42,13 +42,10 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            desktop/src-tauri/target/
           key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-nsis-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-nsis-
       - run: pnpm install --frozen-lockfile
       - name: Verify release-evidence configuration
-        run: node --test ./tests/scripts/release-evidence.test.mjs
+        run: pnpm test:release-contract
       - name: Verify recorded third-party provenance integrity
         run: node ./tests/scripts/assert-third-party-provenance.mjs
       - name: Build NSIS bundle

@@ -14,6 +14,7 @@
     "preview": "pnpm check:node && vite preview",
     "tauri": "pnpm check:node && tauri",
     "test": "pnpm check:node && vitest run",
+    "test:release-contract": "pnpm check:node && node --test ./tests/scripts/release-evidence.contract.mjs",
     "test:e2e": "pnpm check:node && playwright test -c ./tests/playwright.config.ts",
     "test:e2e:update": "pnpm check:node && playwright test -c ./tests/playwright.config.ts --update-snapshots",
     "test:desktop": "pnpm check:node && wdio run ./tests/wdio.conf.ts",
@@ -53,6 +54,7 @@
     "typescript": "~6.0.3",
     "vite": "^8.1.3",
     "vitest": "^4.1.9",
-    "webdriverio": "^9.27.1"
+    "webdriverio": "^9.27.1",
+    "yaml": "^2.9.0"
   }
 }

@@ -4,6 +4,14 @@
   File /nonfatal "/oname=$INSTDIR\libunwind.dll" "${YAP_MAINBINARYDIR}libunwind.dll"
 !macroend
 
+!macro NSIS_HOOK_PREUNINSTALL
+  ${GetOptions} $CMDLINE "/DELETEAPPDATA" $R0
+  ${IfNot} ${Errors}
+    StrCpy $DeleteAppDataCheckboxState 1
+  ${EndIf}
+  ClearErrors
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
   Delete "$INSTDIR\WebView2Loader.dll"
   Delete "$INSTDIR\libunwind.dll"
