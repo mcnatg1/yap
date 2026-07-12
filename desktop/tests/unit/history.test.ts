@@ -5,6 +5,7 @@ import {
   filterHiddenTranscriptHistory,
   historyEntryPlaybackPath,
   hideTranscriptHistory,
+  isNativeLiveTranscriptHistoryEntry,
   maxTranscriptHistoryEntries,
   normalizeHiddenTranscriptHistory,
   pruneMissingHiddenTranscriptHistory,
@@ -14,6 +15,7 @@ import {
   recoverableLiveSessionActionIdentity,
   reconcileNativeTranscriptHistoryEntries,
   recordVisibleTranscriptHistoryEntries,
+  removeTranscriptHistory,
   savedSessionToTranscriptHistoryEntry,
   savedLiveSessionActionIdentity,
   transcriptPathIdentity,
@@ -661,6 +663,83 @@ describe("transcript history storage", () => {
       sessionId: "recovered",
     });
     expect(savedLiveSessionActionIdentity(entry)).toBeUndefined();
+  });
+
+  it("revokes native authority when a catalog refresh removes a session", () => {
+    const entry = savedSessionToTranscriptHistoryEntry({
+      captureCommitPath: "C:/Yap/live-revoked.commit.json",
+      createdAtMs: Date.UTC(2026, 0, 1),
+      name: "live-revoked",
+      outputPath: "C:/Yap/live-revoked.txt",
+      sessionId: "revoked",
+      sourcePath: "C:/Yap/live-revoked.wav",
+    });
+    expect(isNativeLiveTranscriptHistoryEntry(entry)).toBe(true);
+
+    reconcileNativeTranscriptHistoryEntries([entry], [], []);
+
+    expect(isNativeLiveTranscriptHistoryEntry(entry)).toBe(false);
+    expect(canDeleteTranscriptHistoryEntry(entry)).toBe(false);
+  });
+
+  it("revokes replaced and explicitly removed native identities", () => {
+    const original = savedSessionToTranscriptHistoryEntry({
+      captureCommitPath: "C:/Yap/live-replaced.commit.json",
+      createdAtMs: Date.UTC(2026, 0, 1),
+      name: "live-replaced",
+      outputPath: "C:/Yap/live-replaced.txt",
+      sessionId: "replaced",
+      sourcePath: "C:/Yap/live-replaced.wav",
+    });
+    const replacement = savedSessionToTranscriptHistoryEntry({
+      captureCommitPath: "D:/Yap/live-replaced.commit.json",
+      createdAtMs: Date.UTC(2026, 0, 2),
+      name: "live-replaced",
+      outputPath: "D:/Yap/live-replaced.txt",
+      sessionId: "replaced",
+      sourcePath: "D:/Yap/live-replaced.wav",
+    });
+
+    expect(isNativeLiveTranscriptHistoryEntry(original)).toBe(false);
+    expect(isNativeLiveTranscriptHistoryEntry(replacement)).toBe(true);
+    expect(removeTranscriptHistory([replacement], replacement.outputPath)).toEqual([]);
+    expect(isNativeLiveTranscriptHistoryEntry(replacement)).toBe(false);
+  });
+
+  it("bounds native trust to the newest 500 catalog entries", () => {
+    const entries = Array.from({ length: maxTranscriptHistoryEntries + 1 }, (_, index) => ({
+      captureCommitPath: `C:/Yap/live-bounded-${index}.commit.json`,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      name: `live-bounded-${index}`,
+      outputPath: `C:/Yap/live-bounded-${index}.txt`,
+      sessionId: `bounded-${index}`,
+      sourcePath: `C:/Yap/live-bounded-${index}.wav`,
+    }));
+
+    reconcileNativeTranscriptHistoryEntries([], entries, []);
+
+    expect(isNativeLiveTranscriptHistoryEntry(entries[0])).toBe(false);
+    expect(isNativeLiveTranscriptHistoryEntry(entries[entries.length - 1])).toBe(true);
+    reconcileNativeTranscriptHistoryEntries([], [], []);
+  });
+
+  it("does not accumulate native authority across more than 500 catalog refreshes", () => {
+    const entries = Array.from({ length: maxTranscriptHistoryEntries + 1 }, (_, index) => ({
+      captureCommitPath: `C:/Yap/live-refresh-${index}.commit.json`,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      name: `live-refresh-${index}`,
+      outputPath: `C:/Yap/live-refresh-${index}.txt`,
+      sessionId: `refresh-${index}`,
+      sourcePath: `C:/Yap/live-refresh-${index}.wav`,
+    }));
+
+    for (const entry of entries) {
+      reconcileNativeTranscriptHistoryEntries([], [entry], []);
+    }
+
+    expect(isNativeLiveTranscriptHistoryEntry(entries[0])).toBe(false);
+    expect(isNativeLiveTranscriptHistoryEntry(entries[entries.length - 1])).toBe(true);
+    reconcileNativeTranscriptHistoryEntries([], [], []);
   });
 
   it("keeps forged persisted native rows hide-only until native rehydration", () => {

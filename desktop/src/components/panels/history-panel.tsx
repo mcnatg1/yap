@@ -66,6 +66,26 @@ import { rememberText } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 
 const maxHistoryPreviewCacheEntries = maxTranscriptHistoryEntries;
+const noUnavailablePreviewPaths: ReadonlySet<string> = new Set();
+
+export type HistorySearchFailureState = {
+  query: string;
+  paths: ReadonlySet<string>;
+};
+
+function normalizeHistorySearchQuery(query: string) {
+  return query.trim().toLowerCase();
+}
+
+export function historySearchFailurePathsForQuery(
+  failure: HistorySearchFailureState,
+  query: string,
+) {
+  const normalizedQuery = normalizeHistorySearchQuery(query);
+  return shouldSearchTranscriptBodies(normalizedQuery) && failure.query === normalizedQuery
+    ? failure.paths
+    : noUnavailablePreviewPaths;
+}
 
 export function projectHistorySearchDisplay({
   hasResults,
@@ -267,9 +287,10 @@ export function HistoryPanel({
   const [searchFilter, setSearchFilter] = useState("");
   const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
   const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
-  const [unavailablePreviewPaths, setUnavailablePreviewPaths] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  const [searchFailures, setSearchFailures] = useState<HistorySearchFailureState>(() => ({
+    paths: new Set(),
+    query: "",
+  }));
   const previewTextByPathRef = useRef(previewTextByPath);
   const previewLoaderRef = useRef(createPreviewTextLoader());
   const previewSearchGenerationRef = useRef(createPreviewSearchGenerationGuard());
@@ -284,11 +305,11 @@ export function HistoryPanel({
       previewTextByPathRef.current,
       onLoadPreviewText,
       (outputPath, text) => {
-        setUnavailablePreviewPaths((current) => {
-          if (!current.has(outputPath)) return current;
-          const next = new Set(current);
+        setSearchFailures((current) => {
+          if (!current.paths.has(outputPath)) return current;
+          const next = new Set(current.paths);
           next.delete(outputPath);
-          return next;
+          return { ...current, paths: next };
         });
         setPreviewTextByPath((current) =>
           current[outputPath] === undefined
@@ -308,6 +329,11 @@ export function HistoryPanel({
     () => new Set(Object.keys(previewTextByPath)),
     [previewTextByPath],
   );
+  const normalizedSearchQuery = normalizeHistorySearchQuery(searchFilter);
+  const unavailablePreviewPaths = historySearchFailurePathsForQuery(
+    searchFailures,
+    normalizedSearchQuery,
+  );
   const indexingBodies = isHistoryBodySearchPending({
     cachedOutputPaths,
     hasPreviewLoader: Boolean(onLoadPreviewText),
@@ -317,7 +343,7 @@ export function HistoryPanel({
   });
 
   useEffect(() => {
-    setUnavailablePreviewPaths(new Set());
+    setSearchFailures({ paths: new Set(), query: "" });
   }, [entries]);
 
   useEffect(() => {
@@ -336,11 +362,11 @@ export function HistoryPanel({
             onLoadPreviewText,
             (outputPath, text) => {
               if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
-              setUnavailablePreviewPaths((current) => {
-                if (!current.has(outputPath)) return current;
-                const next = new Set(current);
+              setSearchFailures((current) => {
+                if (!current.paths.has(outputPath)) return current;
+                const next = new Set(current.paths);
                 next.delete(outputPath);
-                return next;
+                return { ...current, paths: next };
               });
               setPreviewTextByPath((current) =>
                 current[outputPath] === undefined
@@ -351,11 +377,14 @@ export function HistoryPanel({
           );
         } catch {
           if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) continue;
-          setUnavailablePreviewPaths((current) => {
+          setSearchFailures((current) => {
             const visible = new Set(searchableOutputPaths);
-            const next = new Set([...current].filter((path) => visible.has(path)));
+            const currentPaths = current.query === normalizedSearchQuery
+              ? current.paths
+              : noUnavailablePreviewPaths;
+            const next = new Set([...currentPaths].filter((path) => visible.has(path)));
             next.add(entry.outputPath);
-            return next;
+            return { paths: next, query: normalizedSearchQuery };
           });
         }
       }
@@ -364,14 +393,14 @@ export function HistoryPanel({
     return () => {
       cancelled = true;
     };
-  }, [indexingBodies, onLoadPreviewText, searchFilter, searchableEntries, searchableOutputPaths]);
+  }, [indexingBodies, normalizedSearchQuery, onLoadPreviewText, searchableEntries, searchableOutputPaths]);
 
   useEffect(() => {
     setRenderLimit(historyRenderWindowSize);
   }, [entries, searchFilter]);
 
   const filteredEntries = useMemo(() => {
-    const query = searchFilter.trim().toLowerCase();
+    const query = normalizedSearchQuery;
     const includePreviewText = shouldSearchTranscriptBodies(query);
     return query
       ? searchableEntries.filter((entry) =>
@@ -380,7 +409,7 @@ export function HistoryPanel({
             .includes(query),
         )
       : searchableEntries;
-  }, [previewTextByPath, searchFilter, searchableEntries]);
+  }, [normalizedSearchQuery, previewTextByPath, searchableEntries]);
 
   const historyWindow = useMemo(
     () => renderHistoryWindow(filteredEntries, renderLimit),
@@ -429,7 +458,7 @@ export function HistoryPanel({
                 <Button
                   aria-label="Search past transcripts"
                   onClick={() => {
-                    setUnavailablePreviewPaths(new Set());
+                    setSearchFailures({ paths: new Set(), query: "" });
                     setSearchOpen(true);
                   }}
                   size="icon-xs"
@@ -564,7 +593,7 @@ export function HistoryPanel({
                 <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
                   <p>Some transcripts are unavailable. No available recordings match that search.</p>
                   <Button
-                    onClick={() => setUnavailablePreviewPaths(new Set())}
+                    onClick={() => setSearchFailures({ paths: new Set(), query: "" })}
                     size="sm"
                     type="button"
                     variant="outline"

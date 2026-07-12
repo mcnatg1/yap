@@ -44,7 +44,10 @@ export type RecoverableLiveSessionActionIdentity = {
 };
 
 const hiddenPruneBatchSize = 200;
-const trustedNativeHistoryIdentities = new Set<string>();
+const trustedNativeHistoryIdentities = new Map<
+  string,
+  { createdAtMs: number; outputIdentity: string; sessionId: string }
+>();
 
 function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
   if (!value || typeof value !== "object") return false;
@@ -170,8 +173,46 @@ function nativeHistoryProvenanceKey(entry: TranscriptHistoryEntry) {
 
 function trustNativeTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
   const identity = nativeHistoryProvenanceKey(entry);
-  if (identity) trustedNativeHistoryIdentities.add(identity);
+  const sessionId = validHistorySessionId(entry);
+  if (!identity || !sessionId) return entry;
+
+  const outputIdentity = transcriptPathIdentity(entry.outputPath);
+  for (const [trustedIdentity, trusted] of trustedNativeHistoryIdentities) {
+    if (trusted.outputIdentity === outputIdentity || trusted.sessionId === sessionId) {
+      trustedNativeHistoryIdentities.delete(trustedIdentity);
+    }
+  }
+  const parsedCreatedAt = Date.parse(entry.createdAt);
+  trustedNativeHistoryIdentities.set(identity, {
+    createdAtMs: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : 0,
+    outputIdentity,
+    sessionId,
+  });
+  while (trustedNativeHistoryIdentities.size > maxTranscriptHistoryEntries) {
+    let oldestIdentity: string | undefined;
+    let oldestCreatedAt = Number.POSITIVE_INFINITY;
+    for (const [trustedIdentity, trusted] of trustedNativeHistoryIdentities) {
+      if (trusted.createdAtMs < oldestCreatedAt) {
+        oldestCreatedAt = trusted.createdAtMs;
+        oldestIdentity = trustedIdentity;
+      }
+    }
+    if (oldestIdentity === undefined) break;
+    trustedNativeHistoryIdentities.delete(oldestIdentity);
+  }
   return entry;
+}
+
+function replaceNativeTranscriptHistoryTrust(entries: TranscriptHistoryEntry[]) {
+  trustedNativeHistoryIdentities.clear();
+  for (const entry of normalizeTranscriptHistory(entries)) {
+    trustNativeTranscriptHistoryEntry(entry);
+  }
+}
+
+function revokeNativeTranscriptHistoryEntry(entry: TranscriptHistoryEntry) {
+  const identity = nativeHistoryProvenanceKey(entry);
+  if (identity) trustedNativeHistoryIdentities.delete(identity);
 }
 
 export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined = globalThis.localStorage) {
@@ -308,6 +349,7 @@ export function reconcileNativeTranscriptHistoryEntries(
   nativeEntries: TranscriptHistoryEntry[],
   hiddenOutputPaths: string[],
 ) {
+  replaceNativeTranscriptHistoryTrust(nativeEntries);
   const hidden = new Set(
     normalizeHiddenTranscriptHistory(hiddenOutputPaths).map(transcriptPathIdentity),
   );
@@ -324,6 +366,11 @@ export function reconcileNativeTranscriptHistoryEntries(
 
 export function removeTranscriptHistory(entries: TranscriptHistoryEntry[], outputPath: string) {
   const identity = transcriptPathIdentity(outputPath);
+  for (const entry of entries) {
+    if (transcriptPathIdentity(entry.outputPath) === identity) {
+      revokeNativeTranscriptHistoryEntry(entry);
+    }
+  }
   return entries.filter((entry) => transcriptPathIdentity(entry.outputPath) !== identity);
 }
 

@@ -68,6 +68,13 @@ impl Drop for SessionMutationOwnershipGuard {
 }
 
 fn session_mutation_ownership() -> SessionMutationOwnershipGuard {
+    session_mutation_ownership_with_queue_observer(|| {})
+}
+
+fn session_mutation_ownership_with_queue_observer<F>(queued: F) -> SessionMutationOwnershipGuard
+where
+    F: FnOnce(),
+{
     let owner = SESSION_MUTATION_OWNERSHIP.get_or_init(SessionMutationOwnership::default);
     let mut state = owner
         .state
@@ -75,6 +82,7 @@ fn session_mutation_ownership() -> SessionMutationOwnershipGuard {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let ticket = state.next_ticket;
     state.next_ticket = state.next_ticket.wrapping_add(1);
+    queued();
     while state.serving_ticket != ticket {
         state = owner
             .changed
@@ -497,6 +505,17 @@ fn list_session_catalog_from_dir_at(
     dir: &std::path::Path,
     now: OffsetDateTime,
 ) -> Result<SavedLiveSessionCatalog, String> {
+    list_session_catalog_from_dir_at_with_queue_observer(dir, now, || {})
+}
+
+fn list_session_catalog_from_dir_at_with_queue_observer<F>(
+    dir: &std::path::Path,
+    now: OffsetDateTime,
+    queued: F,
+) -> Result<SavedLiveSessionCatalog, String>
+where
+    F: FnOnce(),
+{
     if !dir.exists() {
         return Ok(SavedLiveSessionCatalog {
             sessions: Vec::new(),
@@ -504,7 +523,7 @@ fn list_session_catalog_from_dir_at(
         });
     }
 
-    let _ownership = session_mutation_ownership();
+    let _ownership = session_mutation_ownership_with_queue_observer(queued);
     list_session_catalog_from_dir_at_while_owned(dir, now)
 }
 
@@ -1423,13 +1442,11 @@ fn revalidate_intent_artifact(
     sha256: &str,
     identity: Option<&recording::FileIdentity>,
 ) -> Result<(), String> {
-    if let Some(identity) = identity {
-        recording::revalidate_regular_artifact_file_identity_and_hash(dir, name, identity, sha256)
-    } else if recording::sha256_regular_artifact(dir, name)? == sha256 {
-        Ok(())
-    } else {
-        Err("recording artifact no longer matches its validated hash".into())
-    }
+    let identity = identity.ok_or_else(|| {
+        "recording deletion intent lacks durable identity evidence; manual reconciliation is required"
+            .to_string()
+    })?;
+    recording::revalidate_regular_artifact_file_identity_and_hash(dir, name, identity, sha256)
 }
 
 fn remove_intent_artifact_if_present(
@@ -1439,29 +1456,29 @@ fn remove_intent_artifact_if_present(
     if !physical_entry_exists(dir, &artifact.name)? {
         return Ok(());
     }
-    if let Some(identity) = artifact.file_identity.as_ref() {
-        recording::remove_regular_artifact_if_file_identity_and_hash(
-            dir,
-            &artifact.name,
-            identity,
-            &artifact.sha256,
-        )
-    } else {
-        recording::remove_regular_artifact_if_hash(dir, &artifact.name, &artifact.sha256)
-    }
+    let identity = artifact.file_identity.as_ref().ok_or_else(|| {
+        "recording deletion intent lacks durable identity evidence; manual reconciliation is required"
+            .to_string()
+    })?;
+    recording::remove_regular_artifact_if_file_identity_and_hash(
+        dir,
+        &artifact.name,
+        identity,
+        &artifact.sha256,
+    )
 }
 
 fn remove_intent_commit(dir: &Path, intent: &DeletionIntent) -> Result<(), String> {
-    if let Some(identity) = intent.commit_file_identity.as_ref() {
-        recording::remove_regular_artifact_if_file_identity_and_hash(
-            dir,
-            &intent.commit_file,
-            identity,
-            &intent.commit_sha256,
-        )
-    } else {
-        recording::remove_regular_artifact_if_hash(dir, &intent.commit_file, &intent.commit_sha256)
-    }
+    let identity = intent.commit_file_identity.as_ref().ok_or_else(|| {
+        "recording deletion intent lacks durable identity evidence; manual reconciliation is required"
+            .to_string()
+    })?;
+    recording::remove_regular_artifact_if_file_identity_and_hash(
+        dir,
+        &intent.commit_file,
+        identity,
+        &intent.commit_sha256,
+    )
 }
 
 fn prove_intent_against_current_commit(
@@ -1590,13 +1607,16 @@ fn validate_deletion_intent(intent: &DeletionIntent) -> Result<(), String> {
             return Err("recording deletion intent has an invalid artifact hash".into());
         }
     }
-    let identity_bound = intent.commit_file_identity.is_some();
-    if intent
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.file_identity.is_some() != identity_bound)
+    if intent.commit_file_identity.is_none()
+        || intent
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.file_identity.is_none())
     {
-        return Err("recording deletion intent has incomplete identity evidence".into());
+        return Err(
+            "recording deletion intent lacks complete durable identity evidence; manual reconciliation is required"
+                .into(),
+        );
     }
     if !recoverable
         && (!names.contains(&format!("live-{}.wav", intent.session_id))
@@ -1878,7 +1898,27 @@ fn recover_live_session_in_dir_with_mutation_barrier<F>(
 where
     F: FnOnce(),
 {
-    let _ownership = session_mutation_ownership();
+    recover_live_session_in_dir_with_queue_observer(
+        dir,
+        session_id,
+        expected_artifact_path,
+        || {},
+        mutation_barrier,
+    )
+}
+
+fn recover_live_session_in_dir_with_queue_observer<F, Q>(
+    dir: &Path,
+    session_id: String,
+    expected_artifact_path: String,
+    queued: Q,
+    mutation_barrier: F,
+) -> Result<SavedLiveSession, String>
+where
+    F: FnOnce(),
+    Q: FnOnce(),
+{
+    let _ownership = session_mutation_ownership_with_queue_observer(queued);
     let session_id = crate::audio::session::SessionId::new(session_id)?;
     if let Some(saved) = saved_recovered_session(dir, &session_id)? {
         let expected = admit_expected_private_artifact_identity(
@@ -3260,31 +3300,51 @@ mod tests {
         let recover_dir = dir.clone();
         let recover_session = session.clone();
         let recover_expected = expected.display().to_string();
+        let (recover_queued_tx, recover_queued_rx) = std::sync::mpsc::channel();
         let (recover_tx, recover_rx) = std::sync::mpsc::channel();
         let recovering = std::thread::spawn(move || {
             recover_tx
-                .send(recover_live_session_in_dir(
+                .send(recover_live_session_in_dir_with_queue_observer(
                     &recover_dir,
                     recover_session.to_string(),
                     recover_expected,
+                    || recover_queued_tx.send(()).unwrap(),
+                    || {},
                 ))
                 .unwrap();
         });
         let list_dir = dir.clone();
+        let (list_queued_tx, list_queued_rx) = std::sync::mpsc::channel();
         let (list_tx, list_rx) = std::sync::mpsc::channel();
         let listing = std::thread::spawn(move || {
             list_tx
-                .send(list_session_catalog_from_dir(&list_dir))
+                .send(list_session_catalog_from_dir_at_with_queue_observer(
+                    &list_dir,
+                    OffsetDateTime::now_utc(),
+                    || list_queued_tx.send(()).unwrap(),
+                ))
                 .unwrap();
         });
 
-        assert!(recover_rx.recv_timeout(Duration::from_millis(100)).is_err());
-        assert!(list_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        recover_queued_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        list_queued_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(recover_rx.try_recv().is_err());
+        assert!(list_rx.try_recv().is_err());
         release_delete_tx.send(()).unwrap();
 
         assert!(deleting.join().unwrap().is_ok());
-        assert!(recover_rx.recv().unwrap().is_err());
-        assert!(list_rx.recv().unwrap().unwrap().sessions.is_empty());
+        assert!(recover_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_err());
+        assert!(list_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .sessions
+            .is_empty());
         recovering.join().unwrap();
         listing.join().unwrap();
         std::fs::remove_dir_all(dir).ok();
@@ -4077,6 +4137,95 @@ mod tests {
             b"replacement"
         );
         assert!(dir.join(intent_name).is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn identity_free_legacy_intent_never_deletes_a_same_content_replacement() {
+        let dir = test_dir("legacy-intent-same-content-replacement");
+        let session = SessionId::new("s-legacy-intent-same-content-replacement").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let mut intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+        let audio_name = intent
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name.ends_with(".wav"))
+            .unwrap()
+            .name
+            .clone();
+        let original_audio = std::fs::read(dir.join(&audio_name)).unwrap();
+        intent.commit_file_identity = None;
+        for artifact in &mut intent.artifacts {
+            artifact.file_identity = None;
+        }
+        let intent_name = deletion_intent_name(&session);
+        std::fs::write(
+            dir.join(&intent_name),
+            format!("{}\n", serde_json::to_string(&intent).unwrap()),
+        )
+        .unwrap();
+
+        std::fs::remove_file(dir.join(&audio_name)).unwrap();
+        std::fs::write(dir.join(&audio_name), &original_audio).unwrap();
+
+        for _ in 0..2 {
+            let warnings = reconcile_pending_deletion_intents(&dir);
+            assert!(warnings
+                .session_warnings
+                .get(session.as_str())
+                .is_some_and(|warning| warning.contains("identity")));
+        }
+
+        assert_eq!(
+            std::fs::read(dir.join(&audio_name)).unwrap(),
+            original_audio
+        );
+        assert!(dir.join(&intent.commit_file).is_file());
+        assert!(dir.join(intent_name).is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn deletion_intent_validation_rejects_partial_and_missing_identity_evidence() {
+        let dir = test_dir("deletion-intent-identity-shape");
+        let session = SessionId::new("s-deletion-intent-identity-shape").unwrap();
+        let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
+        recording.append_pcm16(&[1, 0]).unwrap();
+        recording.finalize().unwrap();
+        let capture = recording::scan_recordings(&dir)
+            .unwrap()
+            .complete
+            .pop()
+            .unwrap();
+        let intent = build_deletion_intent(&dir, &capture, "manual").unwrap();
+
+        let mut missing_commit_identity = intent.clone();
+        missing_commit_identity.commit_file_identity = None;
+        assert!(validate_deletion_intent(&missing_commit_identity)
+            .unwrap_err()
+            .contains("identity"));
+
+        let mut missing_artifact_identity = intent.clone();
+        missing_artifact_identity.artifacts[0].file_identity = None;
+        assert!(validate_deletion_intent(&missing_artifact_identity)
+            .unwrap_err()
+            .contains("identity"));
+
+        let mut missing_all_identities = intent;
+        missing_all_identities.commit_file_identity = None;
+        for artifact in &mut missing_all_identities.artifacts {
+            artifact.file_identity = None;
+        }
+        assert!(validate_deletion_intent(&missing_all_identities)
+            .unwrap_err()
+            .contains("identity"));
         std::fs::remove_dir_all(dir).ok();
     }
 
