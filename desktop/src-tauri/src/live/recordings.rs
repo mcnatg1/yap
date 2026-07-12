@@ -3444,7 +3444,7 @@ mod tests {
     }
 
     #[test]
-    fn history_ignores_linked_legacy_audio_and_keeps_the_safe_transcript_path() {
+    fn history_ignores_linked_pre_release_audio_and_leaves_the_safe_transcript_untouched() {
         let dir = test_dir("history-linked-legacy-audio");
         let outside =
             std::env::temp_dir().join(format!("yap-linked-audio-target-{}", std::process::id()));
@@ -3460,10 +3460,10 @@ mod tests {
             return;
         }
 
+        assert!(!recording::is_regular_artifact(&audio));
         let sessions = list_session_files_from_dir(&dir).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].source_path, transcript.display().to_string());
-        assert_eq!(sessions[0].output_path, transcript.display().to_string());
+        assert!(sessions.is_empty());
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), "safe\n");
         std::fs::remove_file(&audio).ok();
         std::fs::remove_file(&outside).ok();
         std::fs::remove_dir_all(dir).ok();

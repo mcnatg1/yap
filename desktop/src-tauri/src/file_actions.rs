@@ -753,6 +753,7 @@ mod tests {
         let existing = dir.join("live-s-100.txt");
         let missing = dir.join("live-s-101.txt");
         std::fs::write(&existing, "still here").unwrap();
+        let canonical_dir = dir.canonicalize().unwrap();
 
         let resolutions = resolve_owned_live_transcript_paths_from_dir(
             vec![
@@ -770,7 +771,12 @@ mod tests {
         );
         assert_eq!(
             resolutions[0].canonical_path.as_deref(),
-            Some(crate::live::recordings::stable_existing_path_string(&existing).as_str())
+            Some(
+                crate::live::recordings::stable_existing_path_string(
+                    &canonical_dir.join("live-s-100.txt"),
+                )
+                .as_str(),
+            )
         );
         assert!(!resolutions[0].missing);
         assert_eq!(
@@ -778,7 +784,7 @@ mod tests {
             OwnedLiveTranscriptPathResolution {
                 requested_path: missing.display().to_string(),
                 canonical_path: Some(crate::live::recordings::stable_existing_path_string(
-                    &missing
+                    &canonical_dir.join("live-s-101.txt")
                 )),
                 missing: true,
             }
@@ -792,6 +798,7 @@ mod tests {
         let dir = temp_test_dir("hidden-prune-case-alias");
         let transcript = dir.join("live-s-108.txt");
         std::fs::write(&transcript, "still here").unwrap();
+        let canonical_dir = dir.canonicalize().unwrap();
         let requested = dir
             .display()
             .to_string()
@@ -808,7 +815,12 @@ mod tests {
         assert_eq!(resolutions.len(), 1);
         assert_eq!(
             resolutions[0].canonical_path.as_deref(),
-            Some(crate::live::recordings::stable_existing_path_string(&transcript).as_str())
+            Some(
+                crate::live::recordings::stable_existing_path_string(
+                    &canonical_dir.join("live-s-108.txt"),
+                )
+                .as_str(),
+            )
         );
         assert!(!resolutions[0].missing);
         std::fs::remove_dir_all(dir).ok();

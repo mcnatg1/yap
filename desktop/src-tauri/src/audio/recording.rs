@@ -5562,7 +5562,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_rejects_symlinked_committed_artifacts_when_links_are_supported() {
+    fn scan_classifies_symlinked_committed_artifacts_as_damaged_when_links_are_supported() {
         let dir = tempfile_dir("symlinked-artifact");
         let session = SessionId::new("s-symlinked-artifact").unwrap();
         let mut recording = StreamingRecording::create(&dir, session.clone()).unwrap();
@@ -5588,7 +5588,9 @@ mod tests {
 
         let scan = scan_recordings(&dir).unwrap();
         assert!(scan.complete.is_empty());
-        assert_eq!(scan.partial.len(), 1);
+        assert!(scan.partial.is_empty());
+        assert_eq!(scan.damaged.len(), 1);
+        assert_eq!(scan.damaged[0].session_id, session);
         std::fs::remove_file(&audio).ok();
         std::fs::remove_file(&outside).ok();
     }
