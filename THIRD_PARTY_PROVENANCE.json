@@ -10,9 +10,19 @@
         "evidence": {
           "commitUrl": "https://github.com/zachlatta/freeflow/commit/7427ca982c19746770f5357ced16e993f2eb27fd",
           "licensePath": "LICENSE",
-          "licenseSha256": "ae62240a06e155ca3dd97664c34a4ffe70cafeb18bbf8c14717855b96d9d317c",
+          "licenseSha256": "121e01b10b43ece3c10ce3eaf5db22915326aad843c3a271a834660096467add",
           "reviewScope": "upstream revision and license attribution",
-          "localFileEvidence": "integrity-only"
+          "localFileEvidence": "integrity-only",
+          "upstreamFiles": [
+            {
+              "path": "Sources/RecordingOverlay.swift",
+              "sha256": "1a997f67b0f7954ff65946e5e851ba2b8bd7fd9481abdc3d70b640f50e147e33"
+            },
+            {
+              "path": "Sources/LiveAudioLevelNormalizer.swift",
+              "sha256": "74daf050a5373892305cad1eda58acad78ae3f39439beeeb03bbd4c874f852b8"
+            }
+          ]
         }
       },
       "license": "MIT",
@@ -20,7 +30,7 @@
       "files": [
         {
           "path": "desktop/src/components/live/live-overlay.tsx",
-          "sha256": "5837c0a82545ba57360b0afe1f595a86ccf49edd376463b40062279955374e7a"
+          "sha256": "5819280b2055c0066efb886fd01686db2377e72fa9bcc23b1e3825a0818ac20a"
         },
         {
           "path": "desktop/src-tauri/src/audio/preprocess.rs",
