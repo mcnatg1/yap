@@ -228,18 +228,12 @@
     transform-origin: center;
   }
 
-  .live-waveform-pulse .live-waveform-bar {
-    animation: live-waveform-pulse 940ms cubic-bezier(0.37, 0, 0.63, 1) infinite;
-    animation-delay: var(--live-wave-delay);
-  }
-
   .live-processing-waveform .live-processing-pill {
     animation: live-processing-wave 1050ms cubic-bezier(0.37, 0, 0.63, 1) infinite;
     animation-delay: var(--live-wave-delay);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .live-waveform-pulse .live-waveform-bar,
     .live-processing-waveform .live-processing-pill {
       animation: none;
     }
@@ -305,19 +299,6 @@
     @apply h-12 text-sm group-data-[collapsible=icon]:p-0!;
   }
 
-}
-
-@keyframes live-waveform-pulse {
-  0%,
-  100% {
-    opacity: 0.78;
-    transform: scaleY(0.76);
-  }
-
-  48% {
-    opacity: 1;
-    transform: scaleY(1.28);
-  }
 }
 
 @keyframes live-processing-wave {

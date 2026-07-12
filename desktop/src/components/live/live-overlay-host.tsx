@@ -1,6 +1,6 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
-import { LiveOverlay } from "@/components/live/live-overlay";
+import { emitLiveOverlayLevel, LiveOverlay } from "@/components/live/live-overlay";
 import {
   listenLiveLevel,
   listenLiveSession,
@@ -53,7 +53,10 @@ export function LiveOverlayHost() {
       unlisten = stop;
     });
     void listenLiveLevel((level) => {
-      setView((current) => ({ ...current, level: level.level, status: level.status }));
+      emitLiveOverlayLevel(level.level ?? 0);
+      setView((current) => current.status === level.status
+        ? current
+        : { ...current, level: level.level, status: level.status });
     }).then((stop) => {
       if (cancelled) {
         stop();

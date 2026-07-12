@@ -55,9 +55,17 @@ pub(crate) fn run() {
             tray::install(app.handle())?;
             {
                 let app = app.handle().clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    live::overlay_window::recover(&app);
+                std::thread::spawn(move || {
+                    let mut recovery_ticks = 0_u8;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(125));
+                        live::overlay_window::follow_cursor_if_idle(&app);
+                        recovery_ticks = recovery_ticks.saturating_add(1);
+                        if recovery_ticks >= 16 {
+                            live::overlay_window::recover(&app);
+                            recovery_ticks = 0;
+                        }
+                    }
                 });
             }
             let startup_live = app.state::<live::LiveSessionState>().snapshot();

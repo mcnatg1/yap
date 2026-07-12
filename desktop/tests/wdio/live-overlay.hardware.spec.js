@@ -265,11 +265,17 @@ describe("Yap live overlay hardware capture", () => {
         document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface"));
       expect(surface).toBe("sensor");
       const compact = await browser.tauri.execute(() => {
-        const bounds = document.querySelector('[data-overlay-surface="sensor"]').getBoundingClientRect();
-        return { height: bounds.height, width: bounds.width };
+        const root = document.querySelector('[data-overlay-surface="sensor"]').getBoundingClientRect();
+        const sensor = document.querySelector('[data-testid="live-overlay-sensor"]').getBoundingClientRect();
+        return {
+          root: { height: root.height, width: root.width },
+          sensor: { height: sensor.height, width: sensor.width },
+        };
       });
-      expect(compact.width).toBeLessThanOrEqual(260);
-      expect(compact.height).toBeLessThanOrEqual(8);
+      expect(compact.root.width).toBeLessThanOrEqual(260);
+      expect(compact.root.height).toBe(40);
+      expect(compact.sensor.width).toBeLessThanOrEqual(260);
+      expect(compact.sensor.height).toBe(8);
       expect(await browser.tauri.execute(() =>
         globalThis.__yapTask8bLifecycle.saved.length)).toBe(1);
     } catch (error) {

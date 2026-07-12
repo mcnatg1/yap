@@ -77,8 +77,7 @@ pub(super) fn set_live_overlay_surface(
     {
         return Ok(());
     }
-    let (width, height) = live::overlay_window::frame(&surface, error_message.as_deref());
-    live::overlay_window::ensure_size(&app, width, height)
+    live::overlay_window::ensure_surface(&app, &surface, error_message.as_deref())
 }
 
 #[tauri::command]

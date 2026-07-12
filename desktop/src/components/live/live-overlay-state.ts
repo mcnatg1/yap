@@ -19,20 +19,22 @@ export const hoverSensorHeight = 8;
 export const idleSensorWidth = 260;
 export const peekHeight = 40;
 export const peekWidth = 150;
-export const retractMs = 180;
 export const successVisibleMs = 2_500;
 
 const defaultWidth = 104;
 const activeWidth = 112;
 const successWidth = 168;
 const minErrorWidth = 180;
-const maxErrorWidth = 420;
+const maxErrorWidth = 252;
 
 export function overlayIslandWidth(surface: OverlaySurface, model: OverlayModel) {
   if (surface === "peek") return peekWidth;
   if (surface === "success") return successWidth;
   if (surface === "recording" || surface === "processing" || surface === "initializing") return activeWidth;
-  if (surface === "feedback") return overlayFrame(surface, model).width;
+  if (surface === "feedback") {
+    if (!model.errorMessage) return defaultWidth;
+    return Math.min(maxErrorWidth, Math.max(minErrorWidth, model.errorMessage.length * 6.8 + 74));
+  }
   return defaultWidth;
 }
 
@@ -85,15 +87,9 @@ export function overlaySurface(model: OverlayModel, peeked: boolean, retracting:
 }
 
 export function overlayFrame(surface: OverlaySurface, model: OverlayModel) {
-  if (surface === "sensor") return { height: hoverSensorHeight, width: idleSensorWidth };
-  if (surface === "peek") return { height: peekHeight, width: idleSensorWidth };
-  if (surface === "success") return { height: compactHeight, width: idleSensorWidth };
-  if (surface === "processing") return { height: compactHeight, width: idleSensorWidth };
-  if (surface === "feedback") {
-    if (!model.errorMessage) return { height: compactHeight, width: defaultWidth };
-    return { height: compactHeight, width: Math.min(maxErrorWidth, Math.max(minErrorWidth, model.errorMessage.length * 6.8 + 74)) };
+  if (surface === "feedback" && model.errorMessage) {
+    return { height: compactHeight, width: idleSensorWidth };
   }
-  if (surface === "recording" || surface === "initializing") return { height: compactHeight, width: idleSensorWidth };
   return { height: compactHeight, width: idleSensorWidth };
 }
 

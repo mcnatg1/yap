@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import gsap from "gsap";
 import { Check } from "@phosphor-icons/react/Check";
 import { WarningCircle as CircleAlert } from "@phosphor-icons/react/WarningCircle";
 import { ChatText as MessageSquareText } from "@phosphor-icons/react/ChatText";
@@ -7,15 +8,15 @@ import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowC
 import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
 import { X } from "@phosphor-icons/react/X";
 import type { CSSProperties, ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
+  hoverSensorHeight,
   modelFromLiveView,
   overlayFrame,
   overlayIslandWidth,
   overlaySurface,
-  retractMs,
   successVisibleMs,
   type OverlayModel,
   type OverlaySurface,
@@ -42,15 +43,14 @@ export function LiveOverlay({
   view,
 }: LiveOverlayProps) {
   const model = modelFromLiveView(view);
-  const [entered, setEntered] = useState(false);
   const [peeked, setPeeked] = useState(false);
   const [retracting, setRetracting] = useState(false);
   const [successVisible, setSuccessVisible] = useState(false);
-  const [showInitializing, setShowInitializing] = useState(false);
   const prefersReducedMotion = usePrefersReducedMotion();
-  const previousEntrySurfaceRef = useRef<OverlaySurface>("sensor");
+  const islandRef = useRef<HTMLDivElement>(null);
+  const previousSurfaceRef = useRef<OverlaySurface>("sensor");
+  const previousIslandWidthRef = useRef<number | undefined>(undefined);
   const previousStatusRef = useRef(view.status);
-  const retractTimerRef = useRef<number | undefined>(undefined);
   const successTimerRef = useRef<number | undefined>(undefined);
   const hasCopyableFinal = Boolean(model.finalText?.trim());
   const surface = overlaySurface(model, peeked, retracting, successVisible && hasCopyableFinal);
@@ -60,43 +60,54 @@ export function LiveOverlay({
   const rootFrameStyle: CSSProperties | undefined = isTauri() ? undefined : { height: frame.height, width };
   const hiddenIdle = view.visibility === "hidden" && model.phase === "idle";
 
-  useEffect(() => {
-    if (surface === "sensor" || (surface === "initializing" && !showInitializing)) {
-      setEntered(false);
+  useLayoutEffect(() => {
+    const previousSurface = previousSurfaceRef.current;
+    previousSurfaceRef.current = surface;
+    const island = islandRef.current;
+    if (!island) {
+      if (surface === "sensor") previousIslandWidthRef.current = undefined;
       return;
     }
+
+    gsap.killTweensOf(island);
+    const previousWidth = previousIslandWidthRef.current ?? islandWidth;
+    previousIslandWidthRef.current = islandWidth;
 
     if (prefersReducedMotion) {
-      previousEntrySurfaceRef.current = surface;
-      setEntered(true);
+      gsap.set(island, { width: islandWidth, yPercent: 0 });
+      if (retracting) setRetracting(false);
       return;
     }
 
-    if (previousEntrySurfaceRef.current === "sensor") {
-      setEntered(false);
-      const frame = window.requestAnimationFrame(() => setEntered(true));
-      previousEntrySurfaceRef.current = surface;
-      return () => window.cancelAnimationFrame(frame);
+    if (retracting && surface === "peek") {
+      gsap.to(island, {
+        duration: 0.16,
+        ease: "power2.inOut",
+        onComplete: () => setRetracting(false),
+        overwrite: true,
+        yPercent: -100,
+      });
+      return () => gsap.killTweensOf(island);
     }
 
-    previousEntrySurfaceRef.current = surface;
-    setEntered(true);
-  }, [prefersReducedMotion, showInitializing, surface]);
-
-  useEffect(() => {
-    if (model.phase !== "initializing") {
-      setShowInitializing(false);
-      return;
+    if (previousSurface === "sensor") {
+      gsap.fromTo(
+        island,
+        { width: previousWidth, yPercent: -100 },
+        { duration: 0.18, ease: "power3.out", overwrite: true, width: islandWidth, yPercent: 0 },
+      );
+    } else {
+      gsap.to(island, {
+        duration: 0.14,
+        ease: "power2.out",
+        overwrite: true,
+        width: islandWidth,
+        yPercent: 0,
+      });
     }
 
-    if (prefersReducedMotion) {
-      setShowInitializing(true);
-      return;
-    }
-
-    const timer = window.setTimeout(() => setShowInitializing(true), 200);
-    return () => window.clearTimeout(timer);
-  }, [model.phase, prefersReducedMotion]);
+    return () => gsap.killTweensOf(island);
+  }, [islandWidth, prefersReducedMotion, retracting, surface]);
 
   useEffect(() => {
     if (model.phase === "idle") return;
@@ -123,17 +134,11 @@ export function LiveOverlay({
 
   useEffect(() => {
     if (hiddenIdle) return;
-    if (surface === "sensor") {
-      previousEntrySurfaceRef.current = "sensor";
-    }
     setNativeOverlaySurface({ errorMessage: model.errorMessage, surface });
   }, [hiddenIdle, model.errorMessage, surface]);
 
   useEffect(() => {
     return () => {
-      if (retractTimerRef.current !== undefined) {
-        window.clearTimeout(retractTimerRef.current);
-      }
       clearSuccessTimer();
     };
   }, []);
@@ -145,46 +150,44 @@ export function LiveOverlay({
   }
 
   function cancelRetract() {
-    if (retractTimerRef.current === undefined) return;
-    window.clearTimeout(retractTimerRef.current);
-    retractTimerRef.current = undefined;
+    const island = islandRef.current;
+    if (island) gsap.killTweensOf(island);
   }
 
   function openIdlePreview() {
-    const interruptedRetraction = retracting;
     cancelRetract();
     setRetracting(false);
     setPeeked(true);
-    if (interruptedRetraction) {
-      setEntered(true);
-    }
   }
 
   function closeIdlePreview() {
     cancelRetract();
     setPeeked(false);
-    setEntered(false);
     setRetracting(true);
-    retractTimerRef.current = window.setTimeout(() => {
-      retractTimerRef.current = undefined;
-      setRetracting(false);
-    }, retractMs);
   }
 
   if (hiddenIdle) return null;
   if (surface === "sensor") {
     return (
       <div
-        className="live-overlay-root pointer-events-auto h-full w-full bg-transparent"
+        className="live-overlay-root pointer-events-none relative h-full w-full bg-transparent"
         data-overlay-phase={model.phase}
         data-overlay-surface={surface}
         data-testid="live-overlay-root"
-        onMouseEnter={openIdlePreview}
         style={rootFrameStyle}
-      />
+      >
+        <div
+          aria-hidden="true"
+          className="pointer-events-auto absolute inset-x-0 top-0"
+          data-testid="live-overlay-sensor"
+          key="idle-sensor"
+          onPointerEnter={openIdlePreview}
+          onPointerMove={openIdlePreview}
+          style={{ height: hoverSensorHeight }}
+        />
+      </div>
     );
   }
-  if (model.phase === "initializing" && !showInitializing) return null;
 
   return (
     <div
@@ -195,10 +198,10 @@ export function LiveOverlay({
       data-overlay-phase={model.phase}
       data-overlay-surface={surface}
       data-testid="live-overlay-root"
-      onMouseEnter={() => {
+      onPointerEnter={() => {
         if (retracting) openIdlePreview();
       }}
-      onMouseLeave={() => {
+      onPointerLeave={() => {
         if (surface === "peek") closeIdlePreview();
       }}
       style={rootFrameStyle}
@@ -206,14 +209,14 @@ export function LiveOverlay({
       <div
         className="pointer-events-auto h-full text-white"
         data-testid="live-overlay-island"
+        key="active-island"
+        ref={islandRef}
         style={{
           backgroundColor: "black",
           borderBottomLeftRadius: 14,
           borderBottomRightRadius: 14,
           marginInline: "auto",
           overflow: "hidden",
-          transform: entered ? "translateY(0)" : "translateY(-100%)",
-          transition: prefersReducedMotion ? "none" : "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
           width: islandWidth,
         }}
       >
@@ -245,6 +248,13 @@ const setNativeOverlaySurface = createNativeSurfaceSync(async ({ surface, errorM
     surface,
   });
 });
+
+const liveOverlayLevelEvent = "yap-live-overlay-level";
+
+export function emitLiveOverlayLevel(level: number) {
+  const normalized = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+  window.dispatchEvent(new CustomEvent(liveOverlayLevelEvent, { detail: normalized }));
+}
 
 function PeekOverlayView({
   onOpenScratch,
@@ -293,7 +303,7 @@ function RecordingOverlayView({
     <div className="relative grid h-full w-full place-items-center px-3" data-testid="live-recording-layout">
       <div className="absolute inset-0 grid place-items-center transition-opacity duration-200 ease-out">
         {model.phase === "initializing" ? (
-          <InitializingDotsView />
+          <InitializingDotsView prefersReducedMotion={prefersReducedMotion} />
         ) : showsLiveRecordingContent ? (
           <WaveformView audioLevel={model.audioLevel} prefersReducedMotion={prefersReducedMotion} showsActivityPulse />
         ) : (
@@ -381,25 +391,62 @@ function WaveformView({
   prefersReducedMotion: boolean;
   showsActivityPulse?: boolean;
 }) {
-  const activityFloor = showsActivityPulse && !prefersReducedMotion ? 0.08 : 0;
+  const waveformRef = useRef<HTMLDivElement>(null);
+  const renderLevelRef = useRef<(level: number) => void>(() => undefined);
+
+  useLayoutEffect(() => {
+    const waveform = waveformRef.current;
+    if (!waveform) return;
+    const bars = Array.from(waveform.querySelectorAll<HTMLElement>("[data-live-waveform-bar]"));
+    const activityFloor = showsActivityPulse && !prefersReducedMotion ? 0.08 : 0;
+    const scaleSetters = prefersReducedMotion
+      ? []
+      : bars.map((bar) => gsap.quickTo(bar, "scaleY", { duration: 0.08, ease: "power2.out" }));
+
+    const renderLevel = (level: number) => {
+      const normalizedLevel = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+      bars.forEach((bar, index) => {
+        const amplitude = barAmplitude(
+          normalizedLevel,
+          waveformMultipliers[index] ?? 0,
+          index,
+          activityFloor,
+        );
+        const scale = (2 + (22 - 2) * amplitude) / 22;
+        if (prefersReducedMotion) {
+          gsap.set(bar, { scaleY: scale });
+        } else {
+          scaleSetters[index]?.(scale);
+        }
+      });
+    };
+    renderLevelRef.current = renderLevel;
+    renderLevel(audioLevel);
+
+    const handleLevel = (event: Event) => {
+      renderLevel((event as CustomEvent<number>).detail);
+    };
+    window.addEventListener(liveOverlayLevelEvent, handleLevel);
+    return () => {
+      window.removeEventListener(liveOverlayLevelEvent, handleLevel);
+      renderLevelRef.current = () => undefined;
+      gsap.killTweensOf(bars);
+    };
+  }, [prefersReducedMotion, showsActivityPulse]);
+
+  useEffect(() => {
+    renderLevelRef.current(audioLevel);
+  }, [audioLevel]);
+
   return (
     <div
       aria-hidden="true"
-      className={cn(
-        "flex h-6 w-12 items-center justify-center gap-[2.5px]",
-        showsActivityPulse && !prefersReducedMotion && "live-waveform-pulse",
-      )}
+      className="flex h-6 w-12 items-center justify-center gap-[2.5px]"
       data-testid="live-waveform"
+      ref={waveformRef}
     >
-      {waveformMultipliers.map((multiplier, index) => (
-        <WaveformBar
-          amplitude={barAmplitude(audioLevel, multiplier, index, activityFloor)}
-          delay={Math.abs(index - waveformCenterIndex) * 0.01}
-          index={index}
-          key={index}
-          prefersReducedMotion={prefersReducedMotion}
-          response={0.18 + (Math.abs(index - waveformCenterIndex) / waveformCenterIndex) * 0.06}
-        />
+      {waveformMultipliers.map((_, index) => (
+        <WaveformBar index={index} key={index} />
       ))}
     </div>
   );
@@ -408,28 +455,13 @@ function WaveformView({
 const waveformMultipliers = [0.35, 0.55, 0.75, 0.9, 1.0, 0.9, 0.75, 0.55, 0.35] as const;
 const waveformCenterIndex = (waveformMultipliers.length - 1) / 2;
 
-function WaveformBar({
-  amplitude,
-  delay,
-  index,
-  prefersReducedMotion,
-  response,
-}: {
-  amplitude: number;
-  delay: number;
-  index: number;
-  prefersReducedMotion: boolean;
-  response: number;
-}) {
+function WaveformBar({ index }: { index: number }) {
   return (
     <span
-      className="live-waveform-bar w-[3px] rounded-full bg-white"
+      className="live-waveform-bar h-[22px] w-[3px] rounded-full bg-white"
+      data-live-waveform-bar
       style={{
-        "--live-wave-delay": `${index * 72}ms`,
-        height: 2 + (22 - 2) * amplitude,
-        transition: prefersReducedMotion
-          ? "none"
-          : `height ${Math.min(response, 0.12)}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
+        transform: `scaleY(${(2 + (22 - 2) * barAmplitude(0, waveformMultipliers[index] ?? 0, index)) / 22})`,
       } as CSSProperties}
     />
   );
@@ -479,21 +511,27 @@ function processingAmplitude(index: number) {
   return 0.24 + (1 - centerDistance) * 0.18;
 }
 
-function InitializingDotsView() {
-  const prefersReducedMotion = usePrefersReducedMotion();
-  const [activeDot, setActiveDot] = useState(0);
+function InitializingDotsView({ prefersReducedMotion }: { prefersReducedMotion: boolean }) {
+  const dotsRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (prefersReducedMotion) return;
-    const timer = window.setInterval(() => setActiveDot((value) => (value + 1) % 3), 500);
-    return () => window.clearInterval(timer);
+  useLayoutEffect(() => {
+    const dots = dotsRef.current?.querySelectorAll("span");
+    if (!dots?.length || prefersReducedMotion) return;
+    const timeline = gsap.timeline({ repeat: -1 });
+    timeline
+      .to(dots, { duration: 0.16, opacity: 0.9, scale: 1.12, stagger: 0.1 })
+      .to(dots, { duration: 0.22, opacity: 0.25, scale: 1, stagger: 0.1 }, "-=0.08")
+      .to({}, { duration: 0.12 });
+    return () => {
+      timeline.kill();
+    };
   }, [prefersReducedMotion]);
 
   return (
-    <div className="flex items-center justify-center gap-1">
+    <div className="flex items-center justify-center gap-1" ref={dotsRef}>
       {Array.from({ length: 3 }, (_, index) => (
         <span
-          className={cn("size-[4.5px] rounded-full bg-white transition-opacity duration-[400ms]", activeDot === index ? "opacity-90" : "opacity-25")}
+          className="size-[4.5px] rounded-full bg-white opacity-25"
           key={index}
         />
       ))}

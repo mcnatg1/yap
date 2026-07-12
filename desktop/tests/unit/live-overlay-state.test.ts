@@ -26,7 +26,8 @@ describe("live overlay state projection", () => {
     const model = modelFromLiveView(baseView);
 
     expect(overlaySurface(model, false, false, false)).toBe("sensor");
-    expect(overlayFrame("sensor", model)).toEqual({ height: hoverSensorHeight, width: idleSensorWidth });
+    expect(hoverSensorHeight).toBe(8);
+    expect(overlayFrame("sensor", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
     expect(overlaySurface(model, true, false, false)).toBe("peek");
     expect(overlayFrame("peek", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
     expect(overlayIslandWidth("peek", model)).toBe(150);
