@@ -11,6 +11,7 @@ __pycache__/
 .mypy_cache/
 
 desktop/node_modules/
+.pnpm-store/
 desktop/dist/
 desktop/dist-portable/
 desktop/playwright-report/
