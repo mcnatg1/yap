@@ -24,7 +24,7 @@ describe("history job projection", () => {
     expect(job.pipeline.postprocessing).toBe("error");
   });
 
-  it("preserves playback only for matching owned live audio", () => {
+  it("does not expose owned live audio until playback is admitted", () => {
     const sourcePath = "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.wav";
     const job = historyEntryToRecordingJob(savedSessionToTranscriptHistoryEntry({
       captureCommitPath: "C:\\Users\\me\\AppData\\Local\\Yap\\live-recordings\\live-123.commit.json",
@@ -37,7 +37,7 @@ describe("history job projection", () => {
 
     expect(job.intent).toBe("live");
     expect(job.path).toBe(sourcePath);
-    expect(job.playbackPath).toBe(sourcePath);
+    expect(job.playbackPath).toBeUndefined();
   });
 
   it("does not trust foreign history source paths for playback", () => {

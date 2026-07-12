@@ -36,17 +36,27 @@ import {
   workspaceCopy,
 } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
+import {
+  projectHistoryPlaybackAdmission,
+  type HistoryPlaybackAdmissions,
+} from "@/lib/playback-registry";
 
 const ignoreFallbackReady = () => undefined;
 const unavailableRecordingRetry = () => undefined;
 
-function withHistoryPlaybackByteLength(
+function withHistoryPlaybackAdmission(
   item: RecordingJobView | undefined,
-  byteLengths: Record<string, number>,
+  entry: TranscriptHistoryEntry | undefined,
+  admissions: HistoryPlaybackAdmissions,
 ) {
-  if (item?.intent !== "live" || !item.output) return item;
-  const playbackByteLength = byteLengths[item.output];
-  return playbackByteLength === undefined ? item : { ...item, playbackByteLength };
+  if (!item || !entry || item.output !== entry.outputPath) return item;
+  const admission = projectHistoryPlaybackAdmission(entry, admissions);
+  if (!admission) return item;
+  return {
+    ...item,
+    playbackByteLength: admission.byteLength,
+    playbackPath: admission.playbackPath,
+  };
 }
 
 export default function App() {
@@ -83,34 +93,46 @@ export default function App() {
     rememberHiddenHistoryEntry,
   } = useTranscriptHistory();
   const {
-    historyPlaybackByteLengths,
-    historyPlaybackPaths,
-  } = useRegisteredPlayback(queue, setQueue, history);
-  const {
     clearHistorySelectionIf,
     closeHistoryReview,
     historyJob,
     reviewMorphOrigin,
     selectHistoryEntry,
     selectQueueItem,
+    selectedHistoryEntry,
     selectedHistoryItem: selectedHistoryItemWithoutPlaybackMetadata,
     selectedHistoryOutput,
     selectedId,
     selectedItem: selectedItemWithoutPlaybackMetadata,
-  } = useRecordingSelection({ history, historyPlaybackPaths, queue });
+  } = useRecordingSelection({ history, queue });
+  const {
+    historyPlaybackAdmissions,
+  } = useRegisteredPlayback(queue, setQueue, history, selectedHistoryEntry);
   const selectedHistoryItem = useMemo(
-    () => withHistoryPlaybackByteLength(
+    () => withHistoryPlaybackAdmission(
       selectedHistoryItemWithoutPlaybackMetadata,
-      historyPlaybackByteLengths,
+      selectedHistoryEntry,
+      historyPlaybackAdmissions,
     ),
-    [historyPlaybackByteLengths, selectedHistoryItemWithoutPlaybackMetadata],
+    [
+      historyPlaybackAdmissions,
+      selectedHistoryEntry,
+      selectedHistoryItemWithoutPlaybackMetadata,
+    ],
   );
   const selectedItem = useMemo(
-    () => withHistoryPlaybackByteLength(
+    () => selectedHistoryEntry
+      ? withHistoryPlaybackAdmission(
+          selectedItemWithoutPlaybackMetadata,
+          selectedHistoryEntry,
+          historyPlaybackAdmissions,
+        )
+      : selectedItemWithoutPlaybackMetadata,
+    [
+      historyPlaybackAdmissions,
+      selectedHistoryEntry,
       selectedItemWithoutPlaybackMetadata,
-      historyPlaybackByteLengths,
-    ),
-    [historyPlaybackByteLengths, selectedItemWithoutPlaybackMetadata],
+    ],
   );
   const {
     activeRail,

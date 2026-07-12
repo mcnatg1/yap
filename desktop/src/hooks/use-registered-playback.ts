@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import type { TranscriptHistoryEntry } from "@/history";
 import type { RecordingJobView } from "@/lib/app-types";
@@ -9,7 +9,7 @@ import {
   mergeHistoryPlaybackAdmissions,
   reconcilePlaybackAdmissionLifecycle,
   releaseRecordingPlaybackPaths,
-  restoreHistoryPlaybackAdmissions,
+  restoreHistoryPlaybackAdmission,
   restoreQueuePlaybackPaths,
   trimHistoryPlaybackAdmissions,
   type HistoryPlaybackAdmissions,
@@ -19,20 +19,25 @@ export function useRegisteredPlayback(
   queue: RecordingJobView[],
   setQueue: Dispatch<SetStateAction<RecordingJobView[]>>,
   history: TranscriptHistoryEntry[],
+  selectedHistoryEntry?: TranscriptHistoryEntry,
 ) {
   const [historyPlaybackAdmissions, setHistoryPlaybackAdmissions] =
     useState<HistoryPlaybackAdmissions>({});
 
   useEffect(() => {
     const controller = new AbortController();
-    void restoreQueuePlaybackPaths(queue, { signal: controller.signal }).then((restored) => {
-      if (controller.signal.aborted) {
-        void releaseRecordingPlaybackPaths(restored.map((entry) => entry.playbackPath));
-        return;
-      }
-      if (!restored.length) return;
-      setQueue((current) => applyRestoredQueuePlaybackPaths(current, restored));
-    });
+    void Promise.resolve()
+      .then(() => controller.signal.aborted
+        ? []
+        : restoreQueuePlaybackPaths(queue, { signal: controller.signal }))
+      .then((restored) => {
+        if (controller.signal.aborted) {
+          void releaseRecordingPlaybackPaths(restored.map((entry) => entry.playbackPath));
+          return;
+        }
+        if (!restored.length) return;
+        setQueue((current) => applyRestoredQueuePlaybackPaths(current, restored));
+      });
 
     return () => {
       controller.abort();
@@ -40,28 +45,38 @@ export function useRegisteredPlayback(
   }, [queue, setQueue]);
 
   useEffect(() => {
-    setHistoryPlaybackAdmissions((current) => trimHistoryPlaybackAdmissions(current, history));
-  }, [history]);
+    const selectedHistory = selectedHistoryEntry
+      ? history.filter((entry) => entry.outputPath === selectedHistoryEntry.outputPath)
+      : [];
+    setHistoryPlaybackAdmissions((current) => (
+      trimHistoryPlaybackAdmissions(current, selectedHistory)
+    ));
+  }, [history, selectedHistoryEntry]);
 
   useEffect(() => {
+    if (
+      !selectedHistoryEntry ||
+      historyPlaybackAdmissions[selectedHistoryEntry.outputPath]
+    ) return;
+
     const controller = new AbortController();
-    void restoreHistoryPlaybackAdmissions(
-      history,
-      historyPlaybackAdmissions,
-      { signal: controller.signal },
-    ).then((restored) => {
+    void restoreHistoryPlaybackAdmission(selectedHistoryEntry, {
+      signal: controller.signal,
+    }).then((restored) => {
+      if (!restored) return;
       if (controller.signal.aborted) {
-        void releaseRecordingPlaybackPaths(restored.map((entry) => entry.playbackPath));
+        void releaseRecordingPlaybackPaths([restored.playbackPath]);
         return;
       }
-      if (!restored.length) return;
-      setHistoryPlaybackAdmissions((current) => mergeHistoryPlaybackAdmissions(current, restored));
+      setHistoryPlaybackAdmissions((current) => (
+        mergeHistoryPlaybackAdmissions(current, [restored])
+      ));
     });
 
     return () => {
       controller.abort();
     };
-  }, [history, historyPlaybackAdmissions]);
+  }, [historyPlaybackAdmissions, selectedHistoryEntry]);
 
   useEffect(() => {
     reconcilePlaybackAdmissionLifecycle(
@@ -74,18 +89,7 @@ export function useRegisteredPlayback(
     }
   }, [historyPlaybackAdmissions, queue, setQueue]);
 
-  return useMemo(() => ({
-    historyPlaybackByteLengths: Object.fromEntries(
-      Object.entries(historyPlaybackAdmissions).map(([outputPath, admission]) => [
-        outputPath,
-        admission.byteLength,
-      ]),
-    ),
-    historyPlaybackPaths: Object.fromEntries(
-      Object.entries(historyPlaybackAdmissions).map(([outputPath, admission]) => [
-        outputPath,
-        admission.playbackPath,
-      ]),
-    ),
-  }), [historyPlaybackAdmissions]);
+  return {
+    historyPlaybackAdmissions,
+  };
 }

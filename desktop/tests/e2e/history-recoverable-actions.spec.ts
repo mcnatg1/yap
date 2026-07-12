@@ -19,7 +19,7 @@ test("a legacy recoverable row can always be hidden", async ({ page }) => {
   await row.getByRole("button", { name: `Actions for ${name}` }).click();
   const menu = page.getByRole("menu");
 
-  await expect(menu.getByRole("menuitem")).toHaveText(["Recover", "Hide", "Delete"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Hide"]);
   await menu.getByRole("menuitem", { name: "Hide" }).click();
   await expect(row).toHaveCount(0);
 });

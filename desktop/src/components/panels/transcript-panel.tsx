@@ -59,24 +59,34 @@ function recordingActivityLabel(status: RecordingJobStatus) {
   }
 }
 
-// WaveSurfer decodes the full file to PCM. Both limits bound that expansion;
-// larger recordings stay on the browser's streaming native media path.
+// WaveSurfer resamples into Float32 PCM. Unknown layouts use Web Audio's
+// channel ceiling so admission fails toward the streaming native media path.
 export const maxDecodedWaveformBytes = 32 * 1024 * 1024;
-export const maxDecodedWaveformDurationSeconds = 15 * 60;
+export const maxWaveformSourceBytes = 32 * 1024 * 1024;
+export const decodedWaveformSampleRate = 8_000;
+export const maxDecodedWaveformChannels = 32;
+export const waveformReadyTimeoutMs = 10_000;
+const decodedWaveformBytesPerSample = Float32Array.BYTES_PER_ELEMENT;
 
 type DisposableWaveform = {
   destroy: () => void;
 };
 
 function canMountDecodedWaveform(byteLength: number, durationSeconds: number | undefined) {
+  const decodedByteLength = durationSeconds === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.ceil(durationSeconds * decodedWaveformSampleRate) *
+      maxDecodedWaveformChannels * decodedWaveformBytesPerSample;
+
   return (
     Number.isSafeInteger(byteLength) &&
     byteLength >= 0 &&
-    byteLength <= maxDecodedWaveformBytes &&
+    byteLength <= maxWaveformSourceBytes &&
     durationSeconds !== undefined &&
     Number.isFinite(durationSeconds) &&
     durationSeconds > 0 &&
-    durationSeconds <= maxDecodedWaveformDurationSeconds
+    Number.isSafeInteger(decodedByteLength) &&
+    decodedByteLength <= maxDecodedWaveformBytes
   );
 }
 
@@ -84,33 +94,60 @@ export function mountDecodedWaveform<T extends DisposableWaveform>({
   byteLength,
   create,
   durationSeconds,
+  onReadyTimeout,
+  readyTimeoutMs = waveformReadyTimeoutMs,
+  requested,
   subscribe,
 }: {
   byteLength: number;
   create: () => T;
   durationSeconds: number | undefined;
-  subscribe: (waveform: T) => Array<() => void>;
+  onReadyTimeout?: () => void;
+  readyTimeoutMs?: number;
+  requested: boolean;
+  subscribe: (waveform: T, lifecycle: {
+    dispose: () => void;
+    markReady: () => void;
+  }) => Array<() => void>;
 }) {
-  if (!canMountDecodedWaveform(byteLength, durationSeconds)) {
+  if (!requested || !canMountDecodedWaveform(byteLength, durationSeconds)) {
     return undefined;
   }
 
   const waveform = create();
-  let unsubscribers: Array<() => void>;
-  try {
-    unsubscribers = subscribe(waveform);
-  } catch (error) {
+  let disposed = false;
+  let ready = false;
+  let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  let unsubscribers: Array<() => void> = [];
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    if (readyTimer !== undefined) clearTimeout(readyTimer);
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
     waveform.destroy();
+  };
+  const markReady = () => {
+    if (disposed || ready) return;
+    ready = true;
+    if (readyTimer !== undefined) {
+      clearTimeout(readyTimer);
+      readyTimer = undefined;
+    }
+  };
+  readyTimer = setTimeout(() => {
+    onReadyTimeout?.();
+    dispose();
+  }, readyTimeoutMs);
+  try {
+    const subscribed = subscribe(waveform, { dispose, markReady });
+    if (disposed) subscribed.forEach((unsubscribe) => unsubscribe());
+    else unsubscribers = subscribed;
+  } catch (error) {
+    dispose();
     throw error;
   }
-  let disposed = false;
   return {
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      unsubscribers.forEach((unsubscribe) => unsubscribe());
-      waveform.destroy();
-    },
+    dispose,
     waveform,
   };
 }
@@ -145,7 +182,6 @@ function RecordingPlayer({
   const audioRef = useRef<HTMLAudioElement>(null);
   const lightweightTrackRef = useRef<HTMLDivElement>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
-  const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
   const statusId = useId();
   const errorId = useId();
   const [currentSeconds, setCurrentSeconds] = useState(0);
@@ -156,6 +192,8 @@ function RecordingPlayer({
   }>();
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [waveformMounted, setWaveformMounted] = useState(false);
+  const [waveformRequested, setWaveformRequested] = useState(false);
   const recordingPath = item.playbackPath;
   const recordingSrc = useMemo(
     () => (isTauri() && recordingPath ? recordingPath : undefined),
@@ -166,8 +204,7 @@ function RecordingPlayer({
     : undefined;
   const waveformMode = durationSeconds === undefined
     ? "pending"
-    : item.playbackByteLength !== undefined &&
-        canMountDecodedWaveform(item.playbackByteLength, durationSeconds)
+    : waveformMounted
       ? "decoded"
       : "lightweight";
   const recordingStatus = failed
@@ -189,6 +226,8 @@ function RecordingPlayer({
     setNativeMetadata(undefined);
     setFailed(false);
     setPlaying(false);
+    setWaveformMounted(false);
+    setWaveformRequested(false);
   }, [recordingSrc]);
 
   useEffect(() => {
@@ -212,45 +251,38 @@ function RecordingPlayer({
         barWidth: 3,
         container,
         cursorWidth: 0,
-        dragToSeek: true,
         height: 56,
         hideScrollbar: true,
+        interact: false,
         media: audio,
         normalize: true,
         progressColor: "#034f46",
+        sampleRate: decodedWaveformSampleRate,
         waveColor: "rgba(117, 111, 102, 0.28)",
       }),
       durationSeconds,
-      subscribe: (waveSurfer) => [
+      onReadyTimeout: () => setWaveformMounted(false),
+      requested: waveformRequested,
+      subscribe: (waveSurfer, lifecycle) => [
         waveSurfer.on("ready", () => {
-          setFailed(false);
-          setDisplaySeconds(waveSurfer.getCurrentTime());
-        }),
-        waveSurfer.on("timeupdate", setDisplaySeconds),
-        waveSurfer.on("seeking", setDisplaySeconds),
-        waveSurfer.on("interaction", setDisplaySeconds),
-        waveSurfer.on("play", () => setPlaying(true)),
-        waveSurfer.on("pause", () => setPlaying(false)),
-        waveSurfer.on("finish", () => {
-          setPlaying(false);
-          setDisplaySeconds(waveSurfer.getDuration());
+          lifecycle.markReady();
+          setWaveformMounted(true);
+          setDisplaySeconds(audio.currentTime);
         }),
         waveSurfer.on("error", () => {
-          setFailed(Boolean(audio.error));
-          setPlaying(false);
+          lifecycle.dispose();
+          setPlaying(!audio.paused);
+          setWaveformMounted(false);
         }),
       ],
     });
     if (!mounted) return;
-    waveSurferRef.current = mounted.waveform;
-    container.dataset.waveformMounted = "true";
 
     return () => {
       mounted.dispose();
-      delete container.dataset.waveformMounted;
-      if (waveSurferRef.current === mounted.waveform) waveSurferRef.current = undefined;
+      setWaveformMounted(false);
     };
-  }, [durationSeconds, item.playbackByteLength, recordingSrc]);
+  }, [durationSeconds, item.playbackByteLength, recordingSrc, waveformRequested]);
 
   if (!recordingPath || !recordingSrc) return null;
 
@@ -278,35 +310,31 @@ function RecordingPlayer({
   }
 
   function seekToRatio(ratio: number) {
-    const waveSurfer = waveSurferRef.current;
     const audio = audioRef.current;
-    const duration = durationSeconds ?? waveSurfer?.getDuration() ?? audio?.duration;
+    const duration = durationSeconds ?? audio?.duration;
     if (!duration || !Number.isFinite(duration)) return;
 
     const nextSeconds = Math.max(0, Math.min(duration, ratio * duration));
-    if (waveSurfer) {
-      waveSurfer.setTime(nextSeconds);
-    } else if (audio) {
-      audio.currentTime = nextSeconds;
-    }
+    if (audio) audio.currentTime = nextSeconds;
     setProgressSeconds(nextSeconds);
     setDisplaySeconds(nextSeconds);
   }
 
   function seekBy(deltaSeconds: number) {
-    const waveSurfer = waveSurferRef.current;
     const audio = audioRef.current;
-    const duration = durationSeconds ?? waveSurfer?.getDuration() ?? audio?.duration;
-    const currentTime = waveSurfer?.getCurrentTime() ?? audio?.currentTime;
+    const duration = durationSeconds ?? audio?.duration;
+    const currentTime = audio?.currentTime;
     if (currentTime === undefined || !duration || !Number.isFinite(duration)) return;
     seekToRatio((currentTime + deltaSeconds) / duration);
   }
 
   function seekFromPointer(event: ReactPointerEvent<HTMLDivElement>) {
-    if (waveformMode !== "lightweight" || !canSeek) return;
+    if (!canSeek) return;
     const track = lightweightTrackRef.current;
-    if (!track) return;
-    const ratio = seekRatioFromBounds(event.clientX, track.getBoundingClientRect());
+    const ratio = seekRatioFromBounds(
+      event.clientX,
+      (track ?? event.currentTarget).getBoundingClientRect(),
+    );
     if (ratio !== undefined) seekToRatio(ratio);
   }
 
@@ -319,11 +347,7 @@ function RecordingPlayer({
   }
 
   function togglePlayback() {
-    const waveSurfer = waveSurferRef.current;
-    if (waveSurfer) {
-      void waveSurfer.playPause().catch(() => toggleNativePlayback());
-      return;
-    }
+    setWaveformRequested(true);
     toggleNativePlayback();
   }
 
@@ -414,7 +438,8 @@ function RecordingPlayer({
             aria-valuemin={0}
             aria-valuenow={Math.min(currentSeconds, roundedMediaSecond(durationSeconds))}
             aria-valuetext={`${formatElapsed(currentSeconds)}${durationSeconds === undefined ? "" : ` of ${formatElapsed(roundedMediaSecond(durationSeconds))}`}`}
-            className="relative h-14 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-md bg-muted/60 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60"
+            className="relative h-14 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-md bg-muted/60 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60 [&>div]:pointer-events-none"
+            data-waveform-mounted={waveformMounted ? "true" : undefined}
             data-waveform-mode={waveformMode}
             onKeyDown={(event) => {
               if (!canSeek) return;
@@ -440,7 +465,7 @@ function RecordingPlayer({
             }}
             onPointerCancel={finishPointerSeek}
             onPointerDown={(event) => {
-              if (waveformMode !== "lightweight" || !canSeek) return;
+              if (!canSeek) return;
               dragPointerIdRef.current = event.pointerId;
               event.currentTarget.setPointerCapture(event.pointerId);
               seekFromPointer(event);

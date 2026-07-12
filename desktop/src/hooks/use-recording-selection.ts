@@ -13,11 +13,9 @@ type ReviewMorphOrigin = {
 
 export function useRecordingSelection({
   history,
-  historyPlaybackPaths,
   queue,
 }: {
   history: TranscriptHistoryEntry[];
-  historyPlaybackPaths: Record<string, string | undefined>;
   queue: RecordingJobView[];
 }) {
   const [selectedId, setSelectedId] = useState<number>();
@@ -25,8 +23,8 @@ export function useRecordingSelection({
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
 
   const historyJob = useCallback(
-    (entry: TranscriptHistoryEntry) => historyEntryToRecordingJob(entry, historyPlaybackPaths[entry.outputPath]),
-    [historyPlaybackPaths],
+    (entry: TranscriptHistoryEntry) => historyEntryToRecordingJob(entry),
+    [],
   );
   const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
   const selectedHistoryItem = selectedHistoryEntry ? historyJob(selectedHistoryEntry) : undefined;
@@ -97,6 +95,7 @@ export function useRecordingSelection({
     selectHistoryEntry,
     selectQueueItem,
     selectQueueItemOnly,
+    selectedHistoryEntry,
     selectedHistoryItem,
     selectedHistoryOutput,
     selectedId,

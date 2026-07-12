@@ -57,20 +57,29 @@ import {
 import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
 import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
 import {
+  createPreviewSearchLoader,
   createPreviewSearchGenerationGuard,
   createPreviewTextLoader,
+  mergePreviewSearchFailures,
+  prunePreviewSearchFailures,
   previewSearchEntries,
   shouldSearchTranscriptBodies,
+  type PreviewSearchFailureState,
 } from "@/lib/history-preview-loader";
-import { rememberText } from "@/lib/text-cache";
+import { pruneTextCache, rememberText, rememberTexts } from "@/lib/text-cache";
 import { cn } from "@/lib/utils";
 
 const maxHistoryPreviewCacheEntries = maxTranscriptHistoryEntries;
+const maxHistoryPreviewCharsPerEntry = 2_000;
+const maxHistoryPreviewCacheChars =
+  maxHistoryPreviewCacheEntries * maxHistoryPreviewCharsPerEntry;
 const noUnavailablePreviewPaths: ReadonlySet<string> = new Set();
 
-export type HistorySearchFailureState = {
-  query: string;
-  paths: ReadonlySet<string>;
+export type HistorySearchFailureState = PreviewSearchFailureState;
+
+type HistoryPreviewState = {
+  previewTextByPath: Record<string, string>;
+  searchFailures: HistorySearchFailureState;
 };
 
 function normalizeHistorySearchQuery(query: string) {
@@ -81,8 +90,7 @@ export function historySearchFailurePathsForQuery(
   failure: HistorySearchFailureState,
   query: string,
 ) {
-  const normalizedQuery = normalizeHistorySearchQuery(query);
-  return shouldSearchTranscriptBodies(normalizedQuery) && failure.query === normalizedQuery
+  return shouldSearchTranscriptBodies(query)
     ? failure.paths
     : noUnavailablePreviewPaths;
 }
@@ -285,19 +293,37 @@ export function HistoryPanel({
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
+  const [searchRetryGeneration, setSearchRetryGeneration] = useState(0);
   const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
-  const [previewTextByPath, setPreviewTextByPath] = useState<Record<string, string>>({});
-  const [searchFailures, setSearchFailures] = useState<HistorySearchFailureState>(() => ({
-    paths: new Set(),
-    query: "",
+  const [historyPreviewState, setHistoryPreviewState] = useState<HistoryPreviewState>(() => ({
+    previewTextByPath: {},
+    searchFailures: { paths: new Set() },
   }));
+  const { previewTextByPath, searchFailures } = historyPreviewState;
   const previewTextByPathRef = useRef(previewTextByPath);
-  const previewLoaderRef = useRef(createPreviewTextLoader());
+  const previewLoaderRef = useRef(createPreviewTextLoader({
+    maxCharsPerEntry: maxHistoryPreviewCharsPerEntry,
+    maxEntries: maxHistoryPreviewCacheEntries,
+    maxTotalChars: maxHistoryPreviewCacheChars,
+  }));
+  const previewSearchLoaderRef = useRef(createPreviewSearchLoader());
   const previewSearchGenerationRef = useRef(createPreviewSearchGenerationGuard());
 
   useEffect(() => {
     previewTextByPathRef.current = previewTextByPath;
   }, [previewTextByPath]);
+
+  const searchableEntries = useMemo(() => previewSearchEntries(entries), [entries]);
+  const searchableOutputPaths = useMemo(
+    () => searchableEntries.map((entry) => entry.outputPath),
+    [searchableEntries],
+  );
+  const searchableOutputPathSet = useMemo(
+    () => new Set(searchableOutputPaths),
+    [searchableOutputPaths],
+  );
+  const searchableOutputPathSetRef = useRef(searchableOutputPathSet);
+  searchableOutputPathSetRef.current = searchableOutputPathSet;
 
   const loadPreviewText = useCallback(async (entry: TranscriptHistoryEntry) => {
     return previewLoaderRef.current.load(
@@ -305,26 +331,43 @@ export function HistoryPanel({
       previewTextByPathRef.current,
       onLoadPreviewText,
       (outputPath, text) => {
-        setSearchFailures((current) => {
-          if (!current.paths.has(outputPath)) return current;
-          const next = new Set(current.paths);
-          next.delete(outputPath);
-          return { ...current, paths: next };
+        if (!searchableOutputPathSetRef.current.has(outputPath)) return;
+        setHistoryPreviewState((current) => {
+          const hasFailure = current.searchFailures.paths.has(outputPath);
+          const hasText = current.previewTextByPath[outputPath] !== undefined;
+          if (!hasFailure && hasText) return current;
+
+          const paths = hasFailure
+            ? new Set([...current.searchFailures.paths].filter((path) => path !== outputPath))
+            : current.searchFailures.paths;
+          return {
+            previewTextByPath: hasText
+              ? current.previewTextByPath
+              : rememberText(
+                  current.previewTextByPath,
+                  outputPath,
+                  text,
+                  maxHistoryPreviewCacheEntries,
+                  maxHistoryPreviewCharsPerEntry,
+                  maxHistoryPreviewCacheChars,
+                ),
+            searchFailures: hasFailure
+              ? { ...current.searchFailures, paths }
+              : current.searchFailures,
+          };
         });
-        setPreviewTextByPath((current) =>
-          current[outputPath] === undefined
-            ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
-            : current,
-        );
       },
     );
   }, [onLoadPreviewText]);
 
-  const searchableEntries = useMemo(() => previewSearchEntries(entries), [entries]);
-  const searchableOutputPaths = useMemo(
-    () => searchableEntries.map((entry) => entry.outputPath),
-    [searchableEntries],
-  );
+  const retrySearchFailures = useCallback(() => {
+    previewLoaderRef.current.retryFailures();
+    setSearchRetryGeneration((current) => current + 1);
+    setHistoryPreviewState((current) => ({
+      ...current,
+      searchFailures: { paths: new Set() },
+    }));
+  }, []);
   const cachedOutputPaths = useMemo(
     () => new Set(Object.keys(previewTextByPath)),
     [previewTextByPath],
@@ -343,57 +386,118 @@ export function HistoryPanel({
   });
 
   useEffect(() => {
-    setSearchFailures({ paths: new Set(), query: "" });
-  }, [entries]);
+    previewLoaderRef.current.prune(searchableOutputPathSet);
+    setHistoryPreviewState((current) => {
+      const previewText = pruneTextCache(
+        current.previewTextByPath,
+        searchableOutputPathSet,
+      );
+      const failures = prunePreviewSearchFailures(
+        current.searchFailures,
+        searchableOutputPathSet,
+      );
+      if (
+        previewText === current.previewTextByPath
+        && failures === current.searchFailures
+      ) {
+        return current;
+      }
+      return {
+        previewTextByPath: previewText,
+        searchFailures: failures,
+      };
+    });
+  }, [searchableOutputPathSet]);
 
   useEffect(() => {
     if (!indexingBodies || !onLoadPreviewText) return;
 
-    let cancelled = false;
+    const controller = new AbortController();
     const generation = previewSearchGenerationRef.current.begin();
-    void (async () => {
-      for (const entry of searchableEntries) {
-        if (cancelled) break;
-        if (previewTextByPathRef.current[entry.outputPath] !== undefined) continue;
-        try {
-          await previewLoaderRef.current.load(
-            entry,
-            previewTextByPathRef.current,
-            onLoadPreviewText,
-            (outputPath, text) => {
-              if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) return;
-              setSearchFailures((current) => {
-                if (!current.paths.has(outputPath)) return current;
-                const next = new Set(current.paths);
-                next.delete(outputPath);
-                return { ...current, paths: next };
-              });
-              setPreviewTextByPath((current) =>
-                current[outputPath] === undefined
-                  ? rememberText(current, outputPath, text, maxHistoryPreviewCacheEntries)
-                  : current,
-              );
-            },
-          );
-        } catch {
-          if (cancelled || !previewSearchGenerationRef.current.isCurrent(generation)) continue;
-          setSearchFailures((current) => {
-            const visible = new Set(searchableOutputPaths);
-            const currentPaths = current.query === normalizedSearchQuery
-              ? current.paths
-              : noUnavailablePreviewPaths;
-            const next = new Set([...currentPaths].filter((path) => visible.has(path)));
-            next.add(entry.outputPath);
-            return { paths: next, query: normalizedSearchQuery };
-          });
+    const pendingEntries = searchableEntries.filter(
+      (entry) => previewTextByPathRef.current[entry.outputPath] === undefined,
+    );
+
+    void previewSearchLoaderRef.current.load({
+      entries: pendingEntries,
+      loadText: (entry) =>
+        previewLoaderRef.current.load(
+          entry,
+          previewTextByPathRef.current,
+          onLoadPreviewText,
+          () => undefined,
+        ),
+      onBatch: (batch) => {
+        if (
+          controller.signal.aborted
+          || !previewSearchGenerationRef.current.isCurrent(generation)
+        ) {
+          return;
         }
-      }
-    })();
+
+        setHistoryPreviewState((current) => {
+          if (
+            controller.signal.aborted
+            || !previewSearchGenerationRef.current.isCurrent(generation)
+          ) {
+            return current;
+          }
+
+          const retainedPreviewText = pruneTextCache(
+            current.previewTextByPath,
+            searchableOutputPathSet,
+          );
+          const loaded = batch.loaded.filter(
+            ({ outputPath }) =>
+              searchableOutputPathSet.has(outputPath)
+              && retainedPreviewText[outputPath] === undefined,
+          );
+          const failedOutputPaths = batch.failedOutputPaths.filter(
+            (outputPath) => retainedPreviewText[outputPath] === undefined,
+          );
+          const nextPreviewText = loaded.length > 0
+            ? rememberTexts(
+                retainedPreviewText,
+                loaded.map(({ outputPath, text }) => [outputPath, text]),
+                maxHistoryPreviewCacheEntries,
+                maxHistoryPreviewCharsPerEntry,
+                maxHistoryPreviewCacheChars,
+              )
+            : retainedPreviewText;
+          const nextSearchFailures = mergePreviewSearchFailures({
+            current: current.searchFailures,
+            failedOutputPaths,
+            loadedOutputPaths: batch.loaded.map(({ outputPath }) => outputPath),
+            visibleOutputPaths: searchableOutputPathSet,
+          });
+
+          if (
+            nextPreviewText === current.previewTextByPath
+            && nextSearchFailures === current.searchFailures
+          ) {
+            return current;
+          }
+
+          return {
+            previewTextByPath: nextPreviewText,
+            searchFailures: nextSearchFailures,
+          };
+        });
+      },
+      signal: controller.signal,
+    });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
-  }, [indexingBodies, normalizedSearchQuery, onLoadPreviewText, searchableEntries, searchableOutputPaths]);
+  }, [
+    indexingBodies,
+    normalizedSearchQuery,
+    onLoadPreviewText,
+    searchableEntries,
+    searchableOutputPathSet,
+    searchRetryGeneration,
+  ]);
 
   useEffect(() => {
     setRenderLimit(historyRenderWindowSize);
@@ -458,7 +562,6 @@ export function HistoryPanel({
                 <Button
                   aria-label="Search past transcripts"
                   onClick={() => {
-                    setSearchFailures({ paths: new Set(), query: "" });
                     setSearchOpen(true);
                   }}
                   size="icon-xs"
@@ -469,9 +572,35 @@ export function HistoryPanel({
                 </Button>
               )}
             </div>
-            <ScrollArea className="h-[min(620px,calc(100vh-230px))] pr-3">
+            <ScrollArea
+              aria-busy={indexingBodies || undefined}
+              className="h-[min(620px,calc(100vh-230px))] pr-3"
+            >
               {searchDisplay === "results" ? (
                 <div className="flex flex-col gap-6">
+                  {indexingBodies || unavailablePreviewPaths.size > 0 ? (
+                    <div
+                      aria-live="polite"
+                      className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
+                      role="status"
+                    >
+                      <span>
+                        {indexingBodies
+                          ? "Searching more transcript text. Results may be incomplete."
+                          : "Some transcript text is unavailable. Results may be incomplete."}
+                      </span>
+                      {unavailablePreviewPaths.size > 0 ? (
+                        <Button
+                          onClick={retrySearchFailures}
+                          size="sm"
+                          type="button"
+                          variant="ghost"
+                        >
+                          Retry
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {visibleGroups.map((group) => (
                     <section key={group.key}>
                       <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group.label}</h3>
@@ -593,7 +722,7 @@ export function HistoryPanel({
                 <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
                   <p>Some transcripts are unavailable. No available recordings match that search.</p>
                   <Button
-                    onClick={() => setSearchFailures({ paths: new Set(), query: "" })}
+                    onClick={retrySearchFailures}
                     size="sm"
                     type="button"
                     variant="outline"

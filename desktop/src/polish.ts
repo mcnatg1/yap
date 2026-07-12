@@ -2,6 +2,7 @@ import { polishNumGpuLayers } from "@/settings";
 import {
   developmentPolishAvailable,
 } from "@/lib/product-features";
+import type { RecordingJobView } from "@/lib/app-types";
 
 const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
 
@@ -11,6 +12,7 @@ export type PolishRunToken = Readonly<{
   context: string;
   id: number;
   kind: "run";
+  signal: AbortSignal;
 }>;
 
 export type PolishDraftToken = Readonly<{
@@ -21,14 +23,65 @@ export type PolishDraftToken = Readonly<{
 export type PolishSaveToken = Readonly<{
   draft: PolishDraftToken;
   id: number;
+  isCurrent: () => boolean;
   kind: "save";
+  signal: AbortSignal;
 }>;
+
+export type PolishSaveRequest = Readonly<{
+  isCurrent: () => boolean;
+  outputPath: string;
+  revision: number;
+  signal: AbortSignal;
+  sourceIdentity: string;
+  text: string;
+}>;
+
+export function polishSourceIdentity(item: RecordingJobView, sourceText: string) {
+  return JSON.stringify([item.id, item.path, item.output ?? "", sourceText]);
+}
+
+export function createPolishSaveRequest({
+  context,
+  item,
+  sourceText,
+  sourceIdentity,
+  text,
+  token,
+}: {
+  context: string;
+  item: RecordingJobView;
+  sourceText: string;
+  sourceIdentity: string;
+  text: string;
+  token: PolishSaveToken;
+}): PolishSaveRequest | undefined {
+  if (
+    !item.output
+    || !text.trim()
+    || sourceIdentity !== polishSourceIdentity(item, sourceText)
+    || !context.startsWith(`${sourceIdentity}\0`)
+    || token.draft.context !== context
+    || !token.isCurrent()
+  ) return undefined;
+
+  return Object.freeze({
+    isCurrent: token.isCurrent,
+    outputPath: item.output,
+    revision: token.draft.runId,
+    signal: token.signal,
+    sourceIdentity,
+    text,
+  });
+}
 
 export function createPolishOperationOwner() {
   let nextRunId = 0;
   let nextSaveId = 0;
   let activeRun: PolishRunToken | undefined;
+  let activeRunController: AbortController | undefined;
   let activeSave: PolishSaveToken | undefined;
+  let activeSaveController: AbortController | undefined;
   let draft: PolishDraftToken | undefined;
 
   const ownsSave = (token: PolishSaveToken) => (
@@ -50,16 +103,22 @@ export function createPolishOperationOwner() {
     finishRun(token: PolishRunToken) {
       if (activeRun !== token) return false;
       activeRun = undefined;
+      activeRunController = undefined;
       return true;
     },
     finishSave(token: PolishSaveToken) {
       if (!ownsSave(token)) return false;
       activeSave = undefined;
+      activeSaveController = undefined;
       return true;
     },
     invalidate() {
+      activeRunController?.abort();
+      activeSaveController?.abort();
       activeRun = undefined;
+      activeRunController = undefined;
       activeSave = undefined;
+      activeSaveController = undefined;
       draft = undefined;
     },
     isRunCurrent(token: PolishRunToken) {
@@ -70,23 +129,32 @@ export function createPolishOperationOwner() {
     },
     startRun(context: string) {
       if (!context || activeRun || activeSave) return undefined;
+      const controller = new AbortController();
       const token: PolishRunToken = Object.freeze({
         context,
         id: ++nextRunId,
         kind: "run",
+        signal: controller.signal,
       });
       activeRun = token;
+      activeRunController = controller;
       draft = undefined;
       return token;
     },
     startSave(candidate: PolishDraftToken) {
-      if (activeSave || draft !== candidate) return undefined;
-      const token: PolishSaveToken = Object.freeze({
+      if (draft !== candidate) return undefined;
+      activeSaveController?.abort();
+      const controller = new AbortController();
+      let token: PolishSaveToken;
+      token = Object.freeze({
         draft: candidate,
         id: ++nextSaveId,
+        isCurrent: () => ownsSave(token) && !controller.signal.aborted,
         kind: "save",
+        signal: controller.signal,
       });
       activeSave = token;
+      activeSaveController = controller;
       return token;
     },
   };
@@ -146,10 +214,12 @@ export type PolishResult = {
 
 export async function polishTranscript({
   model = defaultPolishModel,
+  signal,
   text,
   tone,
 }: {
   model?: string;
+  signal?: AbortSignal;
   text: string;
   tone: PolishTone;
 }): Promise<PolishResult> {
@@ -161,6 +231,7 @@ export async function polishTranscript({
   if (!source) throw new Error("The selected transcript is empty.");
 
   const numGpu = await polishNumGpuLayers().catch(() => 0);
+  signal?.throwIfAborted();
 
   const response = await fetch("http://127.0.0.1:11434/api/chat", {
     body: JSON.stringify({
@@ -187,7 +258,9 @@ export async function polishTranscript({
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
+    signal,
   }).catch((error) => {
+    if (signal?.aborted) throw error;
     throw new Error(
       `Ollama is not available. Start Ollama, then run: ollama pull ${model}. ${String(error)}`,
     );

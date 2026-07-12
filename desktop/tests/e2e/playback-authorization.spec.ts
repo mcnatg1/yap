@@ -1,8 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { makeTestToneWav } from "../fixtures/audio-fixture";
+
 const mediaDuration = 100.9;
 
-async function installPlaybackBridge(page: Page, paths: string[], restoreDelayMs = 0) {
+async function installPlaybackBridge(
+  page: Page,
+  paths: string[],
+  restoreDelayMs = 0,
+  durationSeconds = mediaDuration,
+) {
   await page.addInitScript(({ mediaDuration, paths, restoreDelayMs }) => {
     localStorage.setItem(
       "yap.recordingQueue.v1",
@@ -34,6 +41,10 @@ async function installPlaybackBridge(page: Page, paths: string[], restoreDelayMs
       __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
       __TAURI_INTERNALS__: {
         convertFileSrc: (path: string) => `asset:${path}`,
+        metadata: {
+          currentWebview: { label: "main" },
+          currentWindow: { label: "main" },
+        },
         transformCallback: () => ++callbackId,
         invoke: async (command: string, args: Record<string, unknown> = {}) => {
           if (command === "plugin:event|listen") return ++callbackId;
@@ -92,11 +103,63 @@ async function installPlaybackBridge(page: Page, paths: string[], restoreDelayMs
         },
       },
     });
-  }, { mediaDuration, paths, restoreDelayMs });
+  }, { mediaDuration: durationSeconds, paths, restoreDelayMs });
 }
 
-test("metadata gates decoded waveforms and source changes clean up", async ({ page }) => {
-  await installPlaybackBridge(page, ["C:\\small.wav", "C:\\large.wav"]);
+async function seedTranscriptHistory(page: Page, count: number) {
+  await page.addInitScript((entryCount) => {
+    localStorage.setItem(
+      "yap.transcriptHistory.v1",
+      JSON.stringify(Array.from({ length: entryCount }, (_, index) => ({
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+        name: `history-${index}`,
+        outputPath: `C:\\transcripts\\history-${index}.txt`,
+        sourcePath: `C:\\recordings\\history-${index}.wav`,
+      }))),
+    );
+  }, count);
+}
+
+test("decoded waveform state follows ready and error while native playback stays available", async ({ page }) => {
+  const testTone = Buffer.from(makeTestToneWav({ durationMs: 100 }));
+  let resolveFirstFetchStarted!: () => void;
+  let resolveSecondFetchStarted!: () => void;
+  let releaseNativeFetch!: () => void;
+  let releaseFirstFetch!: () => void;
+  let releaseSecondFetch!: () => void;
+  const firstFetchStarted = new Promise<void>((resolve) => { resolveFirstFetchStarted = resolve; });
+  const secondFetchStarted = new Promise<void>((resolve) => { resolveSecondFetchStarted = resolve; });
+  const nativeFetchRelease = new Promise<void>((resolve) => { releaseNativeFetch = resolve; });
+  const firstFetchRelease = new Promise<void>((resolve) => { releaseFirstFetch = resolve; });
+  const secondFetchRelease = new Promise<void>((resolve) => { releaseSecondFetch = resolve; });
+  let waveformFetches = 0;
+
+  await page.route("http://127.0.0.1:43123/media/**", async (route) => {
+    if (route.request().resourceType() !== "fetch") {
+      await nativeFetchRelease;
+      await route.fulfill({ body: testTone, contentType: "audio/wav" });
+      return;
+    }
+
+    waveformFetches += 1;
+    if (waveformFetches === 1) {
+      resolveFirstFetchStarted();
+      await firstFetchRelease;
+      await route.fulfill({ body: testTone, contentType: "audio/wav" });
+      return;
+    }
+
+    resolveSecondFetchStarted();
+    await secondFetchRelease;
+    await route.fulfill({ body: "not audio", contentType: "audio/wav" });
+  });
+
+  await installPlaybackBridge(
+    page,
+    ["C:\\small.wav", "C:\\small-broken.wav", "C:\\large.wav"],
+    0,
+    30,
+  );
   await page.goto("/");
   await page.getByRole("button", { name: "Transcribe", exact: true }).click();
   await page.getByRole("button", { name: "Select small.wav" }).click();
@@ -105,16 +168,49 @@ test("metadata gates decoded waveforms and source changes clean up", async ({ pa
   const audio = page.locator("audio");
   await expect(slider).toHaveAttribute("data-waveform-mode", "pending");
   await expect(audio).toHaveAttribute("src", /^http:\/\/127\.0\.0\.1:43123\/media\//);
+  releaseNativeFetch();
   await audio.dispatchEvent("loadedmetadata");
+  await expect(slider).toHaveAttribute("data-waveform-mode", "lightweight");
+  await expect(slider).not.toHaveAttribute("data-waveform-mounted", "true");
+
+  await page.getByRole("button", { name: "Play recording small.wav" }).click();
+  await firstFetchStarted;
+  await expect(slider).toHaveAttribute("data-waveform-mode", "lightweight");
+  await expect(slider).not.toHaveAttribute("data-waveform-mounted", "true");
+  await expect(page.getByTestId("lightweight-seek-track")).toBeVisible();
+
+  releaseFirstFetch();
   await expect(slider).toHaveAttribute("data-waveform-mode", "decoded");
   await expect(slider).toHaveAttribute("data-waveform-mounted", "true");
+  await expect(page.getByTestId("lightweight-seek-track")).toHaveCount(0);
+  await slider.focus();
+  await page.keyboard.press("End");
+  await expect.poll(() => audio.evaluate((element) => element.currentTime)).toBe(30);
+
+  await page.getByRole("button", { name: "Select small-broken.wav" }).click();
+  const brokenSlider = page.getByRole("slider", { name: "Seek recording small-broken.wav" });
+  await audio.dispatchEvent("loadedmetadata");
+  await expect(brokenSlider).toHaveAttribute("data-waveform-mode", "lightweight");
+
+  await page.getByRole("button", { name: "Play recording small-broken.wav" }).click();
+  await secondFetchStarted;
+  await expect(brokenSlider).toHaveAttribute("data-waveform-mode", "lightweight");
+  await expect(brokenSlider).not.toHaveAttribute("data-waveform-mounted", "true");
+  await expect(page.getByTestId("lightweight-seek-track")).toBeVisible();
+
+  releaseSecondFetch();
+  await expect.poll(() => brokenSlider.evaluate((element) =>
+    [...element.children].filter((child) => child.shadowRoot).length)).toBe(0);
+  await expect(brokenSlider).toHaveAttribute("data-waveform-mode", "lightweight");
+  await expect(brokenSlider).not.toHaveAttribute("data-waveform-mounted", "true");
+  await expect(page.getByRole("button", {
+    name: /^(?:Play|Pause) recording small-broken\.wav$/,
+  })).toBeEnabled();
 
   await page.getByRole("button", { name: "Select large.wav" }).click();
   const largeSlider = page.getByRole("slider", { name: "Seek recording large.wav" });
-  await expect(largeSlider).toHaveAttribute("data-waveform-mode", "pending");
-  await expect(largeSlider).not.toHaveAttribute("data-waveform-mounted", "true");
-  await audio.dispatchEvent("loadedmetadata");
   await expect(largeSlider).toHaveAttribute("data-waveform-mode", "lightweight");
+  await expect(largeSlider).not.toHaveAttribute("data-waveform-mounted", "true");
 });
 
 test("lightweight seeking uses visible bounds, exact endpoints, ARIA, and release", async ({ page }) => {
@@ -150,13 +246,15 @@ test("lightweight seeking uses visible bounds, exact endpoints, ARIA, and releas
       .__playbackTest.released.length)).toBe(1);
 });
 
-test("queue restoration keeps IPC concurrency bounded", async ({ page }) => {
+test("queue restoration stays globally bounded across effect generations", async ({ page }) => {
   await installPlaybackBridge(
     page,
     Array.from({ length: 20 }, (_, index) => `C:\\large-${index}.wav`),
-    20,
+    1_000,
   );
   await page.goto("/");
+  await page.getByRole("button", { name: "Transcribe", exact: true }).click();
+  await page.getByRole("button", { name: "Remove file" }).first().click();
 
   await expect.poll(() => page.evaluate(() =>
     (globalThis as unknown as { __playbackTest: { restoreCalls: number } })
@@ -165,4 +263,31 @@ test("queue restoration keeps IPC concurrency bounded", async ({ page }) => {
     (globalThis as unknown as { __playbackTest: { highWaterMark: number } })
       .__playbackTest.highWaterMark);
   expect(highWaterMark).toBe(4);
+});
+
+test("history playback is admitted only after selecting one entry", async ({ page }) => {
+  await installPlaybackBridge(page, []);
+  await seedTranscriptHistory(page, 200);
+  await page.goto("/");
+
+  const selectedName = "history-199";
+  await expect(page.getByRole("button", { name: `Review recording ${selectedName}` })).toBeVisible();
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __playbackTest: { restoreCalls: number } })
+      .__playbackTest.restoreCalls)).toBe(0);
+
+  await page.getByRole("button", { name: `Review recording ${selectedName}` }).click();
+  await expect.poll(() => page.evaluate(() =>
+    (globalThis as unknown as { __playbackTest: { restoreCalls: number } })
+      .__playbackTest.restoreCalls)).toBe(1);
+  expect(await page.evaluate(() => [
+    ...(globalThis as unknown as { __playbackTest: { tokens: Map<string, string> } })
+      .__playbackTest.tokens.keys(),
+  ])).toEqual([`C:\\recordings\\${selectedName}.wav`]);
+
+  await page.keyboard.press("Escape");
+  await expect.poll(() => page.evaluate(() =>
+    (globalThis as unknown as { __playbackTest: { released: string[] } })
+      .__playbackTest.released.length)).toBe(1);
 });

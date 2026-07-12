@@ -27,12 +27,15 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { basename, isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
 import { developmentPolishAvailable } from "@/lib/product-features";
 import {
+  createPolishSaveRequest,
   createPolishOperationOwner,
   isPolishDraftCurrent,
+  polishSourceIdentity,
   polishToneHints,
   polishToneLabels,
   polishTranscript,
   type PolishDraftToken,
+  type PolishSaveRequest,
   type PolishTone,
 } from "@/polish";
 
@@ -52,7 +55,7 @@ type PolishPanelProps = {
   onLoadText: (path: string) => Promise<string>;
   onOpenHelp?: () => void;
   onPolished: (outputPath: string, text: string) => void;
-  onSave: (item: RecordingJobView, text: string) => Promise<string>;
+  onSave: (request: PolishSaveRequest) => Promise<string>;
   originalText?: string;
   polishedText?: string;
 };
@@ -115,7 +118,6 @@ export function PolishPanel(props: PolishPanelProps) {
 
 function DevelopmentPolishPanel({
   item,
-  onLoadText,
   onOpenHelp,
   onPolished,
   onSave,
@@ -129,7 +131,9 @@ function DevelopmentPolishPanel({
   const [runDetails, setRunDetails] = useState<RunDetails | null>(null);
   const [savedPath, setSavedPath] = useState("");
   const [ownedDraft, setOwnedDraft] = useState<OwnedPolishDraft>();
-  const currentContext = item?.output ? `${item.output}\0${tone}` : "";
+  const currentSourceText = originalText ?? "";
+  const currentSourceIdentity = item ? polishSourceIdentity(item, currentSourceText) : "";
+  const currentContext = currentSourceIdentity ? `${currentSourceIdentity}\0${tone}` : "";
   const currentContextRef = useRef(currentContext);
   currentContextRef.current = currentContext;
   const polishedTextRef = useRef(polishedText);
@@ -137,7 +141,8 @@ function DevelopmentPolishPanel({
   const operationOwnerRef = useRef(createPolishOperationOwner());
 
   useLayoutEffect(() => {
-    if (!operationOwnerRef.current.isSaving()) operationOwnerRef.current.invalidate();
+    operationOwnerRef.current.invalidate();
+    setSaving(false);
   }, [currentContext]);
 
   useLayoutEffect(() => () => {
@@ -156,7 +161,7 @@ function DevelopmentPolishPanel({
     }),
   );
   const currentPolishedText = hasPolishedText ? polishedText : undefined;
-  const canPolish = ready && Boolean(item?.output) && !running && !saving;
+  const canPolish = ready && originalText !== undefined && !running && !saving;
   const statusLine = compactStatus({ hasPolishedText, originalText, ready, running });
 
   useEffect(() => {
@@ -167,9 +172,10 @@ function DevelopmentPolishPanel({
   }, [currentContext]);
 
   async function runPolish() {
-    if (!item?.output || running || saving) return;
+    if (!item?.output || originalText === undefined || running || saving) return;
 
     const outputPath = item.output;
+    const source = originalText;
     const requestedContext = currentContext;
     const requestedTone = tone;
     const operation = operationOwnerRef.current.startRun(requestedContext);
@@ -180,8 +186,11 @@ function DevelopmentPolishPanel({
     setSavedPath("");
 
     try {
-      const source = originalText ?? (await onLoadText(outputPath));
-      const result = await polishTranscript({ text: source, tone: requestedTone });
+      const result = await polishTranscript({
+        signal: operation.signal,
+        text: source,
+        tone: requestedTone,
+      });
       const nextDraft = operationOwnerRef.current.acceptRun(operation);
       if (!nextDraft) return;
 
@@ -193,7 +202,7 @@ function DevelopmentPolishPanel({
         totalSeconds: result.totalSeconds,
       });
     } catch (error) {
-      if (operationOwnerRef.current.isRunCurrent(operation)) {
+      if (!operation.signal.aborted && operationOwnerRef.current.isRunCurrent(operation)) {
         toast.error(error instanceof Error ? error.message : String(error));
       }
     } finally {
@@ -224,11 +233,24 @@ function DevelopmentPolishPanel({
 
     const saveOperation = operationOwnerRef.current.startSave(ownedDraft.token);
     if (!saveOperation || !operationOwnerRef.current.acceptSave(saveOperation)) return;
+    const request = createPolishSaveRequest({
+      context: currentContext,
+      item,
+      sourceText: currentSourceText,
+      sourceIdentity: currentSourceIdentity,
+      text: ownedDraft.text,
+      token: saveOperation,
+    });
+    if (!request) {
+      operationOwnerRef.current.finishSave(saveOperation);
+      return;
+    }
     setSaving(true);
     try {
-      const path = await onSave(item, ownedDraft.text);
+      const path = await onSave(request);
       if (
-        operationOwnerRef.current.acceptSave(saveOperation)
+        path
+        && saveOperation.isCurrent()
         && currentContextRef.current === saveOperation.draft.context
       ) setSavedPath(path);
     } catch {

@@ -22,22 +22,32 @@ describe("history panel transcript search", () => {
     })).toBe("unavailable");
   });
 
-  it("scopes terminal preview failures to the body-search query that produced them", () => {
+  it("keeps terminal preview failures across body-search query edits", () => {
     const failure = {
       paths: new Set(["failed.txt"]),
-      query: "needle",
     };
 
     expect(historySearchFailurePathsForQuery(failure, " NEEDLE "))
       .toEqual(new Set(["failed.txt"]));
     expect(historySearchFailurePathsForQuery(failure, "n")).toEqual(new Set());
-    expect(historySearchFailurePathsForQuery(failure, "different")).toEqual(new Set());
+    expect(historySearchFailurePathsForQuery(failure, "different"))
+      .toEqual(new Set(["failed.txt"]));
     expect(isHistoryBodySearchPending({
       cachedOutputPaths: new Set(),
       hasPreviewLoader: true,
       outputPaths: ["failed.txt"],
       query: "different",
       terminalOutputPaths: historySearchFailurePathsForQuery(failure, "different"),
-    })).toBe(true);
+    })).toBe(false);
+  });
+
+  it("keeps visible results while body indexing or failures make them incomplete", () => {
+    expect(projectHistorySearchDisplay({ hasResults: true, indexingBodies: true }))
+      .toBe("results");
+    expect(projectHistorySearchDisplay({
+      hasResults: true,
+      hasUnavailableBodies: true,
+      indexingBodies: false,
+    })).toBe("results");
   });
 });

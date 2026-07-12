@@ -98,23 +98,101 @@ test("history keeps committed review actions separate from recoverable capture a
   const recordingsDir = "C:\\Users\\tester\\AppData\\Local\\Yap\\live-recordings";
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.addInitScript(({ committedName, recoverableName, recordingsDir }) => {
+    const committedSessionId = committedName.slice("live-".length);
+    const recoverableSessionId = recoverableName.slice("live-".length);
+    const committedCreatedAt = "2026-07-11T12:00:00.000Z";
+    const recoverableCreatedAt = "2026-07-11T12:01:00.000Z";
+    const committed = {
+      captureCommitPath: `${recordingsDir}\\${committedName}.commit.json`,
+      createdAt: committedCreatedAt,
+      name: committedName,
+      outputPath: `${recordingsDir}\\${committedName}.txt`,
+      sessionId: committedSessionId,
+      sourcePath: `${recordingsDir}\\${committedName}.wav`,
+    };
+    const recoverable = {
+      createdAt: recoverableCreatedAt,
+      name: recoverableName,
+      outputPath: `${recordingsDir}\\${recoverableName}.wav.part`,
+      recoveryState: "recoverable",
+      sessionId: recoverableSessionId,
+      sourcePath: `${recordingsDir}\\${recoverableName}.wav.part`,
+      warning: "Capture stopped before publication.",
+    };
     localStorage.setItem("yap.transcriptHistory.v1", JSON.stringify([
-      {
-        captureCommitPath: `${recordingsDir}\\${committedName}.commit.json`,
-        createdAt: "2026-07-11T12:00:00.000Z",
-        name: committedName,
-        outputPath: `${recordingsDir}\\${committedName}.txt`,
-        sourcePath: `${recordingsDir}\\${committedName}.wav`,
-      },
-      {
-        createdAt: "2026-07-11T12:01:00.000Z",
-        name: recoverableName,
-        outputPath: `${recordingsDir}\\${recoverableName}.wav.part`,
-        recoveryState: "recoverable",
-        sourcePath: `${recordingsDir}\\${recoverableName}.wav.part`,
-        warning: "Capture stopped before publication.",
-      },
+      committed,
+      recoverable,
     ]));
+
+    Object.defineProperty(globalThis, "isTauri", { value: true });
+    let callbackId = 0;
+    Object.assign(globalThis, {
+      __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
+      __TAURI_INTERNALS__: {
+        metadata: {
+          currentWebview: { label: "main" },
+          currentWindow: { label: "main" },
+        },
+        transformCallback: () => ++callbackId,
+        invoke: async (command: string) => {
+          if (command === "plugin:event|listen") return ++callbackId;
+          if (command === "plugin:event|unlisten") return undefined;
+          if (command === "list_saved_live_sessions") {
+            return {
+              maintenanceWarnings: [],
+              sessions: [{
+                ...committed,
+                createdAtMs: Date.parse(committedCreatedAt),
+              }],
+            };
+          }
+          if (command === "list_recoverable_live_sessions") {
+            return [{
+              audioPartialPath: recoverable.sourcePath,
+              expiresAtMs: Date.parse(recoverableCreatedAt) + 24 * 60 * 60 * 1_000,
+              journalPartialPath: null,
+              name: recoverable.name,
+              reason: recoverable.warning,
+              sessionId: recoverable.sessionId,
+            }];
+          }
+          if (command === "setup_status") {
+            return {
+              engineBinaryStatus: "ready",
+              engineReady: true,
+              engineStatus: "Ready",
+              fallbackEnabled: true,
+              model: "test",
+              modelInstalled: true,
+              root: recordingsDir,
+            };
+          }
+          if (command === "fallback_model_status") {
+            return {
+              id: "nemotron-3.5-asr-streaming-0.6b-1120ms-int8",
+              label: "Nemotron",
+              modelsDir: recordingsDir,
+              status: "ready",
+            };
+          }
+          if (command === "server_connection_status") return "ready";
+          if (command === "live_status") {
+            return {
+              captureMode: "pushToTalk",
+              hotkey: "Ctrl+Shift+Space",
+              pasteHotkey: "",
+              route: "none",
+              status: "idle",
+              visibility: "enabled",
+            };
+          }
+          if (command === "list_input_devices" || command === "resolve_owned_live_transcript_paths") return [];
+          if (command === "list_local_compute_targets") return [{ id: "auto", label: "Auto", selected: true }];
+          if (command === "read_text_file" || command === "read_text_preview") return "";
+          return undefined;
+        },
+      },
+    });
   }, { committedName, recoverableName, recordingsDir });
 
   await page.goto("/");
@@ -144,7 +222,7 @@ test("history keeps committed review actions separate from recoverable capture a
   await recoverableRow.getByRole("button", { name: `Actions for ${recoverableName}` }).click();
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveText(["Recover", "Delete"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Recover", "Hide", "Delete"]);
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator('[data-slot="card"]')).toHaveCount(cardCount);
 });

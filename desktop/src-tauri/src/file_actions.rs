@@ -1,14 +1,19 @@
 use std::{
     io::{Read, Write},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
+use tokio::{sync::Semaphore, time::timeout_at};
 
 const MAX_DECODED_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
 const MAX_HIDDEN_PRUNE_CANDIDATES: usize = 200;
+const MAX_CONCURRENT_TRANSCRIPT_READS: usize = 4;
+const TRANSCRIPT_READ_TIMEOUT: Duration = Duration::from_secs(8);
+const TRANSCRIPT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Deserialize, Serialize)]
 struct RecordingPlaybackRegistry {
@@ -146,19 +151,32 @@ fn resolve_owned_live_transcript_paths_from_dir(
 }
 
 #[tauri::command]
-pub fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
+pub async fn read_text_file(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
     ensure_main_window(&window)?;
-    read_text_file_at(path)
+    run_bounded_transcript_io(
+        transcript_read_limiter(),
+        TRANSCRIPT_READ_TIMEOUT,
+        "Transcript read",
+        move || read_text_file_at(path),
+    )
+    .await
 }
 
 #[tauri::command]
-pub fn read_text_preview(
+pub async fn read_text_preview(
     window: tauri::WebviewWindow,
     path: String,
     max_chars: Option<usize>,
 ) -> Result<String, String> {
     ensure_main_window(&window)?;
-    read_text_preview_at(path, max_chars.unwrap_or(600))
+    let max_chars = max_chars.unwrap_or(600);
+    run_bounded_transcript_io(
+        transcript_read_limiter(),
+        TRANSCRIPT_READ_TIMEOUT,
+        "Transcript preview",
+        move || read_text_preview_at(path, max_chars),
+    )
+    .await
 }
 
 fn read_text_file_at(path: String) -> Result<String, String> {
@@ -197,13 +215,55 @@ fn read_text_preview_at_from_dir(
 }
 
 #[tauri::command]
-pub fn write_polished_text(
+pub async fn write_polished_text(
     window: tauri::WebviewWindow,
     path: String,
     text: String,
 ) -> Result<String, String> {
     ensure_main_window(&window)?;
-    write_polished_text_at(path, text)
+    run_bounded_transcript_io(
+        transcript_write_limiter(),
+        TRANSCRIPT_WRITE_TIMEOUT,
+        "Polished transcript write",
+        move || write_polished_text_at(path, text),
+    )
+    .await
+}
+
+fn transcript_read_limiter() -> Arc<Semaphore> {
+    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(LIMITER.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSCRIPT_READS))))
+}
+
+fn transcript_write_limiter() -> Arc<Semaphore> {
+    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(LIMITER.get_or_init(|| Arc::new(Semaphore::new(1))))
+}
+
+async fn run_bounded_transcript_io<F>(
+    limiter: Arc<Semaphore>,
+    timeout: Duration,
+    operation: &'static str,
+    work: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let permit = timeout_at(deadline, limiter.acquire_owned())
+        .await
+        .map_err(|_| format!("{operation} timed out while waiting for filesystem capacity."))?
+        .map_err(|_| format!("{operation} is unavailable during shutdown."))?;
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    });
+
+    match timeout_at(deadline, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("{operation} worker failed: {error}")),
+        Err(_) => Err(format!("{operation} timed out.")),
+    }
 }
 
 fn write_polished_text_at(path: String, text: String) -> Result<String, String> {
@@ -313,14 +373,14 @@ fn openable_app_path_from(
     if !path.is_file() || !is_yap_media_or_transcript_path(&path) {
         return Err("Only Yap recording and transcript files can be opened.".into());
     }
-    if path_is_inside_owned_live_directory(&path, owned_dir) {
+    if canonical_path_is_inside_owned_live_directory(&path, owned_dir) {
         return crate::live::recordings::canonical_committed_live_path_from_dir(
             &path,
             owned_dir,
             is_transcript_path(&path),
         );
     }
-    registered_recording_path_at(&path, registry_path)
+    registered_canonical_recording_path_at(&path, registry_path)
 }
 
 fn playable_recording_path(path: String) -> Result<std::path::PathBuf, String> {
@@ -352,7 +412,7 @@ fn register_playback_path_at_from_owned_dir(
     owned_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     let path = playable_recording_path(path)?;
-    if path_is_inside_owned_live_directory(&path, owned_dir) {
+    if canonical_path_is_inside_owned_live_directory(&path, owned_dir) {
         return crate::live::recordings::canonical_committed_live_path_from_dir(
             &path, owned_dir, false,
         );
@@ -378,11 +438,13 @@ fn playback_registry_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(test)]
 fn registered_playback_path_at(
     path: String,
     registry_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    registered_recording_path_at(&std::path::PathBuf::from(path), registry_path)
+    let path = playable_recording_path(path)?;
+    registered_canonical_recording_path_at(&path, registry_path)
 }
 
 fn restore_playback_path_at(
@@ -390,14 +452,28 @@ fn restore_playback_path_at(
     registry_path: &std::path::Path,
     owned_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    let path = std::path::PathBuf::from(path);
-    let path = if path_is_inside_owned_live_directory(&path, owned_dir) {
-        crate::live::recordings::canonical_committed_live_path_from_dir(&path, owned_dir, false)?
-    } else {
-        registered_playback_path_at(path.display().to_string(), registry_path)?
-    };
-    revalidate_owned_playback_path_from_dir(&path, owned_dir)?;
-    Ok(path)
+    restore_playback_path_at_with(
+        path,
+        registry_path,
+        owned_dir,
+        crate::live::recordings::canonical_committed_live_path_from_dir,
+    )
+}
+
+fn restore_playback_path_at_with<F>(
+    path: String,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+    authorize_owned: F,
+) -> Result<std::path::PathBuf, String>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path, bool) -> Result<std::path::PathBuf, String>,
+{
+    let path = playable_recording_path(path)?;
+    if canonical_path_is_inside_owned_live_directory(&path, owned_dir) {
+        return authorize_owned(&path, owned_dir, false);
+    }
+    registered_canonical_recording_path_at(&path, registry_path)
 }
 
 fn mint_playback_admission(
@@ -412,16 +488,15 @@ fn mint_playback_admission(
     })
 }
 
-fn registered_recording_path_at(
+fn registered_canonical_recording_path_at(
     path: &std::path::Path,
     registry_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    let path = playable_recording_path(path.display().to_string())?;
     if read_registered_playback_paths(registry_path)?
         .iter()
-        .any(|registered| same_registry_path(registered, &path))
+        .any(|registered| same_registry_path(registered, path))
     {
-        return Ok(path);
+        return Ok(path.to_path_buf());
     }
     Err("Recording file is not registered for playback.".into())
 }
@@ -538,13 +613,13 @@ fn revalidate_owned_playback_path_from_dir(
     path: &std::path::Path,
     owned_dir: &std::path::Path,
 ) -> Result<(), String> {
-    if path_is_inside_owned_live_directory(path, owned_dir) {
+    if canonical_path_is_inside_owned_live_directory(path, owned_dir) {
         crate::live::recordings::canonical_committed_live_path_from_dir(path, owned_dir, false)?;
     }
     Ok(())
 }
 
-fn path_is_inside_owned_live_directory(
+fn canonical_path_is_inside_owned_live_directory(
     path: &std::path::Path,
     owned_dir: &std::path::Path,
 ) -> bool {
@@ -603,6 +678,7 @@ fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
 mod tests {
     use super::*;
     use crate::audio::{recording::StreamingRecording, session::SessionId};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     static TEMP_TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
@@ -616,6 +692,54 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn bounded_transcript_io_keeps_capacity_owned_until_timed_out_work_finishes() {
+        let limiter = Arc::new(Semaphore::new(1));
+        let first = tauri::async_runtime::block_on(run_bounded_transcript_io(
+            Arc::clone(&limiter),
+            Duration::from_millis(10),
+            "Test read",
+            || {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok("late".into())
+            },
+        ));
+        assert!(first.unwrap_err().contains("timed out"));
+        assert_eq!(limiter.available_permits(), 0);
+
+        let second_ran = Arc::new(AtomicBool::new(false));
+        let second_ran_in_work = Arc::clone(&second_ran);
+        let second = tauri::async_runtime::block_on(run_bounded_transcript_io(
+            Arc::clone(&limiter),
+            Duration::from_millis(10),
+            "Test read",
+            move || {
+                second_ran_in_work.store(true, Ordering::SeqCst);
+                Ok("unexpected".into())
+            },
+        ));
+        assert!(second.unwrap_err().contains("filesystem capacity"));
+        assert!(!second_ran.load(Ordering::SeqCst));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while limiter.available_permits() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(limiter.available_permits(), 1);
+    }
+
+    #[test]
+    fn bounded_transcript_io_returns_successful_work() {
+        let result = tauri::async_runtime::block_on(run_bounded_transcript_io(
+            Arc::new(Semaphore::new(1)),
+            Duration::from_secs(1),
+            "Test read",
+            || Ok("ready".into()),
+        ));
+
+        assert_eq!(result.unwrap(), "ready");
     }
 
     #[test]
@@ -1090,6 +1214,38 @@ mod tests {
             restore_playback_path_at(media.display().to_string(), &registry, &owned).unwrap_err();
 
         assert_eq!(error, "File no longer exists.");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn owned_playback_restore_keeps_one_canonical_path_during_catalog_validation() {
+        let dir = temp_test_dir("owned-playback-stable-canonical-path");
+        let registry = dir.join("registry.json");
+        let owned = dir.join("owned");
+        let nested = owned.join("nested");
+        let media = owned.join("live-selected.wav");
+        let requested = nested.join("..").join("live-selected.wav");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+        let canonical_media = media.canonicalize().unwrap();
+        let mut validations = 0;
+
+        let restored = restore_playback_path_at_with(
+            requested.display().to_string(),
+            &registry,
+            &owned,
+            |requested, requested_owned, require_transcript| {
+                validations += 1;
+                assert_eq!(requested_owned, owned);
+                assert!(!require_transcript);
+                assert_eq!(requested, canonical_media.as_path());
+                Ok(requested.to_path_buf())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(restored, canonical_media);
+        assert_eq!(validations, 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
