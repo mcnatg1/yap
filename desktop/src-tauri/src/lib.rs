@@ -8,6 +8,7 @@ pub mod live;
 mod paths;
 pub mod runtime;
 mod runtime_policy;
+pub mod server_connector;
 pub mod stt;
 mod tray;
 

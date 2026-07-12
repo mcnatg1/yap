@@ -4,10 +4,14 @@ mod recordings;
 mod setup;
 
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    let builder = builder.manage(media_protocol::MediaOwner::new());
+    let builder = builder
+        .manage(media_protocol::MediaOwner::new())
+        .manage(crate::server_connector::ConnectorGeneration::default());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
         recordings::server_connection_status,
+        crate::server_connector::server_settings,
+        crate::server_connector::set_server_settings,
         setup::fallback_model_status,
         setup::fallback_model_install,
         setup::fallback_model_cancel_install,

@@ -1,7 +1,37 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { FallbackModelView, LocalComputeTargetView } from "@/lib/app-types";
+import type {
+  FallbackModelView,
+  LocalComputeTargetView,
+  ServerConnectionState,
+} from "@/lib/app-types";
+
+export {
+  saveServerSettings,
+  serverSettings,
+  testServerConnection,
+} from "@/server";
+export type { ServerSettings } from "@/server";
+
+export function projectServerConnectionTestMessage(state: ServerConnectionState): string {
+  switch (state) {
+    case "not_set":
+      return "Connection check unavailable.";
+    case "disabled":
+      return "Server is disabled.";
+    case "connecting":
+      return "Checking connection.";
+    case "ready":
+      return "Connection ready.";
+    case "offline":
+      return "Server is offline.";
+    case "sign_in_required":
+      return "Sign-in required.";
+    case "retrying":
+      return "Server reconnecting.";
+  }
+}
 
 export function fallbackModelStatus(): Promise<FallbackModelView> {
   return invoke<FallbackModelView>("fallback_model_status");
