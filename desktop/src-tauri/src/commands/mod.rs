@@ -39,7 +39,6 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         live::delete_saved_live_session,
         live::show_main_workspace,
         setup::polish_num_gpu,
-        recordings::start_transcribe,
         crate::file_actions::allow_recording_playback_path,
         crate::file_actions::restore_recording_playback_path,
         crate::file_actions::release_recording_playback,

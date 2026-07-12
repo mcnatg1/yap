@@ -3233,6 +3233,7 @@ pub(crate) fn restore_verified_quarantined_artifact(
     remove_verified_quarantined_artifact(artifact)
 }
 
+#[cfg(test)]
 pub(crate) fn remove_regular_artifact_if_hash(
     directory: &Path,
     name: &str,

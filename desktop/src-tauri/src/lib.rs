@@ -1,7 +1,6 @@
 mod app;
 pub mod audio;
 mod authorization;
-mod batch_recordings;
 mod commands;
 mod file_actions;
 mod install_identity;

@@ -412,22 +412,6 @@ fn mint_playback_admission(
     })
 }
 
-pub(crate) fn ensure_registered_recording_paths(
-    paths: &[std::path::PathBuf],
-) -> Result<(), String> {
-    ensure_registered_recording_paths_at(paths, &recording_playback_registry_path())
-}
-
-fn ensure_registered_recording_paths_at(
-    paths: &[std::path::PathBuf],
-    registry_path: &std::path::Path,
-) -> Result<(), String> {
-    for path in paths {
-        registered_recording_path_at(path, registry_path)?;
-    }
-    Ok(())
-}
-
 fn registered_recording_path_at(
     path: &std::path::Path,
     registry_path: &std::path::Path,
@@ -602,7 +586,7 @@ fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
 }
 
 fn is_recording_media_path(path: &std::path::Path) -> bool {
-    crate::batch_recordings::is_supported_recording_path(path)
+    has_extension(path, &["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"])
 }
 
 fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
@@ -1008,21 +992,6 @@ mod tests {
         .is_err());
         assert!(transcript.is_file());
         assert!(audio.is_file());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn registered_recording_paths_reject_unregistered_transcribe_input() {
-        let dir = temp_test_dir("transcribe-unregistered-media");
-        let registry = dir.join("registry.json");
-        let media = dir.join("meeting.wav");
-        std::fs::write(&media, b"RIFF").unwrap();
-
-        let error =
-            ensure_registered_recording_paths_at(&[media.canonicalize().unwrap()], &registry)
-                .unwrap_err();
-
-        assert_eq!(error, "Recording file is not registered for playback.");
         std::fs::remove_dir_all(dir).ok();
     }
 
