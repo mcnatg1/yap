@@ -1,17 +1,22 @@
 # ADR 0010: OKF conversation schema
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7c)
+**Status:** Accepted Markdown/YAML and raw-preservation principles; canonical Phase 9 schema pending
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (OKF dirs, Archivist), [ADR 0009](0009-knowledge-worker-protocol.md) (worker writes these)
-**Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, conversations enter **Lane 1** (content-addressed append store) rather than being written directly to OKF by the client worker; the **KB compiler** in `yap-server` normalises Lane 1 captures to OKF markdown and commits curated/stitched conversations to `yap-knowledge` (Lane 2). The **file schema** (frontmatter fields, markdown body format, dual-track raw/polished) defined in this ADR is **unchanged** — it is the output format of the KB compiler in both profiles.
+**Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, conversations enter **Lane 1** (content-addressed append store) rather than being written directly to OKF by the client worker; the **KB compiler** in `yap-server` normalises Lane 1 captures to OKF markdown and commits curated/stitched conversations to `yap-knowledge` (Lane 2).
+**Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) — the example's fixed `SPEAKER_XX`, `source`, vault, and Opus assumptions are historical. Before implementation, the schema must represent session mode/origin separately from physical tracks, accept WAV or a later negotiated transport codec, and render revisioned `Unknown` / `Speaker N` or fully provenanced server identities. The general Markdown/YAML and raw/polished principles remain accepted; the sample is not an implementation-ready v1 contract.
 
 ## Context
 
-ADR 0004 named the OKF directories (`conversations/`, `jargon_glossary/`, `work_artifacts/`, …) and said "Markdown + YAML frontmatter" but gave no concrete file schema. The Archivist (worker) and any reader (history UI, Librarian, MCP) need a pinned format. This ADR defines the **v1 file schemas**; agents/wiki-links beyond v1 are noted as optional.
+ADR 0004 named the OKF directories (`conversations/`, `jargon_glossary/`, `work_artifacts/`, …) and said "Markdown + YAML frontmatter" but gave no concrete file schema. The Archivist (worker) and any reader (history UI, Librarian, MCP) need a pinned format. This ADR recorded an initial schema sketch; ADR 0017 and ADR 0020 later made its storage lane, source, codec, and speaker fields incomplete. The canonical Phase 9 schema must amend or replace that sketch before implementation.
 
-## Decision
+## Accepted principles
 
-Files are **Markdown + YAML frontmatter**, UTF-8, human-readable, git-friendly. Under `%LOCALAPPDATA%/Yap/knowledge_base/`.
+Conversation outputs remain **Markdown + YAML frontmatter**, UTF-8, human-readable, and git-friendly. Raw text is never discarded when a polished representation exists. Exact paths, storage lanes, source/track fields, audio references, and speaker assertions remain pending under ADR 0017 and ADR 0020.
+
+## Historical schema sketch (non-normative)
+
+The remainder of this section preserves the original solo-profile proposal. It is decision history, not an implementation-ready v1 contract. In that proposal, files lived under `%LOCALAPPDATA%/Yap/knowledge_base/`.
 
 ### Conversation — `conversations/<session-id>.md`
 
@@ -60,7 +65,7 @@ Open Knowledge Format — local markdown+YAML knowledge store...
 See also: [[Speaker Vault]]
 ```
 
-Wiki-links `[[Term]]` are **optional in v1**; resolved by the Curator (Phase 7d).
+In the historical sketch, wiki-links `[[Term]]` were optional and resolved by the Curator under the old Phase 7d alias.
 
 ### Work artifact — `work_artifacts/<session-id>-todos.md`
 
@@ -80,24 +85,24 @@ Coordinator distinguishes **proposed** vs **todo** by confidence ([ADR 0004 §8]
 ### Conventions
 - `schema:` integer on every file; bump on breaking change, readers tolerate older.
 - Filenames: ISO-ish session id / term slug; no spaces.
-- Yap **Transcripts history** mirrors `conversations/` (or a subset) and can render these directly before the full agent loop ships.
+- The historical target had Yap **Transcripts history** mirror `conversations/` (or a subset). Current history does not read this schema.
 
 ## Consequences
 
 ### Positive
-- One pinned format for Archivist writer + history/Librarian/MCP readers.
+- A future pinned format gives the Archivist/compiler and history/Librarian/MCP readers one contract.
 - Markdown+YAML = portable, diffable, openable in any editor or Obsidian-style tool.
 - Dual-track raw preserved; renames don't corrupt vault.
 
 ### Negative
 - Markdown parsing for retrieval is looser than a DB; mitigated by frontmatter + the index ([ADR 0011](0011-vector-rag-retrieval.md)).
-- Schema migrations need care (handled by `schema:` field).
+- Schema migrations need care; the canonical Phase 9 schema must define versioning and compatibility before implementation.
 
 ### Neutral
-- Phase 7c; until then speaker tags append to existing Yap history JSON ([ADR 0004 §10](0004-background-diarization-okf-agents.md)).
+- Historical alias Phase 7c is replaced by canonical Phase 9. Current Yap history does not append speaker tags from this schema.
 
 ## Alternatives considered
-- **SQLite as source of truth** — rejected for content: hurts local-first portability/inspection; SQLite is used only for the **search index** ([ADR 0011](0011-vector-rag-retrieval.md)), not canonical storage.
+- **SQLite as the solo-profile content source of truth** — rejected: it hurts portability and inspection. ADR 0017 separately governs team Lane 1 storage and compiled indexes.
 - **JSON conversations** — rejected: less human-readable than markdown for a notes product.
 - **One big file per day** — rejected: per-session files diff and link better.
 

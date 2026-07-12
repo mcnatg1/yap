@@ -1,6 +1,6 @@
 # Spec: Local LLM Sidecar
 
-**Status:** Draft (2026-06-30)
+**Status:** Deferred draft; solo/local sidecar only, with team LLM execution governed by ADR 0014
 **Implements:** [ADR 0005](../adr/0005-llama-server-agents.md), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (HOT/background mutex)
 **Scope:** Move Polish off the external Ollama dependency onto a bundled `llama-server` sidecar, and define the shared LLM client used by Polish today and Scribe/agents later.
 

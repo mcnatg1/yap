@@ -1,0 +1,332 @@
+name: Stage NSIS Release Draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full commit SHA already merged into the default branch
+        required: true
+        type: string
+      tag:
+        description: GitHub release tag to create
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nsis-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve immutable commit from default branch
+        id: resolve
+        shell: pwsh
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $requested = $env:REQUESTED_SHA.ToLowerInvariant()
+          if ($requested -cnotmatch '^[0-9a-fA-F]{40}$') {
+            throw "Release commit must be a full immutable Git SHA."
+          }
+          $defaultHead = (git rev-parse --verify "HEAD^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Failed to resolve the checked-out default branch." }
+          $resolved = (git rev-parse --verify "$requested^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $resolved -cne $requested) {
+            throw "Requested release commit does not resolve exactly."
+          }
+          git merge-base --is-ancestor $requested $defaultHead
+          if ($LASTEXITCODE -ne 0) {
+            throw "Requested release commit is not reachable from the default branch."
+          }
+          "commit_sha=$requested" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  build-nsis:
+    needs: resolve-release
+    runs-on: windows-2025
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      RUST_TARGET: x86_64-pc-windows-msvc
+      RUST_TOOLCHAIN: 1.96.0
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.resolve-release.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24.14.0"
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.RUST_TARGET }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-release-${{ needs.resolve-release.outputs.commit_sha }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/nsis-hooks.nsh') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare immutable release context
+        env:
+          RELEASE_SHA: ${{ needs.resolve-release.outputs.commit_sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          node ./tests/scripts/release-artifact.mjs prepare
+          --repo-root "$env:GITHUB_WORKSPACE"
+          --commit-sha "$env:RELEASE_SHA"
+          --release-tag "$env:RELEASE_TAG"
+          --context-path ./tests/results/release/context.json
+      - name: Verify release contract
+        run: pnpm test:release-contract
+      - name: Require externally verified third-party provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node ./tests/scripts/assert-third-party-provenance.mjs --require-reviewed --verify-upstream
+      - name: Build NSIS release artifact
+        run: pnpm tauri build --bundles nsis
+      - name: Seal exact NSIS release artifact
+        id: seal
+        run: >-
+          node ./tests/scripts/release-artifact.mjs seal
+          --repo-root "$env:GITHUB_WORKSPACE"
+          --context-path ./tests/results/release/context.json
+          --bundle-directory ./src-tauri/target/release/bundle/nsis
+          --seal-path ./tests/results/release/artifact-seal.json
+          --github-output "$env:GITHUB_OUTPUT"
+      - name: Smoke the exact NSIS release artifact
+        shell: pwsh
+        env:
+          SEALED_INSTALLER_SHA256: ${{ steps.seal.outputs.installer_sha256 }}
+        run: ./tests/scripts/smoke-nsis-production-delete.ps1 -BundleDirectory ./src-tauri/target/release/bundle/nsis -ExpectedInstallerSha256 $env:SEALED_INSTALLER_SHA256
+      - name: Capture release build environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          "YAP_RELEASE_PNPM_VERSION=$(pnpm --version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YAP_RELEASE_TAURI_VERSION=$(pnpm exec tauri --version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $rustcDelimiter = "YAP_RUSTC_$([Guid]::NewGuid().ToString('N'))"
+          "YAP_RELEASE_RUSTC_VV<<$rustcDelimiter" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          rustc -Vv | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($LASTEXITCODE -ne 0) { throw "Failed to capture the Rust compiler version." }
+          $rustcDelimiter | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Import-Module "$env:GITHUB_WORKSPACE\desktop\tests\scripts\nsis-smoke-helpers.psm1" -Force
+          $nsisTools = Get-TauriNsisToolPaths -Root "$env:LOCALAPPDATA\tauri\NSIS"
+          $launcherVersion = (& $nsisTools.LauncherPath /VERSION 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($launcherVersion)) {
+            throw "Failed to capture the Tauri NSIS launcher version."
+          }
+          $compilerVersion = (& $nsisTools.CompilerPath /VERSION 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($compilerVersion)) {
+            throw "Failed to capture the Tauri NSIS compiler version."
+          }
+          if ($launcherVersion -cne $compilerVersion) {
+            throw "The Tauri NSIS launcher and compiler versions do not match."
+          }
+          $launcherHash = (Get-FileHash -LiteralPath $nsisTools.LauncherPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $compilerHash = (Get-FileHash -LiteralPath $nsisTools.CompilerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "YAP_RELEASE_NSIS_VERSION=$compilerVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YAP_RELEASE_NSIS_LAUNCHER_SHA256=$launcherHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YAP_RELEASE_NSIS_COMPILER_SHA256=$compilerHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Bind artifact evidence to immutable commit
+        id: bind
+        env:
+          SEALED_INSTALLER_SHA256: ${{ steps.seal.outputs.installer_sha256 }}
+        run: >-
+          node ./tests/scripts/release-artifact.mjs bind
+          --repo-root "$env:GITHUB_WORKSPACE"
+          --context-path ./tests/results/release/context.json
+          --bundle-directory ./src-tauri/target/release/bundle/nsis
+          --expected-installer-sha256 "$env:SEALED_INSTALLER_SHA256"
+          --seal-path ./tests/results/release/artifact-seal.json
+          --metadata-path ./tests/results/release/release-metadata.json
+          --github-output "$env:GITHUB_OUTPUT"
+      - name: Upload immutable release payload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: nsis-release-payload-${{ github.run_id }}-${{ needs.resolve-release.outputs.commit_sha }}
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            desktop/tests/results/release/release-metadata.json
+          if-no-files-found: error
+          retention-days: 2
+      - name: Upload release evidence
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: nsis-release-evidence-${{ github.run_id }}-${{ needs.resolve-release.outputs.commit_sha }}
+          path: |
+            desktop/tests/results/release/**
+            desktop/tests/results/nsis-smoke/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish-nsis:
+    needs: [resolve-release, build-nsis]
+    runs-on: windows-2025
+    timeout-minutes: 15
+    environment: production-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download immutable release payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: nsis-release-payload-${{ github.run_id }}-${{ needs.resolve-release.outputs.commit_sha }}
+          path: ${{ runner.temp }}/yap-release-payload
+      - name: Verify downloaded payload binding
+        id: verify
+        shell: pwsh
+        env:
+          PAYLOAD_ROOT: ${{ runner.temp }}/yap-release-payload
+          RELEASE_TAG: ${{ inputs.tag }}
+          VERIFIED_SHA: ${{ needs.resolve-release.outputs.commit_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadataFiles = @(Get-ChildItem -LiteralPath $env:PAYLOAD_ROOT -Recurse -Filter "release-metadata.json" -File)
+          $installers = @(Get-ChildItem -LiteralPath $env:PAYLOAD_ROOT -Recurse -Filter "*-setup.exe" -File)
+          if ($metadataFiles.Count -ne 1 -or $installers.Count -ne 1) {
+            throw "Downloaded release payload must contain exactly one installer and one metadata file."
+          }
+          $metadata = Get-Content -LiteralPath $metadataFiles[0].FullName -Raw | ConvertFrom-Json
+          if ([int]$metadata.schemaVersion -ne 3) { throw "Unsupported release metadata schema." }
+          if ($metadata.commitSha -cne $env:VERIFIED_SHA) { throw "Release metadata commit does not match the verified SHA." }
+          if ($metadata.releaseTag -cne $env:RELEASE_TAG) { throw "Release metadata tag does not match the dispatch input." }
+          if ($metadata.releaseTag -cne "v$($metadata.version)") { throw "Release tag does not match the desktop version." }
+          if ($metadata.artifact.fileName -cne $installers[0].Name) { throw "Release metadata names a different installer." }
+          if ($installers[0].Name -cnotlike "*_$($metadata.version)_*-setup.exe") { throw "Release installer filename does not match the desktop version." }
+          if ([long]$metadata.artifact.sizeBytes -ne $installers[0].Length) { throw "Release installer length does not match metadata." }
+          if ([string]::IsNullOrWhiteSpace($metadata.buildEnvironment.runner.imageOs)) { throw "Release metadata is missing the runner image." }
+          if ([string]::IsNullOrWhiteSpace($metadata.buildEnvironment.runner.imageVersion)) { throw "Release metadata is missing the runner image version." }
+          foreach ($tool in @("node", "nsis", "pnpm", "rustcVv", "tauriCli")) {
+            if ([string]::IsNullOrWhiteSpace($metadata.buildEnvironment.tools.$tool)) {
+              throw "Release metadata is missing build tool evidence for $tool."
+            }
+          }
+          foreach ($nsisHash in @("nsisLauncherSha256", "nsisCompilerSha256")) {
+            if ($metadata.buildEnvironment.tools.$nsisHash -cnotmatch '^[0-9a-f]{64}$') {
+              throw "Release metadata is missing a valid NSIS tool hash for $nsisHash."
+            }
+          }
+          $requiredInputs = @(
+            "THIRD_PARTY_NOTICES.md",
+            "THIRD_PARTY_PROVENANCE.json",
+            "desktop/package.json",
+            "desktop/pnpm-lock.yaml",
+            "desktop/src-tauri/Cargo.lock",
+            "desktop/src-tauri/Cargo.toml",
+            "desktop/src-tauri/nsis-hooks.nsh",
+            "desktop/src-tauri/rust-toolchain.toml",
+            "desktop/src-tauri/tauri.conf.json"
+          )
+          foreach ($inputPath in $requiredInputs) {
+            $inputHash = $metadata.buildEnvironment.inputsSha256.$inputPath
+            if ($inputHash -cnotmatch '^[0-9a-f]{64}$') {
+              throw "Release metadata is missing a valid input hash for $inputPath."
+            }
+          }
+          $actualHash = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($metadata.artifact.sha256 -cne $actualHash) { throw "Release installer hash does not match metadata." }
+          "installer_name=$($installers[0].Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "installer_path=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "metadata_path=$($metadataFiles[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Verify production release environment policy
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $environment = gh api "repos/$env:GH_REPO/environments/production-release" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "The production-release Environment is not configured." }
+          $branchPolicy = $environment.deployment_branch_policy
+          $allowsDefaultBranch = $branchPolicy.protected_branches -eq $true
+          if (-not $allowsDefaultBranch -and $branchPolicy.custom_branch_policies -eq $true) {
+            $policies = gh api "repos/$env:GH_REPO/environments/production-release/deployment-branch-policies" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw "Failed to inspect production release branch policies." }
+            $allowsDefaultBranch = @($policies.branch_policies | Where-Object { $_.name -eq $env:DEFAULT_BRANCH }).Count -gt 0
+          }
+          if (-not $allowsDefaultBranch) { throw "The production-release Environment does not allow the default branch." }
+      - name: Bind release tag to verified commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.resolve-release.outputs.commit_sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $encodedTag = [Uri]::EscapeDataString($env:RELEASE_TAG)
+          gh api "repos/$env:GH_REPO/git/ref/tags/$encodedTag" --silent 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh api --method POST "repos/$env:GH_REPO/git/refs" `
+              -f "ref=refs/tags/$($env:RELEASE_TAG)" `
+              -f "sha=$($env:RELEASE_SHA)" --silent
+            if ($LASTEXITCODE -ne 0) {
+              gh api "repos/$env:GH_REPO/git/ref/tags/$encodedTag" --silent
+              if ($LASTEXITCODE -ne 0) { throw "Failed to create or resolve the release tag." }
+            }
+          }
+          $resolved = gh api "repos/$env:GH_REPO/commits/$encodedTag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $resolved.sha -cne $env:RELEASE_SHA) {
+            throw "Release tag does not resolve to the verified release commit."
+          }
+      - name: Record enforcement boundary
+        shell: pwsh
+        run: |
+          "This supported workflow verifies a default-branch commit and immutable artifact, then stages a draft release." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "The private repository plan does not support required-reviewer protection. Inspect and publish the draft manually in GitHub; this workflow never makes it public." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+      - name: Stage verified GitHub draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INSTALLER_NAME: ${{ steps.verify.outputs.installer_name }}
+          INSTALLER_PATH: ${{ steps.verify.outputs.installer_path }}
+          METADATA_PATH: ${{ steps.verify.outputs.metadata_path }}
+          RELEASE_SHA: ${{ needs.resolve-release.outputs.commit_sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release create $env:RELEASE_TAG `
+            --repo $env:GH_REPO `
+            "$env:INSTALLER_PATH#$env:INSTALLER_NAME" `
+            "$env:METADATA_PATH#release-metadata.json" `
+            --draft `
+            --generate-notes `
+            --target $env:RELEASE_SHA `
+            --verify-tag `
+            --title "Yap $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Draft GitHub release creation failed." }

@@ -1,5 +1,7 @@
 # Client State Machine Implementation Plan
 
+> **Implementation status (2026-07-12):** Historical/partially landed plan. Typed UI state and a Rust orchestrator skeleton exist, but imported jobs still use numeric IDs in a React/localStorage queue. The unchecked task boxes below are execution history, not the current backlog; durable Rust ownership moves to the Phase 3 connector plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the cosmetic readiness-helper approach with a real client recording workflow state machine across existing React queue state and the future Rust `RuntimeOrchestrator`.

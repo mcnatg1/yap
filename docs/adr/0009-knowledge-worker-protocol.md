@@ -1,9 +1,10 @@
 # ADR 0009: Knowledge worker IPC protocol
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7a)
+**Status:** Accepted for the solo/local profile; team/server protocol is superseded by ADR 0017 (canonical Phase 9)
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (subprocess worker, FIFO, chunk manifest), [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator owns queue depth)
 **Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, the `yap-knowledge-worker` subprocess and the TCP JSON-lines IPC protocol defined here are **replaced by the `yap-server` KB compiler service** with REST/HTTP APIs. The chunk manifest schema (ADR 0004 §3) is preserved as the normalised document input format. The **solo/local-first profile** retains the TCP JSON-lines protocol on `YAP_KNOWLEDGE_PORT` as specified in this ADR.
+**Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - the vault, `SPEAKER_XX`, and diarization events below are historical. Current speaker evidence uses revisioned `Unknown` / session-scoped `Speaker N` results and is not coupled to the OKF worker protocol.
 
 ## Context
 
@@ -34,11 +35,10 @@ ADR 0004 mandates a **separate `yap-knowledge-worker` subprocess** and mentions 
 ### Worker → host events
 
 ```json
-{ "type": "ready",       "version": "...", "vault_size": 0 }
+{ "type": "ready",       "version": "..." }
 { "type": "queue_depth", "depth": 2 }                  // host enforces ≤3 / degraded
-{ "type": "chunk_done",  "chunk_id": "...", "speakers": ["SPEAKER_01"], "ms": 4200 }
+{ "type": "chunk_done",  "chunk_id": "...", "ms": 4200 }
 { "type": "chunk_failed","chunk_id": "...", "code": "ALIGN_FAILED", "quarantined": true }
-{ "type": "vault_update","session_id": "...", "speakers": [{ "id":"SPEAKER_01","segments":12 }] }
 { "type": "session_stitched", "session_id": "...", "path": "conversations/<id>.md" }
 { "type": "log", "level": "info", "msg": "..." }       // also to knowledge-worker.log
 ```
@@ -53,7 +53,7 @@ ADR 0004 mandates a **separate `yap-knowledge-worker` subprocess** and mentions 
 | Code | Meaning | Worker action |
 |------|---------|---------------|
 | `ALIGN_FAILED` | aligner crashed/no timings | whole-chunk single speaker; continue |
-| `DIAR_FAILED` | WeSpeaker/cluster error | `SPEAKER_UNKNOWN`; continue |
+| `DIAR_FAILED` | Historical speaker-runtime/cluster error | Preserve anonymous/unknown attribution; continue |
 | `WRITE_FAILED` | OKF/markdown write error | move audio+JSON to `quarantine/`; continue |
 | `BAD_MANIFEST` | missing required field | reject message; log; do not crash |
 

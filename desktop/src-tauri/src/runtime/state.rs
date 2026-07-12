@@ -8,7 +8,8 @@ pub enum SetupState {
     SetupError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ServerConnectorState {
     NotSet,
     Connecting,
@@ -37,4 +38,16 @@ pub enum JobRoute {
     LocalFallback,
     ServerBatch,
     ServerLive,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerConnectorState;
+
+    #[test]
+    fn server_state_serializes_for_frontend() {
+        let value = serde_json::to_value(ServerConnectorState::SignInRequired).unwrap();
+
+        assert_eq!(value, "sign_in_required");
+    }
 }

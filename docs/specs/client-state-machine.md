@@ -1,6 +1,6 @@
 # Spec: Client Recording State Machine
 
-**Status:** Draft
+**Status:** Accepted client workflow contract; local/setup paths are partially implemented and server-owned transitions remain unimplemented
 **Scope:** Desktop client workflow for the thin-client MVP, with explicit hooks for server STT, preprocessing, and diarization.
 
 This is the build contract for the client workflow. It replaces the cosmetic readiness-layer approach: the queue and runtime state must model the actual recording lifecycle.
@@ -17,7 +17,7 @@ This is the build contract for the client workflow. It replaces the cosmetic rea
 
 The long-term state machine belongs in Tauri Rust as a `RuntimeOrchestrator` or equivalent. React should project typed snapshots/events from that orchestrator.
 
-The current desktop bridge is allowed to keep React as the temporary owner of queue projection while we refactor the UI, but it must use the same vocabulary the Rust orchestrator will own later. Do not add a standalone readiness helper.
+The current desktop bridge still stores imported jobs in React/localStorage with numeric IDs and legacy `intent`/`path` fields. That is a transitional projection, not durable authority. The Phase 3 connector work replaces it with Rust-minted string IDs, a SQLite ledger, and typed snapshots/events. Do not add a second readiness or queue owner in the meantime.
 
 ## State Axes
 
@@ -28,7 +28,7 @@ The current desktop bridge is allowed to keep React as the temporary owner of qu
 | `checking` | Reading local fallback status. | Checking |
 | `fallback_missing` | Required fallback artifacts are missing or failed verification. | Setup |
 | `fallback_installing` | Setup is downloading/verifying artifacts. | Installing |
-| `fallback_ready` | Sidecar, model, tokenizer, and punctuation assets are ready and enabled. | Ready |
+| `fallback_ready` | Local runtime, model, tokenizer, and punctuation assets are ready and enabled. | Ready |
 | `fallback_disabled` | User disabled local fallback. | Disabled |
 | `setup_error` | Setup check, install, or removal failed. | Needs attention |
 
@@ -37,8 +37,8 @@ The current desktop bridge is allowed to keep React as the temporary owner of qu
 | State | Meaning | Phase |
 |-------|---------|-------|
 | `not_set` | No server URL/profile is configured. | 1 |
-| `connecting` | Health/auth check is running. | 3 |
-| `ready` | Health and auth passed. | 3 |
+| `connecting` | Version, health, auth state, and capability checks are running. | 3 |
+| `ready` | Version and auth state are valid and the required route capabilities were advertised. | 3 |
 | `offline` | Server URL exists but health timed out or failed. | 3 |
 | `sign_in_required` | Server is reachable but sign-in is required. | 7 |
 | `retrying` | Connector is retrying after network loss. | 3/5 |
@@ -73,7 +73,7 @@ These match ADR 0006's Rust-owned runtime shape.
 | `queued_server` | Job is queued for server path. | Server queued |
 | `preprocessing` | Normalization/VAD/chunk/LID/manifest work is active. | Preparing |
 | `uploading` | Desktop is uploading to server. | Uploading |
-| `server_processing_cohere` | Server Cohere batch job is processing. | Server |
+| `server_processing` | The server-selected batch backend is processing. | Server |
 | `local_transcribing` | Nemotron fallback is transcribing. | Fallback |
 | `saving` | Client is writing output/history. | Saving |
 | `diarization_queued` | Speaker work is queued. | Speakers queued |
@@ -86,7 +86,8 @@ These match ADR 0006's Rust-owned runtime shape.
 ## Recording Job Shape
 
 ```ts
-export type RecordingIntent = "live" | "recording";
+export type SessionMode = "dictation" | "meeting";
+export type SessionOrigin = "liveCapture" | "importedFile";
 export type RecordingRoute = "localFallback" | "serverBatch" | "serverLive";
 
 export type PipelineStageStatus =
@@ -108,9 +109,10 @@ export type RecordingPipelineState = {
 
 export type RecordingJobView = {
   id: string;
-  sourcePath: string;
+  sourcePath?: string;
   name: string;
-  intent: RecordingIntent;
+  sessionMode: SessionMode;
+  sessionOrigin: SessionOrigin;
   status: RecordingJobStatus;
   route?: RecordingRoute;
   outputPath?: string;
@@ -124,6 +126,8 @@ export type RecordingJobView = {
 
 Rust can use snake_case names internally and serialize typed snapshots/events to React. React can keep camelCase type aliases for UI code, but the values must remain aligned.
 
+`SessionMode` describes the product workflow. `SessionOrigin` describes how audio entered Yap. Neither is a physical track source; microphone, system loopback, and unknown/mixed imported provenance remain track metadata under ADR 0020. A live capture has no required `sourcePath` until the recording sink commits an artifact.
+
 ## Route Policy
 
 | Input | Server ready | Fallback ready | Result |
@@ -135,7 +139,7 @@ Rust can use snake_case names internally and serialize typed snapshots/events to
 | Larger recording | No | Any | `blocked_server_unavailable` or `queued_server` for retry |
 | Explicit local fallback test/dev file | No | Yes | `localFallback` |
 
-The current desktop bridge may still run selected files through local fallback while the server does not exist, but the state model must label that path as fallback/dev behavior, not the official large-recording product path.
+The current desktop bridge never executes an ordinary imported file through local Nemotron; imports remain queued or blocked. The explicit test/dev-file row is a contract-only diagnostic route and must not become reachable from normal import UX.
 
 ## Transitions
 
@@ -152,17 +156,17 @@ stateDiagram-v2
     QueuedLocalFallback --> LocalTranscribing
     QueuedServer --> Preprocessing
     Preprocessing --> Uploading
-    Uploading --> ServerProcessingCohere
+    Uploading --> ServerProcessing
     LocalTranscribing --> Saving
-    ServerProcessingCohere --> Saving
+    ServerProcessing --> Saving
     Saving --> Complete
-    ServerProcessingCohere --> DiarizationQueued: async speakers
+    ServerProcessing --> DiarizationQueued: async speakers
     DiarizationQueued --> DiarizationRunning
     DiarizationRunning --> Complete
     DiarizationRunning --> Partial
     LocalTranscribing --> Failed
     Uploading --> Failed
-    ServerProcessingCohere --> Failed
+    ServerProcessing --> Failed
     Failed --> Preflighting: retry
     QueuedLocalFallback --> Cancelled
     QueuedServer --> Cancelled
@@ -175,7 +179,7 @@ flowchart LR
     Intake["Intake"] --> Pre["Preprocessing: normalize, VAD, chunks, LID"]
     Pre --> STT["Transcription: Nemotron fallback or server router"]
     STT --> Align["Alignment and timestamps"]
-    Align --> Diar["Diarization: solo fallback or server two-pass"]
+    Align --> Diar["Diarization: local anonymous evidence or server reconciliation"]
     Diar --> Post["Postprocess: history, OKF, KB handoff"]
 ```
 
@@ -189,10 +193,10 @@ Client cleanup changes should touch existing state owners before adding runtime 
 - `desktop/src/components/panels/queue-panel.tsx` renders queue controls and progress.
 - `desktop/src/components/panels/app-sheets.tsx` renders setup/server labels.
 - `desktop/src/lib/history-utils.ts` maps history into `complete` recording views.
-- `desktop/src-tauri/src/runtime/` becomes the Rust `RuntimeOrchestrator` home when implementation reaches the backend state-machine slice.
-- `desktop/src-tauri/src/stt/dispatch.rs` keeps local fallback transcription but reports job/runtime events instead of only path-based progress.
+- `desktop/src-tauri/src/runtime/` contains the current `RuntimeOrchestrator` state skeleton; Phase 3 extends it with validated connector and durable-job snapshots.
+- `desktop/src-tauri/src/stt/dispatch.rs` now holds only shared busy/error projection state. Live transcription is owned by `live/runtime.rs` and `live/stream.rs`.
 
-No server HTTP/WSS calls, diarization engine, preprocessing engine, or local Cohere fallback are introduced by this client cleanup.
+This state-machine cleanup does not itself add server HTTP/WSS calls, diarization inference, or a local Cohere fallback. The source-aware capture/preprocessing foundation landed separately under `desktop/src-tauri/src/audio/`.
 
 ## Acceptance
 

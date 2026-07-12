@@ -1,5 +1,7 @@
 # Local Audio Preprocessing Stack Implementation Plan
 
+> **Implementation status (2026-07-12):** Evolved and substantially landed through the client-audio-foundation work and ADR 0020. Do not implement the obsolete `AudioSource::{Live, Recording}` envelope or treat the unchecked boxes below as current state; current code uses independent session mode, origin, and track-source contracts.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extract deterministic local audio preparation from the live runtime into a small shared Rust module that can serve local live fallback now and produce local capture envelopes that Phase 3 server contracts can map later.

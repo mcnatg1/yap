@@ -1,13 +1,15 @@
 # Live Speaking Overlay And Controls
 
-**Status:** Draft
+**Status:** Historical foundation design; baseline landed and native convergence remains
 **Date:** 2026-07-05
 **Scope:** Next PR for the live speaking UI/state/control foundation. This is the Phase 3/ADR 0013 bridge: build the always-available overlay, configurable hotkey, microphone setup, and typed live state contract before cross-app text injection. It does not implement the full audio thread, Scribe, save-session pipeline, or Phase 8 server streaming connector.
 **Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md)
 
+> **Current truth (2026-07-12):** Overlay, hotkeys, mic capture, local streaming, saved sessions, Windows injection, and clipboard fallback subsequently landed. The original "next PR" exclusions below are historical. Current authority is the canonical live spec: the remaining UX work is visible-bounds single-window island behavior, usable defaults, and deliberate physical-chord recording instead of typed shortcut fields.
+
 ## Problem
 
-The desktop app now has a clean recordings home and playback review surface, but it does not yet have the always-available live speaking control surface that makes the app feel like a daily dictation tool.
+At the time of this design, the desktop app had a recordings home and playback review surface but did not yet have the live speaking control surface.
 
 The product direction is:
 
@@ -15,7 +17,7 @@ The product direction is:
 - Capture is hotkey-gated or explicitly started. The app is not always listening.
 - The overlay can stay visible at the top of the screen, but the "mic hot" state must be unmistakable.
 - Team mode eventually routes live audio to `serverLive` when the GB-class server connector exists; this PR may model/display that future route, but must fall back or block until Phase 8 provides the connector.
-- Cross-app text injection is still later. This PR creates the overlay/control foundation and state hooks needed for it.
+- Cross-app text injection was intentionally later than this foundation slice; it has since landed on Windows.
 
 ## Decision
 

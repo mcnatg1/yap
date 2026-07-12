@@ -1,8 +1,9 @@
 # ADR 0017: Team knowledge base — source-of-truth, compiled disposable indexes, and permission model
 
 **Date:** 2026-07-01
-**Status:** Accepted (roadmap — Phase 11)
+**Status:** Accepted (roadmap — canonical Phase 9)
 **Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier), [ADR 0016](0016-auth-identity-bridge.md) (auth drives permissions), [ADR 0010](0010-okf-conversation-schema.md) (OKF file schema), [ADR 0011](0011-vector-rag-retrieval.md) (vector retrieval), [ADR 0012](0012-mcp-server-surface.md) (MCP surface)
+**Identity-key rule:** Per [ADR 0016](0016-auth-identity-bridge.md), every user and group reference is tenant-scoped. Bare Entra object IDs are historical shorthand and are not valid cache, index, or authorization keys.
 **Consolidates / supersedes server-profile details in:** [ADR 0009](0009-knowledge-worker-protocol.md) (knowledge worker IPC → server KB compiler API), [ADR 0010](0010-okf-conversation-schema.md) (adds two-lane store context), [ADR 0011](0011-vector-rag-retrieval.md) (SQLite → server-side vector DB for team profile), [ADR 0012](0012-mcp-server-surface.md) (MCP now runs in yap-server)
 
 ## Context
@@ -116,7 +117,7 @@ JSONB is used for compiled policies and provenance blobs; these are **compiler o
 
 | Content | Notes |
 |---------|-------|
-| Expanded per-user allowed doc IDs / paths | Pre-computed at compile time; keyed by `(objectId, build_version)` |
+| Expanded per-user allowed doc IDs / paths | Pre-computed at compile time; keyed by `(tenant_id, subject_id, build_version)` |
 | Allowed knowledge-tree by build version | Invalidated on permission recompile; never the source-of-truth |
 | Session tokens (short TTL) | Auth adjacency |
 
@@ -131,7 +132,7 @@ Redis is **never** the permission source-of-truth. It is a speed layer over Post
 | `source_path` | Path in `yap-knowledge` repo |
 | `repo_commit` / `content_hash` | Links chunk to exact source version |
 | `permission_hash` | Hash of compiled permissions at index time; stale chunks are skipped on lookup |
-| `access_tags` | Pre-compiled set of allowed `objectId`s or group IDs (denormalised for fast filter) |
+| `access_tags` | Pre-compiled tenant-scoped principal references such as `(tenant_id, subject_id)` or `(tenant_id, group_id)` (denormalised for fast filter) |
 | `heading` | Section heading for citation |
 | `char_span` | `[start, end]` character offsets in source document |
 | `embedding` | 384-D or 768-D semantic vector |
@@ -278,9 +279,9 @@ denials:
     - contractor-x@org.com
 ```
 
-The compiler expands group membership from Entra ID (ADR 0016) to individual `objectId`s at compile time.
+The compiler resolves permission-file names inside the configured tenant and expands group membership from Entra ID (ADR 0016) to tenant-scoped `(tenant_id, subject_id)` principal keys at compile time. Group IDs are tenant-scoped as well. Unresolved or cross-tenant principals fail closed.
 
-### Phase 11 deliverables
+### Canonical Phase 9 deliverables
 
 - [ ] `yap-knowledge` repo scaffolding (ADR 0018)
 - [ ] KB compiler service in `yap-server`
@@ -298,7 +299,7 @@ The compiler expands group membership from Entra ID (ADR 0016) to individual `ob
 ## Open questions
 
 1. **Lane 1 migration threshold** — What specific metric (e.g. transcript commits/day, repo size, CI time) triggers migration from the Git-compatible Lane 1 design to a dedicated content-addressed store? Monitoring-driven; not a fixed number.
-2. **Vector DB choice** — Milvus vs pgvector vs Qdrant? Evaluate at Phase 11 build time against the GB-class server node profile (RAM, storage IOPS, GPU-accelerated ANN). Record the decision in an ADR amendment.
+2. **Vector DB choice** — Milvus vs pgvector vs Qdrant? Evaluate during canonical Phase 9 against the GB-class server node profile (RAM, storage IOPS, GPU-accelerated ANN). Record the decision in an ADR amendment.
 3. **Permission compile latency SLA** — How quickly must a permission change propagate to all users? (Seconds? Minutes?) This drives the compile pipeline design (incremental vs full rebuild).
 4. **`yap-knowledge` repo host** — Self-hosted Gitea on the org LAN vs GitHub Enterprise? Must be reachable from `yap-server`; must satisfy the org's data-residency requirements.
 

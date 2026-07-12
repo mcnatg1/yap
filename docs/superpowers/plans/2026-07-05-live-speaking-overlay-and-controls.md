@@ -1,5 +1,7 @@
 # Live Speaking Overlay And Controls Implementation Plan
 
+> **Implementation status (2026-07-12):** Historical foundation plan. Overlay, hotkeys, capture, local streaming, recording, and Windows injection subsequently landed; the original exclusions below describe that PR's scope, not current product capability.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the next PR foundation for a snappy always-available live speaking overlay, configurable recording hotkey, microphone setup, and typed live state hooks without implementing cross-app text injection, full live STT streaming, Scribe, save-session audio, or the Phase 8 server connector.

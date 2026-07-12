@@ -11,12 +11,14 @@ __pycache__/
 .mypy_cache/
 
 desktop/node_modules/
+.pnpm-store/
 desktop/dist/
 desktop/dist-portable/
 desktop/playwright-report/
 desktop/test-results/
 desktop/tests/results/
 desktop/src-tauri/target/
+desktop/src-tauri/target-test/
 .vite/
 .tools/
 .xwin-cache/
@@ -55,3 +57,5 @@ Thumbs.db
 .impeccable/
 
 .worktrees/
+
+.superpowers/sdd/task-6-report.md

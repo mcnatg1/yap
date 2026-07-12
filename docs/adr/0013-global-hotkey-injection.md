@@ -1,19 +1,19 @@
 # ADR 0013: Global hotkey + cross-app text injection (L1)
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — overlay/hotkey foundation in Phase 3; injection in Phase 7+)
-**Builds on:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) (STT sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [live spec](../specs/live-dictation-client-ux.md)
+**Status:** Accepted (Windows adapter active; native target smoke and cross-platform adapters continue)
+**Builds on:** [ADR 0006](0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [ADR 0019](0019-local-streaming-model-selection.md) (in-process Nemotron), [live spec](../specs/live-dictation-client-ux.md)
 
 ## Context
 
-L1 of the Voice OS is a **global hotkey** that opens the mic from any app and **injects** the transcribed text into the focused field — the Wispr-Flow-style surface. ADR 0003 left open: "Does global hotkey/injector share the Yap Tauri process or a second tray app?"
+L1 of the Voice OS is a **global hotkey** that opens the mic from any app and **injects** the transcribed text into the stop-time focused external control — the Wispr-Flow-style surface. ADR 0003 left open: "Does global hotkey/injector share the Yap Tauri process or a second tray app?"
 
 The implementation now splits this surface into two deliverable layers:
 
-- **Phase 3 foundation:** live overlay, configurable capture hotkey, mic settings, and live session state. This supports in-app/overlay live recording but does not inject text into other apps.
-- **Phase 7+ injection:** OS accessibility/input permissions, focus detection, text insertion, and clipboard fallback.
+- **Current desktop path:** live overlay, configurable capture hotkey, mic settings, live session state, automatic Windows insertion after completion, and a configurable paste-last shortcut.
+- **Cross-platform hardening:** macOS accessibility integration, richer permission recovery, application compatibility probes, and explicit fallback feedback.
 
-Text injection remains the **last and most ambitious** surface and must not be promised on v1 ([ADR 0002](0002-crispasr-unified-stt-runtime.md), `PRODUCT.md` anti-references).
+Focused-field injection is a core dictation behavior. It must remain client-owned, local, and independent of server availability. The server may improve transcript quality, but it must not own OS focus or insertion.
 
 ## Decision
 
@@ -22,21 +22,21 @@ Text injection remains the **last and most ambitious** surface and must not be p
 | Concern | Decision |
 |---------|----------|
 | Host | Existing Yap Tauri process, running in **tray/background** mode; no second binary |
-| Hotkey | `tauri-plugin-global-shortcut` registers a user-configurable chord; capture controls can ship before text injection |
-| Mic/STT | Reuses the warm **crispasr moonshine** path + orchestrator pre-warm ([ADR 0006](0006-silero-agents-state-machine.md)) — no second STT stack |
-| Overlay | Small always-on-top webview (ghost preview), currently specified as a top-positioned translucent overlay in the Phase 3 foundation |
-| Injection | Phase 7+ OS-level text insertion (e.g. `enigo`/platform APIs): paste-style insert into the focused field |
+| Hotkey | `tauri-plugin-global-shortcut` registers separate user-configurable dictation and paste-last chords; mutation is idle-only, conflict-safe, and transactional |
+| Mic/STT | Reuses the warm in-process Nemotron `LiveStreamEngine` selected by ADR 0019 — one client-local recognizer runtime, no second ASR stack |
+| Overlay | Small always-on-top, non-focusable top-bezel webview |
+| Injection | Capture the external foreground window and, when Windows exposes it, the focused child control when stop begins; revalidate the available target data after final decoding, then send Unicode input. If focus changed, modifiers remain held, or UIPI blocks input, write the full transcript to the clipboard with a valid Yap HWND owner and surface manual-paste status. |
 
-Reusing one process keeps **one STT sidecar, one orchestrator, one model residency** — the whole point of ADR 0006. A separate tray app would duplicate sidecar management and risk dual model loads.
+Reusing one process keeps **one client-local recognizer, one orchestrator, and one model residency** — the whole point of ADR 0006. A separate tray app would duplicate recognizer management and risk dual model loads.
 
 ### Permissions (explicit, per-OS)
 - **macOS:** Accessibility (for injection) + Input Monitoring (global hotkey) + Microphone — request with clear rationale; degrade to "copy to clipboard" if denied.
-- **Windows:** global hotkey + mic; injection via SendInput; UIPI limits on elevated targets → clipboard fallback.
+- **Windows:** global hotkey + mic; injection via `SendInput`; UIPI limits on elevated targets leave the transcript on the clipboard for manual paste.
 - Never silently capture: overlay clearly shows when the mic is hot.
 
 ### Fallback ladder
 ```
-inject into focused field → if blocked → copy to clipboard + toast "Copied — paste with Ctrl/Cmd+V"
+capture stop-time target → revalidate after decode → Unicode `SendInput` → if unsafe/blocked, copy full text + show manual-paste status
 ```
 
 ### Scope guard
@@ -46,8 +46,8 @@ inject into focused field → if blocked → copy to clipboard + toast "Copied �
 ## Consequences
 
 ### Positive
-- Single process → single sidecar/orchestrator; consistent with ADR 0006 invariants.
-- Reuses live pipeline (Phase 3); L1 is mostly hotkey + overlay + injection glue.
+- Single process → single local recognizer/orchestrator; consistent with ADR 0006 and ADR 0019 invariants.
+- Reuses the current client live pipeline; L1 is mostly hotkey + overlay + injection glue.
 - Clear permission + fallback story protects the local-first trust model.
 
 ### Negative
@@ -55,10 +55,10 @@ inject into focused field → if blocked → copy to clipboard + toast "Copied �
 - Tray/background mode adds lifecycle states (running while window closed).
 
 ### Neutral
-- Phase 7+; explicitly **not** a v1 promise. Compete on batch + local + live-in-app first ([ADR 0002](0002-crispasr-unified-stt-runtime.md)).
+- Windows ships first. macOS/Linux adapters and deeper compatibility probes remain follow-on work.
 
 ## Alternatives considered
-- **Separate tray/daemon app** — rejected: duplicates sidecar mgmt; risks dual STT residency; two binaries to sign/update.
+- **Separate tray/daemon app** — rejected: duplicates recognizer management; risks dual STT residency; two binaries to sign/update.
 - **Clipboard-only (no injection)** — viable **fallback**, rejected as the primary because it isn't the Wispr-class UX the surface promises.
 - **Accessibility-tree typing per app** — rejected v1: brittle across apps; OS insert + clipboard fallback is more robust.
 

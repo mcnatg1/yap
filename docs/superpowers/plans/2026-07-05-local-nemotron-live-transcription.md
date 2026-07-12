@@ -1,5 +1,7 @@
 # Local Nemotron Live Transcription Implementation Plan
 
+> **Implementation status (2026-07-12):** Baseline implemented. Remaining work is model-artifact licensing, licensed real-speech/WER evidence, hosted real-model/native CI and performance gates, and production-release proof; unchecked historical implementation boxes do not mean the runtime is absent.
+
 > **For agentic workers:** Use this as the current implementation map. ADR 0019 supersedes earlier Moonshine/Parakeet local fallback plans.
 
 **Goal:** Keep the desktop client focused on one local live/offline fallback: Nemotron 3.5 ASR Streaming 0.6B INT8 via `sherpa-onnx`.

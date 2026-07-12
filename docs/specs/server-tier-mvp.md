@@ -1,6 +1,6 @@
 # Spec: Server Tier MVP
 
-**Status:** Draft
+**Status:** Draft canonical Phase 3 build contract; health/router skeleton only
 **Scope:** Stand up the first server path while keeping this repo as the MVP monorepo.
 
 The server tier introduces `yap-server` as a private service on an org-owned GB-class server node. The desktop remains the product surface; the server owns heavy inference, queues, and the future API contract.
@@ -15,7 +15,7 @@ cohere-transcribe-local/
   docs/                  ADRs, specs, runbooks
 ```
 
-This stays a monorepo through MVP. Split into `yap-desktop`, `yap-server`, and `yap-knowledge` in Phase 12 after the server is deployable and access boundaries are real.
+This stays a monorepo through canonical Phase 9. Split into `yap-desktop`, `yap-server`, and `yap-knowledge` in canonical Phase 10 after the server is deployable and access boundaries are real.
 
 `server/` starts small and tracks the future service shape without adding a framework:
 
@@ -56,4 +56,4 @@ Avoid top-level `models/` and `workers/` during MVP. Model files live on the nod
 - `server/README.md` defines where server-tier code lands.
 - `python -m unittest discover -s server/tests -p "test_*.py"` passes with `PYTHONPATH=server/src`.
 - `infra/yap-server-node/setup-server.sh` stays idempotent and syntax-valid.
-- ADR 0018 still records the Phase 12 three-repo split.
+- ADR 0018 still records the canonical Phase 10 three-repo split.

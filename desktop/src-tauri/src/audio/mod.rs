@@ -1,13 +1,14 @@
 //! Deterministic desktop-side audio preparation.
 //! Heavy inference, diarization, enrichment, and team storage stay server-owned.
 
+pub mod capture;
+pub mod coordinator;
+pub mod evidence;
 pub mod frame;
 pub mod manifest;
 pub mod preprocess;
+pub mod recording;
+pub mod results;
+pub mod session;
+pub mod timeline;
 pub mod vad;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn audio_module_exports_expected_children() {}
-}

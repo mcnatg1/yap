@@ -1,14 +1,16 @@
 # ADR 0014: Server-tier compute topology — thin client + GB-class workload router
 
 **Date:** 2026-07-01
-**Status:** Accepted (roadmap — Phase 8)
+**Status:** Accepted (roadmap — canonical Phases 3–5)
 **Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (local fallback runtime history), [ADR 0005](0005-llama-server-agents.md) (LLM sidecar), [ADR 0006](0006-silero-agents-state-machine.md) (runtime state machine)
 **Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the team profile still defaults to server-hosted live ASR when connected, but the desktop-local offline/degraded fallback is Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`.
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
+**Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
+**Implementation status:** Client capture/local fallback and a server health/router skeleton exist. The network service, capability contract, connector, durable jobs, upload/WSS, auth, and server inference are not implemented.
 
 ## Context
 
-Yap's existing architecture is **local-first**: the local STT fallback, llama-server LLM, and knowledge worker all run on the client machine. Benchmarks against a typical 16 GB i5 laptop CPU reveal hard limits:
+The earlier local-first architecture proposed that local STT, a llama-server LLM, and a knowledge worker would all run on the client. Only local Nemotron STT is implemented; llama-server and the knowledge worker remain unimplemented. Benchmarks against a typical 16 GB i5 laptop CPU motivated moving the heavier target workloads server-side:
 
 | Workload | Result | Significance |
 |----------|--------|--------------|
@@ -30,11 +32,11 @@ Yap supports two deployment profiles. Neither profile is deleted. The team profi
 |-----------|---------------------------|----------------------|
 | Target | Individual users with local live fallback | Org teams on a shared GB-class server node |
 | STT (live) | Local Nemotron INT8 (`sherpa-onnx`) | Server-hosted streaming ASR pool |
-| STT (batch) | Queue/block larger recordings when offline; no local Cohere default in PR3 | Server Cohere batch pool (concurrent GPU workers) |
-| LLM | Local llama-server (`-ngl 0`) | Server LLM pool (Scribe/polish/agents on GPU) |
-| Diarization | Server-less (L3 worker, Phase 7b) | Two-pass server pipeline (ADR 0015, Phase 10) |
-| Knowledge base | Local OKF markdown (Phase 7c) | `yap-knowledge` Git repo + KB compiler (ADR 0017, Phase 11) |
-| Auth | None / local | Entra ID / MSAL (ADR 0016, Phase 9) |
+| STT (batch) | Queue/block every imported recording when offline; no local file-ASR path | Server Cohere batch pool (concurrent GPU workers) |
+| LLM | Future local llama-server (`-ngl 0`); not shipped | Future server LLM pool (Scribe/polish/agents on GPU) |
+| Diarization | Optional local anonymous evidence; no durable voice profiles | Server-authoritative reconciliation and purpose-authorized identity (ADR 0020, canonical Phase 8) |
+| Knowledge base | Local OKF markdown (legacy phase map) | `yap-knowledge` Git repo + KB compiler (ADR 0017, canonical Phase 9) |
+| Auth | None / local | Entra ID / MSAL (ADR 0016, canonical Phase 7) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
 
 ### Client-side responsibilities (both profiles)
@@ -43,9 +45,9 @@ The Tauri desktop app (`yap-desktop`) retains everything that cannot be delegate
 
 | Responsibility | Notes |
 |----------------|-------|
-| **Mic capture** | Platform audio API; always local |
-| **VAD / endpointing** | Silero ONNX in Rust (ADR 0006); produces Opus chunks + `vad_segments` |
-| **Opus chunk encoding** | Compress before wire transfer; reduces bandwidth by ~10× vs PCM |
+| **Track-aware capture** | Platform audio API; microphone now and optional system loopback later; always local |
+| **VAD / endpointing** | Client-side advisory boundaries and endpointing; source audio remains authoritative |
+| **Transport encoding** | Negotiate PCM/Opus with the server contract; preserve source-track and gap metadata |
 | **Global hotkey + text injection** | ADR 0013; OS-level; cannot be delegated |
 | **Ghost / preview UI** | Tauri webview overlay; latency-sensitive rendering |
 | **Local file selection** | OS file picker; files may be uploaded to server for batch |
@@ -70,7 +72,7 @@ flowchart TB
         end
 
         KB["Knowledge compiler\n(ADR 0017)"]
-        Diar["Diarization service\n(ADR 0015)"]
+        Diar["Diarization service\n(ADR 0020)"]
     end
 
     Client -->|"Opus stream (WSS)"| Router
@@ -179,7 +181,7 @@ C4Deployment
 | Pool | Model | Mode | Notes |
 |------|-------|------|-------|
 | **Streaming ASR pool** | Server-selected GPU ASR | Live mic, real-time WSS | Wispr-Flow-style; thin client streams Opus chunks; server returns partial/final tokens |
-| **Cohere batch pool** | Cohere Transcribe (GPU) | File / queue jobs | Multiple concurrent workers; GPU throughput removes the 26-min CPU bottleneck |
+| **Cohere batch pool** | Cohere Transcribe (GPU) | File / queue jobs | Multiple concurrent workers; expected to improve on the 26-min CPU result, subject to GB10 benchmarks |
 | **LLM pool** | Scribe/polish + agent models (GPU) | Scribe polish, Student/Curator/Analyst/Coordinator | Multi-tenant; `-ngl` not 0 on GPU |
 
 #### Client/server protocol shape
@@ -222,7 +224,7 @@ sequenceDiagram
 | **Server streaming ASR** (team default) | Team profile; server reachable | Client streams Opus → server ASR pool → partial tokens returned over WSS; lowest latency on LAN |
 | **Local Nemotron INT8** (offline/degraded fallback) | Solo profile; server unreachable; degraded mode | sherpa-onnx recognizer on client; quality/language coverage lower than server GPU |
 
-**Local Nemotron INT8 is a fallback flag, not the product.** In team profile, the default live path is server-hosted streaming ASR. The client connector detects server reachability and falls back automatically.
+**Local Nemotron INT8 is a fallback route, not official imported-file ASR.** In team profile, server streaming is preferred only after version, authentication state, and the required live capability validate. A connector outage may route live dictation to Nemotron, but imported recordings remain queued server jobs.
 
 ### On-prem is not cloud
 
@@ -238,7 +240,7 @@ The GB-class server node:
 
 | Concern | Server streaming ASR (team) | Local Nemotron (solo/fallback) |
 |---------|----------------------------|---------------------------------|
-| **Latency** | LAN round-trip (~1–5 ms) + server inference; typically competitive | Pure local; no network |
+| **Latency** | LAN round-trip planning estimate (~1–5 ms) + unbenchmarked server inference | Pure local; no network |
 | **Bandwidth** | ~16 kbps Opus audio upstream | Zero |
 | **Privacy** | Audio leaves device → server (org-controlled LAN) | Audio never leaves device |
 | **Offline** | Requires LAN/VPN | Fully offline |
@@ -249,7 +251,7 @@ The GB-class server node:
 
 ### Positive
 
-- **CPU bottleneck removed** — Cohere batch drops from ~26 min (CPU) to a few minutes on the GPU pool, with concurrent multi-user throughput. (Exact GPU wall time is unbenchmarked; see § Open questions.)
+- **CPU bottleneck can move off the client** — the GPU pool is expected to improve on the ~26 min CPU result and permit concurrent work, but GB10 wall time and safe concurrency remain benchmark gates.
 - **Better live quality** — the server can run larger or more specialized ASR models than the client can afford locally.
 - **Solo profile preserved** — no regression for offline or privacy-max users.
 - **Clear trust framing** — "our hardware, our network" resolves the local-first/GPU tension cleanly.
@@ -264,26 +266,19 @@ The GB-class server node:
 
 ### Neutral
 
-- The client binary (`yap-desktop`) ships to all users; profile is determined at runtime by server connectivity and auth status.
-- Phases 1–7e (local-first track) continue in parallel for the solo profile; they are not blocked by the server-tier work.
+- The client binary (`yap-desktop`) ships to all users. Deployment intent comes from local/org configuration; connectivity, version, authentication, and advertised capabilities determine connector state and route without silently changing a configured team deployment into Solo.
+- Client-local live fallback remains available through all canonical phases; server work in Phases 3–9 does not turn imported recordings into local jobs.
 
 ## Implementation notes
 
-### Profile detection
+### Profile and connector state
 
 ```rust
-enum DeploymentProfile { Solo, Team }
-
-fn detect_profile(config: &AppConfig) -> DeploymentProfile {
-    if config.server_url.is_some() && server_reachable(&config.server_url) {
-        DeploymentProfile::Team
-    } else {
-        DeploymentProfile::Solo
-    }
-}
+enum DeploymentProfile { Solo, TeamConfigured }
+enum ConnectorState { Disabled, Connecting, Offline, SignInRequired, Ready }
 ```
 
-The server URL is set in Settings (org onboarding). Missing or unreachable → solo profile automatically.
+The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured + Offline`; it does not silently become Solo. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is offline. `Ready` is accepted only after the version, auth state, and required advertised capabilities validate.
 
 ### Client connector state machine (team profile)
 
@@ -291,8 +286,9 @@ The server URL is set in Settings (org onboarding). Missing or unreachable → s
 stateDiagram-v2
     [*] --> Disconnected
     Disconnected --> Connecting: server_url present
-    Connecting --> Connected: health + auth ok
-    Connecting --> LocalFallback: timeout / auth fail
+    Connecting --> Connected: version + auth + capabilities valid
+    Connecting --> QueuedOffline: timeout / malformed or incompatible health
+    Connecting --> SignInRequired: auth required
     Connected --> LiveStreaming: live mic
     Connected --> BatchUploading: larger recording
     LiveStreaming --> Connected: stream final
@@ -304,11 +300,11 @@ stateDiagram-v2
     Connected --> Disconnected: user disables server
 ```
 
-On `Connected` loss → switch to solo/local fallback; toast "Using local transcription (server unreachable)."
+On `Connected` loss, live dictation may switch to local fallback with a visible route notice. Imported recordings remain server jobs in `QueuedOffline`; they never run through local Nemotron.
 
-### Phase 8 deliverables
+### Canonical Phases 3–5 deliverables
 
-- [ ] `server/` staging area and Phase 8 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in Phase 12)
+- [ ] `server/` staging area and Phase 3 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
 - [ ] Workload router: per-user queues, priority, pool dispatch
 - [ ] Streaming ASR pool: GPU ASR, WSS endpoint
 - [ ] Cohere batch pool: concurrent GPU workers, job queue

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Yap desktop client"
 authors = ["Yap contributors"]
 edition = "2021"
+rust-version = "1.96"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -21,16 +22,21 @@ tauri-build = { version = "2", features = [] }
 wdio = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"
-reqwest = { version = "0.13", features = ["blocking", "multipart", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
 sha2 = "0.11"
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 tauri-plugin-global-shortcut = "2"
 cpal = "0.16"
 sherpa-onnx = "1.13.4"
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 tauri-plugin-wdio = { version = "1", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1", optional = true }
+time = { version = "0.3.53", default-features = false, features = ["formatting", "parsing"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

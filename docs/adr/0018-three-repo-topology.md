@@ -1,8 +1,8 @@
 # ADR 0018: Three-repo topology
 
 **Date:** 2026-07-01
-**Status:** Accepted (roadmap — Phase 12)
-**Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier), [ADR 0017](0017-knowledge-base-compiler.md) (yap-knowledge as Git source-of-truth)
+**Status:** Accepted (roadmap — canonical Phase 10)
+**Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier), [ADR 0017](0017-knowledge-base-compiler.md) (yap-knowledge as Git source-of-truth), [ADR 0020](0020-meeting-capture-diarization-authority.md) (meeting capture and diarization authority)
 
 ## Context
 
@@ -19,12 +19,12 @@ Today the entire codebase lives in a single monorepo (`cohere-transcribe-local`)
 
 Split the codebase into **three repositories**, each with a single, clear deployment identity.
 
-This is the **long-term Phase 12 target**, not the MVP working layout. Through MVP and early server phases, keep a staged monorepo:
+This is the **long-term canonical Phase 10 target**, not the MVP working layout. Through Phase 9, keep a staged monorepo:
 
 ```text
 cohere-transcribe-local/
   desktop/              # installed Tauri client; future yap-desktop
-  server/               # Phase 8 yap-server staging area
+  server/               # canonical Phases 3–5 yap-server staging area
   infra/yap-server-node/ # GB-class host setup, independent of app code
   docs/                 # authoritative ADRs, specs, and runbooks
 ```
@@ -38,7 +38,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | Tauri + React thin client |
 | **Primary language** | Rust (Tauri backend) + TypeScript (React frontend) |
 | **Deployment** | NSIS installer (Windows); future: macOS DMG, Linux AppImage |
-| **Responsibilities** | Mic capture; Silero VAD; Opus encoding; global hotkey + text injection (ADR 0013); ghost / preview UI; server connector (WSS + HTTP); local file selection; local Nemotron INT8 fallback; Settings UI |
+| **Responsibilities** | Track-aware capture and deterministic preprocessing; recording; global hotkey + text injection (ADR 0013); ghost / preview UI; optional anonymous speaker evidence; server connector (WSS + HTTP); local file selection; local Nemotron INT8 fallback; Settings UI |
 | **Maps from** | `cohere-transcribe-local/desktop/` |
 
 `yap-desktop` ships to end-user machines. It must be code-signed and notarised per-platform. It contains no server-side logic and no knowledge data.
@@ -50,7 +50,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | GB-class server node: workload router, model pools, KB compiler, auth middleware, APIs |
 | **Primary language** | Python (ML inference services) + Rust (router / API server) |
 | **Deployment** | Docker Compose / Kubernetes on org-managed GB-class hardware |
-| **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); Streaming ASR pool (WSS); Cohere batch pool (concurrent GPU workers); LLM pool (Scribe/polish/agents); ECAPA-TDNN + two-pass diarization service (ADR 0015); KB compiler service (ADR 0017); Auth middleware + identity DB (ADR 0016); APIs: live WSS, batch job queue, KB query |
+| **Responsibilities** | Workload router (per-tenant queues, fairness, backpressure); streaming and batch ASR pools; LLM pool (Scribe/polish/agents); authoritative model-selected diarization and reconciliation (ADR 0020); purpose-authorized identity service (ADR 0016); KB compiler service (ADR 0017); APIs for live streams, batch jobs, result revisions, and KB queries |
 | **Infrastructure-as-code** | `yap-server/infra/` contains Postgres migrations, Redis config, vector index config, S3 bucket/lifecycle policy, docker-compose/k8s manifests. The storage **data** lives on the running server node; the repo holds migrations + IaC only. |
 | **Maps from** | `cohere-transcribe-local/server/` plus `infra/yap-server-node/` after MVP staging |
 
@@ -108,15 +108,15 @@ The current `cohere-transcribe-local` workspace maps as follows:
 | Current path | Destination repo |
 |--------------|-----------------|
 | `desktop/` | `yap-desktop` |
-| `server/` | MVP staging area for `yap-server`; split in Phase 12 |
+| `server/` | MVP staging area for `yap-server`; split in canonical Phase 10 |
 | `infra/yap-server-node/` | `yap-server` host/bootstrap docs and scripts |
-| `docs/` | Stay in the monorepo through MVP; split or copy with repo ownership in Phase 12 |
+| `docs/` | Stay in the monorepo through Phase 9; split or copy with repo ownership in Phase 10 |
 | Historical `transcribe.py`, `requirements.txt` | Not migrated; larger-recording transcription moved toward the server path while local live fallback moved to the Tauri runtime |
 | `PRODUCT.md`, `DESIGN.md` | `yap-desktop` (product docs) |
-| *New server code* | `server/` now; `yap-server` repo in Phase 12 |
+| *New server code* | `server/` now; `yap-server` repo in canonical Phase 10 |
 | *Knowledge data* | `yap-knowledge` (new repo) |
 
-The migration is **not** Phase 12's only scope; it also includes updating all CI/CD pipelines, cross-repo references, and the ADR cross-links. Phase 12 is a logistics phase, not a feature phase.
+The migration is **not** Phase 10's only scope; it also includes updating all CI/CD pipelines, cross-repo references, and the ADR cross-links. Phase 10 is a logistics phase, not a feature phase.
 
 ### Optional future: `yap-contracts`
 
@@ -141,7 +141,7 @@ Extracting prematurely adds a third dependency to manage without a proven need.
 ### Negative
 
 - **Cross-repo coordination** — API changes require coordinated updates in two repos (`yap-desktop` and `yap-server`). Mitigated by starting with API types in `yap-server` and a clear versioning policy.
-- **Migration cost** — splitting the monorepo requires updating CI/CD, cross-repo links, and developer tooling. Phase 12 has non-trivial logistics.
+- **Migration cost** — splitting the monorepo requires updating CI/CD, cross-repo links, and developer tooling. Phase 10 has non-trivial logistics.
 - **Git history fragmentation** — `git log` on `yap-desktop` will not show the server history. Acceptable: the two systems were merged only temporarily.
 
 ### Neutral
@@ -151,7 +151,7 @@ Extracting prematurely adds a third dependency to manage without a proven need.
 
 ## Implementation notes
 
-### Phase 12 deliverables
+### Canonical Phase 10 deliverables
 
 - [ ] Create/extract `yap-server` repo from `server/` and `infra/yap-server-node/`; preserve router, pool stubs, KB compiler stub, and IaC structure
 - [ ] Create `yap-knowledge` repo; initial permission schema, placeholder OKF directories
@@ -165,9 +165,9 @@ Extracting prematurely adds a third dependency to manage without a proven need.
 
 ### Single monorepo (keep `cohere-transcribe-local`)
 
-**Rejected for the long term.** A monorepo works for Phase 0–7 but conflates a data repo (`yap-knowledge`), a server service, and a desktop installer. Path-based CI filtering becomes fragile. Access control on `yap-knowledge` cannot be enforced at the repo level.
+**Rejected for the long term.** A monorepo works through canonical Phase 9 but conflates a data repo (`yap-knowledge`), a server service, and a desktop installer. Path-based CI filtering becomes fragile. Access control on `yap-knowledge` cannot be enforced at the repo level.
 
-**Acceptable short-term:** the repo split is Phase 12; earlier server-tier phases (8–11) can build in a `server/` subdirectory of the monorepo as a staging area before the formal split.
+**Acceptable short-term:** the repo split is canonical Phase 10; server, preprocessing, diarization, and knowledge phases 3–9 can build in a `server/` subdirectory of the monorepo before the formal split.
 
 ### Two repos (yap-desktop + yap-server, merge yap-knowledge into server)
 

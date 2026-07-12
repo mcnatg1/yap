@@ -1,18 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { liveSettingsLocked, projectFallbackLifecycle } from "@/components/panels/app-sheets";
+import { liveSettingsLocked, projectFallbackLifecycle, projectLiveOverlayAction } from "@/components/panels/app-sheets";
 import {
+  acceptedRecordingDrops,
   createInitialPipelineState,
   deriveSetupState,
   deriveSetupStateFromFallbackModel,
   isFallbackModelBusy,
   isRecordingActive,
   isRecordingFinished,
-  isRecordingRetryable,
-  isRecordingRunnable,
   isWorkspaceView,
   fallbackModelLabel,
-  recordingStatusForStartFailure,
   serverConnectionLabel,
   setupStateLabel,
 } from "@/lib/app-types";
@@ -69,27 +67,25 @@ describe("client recording workflow projection", () => {
     expect(fallbackModelLabel("custom.gguf")).toBe("custom");
   });
 
-  it("keeps active, finished, and runnable statuses distinct", () => {
-    expect(isRecordingActive("local_transcribing")).toBe(true);
-    expect(isRecordingActive("queued_local_fallback")).toBe(false);
+  it("keeps queued, active server, and finished statuses distinct", () => {
+    expect(isRecordingActive("server_processing")).toBe(true);
+    expect(isRecordingActive("queued_server")).toBe(false);
     expect(isRecordingFinished("complete")).toBe(true);
     expect(isRecordingFinished("partial")).toBe(true);
-    expect(isRecordingRunnable("blocked_server_unavailable")).toBe(false);
-    expect(isRecordingRunnable("queued_local_fallback")).toBe(true);
-    expect(isRecordingRunnable("failed")).toBe(true);
-    expect(isRecordingRunnable("complete")).toBe(false);
-    expect(isRecordingRetryable("blocked_server_unavailable")).toBe(false);
-    expect(isRecordingRetryable("blocked_sign_in_required")).toBe(true);
-    expect(isRecordingRetryable("blocked_setup_required")).toBe(false);
+    expect(isRecordingFinished("queued_server")).toBe(false);
   });
 
-  it("maps rejected starts into recoverable job states", () => {
-    expect(recordingStatusForStartFailure("MODEL_MISSING")).toBe("blocked_setup_required");
-    expect(recordingStatusForStartFailure("FALLBACK_DISABLED")).toBe("blocked_setup_required");
-    expect(recordingStatusForStartFailure("SERVER_UNAVAILABLE")).toBe("blocked_server_unavailable");
-    expect(recordingStatusForStartFailure("SIGN_IN_REQUIRED")).toBe("blocked_sign_in_required");
-    expect(recordingStatusForStartFailure("BUSY")).toBe("failed");
-    expect(recordingStatusForStartFailure()).toBe("failed");
+  it("accepts only new supported recording drops while preserving allocated ids", () => {
+    expect(acceptedRecordingDrops(["C:/a.wav"], [
+      { id: 10, path: "C:/a.wav" },
+      { id: 11, path: "C:/b.txt" },
+      { id: 12, path: "C:/c.wav" },
+      { id: 13, path: "C:/c.wav" },
+      { id: 14, path: "C:/d.mp3" },
+    ])).toEqual([
+      { id: 12, path: "C:/c.wav" },
+      { id: 14, path: "C:/d.mp3" },
+    ]);
   });
 
   it("guards workspace event payloads at runtime", () => {
@@ -196,6 +192,25 @@ describe("client recording workflow projection", () => {
   it("treats saving as an active settings lock", () => {
     expect(liveSettingsLocked("saving")).toBe(true);
     expect(liveSettingsLocked("idle")).toBe(false);
+  });
+
+  it("keeps the settings Stop action available while live is active", () => {
+    expect(projectLiveOverlayAction("speaking", false)).toEqual({
+      disabled: false,
+      label: "Stop",
+    });
+    expect(projectLiveOverlayAction("speaking", true)).toEqual({
+      disabled: true,
+      label: "Stop",
+    });
+    expect(projectLiveOverlayAction("idle", false)).toEqual({
+      disabled: false,
+      label: "Start",
+    });
+    expect(projectLiveOverlayAction("saving", false)).toEqual({
+      disabled: true,
+      label: "Saving",
+    });
   });
 
   it("locks install, remove, and verify while live is active but keeps cancel during downloads", () => {

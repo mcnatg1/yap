@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { TranscriptHistoryEntry } from "@/history";
+import { projectTranscriptText } from "@/lib/transcript-text";
 
 export function TranscriptPreviewDialog({
   entry,
@@ -27,8 +28,10 @@ export function TranscriptPreviewDialog({
   onOpen: (entry: TranscriptHistoryEntry) => void;
   onOpenChange: (open: boolean) => void;
   onReveal: (entry: TranscriptHistoryEntry) => void;
-  text: string;
+  text?: string;
 }) {
+  const transcriptText = projectTranscriptText(text);
+
   return (
     <Dialog onOpenChange={onOpenChange} open={Boolean(entry)}>
       <DialogContent className="max-h-[86vh] overflow-hidden sm:max-w-3xl">
@@ -38,7 +41,7 @@ export function TranscriptPreviewDialog({
         </DialogHeader>
         <ScrollArea className="max-h-[58vh] rounded-md border bg-muted">
           <pre className="whitespace-pre-wrap break-words p-4 text-sm leading-6">
-            {text || "Loading transcript..."}
+            {transcriptText.text}
           </pre>
         </ScrollArea>
         {entry ? (

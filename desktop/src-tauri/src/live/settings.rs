@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::state::LiveCaptureMode;
+use super::state::{LiveCaptureMode, LiveOverlayVisibility, LiveSessionView};
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Shift+Space";
 
@@ -36,23 +36,33 @@ pub fn load() -> LiveSettings {
 
 pub fn save(settings: &LiveSettings) -> Result<(), String> {
     let path = settings_path();
+    save_to_path(settings, &path)
+}
+
+pub(crate) fn save_view(view: &LiveSessionView) -> Result<(), String> {
+    save(&LiveSettings {
+        overlay_enabled: view.visibility == LiveOverlayVisibility::Enabled,
+        hotkey: (!view.hotkey.is_empty()).then(|| view.hotkey.clone()),
+        paste_hotkey: (!view.paste_hotkey.is_empty()).then(|| view.paste_hotkey.clone()),
+        capture_mode: view.capture_mode,
+        input_device_id: view.input_device_id.clone(),
+    })
+}
+
+fn save_to_path(settings: &LiveSettings, path: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create settings directory: {err}"))?;
     }
     let text = serde_json::to_string_pretty(settings)
         .map_err(|err| format!("Failed to serialize live settings: {err}"))?;
-    std::fs::write(path, text).map_err(|err| format!("Failed to save live settings: {err}"))
+    std::fs::remove_file(path.with_extension("json.part")).ok();
+    crate::stt::model::write_text_atomically(path, &text)
+        .map_err(|err| format!("Failed to save live settings: {err}"))
 }
 
 pub fn settings_dir_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    if let Some(local_app_data) = env("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data).join("Yap");
-    }
-    env("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".yap")
+    crate::paths::app_data_dir_from(env)
 }
 
 fn settings_path() -> PathBuf {
@@ -75,13 +85,29 @@ mod tests {
 
     #[test]
     fn settings_dir_uses_local_app_data() {
-        let dir = settings_dir_from(|key| {
-            (key == "LOCALAPPDATA").then(|| "C:/Users/Test/AppData/Local".into())
-        });
+        let local = std::env::temp_dir().join("local-data");
+        let dir =
+            settings_dir_from(|key| (key == "LOCALAPPDATA").then(|| local.display().to_string()));
 
-        assert_eq!(
-            dir,
-            PathBuf::from("C:/Users/Test/AppData/Local").join("Yap")
-        );
+        assert_eq!(dir, local.join("Yap"));
+    }
+
+    #[test]
+    fn save_live_settings_replaces_stale_partial_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "yap-live-settings-{}-{}",
+            std::process::id(),
+            crate::live::recordings::unix_millis_now().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live-settings.json");
+        let partial = dir.join("live-settings.json.part");
+        std::fs::write(&partial, "stale").unwrap();
+
+        save_to_path(&LiveSettings::default(), &path).unwrap();
+
+        assert!(path.exists());
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

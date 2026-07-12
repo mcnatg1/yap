@@ -26,14 +26,19 @@ describe("live overlay state projection", () => {
     const model = modelFromLiveView(baseView);
 
     expect(overlaySurface(model, false, false, false)).toBe("sensor");
-    expect(overlayFrame("sensor", model)).toEqual({ height: hoverSensorHeight, width: idleSensorWidth });
+    expect(hoverSensorHeight).toBe(8);
+    expect(overlayFrame("sensor", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
     expect(overlaySurface(model, true, false, false)).toBe("peek");
     expect(overlayFrame("peek", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
     expect(overlayIslandWidth("peek", model)).toBe(150);
   });
 
-  it("treats armed, listening, and speaking as active recording surfaces", () => {
-    for (const status of ["armed", "listening", "speaking"] as const) {
+  it("shows armed as initializing before capture is installed", () => {
+    expect(modelFromLiveView({ ...baseView, status: "armed" }).phase).toBe("initializing");
+  });
+
+  it("treats listening and speaking as active recording surfaces", () => {
+    for (const status of ["listening", "speaking"] as const) {
       expect(modelFromLiveView({ ...baseView, status }).phase).toBe("recording");
     }
   });
@@ -45,7 +50,7 @@ describe("live overlay state projection", () => {
     expect(overlaySurface(model, false, false, false)).toBe("recording");
   });
 
-  it("reserves the hands-free confirm/cancel island width", () => {
+  it("reserves the hands-free finish island width", () => {
     const model = modelFromLiveView({ ...baseView, captureMode: "toggle", status: "listening" });
 
     expect(model.recordingTriggerMode).toBe("toggle");
@@ -94,5 +99,17 @@ describe("live overlay state projection", () => {
     expect(overlayIslandWidth("success", idleWithText)).toBe(168);
     expect(overlaySurface(blocked, false, false, false)).toBe("feedback");
     expect(overlayFrame("feedback", blocked).width).toBeGreaterThanOrEqual(180);
+  });
+
+  it("surfaces idle injection fallback instead of reporting success", () => {
+    const fallback = modelFromLiveView({
+      ...baseView,
+      error: "Couldn't insert text here. Transcript copied; press Ctrl+V.",
+      finalText: "done",
+    });
+
+    expect(fallback.phase).toBe("feedback");
+    expect(fallback.errorMessage).toContain("Transcript copied");
+    expect(overlaySurface(fallback, false, false, true)).toBe("feedback");
   });
 });

@@ -1,20 +1,25 @@
 import type { TranscriptHistoryEntry } from "@/history";
 import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
 
-export function historyEntryToRecordingJob(entry: TranscriptHistoryEntry): RecordingJobView {
+export function historyEntryToRecordingJob(
+  entry: TranscriptHistoryEntry,
+  restoredPlaybackPath?: string,
+): RecordingJobView {
   return {
     id: 0,
-    intent: "recording",
+    intent: "live",
     name: entry.name,
     output: entry.outputPath,
     path: entry.sourcePath,
+    playbackPath: restoredPlaybackPath,
     pipeline: {
       ...createInitialPipelineState(),
       intake: "done",
       transcription: "done",
-      postprocessing: "done",
+      postprocessing: entry.warning || entry.recoveryState ? "error" : "done",
     },
     route: "localFallback",
-    status: "complete",
+    error: entry.warning ?? (entry.recoveryState ? "Partial recording available for recovery." : undefined),
+    status: entry.warning || entry.recoveryState ? "partial" : "complete",
   };
 }

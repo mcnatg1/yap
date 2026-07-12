@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import gsap from "gsap";
 import { Check } from "@phosphor-icons/react/Check";
 import { WarningCircle as CircleAlert } from "@phosphor-icons/react/WarningCircle";
 import { ChatText as MessageSquareText } from "@phosphor-icons/react/ChatText";
@@ -7,19 +8,20 @@ import { ArrowCounterClockwise as RotateCcw } from "@phosphor-icons/react/ArrowC
 import { Sparkle as Sparkles } from "@phosphor-icons/react/Sparkle";
 import { X } from "@phosphor-icons/react/X";
 import type { CSSProperties, ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
+  hoverSensorHeight,
   modelFromLiveView,
   overlayFrame,
   overlayIslandWidth,
   overlaySurface,
-  retractMs,
   successVisibleMs,
   type OverlayModel,
   type OverlaySurface,
 } from "@/components/live/live-overlay-state";
+import { createNativeSurfaceSync } from "@/components/live/native-surface-sync";
 import { type LiveSessionView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
@@ -32,8 +34,6 @@ type LiveOverlayProps = {
   view: LiveSessionView;
 };
 
-const idleSensorPollMs = 120;
-
 export function LiveOverlay({
   onOpenScratch,
   onOpenTransform,
@@ -43,14 +43,14 @@ export function LiveOverlay({
   view,
 }: LiveOverlayProps) {
   const model = modelFromLiveView(view);
-  const [entered, setEntered] = useState(false);
   const [peeked, setPeeked] = useState(false);
   const [retracting, setRetracting] = useState(false);
   const [successVisible, setSuccessVisible] = useState(false);
-  const [showInitializing, setShowInitializing] = useState(false);
-  const previousEntrySurfaceRef = useRef<OverlaySurface>("sensor");
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const islandRef = useRef<HTMLDivElement>(null);
+  const previousSurfaceRef = useRef<OverlaySurface>("sensor");
+  const previousIslandWidthRef = useRef<number | undefined>(undefined);
   const previousStatusRef = useRef(view.status);
-  const retractTimerRef = useRef<number | undefined>(undefined);
   const successTimerRef = useRef<number | undefined>(undefined);
   const hasCopyableFinal = Boolean(model.finalText?.trim());
   const surface = overlaySurface(model, peeked, retracting, successVisible && hasCopyableFinal);
@@ -58,33 +58,56 @@ export function LiveOverlay({
   const islandWidth = overlayIslandWidth(surface, model);
   const width = frame.width;
   const rootFrameStyle: CSSProperties | undefined = isTauri() ? undefined : { height: frame.height, width };
+  const hiddenIdle = view.visibility === "hidden" && model.phase === "idle";
 
-  useEffect(() => {
-    if (surface === "sensor" || (surface === "initializing" && !showInitializing)) {
-      setEntered(false);
+  useLayoutEffect(() => {
+    const previousSurface = previousSurfaceRef.current;
+    previousSurfaceRef.current = surface;
+    const island = islandRef.current;
+    if (!island) {
+      if (surface === "sensor") previousIslandWidthRef.current = undefined;
       return;
     }
 
-    if (previousEntrySurfaceRef.current === "sensor") {
-      setEntered(false);
-      const frame = window.requestAnimationFrame(() => setEntered(true));
-      previousEntrySurfaceRef.current = surface;
-      return () => window.cancelAnimationFrame(frame);
-    }
+    gsap.killTweensOf(island);
+    const previousWidth = previousIslandWidthRef.current ?? islandWidth;
+    previousIslandWidthRef.current = islandWidth;
 
-    previousEntrySurfaceRef.current = surface;
-    setEntered(true);
-  }, [showInitializing, surface]);
-
-  useEffect(() => {
-    if (model.phase !== "initializing") {
-      setShowInitializing(false);
+    if (prefersReducedMotion) {
+      gsap.set(island, { width: islandWidth, yPercent: 0 });
+      if (retracting) setRetracting(false);
       return;
     }
 
-    const timer = window.setTimeout(() => setShowInitializing(true), 200);
-    return () => window.clearTimeout(timer);
-  }, [model.phase]);
+    if (retracting && surface === "peek") {
+      gsap.to(island, {
+        duration: 0.16,
+        ease: "power2.inOut",
+        onComplete: () => setRetracting(false),
+        overwrite: true,
+        yPercent: -100,
+      });
+      return () => gsap.killTweensOf(island);
+    }
+
+    if (previousSurface === "sensor") {
+      gsap.fromTo(
+        island,
+        { width: previousWidth, yPercent: -100 },
+        { duration: 0.18, ease: "power3.out", overwrite: true, width: islandWidth, yPercent: 0 },
+      );
+    } else {
+      gsap.to(island, {
+        duration: 0.14,
+        ease: "power2.out",
+        overwrite: true,
+        width: islandWidth,
+        yPercent: 0,
+      });
+    }
+
+    return () => gsap.killTweensOf(island);
+  }, [islandWidth, prefersReducedMotion, retracting, surface]);
 
   useEffect(() => {
     if (model.phase === "idle") return;
@@ -110,26 +133,12 @@ export function LiveOverlay({
   }, [hasCopyableFinal, view.status]);
 
   useEffect(() => {
-    if (surface === "sensor") {
-      previousEntrySurfaceRef.current = "sensor";
-    }
-    void setNativeOverlaySurface(surface, model.errorMessage);
-  }, [model.errorMessage, surface]);
-
-  useEffect(() => {
-    if (!isTauri() || surface !== "sensor") return;
-
-    const timer = window.setInterval(() => {
-      void setNativeOverlaySurface(surface, model.errorMessage);
-    }, idleSensorPollMs);
-    return () => window.clearInterval(timer);
-  }, [model.errorMessage, surface]);
+    if (hiddenIdle) return;
+    setNativeOverlaySurface({ errorMessage: model.errorMessage, surface });
+  }, [hiddenIdle, model.errorMessage, surface]);
 
   useEffect(() => {
     return () => {
-      if (retractTimerRef.current !== undefined) {
-        window.clearTimeout(retractTimerRef.current);
-      }
       clearSuccessTimer();
     };
   }, []);
@@ -141,42 +150,44 @@ export function LiveOverlay({
   }
 
   function cancelRetract() {
-    if (retractTimerRef.current === undefined) return;
-    window.clearTimeout(retractTimerRef.current);
-    retractTimerRef.current = undefined;
+    const island = islandRef.current;
+    if (island) gsap.killTweensOf(island);
   }
 
   function openIdlePreview() {
     cancelRetract();
     setRetracting(false);
     setPeeked(true);
-    setEntered(true);
   }
 
   function closeIdlePreview() {
     cancelRetract();
     setPeeked(false);
-    setEntered(false);
     setRetracting(true);
-    retractTimerRef.current = window.setTimeout(() => {
-      retractTimerRef.current = undefined;
-      setRetracting(false);
-    }, retractMs);
   }
 
+  if (hiddenIdle) return null;
   if (surface === "sensor") {
     return (
       <div
-        className="live-overlay-root pointer-events-auto h-full w-full bg-transparent"
+        className="live-overlay-root pointer-events-none relative h-full w-full bg-transparent"
         data-overlay-phase={model.phase}
         data-overlay-surface={surface}
         data-testid="live-overlay-root"
-        onMouseEnter={openIdlePreview}
         style={rootFrameStyle}
-      />
+      >
+        <div
+          aria-hidden="true"
+          className="pointer-events-auto absolute inset-x-0 top-0"
+          data-testid="live-overlay-sensor"
+          key="idle-sensor"
+          onPointerEnter={openIdlePreview}
+          onPointerMove={openIdlePreview}
+          style={{ height: hoverSensorHeight }}
+        />
+      </div>
     );
   }
-  if (model.phase === "initializing" && !showInitializing) return null;
 
   return (
     <div
@@ -187,10 +198,10 @@ export function LiveOverlay({
       data-overlay-phase={model.phase}
       data-overlay-surface={surface}
       data-testid="live-overlay-root"
-      onMouseEnter={() => {
+      onPointerEnter={() => {
         if (retracting) openIdlePreview();
       }}
-      onMouseLeave={() => {
+      onPointerLeave={() => {
         if (surface === "peek") closeIdlePreview();
       }}
       style={rootFrameStyle}
@@ -198,14 +209,14 @@ export function LiveOverlay({
       <div
         className="pointer-events-auto h-full text-white"
         data-testid="live-overlay-island"
+        key="active-island"
+        ref={islandRef}
         style={{
           backgroundColor: "black",
           borderBottomLeftRadius: 14,
           borderBottomRightRadius: 14,
           marginInline: "auto",
           overflow: "hidden",
-          transform: entered ? "translateY(0)" : "translateY(-100%)",
-          transition: "transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
           width: islandWidth,
         }}
       >
@@ -222,6 +233,7 @@ export function LiveOverlay({
             model={model}
             onRetryButtonPressed={onRetry}
             onStopButtonPressed={onStop}
+            prefersReducedMotion={prefersReducedMotion}
           />
         )}
       </div>
@@ -229,12 +241,19 @@ export function LiveOverlay({
   );
 }
 
-async function setNativeOverlaySurface(surface: OverlaySurface, errorMessage?: string) {
+const setNativeOverlaySurface = createNativeSurfaceSync(async ({ surface, errorMessage }) => {
   if (!isTauri()) return;
   await invoke("set_live_overlay_surface", {
     errorMessage: errorMessage ?? null,
     surface,
-  }).catch(() => undefined);
+  });
+});
+
+const liveOverlayLevelEvent = "yap-live-overlay-level";
+
+export function emitLiveOverlayLevel(level: number) {
+  const normalized = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+  window.dispatchEvent(new CustomEvent(liveOverlayLevelEvent, { detail: normalized }));
 }
 
 function PeekOverlayView({
@@ -265,10 +284,12 @@ function RecordingOverlayView({
   model,
   onRetryButtonPressed,
   onStopButtonPressed,
+  prefersReducedMotion,
 }: {
   model: OverlayModel;
   onRetryButtonPressed?: () => void;
   onStopButtonPressed?: () => void;
+  prefersReducedMotion: boolean;
 }) {
   const showsLiveRecordingContent = model.phase === "recording";
   const showsStopButton = showsLiveRecordingContent && model.recordingTriggerMode === "toggle";
@@ -282,20 +303,16 @@ function RecordingOverlayView({
     <div className="relative grid h-full w-full place-items-center px-3" data-testid="live-recording-layout">
       <div className="absolute inset-0 grid place-items-center transition-opacity duration-200 ease-out">
         {model.phase === "initializing" ? (
-          <InitializingDotsView />
+          <InitializingDotsView prefersReducedMotion={prefersReducedMotion} />
         ) : showsLiveRecordingContent ? (
-          <WaveformView audioLevel={model.audioLevel} showsActivityPulse />
+          <WaveformView audioLevel={model.audioLevel} prefersReducedMotion={prefersReducedMotion} showsActivityPulse />
         ) : (
           <ProcessingIndicatorView />
         )}
       </div>
 
       {showsStopButton ? (
-        <div className="absolute inset-0 flex items-center justify-between px-2" data-testid="live-toggle-actions">
-          <FreeFlowIconButton label="Cancel recording" onClick={onStopButtonPressed} tone="cancel">
-            <X className="size-3" weight="bold" />
-          </FreeFlowIconButton>
-          <div className="h-px w-12" />
+        <div className="absolute inset-0 flex items-center justify-end px-2" data-testid="live-toggle-actions">
           <FreeFlowIconButton label="Finish recording" onClick={onStopButtonPressed} tone="confirm">
             <Check className="size-3" weight="bold" />
           </FreeFlowIconButton>
@@ -365,17 +382,71 @@ function FreeFlowIconButton({
   );
 }
 
-function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; showsActivityPulse?: boolean }) {
-  const pulseTime = useAnimationTime(Boolean(showsActivityPulse));
+function WaveformView({
+  audioLevel,
+  prefersReducedMotion,
+  showsActivityPulse,
+}: {
+  audioLevel: number;
+  prefersReducedMotion: boolean;
+  showsActivityPulse?: boolean;
+}) {
+  const waveformRef = useRef<HTMLDivElement>(null);
+  const renderLevelRef = useRef<(level: number) => void>(() => undefined);
+
+  useLayoutEffect(() => {
+    const waveform = waveformRef.current;
+    if (!waveform) return;
+    const bars = Array.from(waveform.querySelectorAll<HTMLElement>("[data-live-waveform-bar]"));
+    const activityFloor = showsActivityPulse && !prefersReducedMotion ? 0.08 : 0;
+    const scaleSetters = prefersReducedMotion
+      ? []
+      : bars.map((bar) => gsap.quickTo(bar, "scaleY", { duration: 0.08, ease: "power2.out" }));
+
+    const renderLevel = (level: number) => {
+      const normalizedLevel = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+      bars.forEach((bar, index) => {
+        const amplitude = barAmplitude(
+          normalizedLevel,
+          waveformMultipliers[index] ?? 0,
+          index,
+          activityFloor,
+        );
+        const scale = (2 + (22 - 2) * amplitude) / 22;
+        if (prefersReducedMotion) {
+          gsap.set(bar, { scaleY: scale });
+        } else {
+          scaleSetters[index]?.(scale);
+        }
+      });
+    };
+    renderLevelRef.current = renderLevel;
+    renderLevel(audioLevel);
+
+    const handleLevel = (event: Event) => {
+      renderLevel((event as CustomEvent<number>).detail);
+    };
+    window.addEventListener(liveOverlayLevelEvent, handleLevel);
+    return () => {
+      window.removeEventListener(liveOverlayLevelEvent, handleLevel);
+      renderLevelRef.current = () => undefined;
+      gsap.killTweensOf(bars);
+    };
+  }, [prefersReducedMotion, showsActivityPulse]);
+
+  useEffect(() => {
+    renderLevelRef.current(audioLevel);
+  }, [audioLevel]);
+
   return (
-    <div aria-hidden="true" className="flex h-6 w-12 items-center justify-center gap-[2.5px]" data-testid="live-waveform">
-      {waveformMultipliers.map((multiplier, index) => (
-        <WaveformBar
-          amplitude={barAmplitude(audioLevel, multiplier, index, pulseTime)}
-          delay={Math.abs(index - waveformCenterIndex) * 0.01}
-          key={index}
-          response={0.18 + (Math.abs(index - waveformCenterIndex) / waveformCenterIndex) * 0.06}
-        />
+    <div
+      aria-hidden="true"
+      className="flex h-6 w-12 items-center justify-center gap-[2.5px]"
+      data-testid="live-waveform"
+      ref={waveformRef}
+    >
+      {waveformMultipliers.map((_, index) => (
+        <WaveformBar index={index} key={index} />
       ))}
     </div>
   );
@@ -384,28 +455,23 @@ function WaveformView({ audioLevel, showsActivityPulse }: { audioLevel: number; 
 const waveformMultipliers = [0.35, 0.55, 0.75, 0.9, 1.0, 0.9, 0.75, 0.55, 0.35] as const;
 const waveformCenterIndex = (waveformMultipliers.length - 1) / 2;
 
-function WaveformBar({ amplitude, delay, response }: { amplitude: number; delay: number; response: number }) {
+function WaveformBar({ index }: { index: number }) {
   return (
     <span
-      className="w-[3px] rounded-full bg-white"
+      className="live-waveform-bar h-[22px] w-[3px] rounded-full bg-white"
+      data-live-waveform-bar
       style={{
-        height: 2 + (22 - 2) * amplitude,
-        transition: `height ${Math.min(response, 0.12)}s cubic-bezier(0.16, 1, 0.3, 1) ${delay}s`,
-      }}
+        transform: `scaleY(${(2 + (22 - 2) * barAmplitude(0, waveformMultipliers[index] ?? 0, index)) / 22})`,
+      } as CSSProperties}
     />
   );
 }
 
-function barAmplitude(level: number, multiplier: number, index: number, pulseTime?: number) {
+function barAmplitude(level: number, multiplier: number, index: number, activityFloor = 0) {
   const baseAmplitude = Math.min(Math.max(level, 0) * multiplier, 1);
-  if (pulseTime === undefined) return baseAmplitude;
-
-  const travelingWave = 0.5 + 0.5 * Math.sin(pulseTime * 6.2 - index * 0.78);
-  const shimmer = 0.5 + 0.5 * Math.sin(pulseTime * 3.1 + index * 0.5);
-  const pulse = travelingWave * 0.22 + shimmer * 0.06;
-  const saturationRelief = baseAmplitude * (0.74 + pulse);
-  const quietPulse = (1 - baseAmplitude) * (0.04 + pulse * 0.28);
-  return Math.min(saturationRelief + quietPulse, 1);
+  if (!activityFloor) return baseAmplitude;
+  const centerBoost = 1 - Math.abs(index - waveformCenterIndex) / waveformCenterIndex;
+  return Math.max(baseAmplitude, activityFloor * (0.62 + centerBoost * 0.38));
 }
 
 function ProcessingIndicatorView() {
@@ -413,59 +479,59 @@ function ProcessingIndicatorView() {
 }
 
 function ProcessingWaveformView() {
-  const time = useAnimationTime(true) ?? 0;
   return (
-    <div className="flex h-5 items-center justify-center gap-1">
+    <div className="live-processing-waveform flex h-5 items-center justify-center gap-1">
       {Array.from({ length: 5 }, (_, index) => (
         <ProcessingPill
-          amplitude={processingAmplitude(index, time)}
+          amplitude={processingAmplitude(index)}
+          index={index}
           key={index}
-          opacity={0.42 + processingPulse(index, time) * 0.52}
+          opacity={0.72}
         />
       ))}
     </div>
   );
 }
 
-function ProcessingPill({ amplitude, opacity }: { amplitude: number; opacity: number }) {
+function ProcessingPill({ amplitude, index, opacity }: { amplitude: number; index: number; opacity: number }) {
   return (
     <span
-      className="w-1 rounded-full bg-white"
+      className="live-processing-pill w-1 rounded-full bg-white"
       style={{
+        "--live-wave-delay": `${index * 110}ms`,
         height: 4 + (18 - 4) * amplitude,
         opacity,
-      }}
+      } as CSSProperties}
     />
   );
 }
 
-function processingAmplitude(index: number, time: number) {
+function processingAmplitude(index: number) {
   const centerDistance = Math.abs(index - 2) / 2;
-  const baseline = 0.18 + (1 - centerDistance) * 0.1;
-  return Math.min(baseline + processingPulse(index, time) * 0.68, 1);
+  return 0.24 + (1 - centerDistance) * 0.18;
 }
 
-function processingPulse(index: number, time: number) {
-  const cycle = 1.05;
-  const stagger = 0.11;
-  const phase = ((time - index * stagger) % cycle) / cycle;
-  const wave = 0.5 + 0.5 * Math.sin(phase * 2 * Math.PI - Math.PI / 2);
-  return Math.pow(wave, 1.9);
-}
+function InitializingDotsView({ prefersReducedMotion }: { prefersReducedMotion: boolean }) {
+  const dotsRef = useRef<HTMLDivElement>(null);
 
-function InitializingDotsView() {
-  const [activeDot, setActiveDot] = useState(0);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setActiveDot((value) => (value + 1) % 3), 500);
-    return () => window.clearInterval(timer);
-  }, []);
+  useLayoutEffect(() => {
+    const dots = dotsRef.current?.querySelectorAll("span");
+    if (!dots?.length || prefersReducedMotion) return;
+    const timeline = gsap.timeline({ repeat: -1 });
+    timeline
+      .to(dots, { duration: 0.16, opacity: 0.9, scale: 1.12, stagger: 0.1 })
+      .to(dots, { duration: 0.22, opacity: 0.25, scale: 1, stagger: 0.1 }, "-=0.08")
+      .to({}, { duration: 0.12 });
+    return () => {
+      timeline.kill();
+    };
+  }, [prefersReducedMotion]);
 
   return (
-    <div className="flex items-center justify-center gap-1">
+    <div className="flex items-center justify-center gap-1" ref={dotsRef}>
       {Array.from({ length: 3 }, (_, index) => (
         <span
-          className={cn("size-[4.5px] rounded-full bg-white transition-opacity duration-[400ms]", activeDot === index ? "opacity-90" : "opacity-25")}
+          className="size-[4.5px] rounded-full bg-white opacity-25"
           key={index}
         />
       ))}
@@ -533,27 +599,20 @@ function FreeFlowNeutralButton({
   );
 }
 
-function useAnimationTime(enabled: boolean) {
-  const [time, setTime] = useState<number | undefined>(undefined);
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
 
   useEffect(() => {
-    if (!enabled) {
-      setTime(undefined);
-      return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefersReducedMotion(media.matches);
+
+    function handleChange(event: MediaQueryListEvent) {
+      setPrefersReducedMotion(event.matches);
     }
 
-    let frame = 0;
-    let previous = 0;
-    const tick = (now: number) => {
-      if (now - previous >= 1000 / 60) {
-        previous = now;
-        setTime(now / 1000);
-      }
-      frame = window.requestAnimationFrame(tick);
-    };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-  }, [enabled]);
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, []);
 
-  return time;
+  return prefersReducedMotion;
 }

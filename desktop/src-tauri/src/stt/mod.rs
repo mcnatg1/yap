@@ -5,10 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn logs_dir() -> PathBuf {
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        return PathBuf::from(local).join("Yap").join("logs");
-    }
-    PathBuf::from("logs")
+    crate::paths::app_data_dir().join("logs")
 }
 
 pub fn yap_log_path() -> PathBuf {

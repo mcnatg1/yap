@@ -40,10 +40,7 @@ pub fn settings_dir_from<F>(env: F) -> std::path::PathBuf
 where
     F: Fn(&str) -> Option<String>,
 {
-    if let Some(local) = env("LOCALAPPDATA") {
-        return std::path::PathBuf::from(local).join("Yap");
-    }
-    std::path::PathBuf::from(".")
+    crate::paths::app_data_dir_from(env)
 }
 
 fn settings_dir() -> std::path::PathBuf {
@@ -142,13 +139,11 @@ mod tests {
 
     #[test]
     fn settings_dir_uses_localappdata() {
+        let local = std::env::temp_dir().join("local-data");
         let dir = settings_dir_from(|key| match key {
-            "LOCALAPPDATA" => Some("C:/Users/me/AppData/Local".into()),
+            "LOCALAPPDATA" => Some(local.display().to_string()),
             _ => None,
         });
-        assert_eq!(
-            dir,
-            std::path::PathBuf::from("C:/Users/me/AppData/Local").join("Yap")
-        );
+        assert_eq!(dir, local.join("Yap"));
     }
 }

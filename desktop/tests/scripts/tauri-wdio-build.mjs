@@ -3,28 +3,33 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { resolvePackageManagerCommand } from "./package-manager-command.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const source = path.join(root, "tests", "wdio", "capabilities", "wdio.json");
 const generated = path.join(root, "src-tauri", "capabilities", "wdio.generated.json");
-const pnpmCli = process.env.npm_execpath;
+const packageManager = resolvePackageManagerCommand({
+  args: [
+    "tauri",
+    "build",
+    "--debug",
+    "--features",
+    "wdio",
+    "--config",
+    "src-tauri/tauri.wdio.conf.json",
+    "--no-bundle",
+  ],
+  nodeExecPath: process.execPath,
+  npmExecPath: process.env.npm_execpath,
+});
 
 await rm(generated, { force: true });
 await copyFile(source, generated);
 
 try {
   const exitCode = await run(
-    pnpmCli ? process.execPath : "pnpm",
-    [
-      ...(pnpmCli ? [pnpmCli] : []),
-      "tauri",
-      "build",
-      "--debug",
-      "--features",
-      "wdio",
-      "--config",
-      "src-tauri/tauri.wdio.conf.json",
-      "--no-bundle",
-    ],
+    packageManager.command,
+    packageManager.args,
   );
   process.exitCode = exitCode;
 } finally {

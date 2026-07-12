@@ -1,17 +1,19 @@
 # Client State Machine Design
 
-**Status:** Draft
+**Status:** Historical design record; typed React projection and Rust orchestrator skeleton landed
 **Date:** 2026-07-05
 **Scope:** Phase 1/2 desktop workflow architecture, with hooks for Phase 3-8 server, preprocessing, and diarization.
 **Canonical build spec:** [../../specs/client-state-machine.md](../../specs/client-state-machine.md)
 
+> **Current truth (2026-07-12):** The statements below describe the pre-implementation starting point. Shared recording-job types and a Rust `RuntimeOrchestrator` skeleton now exist, while imported jobs still use a numeric React/localStorage queue. Durable Rust/SQLite ownership remains in the Phase 3 connector plan.
+
 ## Problem
 
-The desktop currently works, but its state is still UI-shaped:
+At the time of this design, the desktop worked but its state was still UI-shaped:
 
 - `desktop/src/App.tsx` owns queue, setup, running, history, selection, and status text directly.
 - `UploadItem` and `UploadStatus` live in `desktop/src/components/stacked-upload.tsx`, even though the queue is app state.
-- Rust currently exposes setup status and local STT events, but not a client/runtime job state machine.
+- Rust exposed setup status and local STT events, but not a client/runtime job state machine; the skeleton has since landed.
 - The queue can only say `queued`, `running`, `done`, or `error`, which is not enough for the product direction.
 
 The product direction is no longer "local model does everything." Yap is a thin desktop client with local Nemotron INT8 for live/offline fallback, a server router for official larger recordings, queued/blocking behavior when the server path is unavailable, and preprocessing/diarization as first-class pipeline stages.

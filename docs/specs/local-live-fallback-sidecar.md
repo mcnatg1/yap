@@ -1,6 +1,6 @@
 # Spec: Local Nemotron Live Fallback
 
-**Status:** Scoped to the local live fallback path.
+**Status:** Implemented baseline; model licensing, hosted real-model/native CI, performance gates, and production-release proof remain
 
 ## Scope
 

@@ -1,9 +1,9 @@
 # ADR 0004: Background knowledge pipeline — diarization, micro-batches, OKF, and agents
 
 **Date:** 2026-06-30
-**Status:** Accepted (roadmap — Phase 7+ relative to current Yap; design validated against Voice OS spec)
+**Status:** Accepted for non-diarization background principles; diarization details superseded by [ADR 0020](0020-meeting-capture-diarization-authority.md)
 **Builds on:** [ADR 0003](0003-long-term-voice-architecture.md) (recordings, LID, voice OS layers)
-**Amended by:** [ADR 0015](0015-two-pass-diarization-speaker-identity.md) — the diarization design in this ADR (WeSpeaker ResNet34 + spectral clustering + Rolling Speaker Vault) is **retained for the solo/local-first profile** but **superseded for the team profile** by the two-pass ECAPA-TDNN + AHC/VBx pipeline. Specifically: WeSpeaker → ECAPA-TDNN; online k-NN replaces vault-first cosine matching; AHC + VBx replaces spectral clustering in Pass 2; the `yap-knowledge-worker` subprocess moves to the server-side KB compiler in the team profile. All of §3–§10 remain normative for the solo profile.
+**Diarization superseded by:** [ADR 0020](0020-meeting-capture-diarization-authority.md). Critical-path isolation, bounded queues, raw-text alignment, and recoverable background processing remain useful principles. The fixed WeSpeaker/vault algorithms, numeric thresholds, local durable speaker memory, and profile split described below are historical rather than normative.
 
 ## Context
 

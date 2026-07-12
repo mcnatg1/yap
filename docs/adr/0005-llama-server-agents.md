@@ -1,7 +1,7 @@
 # ADR 0005: Bundled llama-server for LLM agents (CPU-first)
 
 **Date:** 2026-06-30
-**Status:** Accepted
+**Status:** Accepted for the solo/local profile; team execution is amended by ADR 0014
 **Builds on:** [ADR 0002](0002-crispasr-unified-stt-runtime.md) (sidecar pattern), [ADR 0004](0004-background-diarization-okf-agents.md) (Scribe agent, 400 ms bypass)
 **Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — in the **team profile**, `llama-server` moves to the **LLM pool on the GB-class server node** (`-ngl` not 0; GPU-accelerated Scribe, polish, and agents). The **solo/local-first profile** retains the bundled `llama-server` sidecar with `--n-gpu-layers 0` as specified in this ADR. The CPU-first rule is the compatibility baseline for the solo profile; it does not apply to the server pool.
 

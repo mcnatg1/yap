@@ -11,7 +11,7 @@ export const workspaceCopy: Record<WorkspaceView, { title: string; description: 
   },
   transcribe: {
     title: "Transcribe",
-    description: "Add files. Run when ready.",
+    description: "Add recordings to your organization's transcription queue.",
   },
   polish: {
     title: "Polish",
@@ -24,6 +24,9 @@ export function isWorkspaceView(value: unknown): value is WorkspaceView {
 }
 
 export const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
+
+export const queuedServerMessage =
+  "Queued for your organization's transcription server. It will start when Yap connects.";
 
 export const audioExtensions = ["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 export const audioExts = new Set(audioExtensions.map((format) => `.${format}`));
@@ -69,15 +72,12 @@ export type ServerConnectionState =
 export type RecordingJobStatus =
   | "accepted"
   | "preflighting"
-  | "blocked_setup_required"
   | "blocked_server_unavailable"
   | "blocked_sign_in_required"
-  | "queued_local_fallback"
   | "queued_server"
   | "preprocessing"
   | "uploading"
-  | "server_processing_cohere"
-  | "local_transcribing"
+  | "server_processing"
   | "saving"
   | "diarization_queued"
   | "diarization_running"
@@ -127,6 +127,7 @@ export type LiveSessionView = {
   level?: number | null;
   partialText?: string | null;
   finalText?: string | null;
+  transcriptionDegraded?: boolean;
   error?: string | null;
 };
 
@@ -139,9 +140,16 @@ export type RecordingPipelineState = {
   postprocessing: PipelineStageStatus;
 };
 
+export type PlaybackAdmission = {
+  playbackPath: string;
+  byteLength: number;
+};
+
 export type RecordingJobView = {
   id: number;
   path: string;
+  playbackPath?: string;
+  playbackByteLength?: number;
   name: string;
   intent: RecordingIntent;
   status: RecordingJobStatus;
@@ -154,6 +162,11 @@ export type RecordingJobView = {
   pipeline: RecordingPipelineState;
 };
 
+export type QueuedRecordingPath = {
+  id: number;
+  path: string;
+};
+
 export type SetupSnapshot = {
   engineReady: boolean;
   fallbackEnabled: boolean;
@@ -164,8 +177,7 @@ const activeRecordingStatuses = new Set<RecordingJobStatus>([
   "preflighting",
   "preprocessing",
   "uploading",
-  "server_processing_cohere",
-  "local_transcribing",
+  "server_processing",
   "saving",
   "diarization_running",
 ]);
@@ -181,6 +193,19 @@ export function createInitialPipelineState(): RecordingPipelineState {
     diarization: "notStarted",
     postprocessing: "notStarted",
   };
+}
+
+export function acceptedRecordingDrops(
+  currentPaths: Iterable<string>,
+  incoming: QueuedRecordingPath[],
+) {
+  const existing = new Set(currentPaths);
+  const seen = new Set<string>();
+  return incoming.filter(({ path }) => {
+    if (!audioExts.has(extension(path)) || existing.has(path) || seen.has(path)) return false;
+    seen.add(path);
+    return true;
+  });
 }
 
 export function deriveSetupState(snapshot: SetupSnapshot): SetupState {
@@ -225,32 +250,6 @@ export function isRecordingActive(status: RecordingJobStatus) {
 
 export function isRecordingFinished(status?: RecordingJobStatus) {
   return status ? finishedRecordingStatuses.has(status) : false;
-}
-
-export function isRecordingRunnable(status: RecordingJobStatus) {
-  return status === "queued_local_fallback" || status === "failed";
-}
-
-export function isRecordingRetryable(status: RecordingJobStatus) {
-  return (
-    status === "failed" ||
-    status === "blocked_sign_in_required"
-  );
-}
-
-export function recordingStatusForStartFailure(code?: string): RecordingJobStatus {
-  switch (code) {
-    case "MODEL_MISSING":
-    case "FALLBACK_DISABLED":
-      return "blocked_setup_required";
-    case "SERVER_UNAVAILABLE":
-    case "SERVER_OFFLINE":
-      return "blocked_server_unavailable";
-    case "SIGN_IN_REQUIRED":
-      return "blocked_sign_in_required";
-    default:
-      return "failed";
-  }
 }
 
 export function setupStateLabel(state: SetupState) {

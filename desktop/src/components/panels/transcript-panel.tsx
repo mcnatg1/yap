@@ -1,5 +1,12 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { FileAudio } from "@phosphor-icons/react/FileAudio";
 import { FileText } from "@phosphor-icons/react/FileText";
@@ -30,26 +37,133 @@ import {
   formatElapsed,
   isRecordingActive,
   isRecordingFinished,
+  queuedServerMessage,
   type RecordingJobStatus,
   type RecordingJobView,
 } from "@/lib/app-types";
+import { projectTranscriptText } from "@/lib/transcript-text";
 import { cn } from "@/lib/utils";
 
-function recordingActivityLabel(status: RecordingJobStatus, elapsedSeconds?: number) {
+function recordingActivityLabel(status: RecordingJobStatus) {
   switch (status) {
     case "uploading":
       return "Uploading";
-    case "server_processing_cohere":
+    case "server_processing":
       return "Processing on server";
     case "diarization_running":
       return "Finding speakers";
     case "saving":
       return "Saving";
-    case "local_transcribing":
-      return elapsedSeconds ? `Transcribing locally · ${formatElapsed(elapsedSeconds)}` : "Transcribing locally...";
     default:
       return "Working";
   }
+}
+
+// WaveSurfer resamples into Float32 PCM. Unknown layouts use Web Audio's
+// channel ceiling so admission fails toward the streaming native media path.
+export const maxDecodedWaveformBytes = 32 * 1024 * 1024;
+export const maxWaveformSourceBytes = 32 * 1024 * 1024;
+export const decodedWaveformSampleRate = 8_000;
+export const maxDecodedWaveformChannels = 32;
+export const waveformReadyTimeoutMs = 10_000;
+const decodedWaveformBytesPerSample = Float32Array.BYTES_PER_ELEMENT;
+
+type DisposableWaveform = {
+  destroy: () => void;
+};
+
+function canMountDecodedWaveform(byteLength: number, durationSeconds: number | undefined) {
+  const decodedByteLength = durationSeconds === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.ceil(durationSeconds * decodedWaveformSampleRate) *
+      maxDecodedWaveformChannels * decodedWaveformBytesPerSample;
+
+  return (
+    Number.isSafeInteger(byteLength) &&
+    byteLength >= 0 &&
+    byteLength <= maxWaveformSourceBytes &&
+    durationSeconds !== undefined &&
+    Number.isFinite(durationSeconds) &&
+    durationSeconds > 0 &&
+    Number.isSafeInteger(decodedByteLength) &&
+    decodedByteLength <= maxDecodedWaveformBytes
+  );
+}
+
+export function mountDecodedWaveform<T extends DisposableWaveform>({
+  byteLength,
+  create,
+  durationSeconds,
+  onReadyTimeout,
+  readyTimeoutMs = waveformReadyTimeoutMs,
+  requested,
+  subscribe,
+}: {
+  byteLength: number;
+  create: () => T;
+  durationSeconds: number | undefined;
+  onReadyTimeout?: () => void;
+  readyTimeoutMs?: number;
+  requested: boolean;
+  subscribe: (waveform: T, lifecycle: {
+    dispose: () => void;
+    markReady: () => void;
+  }) => Array<() => void>;
+}) {
+  if (!requested || !canMountDecodedWaveform(byteLength, durationSeconds)) {
+    return undefined;
+  }
+
+  const waveform = create();
+  let disposed = false;
+  let ready = false;
+  let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  let unsubscribers: Array<() => void> = [];
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    if (readyTimer !== undefined) clearTimeout(readyTimer);
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
+    waveform.destroy();
+  };
+  const markReady = () => {
+    if (disposed || ready) return;
+    ready = true;
+    if (readyTimer !== undefined) {
+      clearTimeout(readyTimer);
+      readyTimer = undefined;
+    }
+  };
+  readyTimer = setTimeout(() => {
+    onReadyTimeout?.();
+    dispose();
+  }, readyTimeoutMs);
+  try {
+    const subscribed = subscribe(waveform, { dispose, markReady });
+    if (disposed) subscribed.forEach((unsubscribe) => unsubscribe());
+    else unsubscribers = subscribed;
+  } catch (error) {
+    dispose();
+    throw error;
+  }
+  return {
+    dispose,
+    waveform,
+  };
+}
+
+export function seekRatioFromBounds(
+  clientX: number,
+  bounds: Pick<DOMRect, "left" | "width">,
+) {
+  if (bounds.width <= 0) return undefined;
+  return Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width));
+}
+
+export function roundedMediaSecond(seconds: number | undefined) {
+  return seconds !== undefined && Number.isFinite(seconds)
+    ? Math.max(0, Math.floor(seconds))
+    : 0;
 }
 
 function RecordingPlayer({
@@ -64,16 +178,35 @@ function RecordingPlayer({
   variant?: "panel" | "modal";
 }) {
   const displayedSecondRef = useRef(0);
+  const dragPointerIdRef = useRef<number | undefined>(undefined);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const lightweightTrackRef = useRef<HTMLDivElement>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
-  const waveSurferRef = useRef<WaveSurfer | undefined>(undefined);
   const statusId = useId();
   const errorId = useId();
   const [currentSeconds, setCurrentSeconds] = useState(0);
-  const [durationSeconds, setDurationSeconds] = useState<number>();
+  const [progressSeconds, setProgressSeconds] = useState(0);
+  const [nativeMetadata, setNativeMetadata] = useState<{
+    durationSeconds: number;
+    recordingSrc: string;
+  }>();
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const recordingSrc = useMemo(() => (isTauri() ? convertFileSrc(item.path) : undefined), [item.path]);
+  const [waveformMounted, setWaveformMounted] = useState(false);
+  const [waveformRequested, setWaveformRequested] = useState(false);
+  const recordingPath = item.playbackPath;
+  const recordingSrc = useMemo(
+    () => (isTauri() && recordingPath ? recordingPath : undefined),
+    [recordingPath],
+  );
+  const durationSeconds = nativeMetadata && nativeMetadata.recordingSrc === recordingSrc
+    ? nativeMetadata.durationSeconds
+    : undefined;
+  const waveformMode = durationSeconds === undefined
+    ? "pending"
+    : waveformMounted
+      ? "decoded"
+      : "lightweight";
   const recordingStatus = failed
     ? "Playback unavailable"
     : isRecordingFinished(item.status)
@@ -87,63 +220,71 @@ function RecordingPlayer({
 
   useEffect(() => {
     setCurrentSeconds(0);
+    setProgressSeconds(0);
     displayedSecondRef.current = 0;
+    dragPointerIdRef.current = undefined;
+    setNativeMetadata(undefined);
     setFailed(false);
     setPlaying(false);
-    setDurationSeconds(undefined);
+    setWaveformMounted(false);
+    setWaveformRequested(false);
   }, [recordingSrc]);
 
   useEffect(() => {
     const audio = audioRef.current;
     const container = waveformRef.current;
-    if (!audio || !container || !recordingSrc) return;
+    const byteLength = item.playbackByteLength;
+    if (
+      !audio ||
+      !container ||
+      !recordingSrc ||
+      durationSeconds === undefined ||
+      byteLength === undefined
+    ) return;
 
-    const waveSurfer = WaveSurfer.create({
-      barGap: 2,
-      barMinHeight: 3,
-      barRadius: 999,
-      barWidth: 3,
-      container,
-      cursorWidth: 0,
-      dragToSeek: true,
-      height: 56,
-      hideScrollbar: true,
-      media: audio,
-      normalize: true,
-      progressColor: "#034f46",
-      waveColor: "rgba(117, 111, 102, 0.28)",
+    const mounted = mountDecodedWaveform({
+      byteLength,
+      create: () => WaveSurfer.create({
+        barGap: 2,
+        barMinHeight: 3,
+        barRadius: 999,
+        barWidth: 3,
+        container,
+        cursorWidth: 0,
+        height: 56,
+        hideScrollbar: true,
+        interact: false,
+        media: audio,
+        normalize: true,
+        progressColor: "#034f46",
+        sampleRate: decodedWaveformSampleRate,
+        waveColor: "rgba(117, 111, 102, 0.28)",
+      }),
+      durationSeconds,
+      onReadyTimeout: () => setWaveformMounted(false),
+      requested: waveformRequested,
+      subscribe: (waveSurfer, lifecycle) => [
+        waveSurfer.on("ready", () => {
+          lifecycle.markReady();
+          setWaveformMounted(true);
+          setDisplaySeconds(audio.currentTime);
+        }),
+        waveSurfer.on("error", () => {
+          lifecycle.dispose();
+          setPlaying(!audio.paused);
+          setWaveformMounted(false);
+        }),
+      ],
     });
-    waveSurferRef.current = waveSurfer;
-
-    const unsubscribers = [
-      waveSurfer.on("ready", (duration) => {
-        setDurationSeconds(Number.isFinite(duration) ? duration : undefined);
-        setFailed(false);
-        setDisplaySeconds(waveSurfer.getCurrentTime());
-      }),
-      waveSurfer.on("timeupdate", setDisplaySeconds),
-      waveSurfer.on("seeking", setDisplaySeconds),
-      waveSurfer.on("interaction", setDisplaySeconds),
-      waveSurfer.on("play", () => setPlaying(true)),
-      waveSurfer.on("pause", () => setPlaying(false)),
-      waveSurfer.on("finish", () => {
-        setPlaying(false);
-        setDisplaySeconds(waveSurfer.getDuration());
-      }),
-      waveSurfer.on("error", () => {
-        setFailed(Boolean(audio.error));
-        setPlaying(false);
-      }),
-    ];
+    if (!mounted) return;
 
     return () => {
-      unsubscribers.forEach((unsubscribe) => unsubscribe());
-      waveSurfer.destroy();
-      if (waveSurferRef.current === waveSurfer) waveSurferRef.current = undefined;
+      mounted.dispose();
+      setWaveformMounted(false);
     };
-  }, [recordingSrc]);
+  }, [durationSeconds, item.playbackByteLength, recordingSrc, waveformRequested]);
 
-  if (!recordingSrc) return null;
+  if (!recordingPath || !recordingSrc) return null;
 
   function setDisplaySeconds(seconds: number) {
     const wholeSeconds = Math.floor(seconds);
@@ -154,47 +295,59 @@ function RecordingPlayer({
 
   function syncMediaDuration() {
     const duration = audioRef.current?.duration;
-    if (duration && Number.isFinite(duration)) {
-      setDurationSeconds(duration);
+    if (recordingSrc && duration && Number.isFinite(duration)) {
+      setNativeMetadata({ durationSeconds: duration, recordingSrc });
       setFailed(false);
     }
   }
 
   function syncMediaTime() {
     const currentTime = audioRef.current?.currentTime;
-    if (currentTime !== undefined && Number.isFinite(currentTime)) setDisplaySeconds(currentTime);
+    if (currentTime !== undefined && Number.isFinite(currentTime)) {
+      setProgressSeconds(currentTime);
+      setDisplaySeconds(currentTime);
+    }
   }
 
   function seekToRatio(ratio: number) {
-    const waveSurfer = waveSurferRef.current;
     const audio = audioRef.current;
-    const duration = durationSeconds ?? waveSurfer?.getDuration() ?? audio?.duration;
+    const duration = durationSeconds ?? audio?.duration;
     if (!duration || !Number.isFinite(duration)) return;
 
     const nextSeconds = Math.max(0, Math.min(duration, ratio * duration));
-    if (waveSurfer) {
-      waveSurfer.setTime(nextSeconds);
-    } else if (audio) {
-      audio.currentTime = nextSeconds;
-    }
+    if (audio) audio.currentTime = nextSeconds;
+    setProgressSeconds(nextSeconds);
     setDisplaySeconds(nextSeconds);
   }
 
   function seekBy(deltaSeconds: number) {
-    const waveSurfer = waveSurferRef.current;
     const audio = audioRef.current;
-    const duration = durationSeconds ?? waveSurfer?.getDuration() ?? audio?.duration;
-    const currentTime = waveSurfer?.getCurrentTime() ?? audio?.currentTime;
+    const duration = durationSeconds ?? audio?.duration;
+    const currentTime = audio?.currentTime;
     if (currentTime === undefined || !duration || !Number.isFinite(duration)) return;
     seekToRatio((currentTime + deltaSeconds) / duration);
   }
 
-  function togglePlayback() {
-    const waveSurfer = waveSurferRef.current;
-    if (waveSurfer) {
-      void waveSurfer.playPause().catch(() => toggleNativePlayback());
-      return;
+  function seekFromPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!canSeek) return;
+    const track = lightweightTrackRef.current;
+    const ratio = seekRatioFromBounds(
+      event.clientX,
+      (track ?? event.currentTarget).getBoundingClientRect(),
+    );
+    if (ratio !== undefined) seekToRatio(ratio);
+  }
+
+  function finishPointerSeek(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragPointerIdRef.current !== event.pointerId) return;
+    dragPointerIdRef.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
     }
+  }
+
+  function togglePlayback() {
+    setWaveformRequested(true);
     toggleNativePlayback();
   }
 
@@ -210,6 +363,10 @@ function RecordingPlayer({
       audio.pause();
     }
   }
+
+  const lightweightProgress = durationSeconds
+    ? Math.max(0, Math.min(100, (progressSeconds / durationSeconds) * 100))
+    : 0;
 
   return (
     <section className={cn("grid gap-3 border-b", variant === "modal" ? "bg-background px-8 py-6" : "bg-muted/40 p-4 sm:p-5")} aria-label="Recording playback">
@@ -277,11 +434,13 @@ function RecordingPlayer({
           <div
             aria-label={`Seek recording ${item.name}`}
             aria-disabled={!canSeek}
-            aria-valuemax={Math.round(durationSeconds ?? 0)}
+            aria-valuemax={roundedMediaSecond(durationSeconds)}
             aria-valuemin={0}
-            aria-valuenow={currentSeconds}
-            aria-valuetext={`${formatElapsed(currentSeconds)}${durationSeconds === undefined ? "" : ` of ${formatElapsed(Math.floor(durationSeconds))}`}`}
-            className="relative h-14 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-md bg-muted/60 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60"
+            aria-valuenow={Math.min(currentSeconds, roundedMediaSecond(durationSeconds))}
+            aria-valuetext={`${formatElapsed(currentSeconds)}${durationSeconds === undefined ? "" : ` of ${formatElapsed(roundedMediaSecond(durationSeconds))}`}`}
+            className="relative h-14 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-md bg-muted/60 outline-none ring-offset-background transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-disabled:cursor-default aria-disabled:opacity-70 aria-disabled:hover:bg-muted/60 [&>div]:pointer-events-none"
+            data-waveform-mounted={waveformMounted ? "true" : undefined}
+            data-waveform-mode={waveformMode}
             onKeyDown={(event) => {
               if (!canSeek) return;
               if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
@@ -304,10 +463,37 @@ function RecordingPlayer({
                 seekToRatio(1);
               }
             }}
+            onPointerCancel={finishPointerSeek}
+            onPointerDown={(event) => {
+              if (!canSeek) return;
+              dragPointerIdRef.current = event.pointerId;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              seekFromPointer(event);
+            }}
+            onPointerMove={(event) => {
+              if (dragPointerIdRef.current === event.pointerId) seekFromPointer(event);
+            }}
+            onPointerUp={(event) => {
+              if (dragPointerIdRef.current === event.pointerId) seekFromPointer(event);
+              finishPointerSeek(event);
+            }}
             ref={waveformRef}
             role="slider"
             tabIndex={canSeek ? 0 : -1}
-          />
+          >
+            {waveformMode === "decoded" ? null : (
+              <div
+                className="pointer-events-none absolute inset-x-3 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-foreground/10"
+                data-testid="lightweight-seek-track"
+                ref={lightweightTrackRef}
+              >
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-100 ease-linear motion-reduce:transition-none"
+                  style={{ width: waveformMode === "lightweight" ? `${lightweightProgress}%` : "0%" }}
+                />
+              </div>
+            )}
+          </div>
         </div>
         <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
           <span>{playing ? "Playing" : recordingStatus}</span>
@@ -373,6 +559,7 @@ export function TranscriptPanel({
   const isDone = isRecordingFinished(item?.status);
   const isRunning = item ? isRecordingActive(item.status) : false;
   const isError = item?.status === "failed";
+  const transcriptText = projectTranscriptText(text);
 
   useEffect(() => {
     if (!isDone || !item?.output) return;
@@ -421,7 +608,7 @@ export function TranscriptPanel({
               )
               : isRunning
                 ? item?.progressMessage ??
-                  (item ? recordingActivityLabel(item.status, elapsedSeconds) : "Working")
+                  (item ? recordingActivityLabel(item.status) : "Working")
                 : isError
                   ? "Transcription failed"
                   : item
@@ -472,15 +659,23 @@ export function TranscriptPanel({
         {item ? <RecordingPlayer item={item} onOpen={onOpen} onReveal={onReveal} variant={variant} /> : null}
         <ScrollArea className="min-h-[280px] flex-1 bg-[var(--surface-transcript)]">
           <div className={cn("min-h-[280px]", variant === "modal" ? "p-8 pt-7" : "p-5")}>
+            {item?.status === "partial" && item.error ? (
+              <Alert className="mb-5">
+                <HelpCircle />
+                <AlertDescription>{item.error}</AlertDescription>
+              </Alert>
+            ) : null}
             {isDone ? (
-              text ? (
-                <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{text}</pre>
+              transcriptText.state === "ready" ? (
+                <pre className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground">{transcriptText.text}</pre>
+              ) : transcriptText.state === "empty" ? (
+                <p className="text-[15px] leading-7 text-muted-foreground">{transcriptText.text}</p>
               ) : (
                 <div className="flex flex-col gap-3">
                   <Skeleton className="h-4 w-3/4" />
                   <Skeleton className="h-4 w-full" />
                   <Skeleton className="h-4 w-5/6" />
-                  <p className="text-sm text-muted-foreground">Loading transcript…</p>
+                  <p className="text-sm text-muted-foreground">{transcriptText.text}</p>
                 </div>
               )
             ) : isError ? (
@@ -522,7 +717,9 @@ export function TranscriptPanel({
                   )}
                 </Badge>
                 <p className="text-[15px] leading-7 text-muted-foreground">
-                  The finished transcript will appear here as soon as the local run completes.
+                  {item.route === "serverBatch"
+                    ? queuedServerMessage
+                    : "The finished transcript will appear here as soon as the local run completes."}
                 </p>
               </div>
             ) : (

@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const testPort = 4174;
+const testUrl = `http://127.0.0.1:${testPort}`;
+
 export default defineConfig({
   expect: {
     timeout: 5_000,
@@ -14,15 +17,15 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 20_000,
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: testUrl,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
     video: "retain-on-failure",
   },
   webServer: {
-    command: "pnpm dev --host 127.0.0.1 --port 4173",
-    reuseExistingServer: !process.env.CI,
+    command: `pnpm dev --host 127.0.0.1 --port ${testPort} --strictPort`,
+    reuseExistingServer: false,
     timeout: 60_000,
-    url: "http://127.0.0.1:4173",
+    url: testUrl,
   },
 });

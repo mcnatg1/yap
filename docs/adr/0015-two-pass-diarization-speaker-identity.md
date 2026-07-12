@@ -1,9 +1,11 @@
 # ADR 0015: Two-pass diarization and speaker identity
 
 **Date:** 2026-07-01
-**Status:** Accepted (roadmap — Phase 10)
+**Status:** Superseded by [ADR 0020](0020-meeting-capture-diarization-authority.md)
 **Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier, model pools), [ADR 0016](0016-auth-identity-bridge.md) (identity DB, Entra objectId → centroid bridge)
 **Supersedes diarization details in:** [ADR 0004](0004-background-diarization-okf-agents.md) (WeSpeaker + spectral clustering, vault-first design)
+
+> **2026-07-10:** ADR 0020 replaces this server-only ECAPA/VBx decision with source-aware capture, optional local anonymous evidence, server-authoritative reconciliation, calibrated model-versioned matching, and explicit privacy boundaries. This document remains as decision history and must not be used as the current implementation contract.
 
 ## Context
 

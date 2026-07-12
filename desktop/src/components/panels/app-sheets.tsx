@@ -62,6 +62,13 @@ import { cn } from "@/lib/utils";
 
 type SettingsSection = "general" | "system" | "about";
 
+export function projectAppModalState(modal: "settings" | "help" | null) {
+  return {
+    detailsOpen: modal === "settings",
+    helpOpen: modal === "help",
+  };
+}
+
 const settingsSections: { id: SettingsSection; icon: ComponentType<{ className?: string }>; label: string }[] = [
   { id: "general", icon: Mic, label: "General" },
   { id: "system", icon: Server, label: "System" },
@@ -112,6 +119,20 @@ function liveLocksFallbackActions(status: LiveSessionStatus) {
 
 export function liveSettingsLocked(status: LiveSessionStatus) {
   return liveLocksFallbackActions(status);
+}
+
+export function projectLiveOverlayAction(status: LiveSessionStatus, liveBusy: boolean) {
+  if (status === "saving") {
+    return {
+      disabled: true,
+      label: "Saving",
+    };
+  }
+  const liveActive = liveSettingsLocked(status);
+  return {
+    disabled: liveBusy,
+    label: liveActive ? "Stop" : "Start",
+  };
 }
 
 function fallbackDownloadLabel(view: FallbackModelView) {
@@ -300,6 +321,7 @@ export function SettingsSheet({
   status: string;
 }) {
   const liveActive = liveSettingsLocked(liveView.status);
+  const liveOverlayAction = projectLiveOverlayAction(liveView.status, liveBusy);
   const fallbackLocked = liveActive;
   const micLabelId = useId();
   const computeLabelId = useId();
@@ -431,7 +453,7 @@ export function SettingsSheet({
                           Apply
                         </Button>
                       }
-                      detail={liveActive ? "Stop live first." : "Pastes the last saved dictation."}
+                      detail={liveActive ? "Stop live first." : "Inserts the last transcript into the focused field."}
                       label="Paste last"
                       value={liveView.pasteHotkey || "Off"}
                     >
@@ -505,9 +527,9 @@ export function SettingsSheet({
                     </SettingsRow>
                     <SettingsRow
                       action={
-                        <Button disabled={liveBusy || liveActive} onClick={liveActive ? onStopLive : onStartLive} type="button">
+                        <Button disabled={liveOverlayAction.disabled} onClick={liveActive ? onStopLive : onStartLive} type="button">
                           <Mic data-icon="inline-start" />
-                          {liveActive ? "Stop" : "Start"}
+                          {liveOverlayAction.label}
                         </Button>
                       }
                       detail={liveView.error || liveSettingsError || "Small overlay stays available for live dictation."}
@@ -669,7 +691,12 @@ export function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean
           <SheetDescription>Core controls.</SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-3 px-4">
-          <StatusRow icon={UploadCloud} label="Add files" value="Drag files in, or click Drop files here." wrap />
+          <StatusRow
+            icon={UploadCloud}
+            label="Add files"
+            value="Choose files or drag recordings onto Transcribe. They wait in the organization server queue."
+            wrap
+          />
           <StatusRow
             icon={Sparkles}
             label="Transcribe"

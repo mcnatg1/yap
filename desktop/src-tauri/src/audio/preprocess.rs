@@ -136,6 +136,7 @@ fn mix(current: f32, target: f32, blend: f32) -> f32 {
 }
 
 pub struct LinearResampler {
+    buffered: Vec<f32>,
     source_rate: u32,
     target_rate: u32,
     cursor: f64,
@@ -144,6 +145,7 @@ pub struct LinearResampler {
 impl LinearResampler {
     pub fn new(source_rate: u32, target_rate: u32) -> Self {
         Self {
+            buffered: Vec::new(),
             source_rate: source_rate.max(1),
             target_rate: target_rate.max(1),
             cursor: 0.0,
@@ -157,17 +159,25 @@ impl LinearResampler {
         if self.source_rate == self.target_rate {
             return input.to_vec();
         }
+        self.buffered.extend_from_slice(input);
         let step = self.source_rate as f64 / self.target_rate as f64;
         let mut output = Vec::new();
-        while self.cursor < input.len() as f64 {
+        while self.cursor < self.buffered.len() as f64 {
             let base = self.cursor.floor() as usize;
             let frac = (self.cursor - base as f64) as f32;
-            let a = input[base];
-            let b = input.get(base + 1).copied().unwrap_or(a);
+            if frac != 0.0 && base + 1 >= self.buffered.len() {
+                break;
+            }
+            let a = self.buffered[base];
+            let b = self.buffered.get(base + 1).copied().unwrap_or(a);
             output.push(a + (b - a) * frac);
             self.cursor += step;
         }
-        self.cursor -= input.len() as f64;
+        let drop_count = (self.cursor.floor() as usize).min(self.buffered.len().saturating_sub(1));
+        if drop_count > 0 {
+            self.buffered.drain(..drop_count);
+            self.cursor -= drop_count as f64;
+        }
         output
     }
 }
@@ -205,6 +215,18 @@ mod tests {
     fn linear_resample_can_downsample() {
         let mut resampler = LinearResampler::new(4, 2);
         assert_eq!(resampler.push(&[0.0, 1.0, 0.0, -1.0]), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn linear_resample_matches_split_callbacks() {
+        let mut one_chunk = LinearResampler::new(2, 4);
+        let expected = one_chunk.push(&[0.0, 1.0, 0.0]);
+
+        let mut split = LinearResampler::new(2, 4);
+        let mut actual = split.push(&[0.0, 1.0]);
+        actual.extend(split.push(&[0.0]));
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

@@ -5,6 +5,7 @@
   "windows": ["main", "live-overlay"],
   "permissions": [
     "core:window:allow-inner-size",
+    "core:window:allow-close",
     "core:window:allow-is-closable",
     "core:window:allow-is-focused",
     "core:window:allow-is-visible",

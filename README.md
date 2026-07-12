@@ -1,8 +1,8 @@
 # Yap
 
-Yap is a staged monorepo for the MVP: one desktop app, one future server tier, and the docs that keep the architecture honest.
+Yap is a staged monorepo for the MVP: one desktop app, one staged server tier, and the docs that keep the architecture honest.
 
-The desktop is a Tauri app with a local Nemotron live fallback. Larger recording transcription belongs on the GB-class server path once `yap-server` exists. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
+The desktop is a Tauri app with a local Nemotron live fallback. Larger recording transcription belongs on the GB-class server path once the staged `yap-server` skeleton becomes a deployable private service with real workers. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
 
 ## Current Posture
 
@@ -18,6 +18,8 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 - Editor-specific config is not tracked. Use whichever editor you want.
 - MVP repo posture: staged monorepo, no Nx/Turborepo, no separate `yap-contracts` yet.
 
+After this hardening branch passes its PR checks and is merged, the immediate tooling slice migrates repo-owned PowerShell scripts and workflows to PowerShell 7. The next **product** implementation plan remains the canonical Phase 3 server contract and durable connector; the tooling migration does not change that architecture order.
+
 ## Repository Layout
 
 ```text
@@ -30,7 +32,7 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 |   |-- adr/                          Architecture decisions.
 |   |-- specs/                        Phase specs and testing notes.
 |   |-- runbooks/                     Operational setup notes.
-|   `-- superpowers/plans/            Historical implementation plans.
+|   `-- superpowers/plans/            Active and historical implementation plans.
 |-- infra/
 |   `-- yap-server-node/              GB-class node setup script and env example.
 |-- server/
@@ -59,13 +61,18 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
     `-- src-tauri/
         |-- Cargo.toml                Rust/Tauri deps.
         |-- tauri.conf.json           Window and bundle config.
-        |-- nsis-hooks.nsh            Windows installer DLL hook.
+        |-- nsis-hooks.nsh            Windows installer/uninstaller policy hooks.
         |-- examples/nemotron_profile.rs Local live runtime profiler.
         |-- tests/parity.rs           Mock verbose-json parity contract.
         `-- src/
-            |-- lib.rs                Tauri commands, event wiring, app lifecycle.
+            |-- app.rs                App/tray/window lifecycle.
+            |-- lib.rs                Tauri wiring and command registration.
+            |-- commands/             Native invoke handlers, including media admission.
+            |-- audio/                Capture, framing, timeline, bounded sinks, recording, evidence/results.
+            |-- live/                 Live session, hotkeys, overlay, injection, runtime, history/recovery.
+            |-- runtime/              Route/orchestrator state skeleton.
             `-- stt/
-                |-- dispatch.rs       Batch orchestration and transcript file writes.
+                |-- dispatch.rs       Local fallback runtime state only.
                 |-- error.rs          Stable STT error codes/messages.
                 |-- model.rs          Shared model cache/download/verification helpers.
                 |-- nemotron.rs       Pinned sherpa-onnx Nemotron model bundle.
@@ -83,6 +90,8 @@ work, plus setup/install/remove controls for the pinned sherpa model artifacts.
 2. Tauri owns mic capture, hotkey state, the live overlay window, and the local fallback runtime.
 3. `stt::nemotron` resolves/downloads the pinned Nemotron INT8 artifact set; the live worker keeps one in-process sherpa recognizer warm.
 4. Larger recording jobs queue or block until the server contract exists instead of silently producing official-looking local batch transcripts.
+
+Imported recording jobs currently use a transitional React/localStorage queue with Rust-authorized playback paths. It is not durable server execution authority; the Phase 3 connector plan replaces it with Rust-owned string IDs and a SQLite job ledger.
 
 ## Development
 
