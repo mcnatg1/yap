@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  attachWdioRunIsolation,
   assertRecordingRootEmpty,
   createWdioRunIsolation,
   listRecordingArtifacts,
@@ -14,7 +15,9 @@ const testsRoot = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = path.resolve(testsRoot, "..");
 const appBinaryPath =
   process.env.APP_BINARY ?? path.join(desktopRoot, "src-tauri", "target", "debug", binaryName);
-const isolation = createWdioRunIsolation();
+const isolation = process.env.WDIO_WORKER_ID
+  ? attachWdioRunIsolation()
+  : createWdioRunIsolation();
 class Task8bIsolationCleanupService {
   async onComplete() {
     await new Promise((resolve) => setTimeout(resolve, 100));

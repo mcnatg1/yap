@@ -89,6 +89,7 @@ describe("Yap shared tray dispatcher", () => {
 
     await waitForProcessExit(processId);
     expect(isProcessAlive(processId)).toBe(false);
+    browser.sessionId = undefined;
     if (bridgeClosedDuringQuit) {
       console.info("Tray quit terminated the app before the WDIO bridge returned.");
     }

@@ -2,6 +2,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   rmdirSync,
   symlinkSync,
   unlinkSync,
@@ -13,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   MICROPHONE_PERMISSION_DENIED_PREFIX,
+  attachWdioRunIsolation,
   assertOwnedSavedSession,
   assertRecordingRootEmpty,
   classifyNativeReadiness,
@@ -367,6 +369,75 @@ describe("Task 8b canonical saved-session ownership", () => {
 });
 
 describe("Task 8b WDIO run isolation", () => {
+  it("attaches a worker to the launcher-owned isolation without reclaiming it", () => {
+    const env = {};
+    const isolation = privateIsolation("worker-attach", env);
+    const ownerMarker = path.join(isolation.runRoot, ".yap-wdio-run-owner");
+    const markerBefore = readFileSync(ownerMarker, "utf8");
+    env.WDIO_WORKER_ID = "0-0";
+
+    expect(attachWdioRunIsolation(env)).toEqual(isolation);
+    expect(readFileSync(ownerMarker, "utf8")).toBe(markerBefore);
+  });
+
+  it("rejects a worker path substitution without disturbing launcher ownership", () => {
+    const env = {};
+    const isolation = privateIsolation("worker-substitution", env);
+    const ownerMarker = path.join(isolation.runRoot, ".yap-wdio-run-owner");
+
+    expect(() => attachWdioRunIsolation({
+      ...env,
+      YAP_MODELS_DIR: path.join(isolation.runRoot, "substituted-models"),
+    })).toThrow(/models.*exact|inherited.*models|does not match/i);
+    expect(readFileSync(ownerMarker, "utf8")).toBe(`${isolation.token}\n`);
+    expect(existsSync(isolation.runRoot)).toBe(true);
+  });
+
+  it("rejects workers missing the inherited token or a required path", () => {
+    const env = {};
+    privateIsolation("worker-missing-env", env);
+
+    expect(() => attachWdioRunIsolation({
+      ...env,
+      YAP_WDIO_RUN_TOKEN: "",
+    })).toThrow(/token/i);
+    const { YAP_MODELS_DIR: _missing, ...missingModels } = env;
+    expect(() => attachWdioRunIsolation(missingModels)).toThrow(/models/i);
+  });
+
+  it("rejects an inherited run root before claiming it", () => {
+    const token = `unit-inherited-${process.pid}-${Date.now()}`;
+    const tempRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "results",
+      "temp",
+      "wdio",
+    );
+    const runRoot = path.join(tempRoot, `run-${token}`);
+    mkdirSync(runRoot, { recursive: true });
+    writeFileSync(path.join(runRoot, "must-survive.txt"), "keep");
+
+    expect(() => createWdioRunIsolation({}, { token })).toThrow(/already exists|inherited|stale|colliding/i);
+    expect(existsSync(path.join(runRoot, "must-survive.txt"))).toBe(true);
+    rmdirSync(runRoot, { recursive: true });
+  });
+
+  it("rejects cleanup when the exclusive ownership marker is missing or mismatched", async () => {
+    const isolation = privateIsolation("owner-marker");
+    const ownerMarker = path.join(isolation.runRoot, ".yap-wdio-run-owner");
+    const original = readFileSync(ownerMarker, "utf8");
+    unlinkSync(ownerMarker);
+
+    await expect(removePrivateRunRootWhenReleased(isolation)).rejects.toThrow(/ownership marker/i);
+    expect(existsSync(isolation.runRoot)).toBe(true);
+
+    writeFileSync(ownerMarker, `${original.trim()}-foreign\n`, { flag: "wx" });
+    await expect(removePrivateRunRootWhenReleased(isolation)).rejects.toThrow(/ownership marker/i);
+    expect(existsSync(isolation.runRoot)).toBe(true);
+    writeFileSync(ownerMarker, original, { flag: "w" });
+  });
+
   it("rejects paired temp-root and run-root substitution", async () => {
     const owner = privateIsolation("paired-substitution");
     const tempRoot = path.join(owner.runRoot, "outside");
@@ -426,6 +497,14 @@ describe("Task 8b WDIO run isolation", () => {
       ...isolation,
       webviewRoot: substituted,
     })).rejects.toThrow(/WebView root.*exact child/i);
+    await expect(removePrivateRunRootWhenReleased({
+      ...isolation,
+      appDataRoot: substituted,
+    })).rejects.toThrow(/app-data root.*exact child/i);
+    await expect(removePrivateRunRootWhenReleased({
+      ...isolation,
+      modelsRoot: substituted,
+    })).rejects.toThrow(/models root.*exact child/i);
     expect(existsSync(runMarker)).toBe(true);
   });
 
@@ -504,10 +583,16 @@ describe("Task 8b WDIO run isolation", () => {
 
     expect(isolation.tempRoot).toBe(expectedTempRoot);
     expect(isolation.runRoot).toBe(path.join(expectedTempRoot, `run-${isolation.token}`));
+    expect(path.win32.isAbsolute(isolation.appDataRoot)).toBe(true);
+    expect(path.win32.isAbsolute(isolation.modelsRoot)).toBe(true);
     expect(path.win32.isAbsolute(isolation.recordingRoot)).toBe(true);
     expect(path.win32.isAbsolute(isolation.webviewRoot)).toBe(true);
+    expect(path.dirname(isolation.appDataRoot)).toBe(isolation.runRoot);
+    expect(path.dirname(isolation.modelsRoot)).toBe(isolation.runRoot);
     expect(path.dirname(isolation.recordingRoot)).toBe(isolation.runRoot);
     expect(path.dirname(isolation.webviewRoot)).toBe(isolation.runRoot);
+    expect(env.YAP_APP_DATA_DIR).toBe(isolation.appDataRoot);
+    expect(env.YAP_MODELS_DIR).toBe(isolation.modelsRoot);
     expect(env.YAP_LIVE_RECORDINGS_DIR).toBe(isolation.recordingRoot);
     expect(env.WEBVIEW2_USER_DATA_FOLDER).toBe(isolation.webviewRoot);
     expect(listRecordingArtifacts(isolation.recordingRoot)).toEqual([]);

@@ -3,9 +3,11 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { rm as removeAsync } from "node:fs/promises";
 import path from "node:path";
@@ -319,10 +321,13 @@ const helperDirectory = path.dirname(fileURLToPath(import.meta.url));
 const fixedWdioTempRoot = path.resolve(helperDirectory, "..", "results", "temp", "wdio");
 const isolationTokenPattern = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const retryableRemovalCodes = new Set(["EBUSY", "EMFILE", "ENFILE", "ENOTEMPTY", "EPERM"]);
+const runOwnerMarkerName = ".yap-wdio-run-owner";
 
 function expectedIsolationPaths(token) {
   const runRoot = path.join(fixedWdioTempRoot, `run-${token}`);
   return {
+    appDataRoot: path.join(runRoot, "app-data"),
+    modelsRoot: path.join(runRoot, "models"),
     recordingRoot: path.join(runRoot, "live-recordings"),
     runRoot,
     tempRoot: fixedWdioTempRoot,
@@ -371,6 +376,14 @@ function assertSafeIsolationRoot(isolation) {
   if (!sameWindowsPath(recordingRoot, expected.recordingRoot)) {
     throw new Error("WDIO recording root is not the exact child of the token-derived run root.");
   }
+  const appDataRoot = requireAbsoluteWindowsPath(isolation.appDataRoot, "WDIO app-data root");
+  if (!sameWindowsPath(appDataRoot, expected.appDataRoot)) {
+    throw new Error("WDIO app-data root is not the exact child of the token-derived run root.");
+  }
+  const modelsRoot = requireAbsoluteWindowsPath(isolation.modelsRoot, "WDIO models root");
+  if (!sameWindowsPath(modelsRoot, expected.modelsRoot)) {
+    throw new Error("WDIO models root is not the exact child of the token-derived run root.");
+  }
   const webviewRoot = requireAbsoluteWindowsPath(isolation.webviewRoot, "WDIO WebView root");
   if (!sameWindowsPath(webviewRoot, expected.webviewRoot)) {
     throw new Error("WDIO WebView root is not the exact child of the token-derived run root.");
@@ -381,7 +394,22 @@ function assertSafeIsolationRoot(isolation) {
   if (runExists && !tempExists) {
     throw new Error("WDIO run root exists without the fixed WDIO temp root.");
   }
+  if (runExists) {
+    const ownerMarker = path.join(expected.runRoot, runOwnerMarkerName);
+    if (!existsSync(ownerMarker)) {
+      throw new Error("WDIO run root is missing its exclusive ownership marker.");
+    }
+    const markerMetadata = lstatSync(ownerMarker);
+    if (markerMetadata.isSymbolicLink() || !markerMetadata.isFile()) {
+      throw new Error("WDIO run-root ownership marker must be an unredirected regular file.");
+    }
+    if (readFileSync(ownerMarker, "utf8") !== `${token}\n`) {
+      throw new Error("WDIO run-root ownership marker does not match this run token.");
+    }
+  }
   assertUnredirectedDirectory(expected.recordingRoot, "WDIO recording root");
+  assertUnredirectedDirectory(expected.appDataRoot, "WDIO app-data root");
+  assertUnredirectedDirectory(expected.modelsRoot, "WDIO models root");
   assertUnredirectedDirectory(expected.webviewRoot, "WDIO WebView root");
   return expected;
 }
@@ -395,16 +423,55 @@ export function createWdioRunIsolation(env = process.env, options = {}) {
 
   mkdirSync(isolation.tempRoot, { recursive: true });
   assertUnredirectedDirectory(isolation.tempRoot, "Fixed WDIO temp root");
-  if (!existsSync(isolation.runRoot)) mkdirSync(isolation.runRoot);
+  try {
+    mkdirSync(isolation.runRoot);
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error(`WDIO run root already exists and cannot be inherited or reclaimed: ${isolation.runRoot}`);
+    }
+    throw error;
+  }
   assertUnredirectedDirectory(isolation.runRoot, "WDIO run root");
+  writeFileSync(path.join(isolation.runRoot, runOwnerMarkerName), `${token}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+  });
+  if (!existsSync(isolation.appDataRoot)) mkdirSync(isolation.appDataRoot);
+  if (!existsSync(isolation.modelsRoot)) mkdirSync(isolation.modelsRoot);
   if (!existsSync(isolation.recordingRoot)) mkdirSync(isolation.recordingRoot);
   if (!existsSync(isolation.webviewRoot)) mkdirSync(isolation.webviewRoot);
   assertSafeIsolationRoot(isolation);
 
   env.YAP_WDIO_RUN_TOKEN = token;
   env.YAP_WDIO_RUN_ROOT = isolation.runRoot;
+  env.YAP_APP_DATA_DIR = isolation.appDataRoot;
+  env.YAP_MODELS_DIR = isolation.modelsRoot;
   env.YAP_LIVE_RECORDINGS_DIR = isolation.recordingRoot;
   env.WEBVIEW2_USER_DATA_FOLDER = isolation.webviewRoot;
+  return isolation;
+}
+
+export function attachWdioRunIsolation(env = process.env) {
+  const token = env.YAP_WDIO_RUN_TOKEN;
+  if (typeof token !== "string" || !isolationTokenPattern.test(token)) {
+    throw new Error("Inherited WDIO isolation token is missing or invalid.");
+  }
+
+  const isolation = { ...expectedIsolationPaths(token), token };
+  const inheritedPaths = [
+    ["YAP_WDIO_RUN_ROOT", "runRoot", "run root"],
+    ["YAP_APP_DATA_DIR", "appDataRoot", "app-data root"],
+    ["YAP_MODELS_DIR", "modelsRoot", "models root"],
+    ["YAP_LIVE_RECORDINGS_DIR", "recordingRoot", "recording root"],
+    ["WEBVIEW2_USER_DATA_FOLDER", "webviewRoot", "WebView root"],
+  ];
+  for (const [variable, key, label] of inheritedPaths) {
+    const inherited = requireAbsoluteWindowsPath(env[variable], `Inherited WDIO ${label}`);
+    if (!sameWindowsPath(inherited, isolation[key])) {
+      throw new Error(`Inherited WDIO ${label} does not match the launcher-owned isolation.`);
+    }
+  }
+  assertSafeIsolationRoot(isolation);
   return isolation;
 }
 

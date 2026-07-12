@@ -128,6 +128,8 @@ if ($candidateCount -ne 1) {
 async function restoreMainWindowNatively() {
   await showMainWindowNatively();
   await browser.tauri.switchWindow("main");
+  await browser.tauri.execute(({ core }) =>
+    core.invoke("show_main_workspace", { workspace: "home" }));
   await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
     core.invoke("plugin:window|is_visible", { label: "main" })), {
     interval: 50,
