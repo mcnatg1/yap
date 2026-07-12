@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
 import re
 import socket
 import sys
+import time
 from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -22,6 +24,8 @@ MAX_REQUEST_BODY_BYTES = 1024 * 1024
 MAX_LOG_METHOD_CHARS = 16
 MAX_LOG_PATH_CHARS = 128
 REQUEST_IO_TIMEOUT_SECONDS = 2.0
+REQUEST_WALL_CLOCK_DEADLINE_SECONDS = 2.0
+_SUPPORTED_HTTP_VERSIONS = frozenset({"HTTP/1.0", "HTTP/1.1"})
 
 _REQUEST_LOGGER = logging.getLogger("yap_server.requests")
 _JOB_PATH = re.compile(r"^/v1/jobs/[^/]+$")
@@ -45,10 +49,29 @@ def _allowed_methods(path: str) -> frozenset[str] | None:
     return None
 
 
-def _bounded(value: str, maximum: int) -> str:
+def _bounded(value: str | None, maximum: int) -> str:
+    if not isinstance(value, str):
+        return ""
     if len(value) <= maximum:
         return value
     return value[:maximum] + "…"
+
+
+class _DeadlineSocketReader(io.RawIOBase):
+    def __init__(self, connection: socket.socket, deadline: float) -> None:
+        super().__init__()
+        self._connection = connection
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request wall-clock deadline exceeded")
+        self._connection.settimeout(min(REQUEST_IO_TIMEOUT_SECONDS, remaining))
+        return self._connection.recv_into(buffer)
 
 
 class _HealthRequestHandler(BaseHTTPRequestHandler):
@@ -69,6 +92,15 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         self.request_version = ""
         self.command = ""
         super().__init__(*args, **kwargs)
+
+    def setup(self) -> None:
+        deadline = time.monotonic() + REQUEST_WALL_CLOCK_DEADLINE_SECONDS
+        super().setup()
+        original_rfile = self.rfile
+        self.rfile = io.BufferedReader(
+            _DeadlineSocketReader(self.connection, deadline)
+        )
+        original_rfile.close()
 
     def do_GET(self) -> None:
         self._dispatch()
@@ -98,14 +130,8 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         self._dispatch()
 
     def _dispatch(self) -> None:
-        if self.request_version == "HTTP/0.9":
-            self.request_version = "HTTP/1.0"
-            self.close_connection = True
-            self._send_error(
-                HTTPStatus.HTTP_VERSION_NOT_SUPPORTED,
-                code="HTTP_VERSION_NOT_SUPPORTED",
-                message="HTTP/1.0 or HTTP/1.1 is required.",
-            )
+        if self.request_version not in _SUPPORTED_HTTP_VERSIONS:
+            self._send_version_not_supported()
             return
 
         if not self._request_size_is_allowed():
@@ -211,6 +237,15 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             headers=headers,
         )
 
+    def _send_version_not_supported(self) -> None:
+        self.request_version = "HTTP/1.0"
+        self.close_connection = True
+        self._send_error(
+            HTTPStatus.HTTP_VERSION_NOT_SUPPORTED,
+            code="HTTP_VERSION_NOT_SUPPORTED",
+            message="HTTP/1.0 or HTTP/1.1 is required.",
+        )
+
     def _send_json(
         self,
         status: HTTPStatus,
@@ -265,6 +300,12 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus(code)
         except ValueError:
             status = HTTPStatus.INTERNAL_SERVER_ERROR
+        if status == HTTPStatus.HTTP_VERSION_NOT_SUPPORTED:
+            self._send_version_not_supported()
+            return
+        if self.request_version not in _SUPPORTED_HTTP_VERSIONS:
+            self.request_version = "HTTP/1.0"
+            self.close_connection = True
         self._send_error(
             status,
             code="HTTP_ERROR",

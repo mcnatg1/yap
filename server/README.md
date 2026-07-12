@@ -99,6 +99,8 @@ server-node runbook keeps port 18765 tunnel-only by default.
 
 Only `GET /v1/health` is implemented. Contract-only job, chunk, commit, and live
 routes return a stable `501 NOT_IMPLEMENTED` JSON error. Request bodies are
-capped at 1 MiB before any body read.
+capped at 1 MiB before any body read. Each accepted request has a two-second
+wall-clock deadline, so slow-drip input cannot extend the single-request server
+indefinitely. The service accepts HTTP/1.0 and HTTP/1.1 only.
 
 Skipped for now: Nx/Turborepo, package workspace wiring, framework/server dependencies, checked-in model weights, and fake GB300 profiles.
