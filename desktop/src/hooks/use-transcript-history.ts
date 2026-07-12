@@ -40,7 +40,7 @@ export function createTranscriptHistoryStore({
   let acceptedNativeGeneration = 0;
   const acceptedNativeGenerationByOutput = new Map<
     string,
-    { generation: number; session: string }
+    { generation: number; sessionId: string }
   >();
 
   const pruneAcceptedNativeGenerations = (history: TranscriptHistoryEntry[]) => {
@@ -89,9 +89,10 @@ export function createTranscriptHistoryStore({
     if (acceptedNativeEntries.length) {
       acceptedNativeGeneration += 1;
       for (const entry of acceptedNativeEntries) {
+        if (!entry.sessionId) continue;
         acceptedNativeGenerationByOutput.set(
           transcriptPathIdentity(entry.outputPath),
-          { generation: acceptedNativeGeneration, session: entry.name },
+          { generation: acceptedNativeGeneration, sessionId: entry.sessionId },
         );
       }
     }
@@ -109,20 +110,21 @@ export function createTranscriptHistoryStore({
       applied = true;
 
       const acceptedAfterBaseline = getCurrentHistory().filter((entry) => {
-        if (!isNativeLiveTranscriptHistoryEntry(entry)) return false;
         const metadata = acceptedNativeGenerationByOutput.get(
           transcriptPathIdentity(entry.outputPath),
         );
         return metadata !== undefined
           && metadata.generation > baselineGeneration
-          && metadata.session === entry.name;
+          && metadata.sessionId === entry.sessionId;
       });
       const acceptedSessions = new Set(
-        acceptedAfterBaseline.map((entry) => entry.name),
+        acceptedAfterBaseline.flatMap((entry) => entry.sessionId ?? []),
       );
       const mergedNativeEntries = [
         ...acceptedAfterBaseline,
-        ...entries.filter((entry) => !acceptedSessions.has(entry.name)),
+        ...entries.filter((entry) => (
+          !entry.sessionId || !acceptedSessions.has(entry.sessionId)
+        )),
       ];
       const next = reconcileNativeTranscriptHistoryEntries(
         readTranscriptHistory(storage),
