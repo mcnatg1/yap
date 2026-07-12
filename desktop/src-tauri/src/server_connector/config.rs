@@ -1,13 +1,10 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use reqwest::Url;
 
 pub const CURRENT_SCHEMA_VERSION: u16 = 1;
-
-static SETTINGS_PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,7 +28,9 @@ impl Default for ServerSettings {
 pub enum ConfigError {
     Invalid(&'static str),
     IncompatibleSchema(u64),
-    Io(std::io::Error),
+    AccessIo(std::io::Error),
+    SaveIo(std::io::Error),
+    PublishedButDurabilityUnconfirmed(std::io::Error),
     Serialization(serde_json::Error),
 }
 
@@ -43,7 +42,14 @@ impl std::fmt::Display for ConfigError {
                 formatter,
                 "Server settings use unsupported schema version {version}."
             ),
-            Self::Io(error) => write!(formatter, "Could not save server settings: {error}"),
+            Self::AccessIo(error) => {
+                write!(formatter, "Could not access server settings: {error}")
+            }
+            Self::SaveIo(error) => write!(formatter, "Could not save server settings: {error}"),
+            Self::PublishedButDurabilityUnconfirmed(error) => write!(
+                formatter,
+                "Server settings changed, but durability confirmation failed: {error}"
+            ),
             Self::Serialization(error) => {
                 write!(formatter, "Could not encode server settings: {error}")
             }
@@ -53,9 +59,9 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-impl From<std::io::Error> for ConfigError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
+impl ConfigError {
+    pub(crate) fn settings_were_published(&self) -> bool {
+        matches!(self, Self::PublishedButDurabilityUnconfirmed(_))
     }
 }
 
@@ -135,7 +141,7 @@ pub(crate) fn load_from_path(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ServerSettings::default());
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(ConfigError::AccessIo(error)),
     };
     decode_persisted_settings(&text, allow_insecure_private)
 }
@@ -145,25 +151,42 @@ pub(crate) fn save_to_path(
     path: &Path,
     allow_insecure_private: bool,
 ) -> Result<ServerSettings, ConfigError> {
-    save_to_path_with_before_publish(settings, path, allow_insecure_private, |_, _| Ok(()))
+    save_to_path_with_hooks(
+        settings,
+        path,
+        allow_insecure_private,
+        || Ok(()),
+        || Ok(()),
+        |_, _| Ok(()),
+        |_| Ok(()),
+    )
 }
 
-fn save_to_path_with_before_publish<F>(
+pub(super) fn save_to_path_with_hooks<BeforeLock, AfterLock, BeforePublish, AfterPublish>(
     settings: &ServerSettings,
     path: &Path,
     allow_insecure_private: bool,
-    before_publish: F,
+    before_lock: BeforeLock,
+    after_lock: AfterLock,
+    before_publish: BeforePublish,
+    after_publish: AfterPublish,
 ) -> Result<ServerSettings, ConfigError>
 where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    BeforeLock: FnOnce() -> std::io::Result<()>,
+    AfterLock: FnOnce() -> std::io::Result<()>,
+    BeforePublish: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    AfterPublish: FnOnce(&Path) -> std::io::Result<()>,
 {
     let normalized = normalize_settings(settings, allow_insecure_private)?;
-    ensure_existing_schema_compatible(path)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(ConfigError::SaveIo)?;
     }
+    before_lock().map_err(ConfigError::SaveIo)?;
+    let _lock = acquire_settings_lock(path)?;
+    after_lock().map_err(ConfigError::SaveIo)?;
+    ensure_existing_schema_compatible(path)?;
     let encoded = serde_json::to_string_pretty(&normalized)?;
-    write_atomically_with_before_publish(path, encoded.as_bytes(), before_publish)?;
+    write_atomically_locked_with_hooks(path, encoded.as_bytes(), before_publish, after_publish)?;
     Ok(normalized)
 }
 
@@ -187,7 +210,7 @@ fn ensure_existing_schema_compatible(path: &Path) -> Result<(), ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(ConfigError::AccessIo(error)),
     };
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
         ensure_schema_compatible(&value)?;
@@ -239,6 +262,7 @@ fn allow_insecure_private_server() -> bool {
     std::env::var("YAP_ALLOW_INSECURE_PRIVATE_SERVER").as_deref() == Ok("1")
 }
 
+#[cfg(test)]
 fn write_atomically_with_before_publish<F>(
     path: &Path,
     contents: &[u8],
@@ -247,36 +271,54 @@ fn write_atomically_with_before_publish<F>(
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(ConfigError::SaveIo)?;
+    }
+    let _lock = acquire_settings_lock(path)?;
+    write_atomically_locked_with_hooks(path, contents, before_publish, |_| Ok(()))
+}
+
+fn write_atomically_locked_with_hooks<BeforePublish, AfterPublish>(
+    path: &Path,
+    contents: &[u8],
+    before_publish: BeforePublish,
+    after_publish: AfterPublish,
+) -> Result<(), ConfigError>
+where
+    BeforePublish: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    AfterPublish: FnOnce(&Path) -> std::io::Result<()>,
+{
     let legacy_partial = path.with_extension("json.part");
     match std::fs::remove_file(&legacy_partial) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(ConfigError::SaveIo(error)),
     }
+    scavenge_abandoned_unique_partials(path).map_err(ConfigError::SaveIo)?;
 
-    let (partial, mut file) = reserve_unique_partial(path)?;
+    let (partial, mut file) = reserve_unique_partial(path).map_err(ConfigError::SaveIo)?;
 
-    let result = (|| -> Result<(), ConfigError> {
+    let publication = (|| -> std::io::Result<()> {
         file.write_all(contents)?;
         file.flush()?;
         file.sync_all()?;
         drop(file);
         before_publish(&partial, path)?;
-        let _publish_guard = SETTINGS_PUBLISH_LOCK
-            .lock()
-            .map_err(|_| std::io::Error::other("server settings publish lock is unavailable"))?;
         atomic_replace_same_directory(&partial, path)?;
-        sync_parent_directory(path)?;
         Ok(())
     })();
 
-    if result.is_err() {
+    if let Err(error) = publication {
         std::fs::remove_file(&partial).ok();
+        return Err(ConfigError::SaveIo(error));
     }
-    result
+    if let Err(error) = after_publish(path).and_then(|_| sync_parent_directory(path)) {
+        return Err(ConfigError::PublishedButDurabilityUnconfirmed(error));
+    }
+    Ok(())
 }
 
-fn reserve_unique_partial(path: &Path) -> Result<(PathBuf, std::fs::File), ConfigError> {
+fn reserve_unique_partial(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let file_name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -296,14 +338,144 @@ fn reserve_unique_partial(path: &Path) -> Result<(PathBuf, std::fs::File), Confi
         {
             Ok(file) => return Ok((partial, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         "could not reserve unique server settings partial",
+    ))
+}
+
+fn scavenge_abandoned_unique_partials(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "settings path has no parent",
+        )
+    })?;
+    let base_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "settings path has no UTF-8 file name",
+            )
+        })?;
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let Some(candidate) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_unique_partial_name(base_name, &candidate) || !entry.file_type()?.is_file() {
+            continue;
+        }
+        std::fs::remove_file(entry.path())?;
+    }
+    Ok(())
+}
+
+fn is_unique_partial_name(base_name: &str, candidate: &str) -> bool {
+    let Some(identity) = candidate
+        .strip_prefix(base_name)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".part"))
+    else {
+        return false;
+    };
+    let mut parts = identity.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(pid), Some(counter), None)
+            if pid.parse::<u32>().is_ok() && counter.parse::<u64>().is_ok()
     )
-    .into())
+}
+
+struct SettingsFileLock {
+    file: std::fs::File,
+}
+
+fn acquire_settings_lock(path: &Path) -> Result<SettingsFileLock, ConfigError> {
+    let lock_path = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(ConfigError::SaveIo)?;
+    lock_file_exclusive(&file).map_err(ConfigError::SaveIo)?;
+    Ok(SettingsFileLock { file })
+}
+
+impl Drop for SettingsFileLock {
+    fn drop(&mut self) {
+        unlock_file(&self.file).ok();
+    }
+}
+
+#[cfg(windows)]
+fn lock_file_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+    use windows::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    unsafe {
+        LockFileEx(
+            HANDLE(file.as_raw_handle()),
+            LOCKFILE_EXCLUSIVE_LOCK,
+            None,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    }
+    .map_err(|_| std::io::Error::last_os_error())
+}
+
+#[cfg(windows)]
+fn unlock_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    unsafe {
+        UnlockFileEx(
+            HANDLE(file.as_raw_handle()),
+            None,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    }
+    .map_err(|_| std::io::Error::last_os_error())
+}
+
+#[cfg(unix)]
+fn lock_file_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn unlock_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(windows)]
@@ -369,6 +541,7 @@ fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -392,6 +565,49 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    const CROSS_PROCESS_CHILD_PATH: &str = "YAP_TEST_SETTINGS_CHILD_PATH";
+    const CROSS_PROCESS_READY_PATH: &str = "YAP_TEST_SETTINGS_READY_PATH";
+    const CROSS_PROCESS_RELEASE_PATH: &str = "YAP_TEST_SETTINGS_RELEASE_PATH";
+    const CROSS_PROCESS_FUTURE: &str = r#"{
+  "schemaVersion": 2,
+  "enabled": true,
+  "baseUrl": "https://future-process.example",
+  "futureField": "preserve-cross-process"
+}"#;
+
+    fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    fn wait_for_child(mut child: std::process::Child, timeout: Duration) -> std::process::Output {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait().unwrap() {
+                Some(_) => return child.wait_with_output().unwrap(),
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                None => {
+                    child.kill().ok();
+                    let output = child.wait_with_output().unwrap();
+                    panic!(
+                        "settings child exceeded {:?}: stdout={} stderr={}",
+                        timeout,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -551,10 +767,18 @@ mod tests {
             let writer_path = path.clone();
             let writer_release = Arc::clone(&release);
             std::thread::spawn(move || {
-                save_to_path_with_before_publish(&settings, &writer_path, false, move |_, _| {
-                    writer_release.wait();
-                    Ok(())
-                })
+                save_to_path_with_hooks(
+                    &settings,
+                    &writer_path,
+                    false,
+                    move || {
+                        writer_release.wait();
+                        Ok(())
+                    },
+                    || Ok(()),
+                    |_, _| Ok(()),
+                    |_| Ok(()),
+                )
             })
         };
         let left_writer = spawn_writer(left.clone());
@@ -589,9 +813,144 @@ mod tests {
         })
         .unwrap_err();
 
+        assert!(error
+            .to_string()
+            .starts_with("Could not save server settings:"));
         assert!(error.to_string().contains("injected publication failure"));
         assert!(!path.exists());
         assert_eq!(partial_files(&dir), Vec::<String>::new());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn load_io_errors_are_reported_as_access_failures() {
+        let dir = temp_dir("load-access-error");
+
+        let error = load_from_path(&dir, false).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .starts_with("Could not access server settings:"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn locked_save_scavenges_only_matching_abandoned_unique_partials() {
+        let dir = temp_dir("stale-unique");
+        let path = dir.join("server-settings.json");
+        let abandoned = dir.join("server-settings.json.424242.7.part");
+        let unrelated = dir.join("server-settings.json.owner.part");
+        std::fs::write(&abandoned, "abandoned").unwrap();
+        std::fs::write(&unrelated, "keep").unwrap();
+
+        save_to_path(&ServerSettings::default(), &path, false).unwrap();
+
+        assert!(!abandoned.exists());
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "keep");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn cross_process_schema2_publisher_helper() {
+        let Ok(path) = std::env::var(CROSS_PROCESS_CHILD_PATH) else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var(CROSS_PROCESS_READY_PATH).unwrap());
+        let release = PathBuf::from(std::env::var(CROSS_PROCESS_RELEASE_PATH).unwrap());
+        let path = PathBuf::from(path);
+        let _lock = acquire_settings_lock(&path).unwrap();
+        std::fs::write(&ready, b"locked").unwrap();
+        assert!(wait_for_path(&release, Duration::from_secs(10)));
+        write_atomically_locked_with_hooks(
+            &path,
+            CROSS_PROCESS_FUTURE.as_bytes(),
+            |_, _| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v1_writer_rechecks_schema_after_waiting_for_cross_process_lock() {
+        let dir = temp_dir("cross-process-schema");
+        let path = dir.join("server-settings.json");
+        let ready = dir.join("child.ready");
+        let release = dir.join("child.release");
+        save_to_path(&ServerSettings::default(), &path, false).unwrap();
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server_connector::config::tests::cross_process_schema2_publisher_helper",
+                "--nocapture",
+            ])
+            .env(CROSS_PROCESS_CHILD_PATH, &path)
+            .env(CROSS_PROCESS_READY_PATH, &ready)
+            .env(CROSS_PROCESS_RELEASE_PATH, &release)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        if !wait_for_path(&ready, Duration::from_secs(10)) {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("schema2 child did not acquire the settings lock");
+        }
+
+        let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            save_to_path_with_hooks(
+                &ServerSettings {
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                    enabled: true,
+                    base_url: Some("https://v1-writer.example".into()),
+                },
+                &writer_path,
+                false,
+                move || {
+                    attempted_tx.send(()).unwrap();
+                    Ok(())
+                },
+                move || {
+                    acquired_tx.send(()).unwrap();
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                |_| Ok(()),
+            )
+        });
+        if attempted_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("v1 writer did not attempt the settings lock");
+        }
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "v1 writer acquired the lock while schema2 still held it"
+        );
+        std::fs::write(&release, b"publish").unwrap();
+
+        let output = wait_for_child(child, Duration::from_secs(10));
+        assert!(
+            output.status.success(),
+            "child stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            writer.join().unwrap(),
+            Err(ConfigError::IncompatibleSchema(2))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            CROSS_PROCESS_FUTURE
+        );
 
         std::fs::remove_dir_all(dir).ok();
     }
