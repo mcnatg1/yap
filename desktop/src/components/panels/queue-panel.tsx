@@ -1,6 +1,8 @@
 import { Trash as Trash2 } from "@phosphor-icons/react/Trash";
+import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 
 import { StackedUpload } from "@/components/stacked-upload";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -28,16 +30,22 @@ export function QueuePanel({
   onClear,
   onRemove,
   onReveal,
+  onRetryMigration,
   onSelect,
   queue,
+  migrationError,
+  migrationPending,
   selectedId,
 }: {
-  onClear: () => void;
-  onRemove: (id: number) => void;
+  onClear: () => void | Promise<void>;
+  onRemove: (id: string) => void | Promise<void>;
   onReveal: (path: string) => void;
-  onSelect: (id: number) => void;
+  onRetryMigration: () => void | Promise<unknown>;
+  onSelect: (id: string) => void;
   queue: RecordingJobView[];
-  selectedId?: number;
+  migrationError?: string;
+  migrationPending: boolean;
+  selectedId?: string;
 }) {
   return (
     <Card className="surface-workspace-inset h-full min-w-0 bg-card py-0">
@@ -88,6 +96,19 @@ export function QueuePanel({
         </CardAction>
       </CardHeader>
       <CardContent className="p-4 sm:p-5">
+        {migrationError ? (
+          <Alert className="mb-4" variant="destructive">
+            <WarningCircle />
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+              <span>{migrationError}</span>
+              <Button onClick={() => void onRetryMigration()} size="sm" type="button" variant="outline">
+                Retry restore
+              </Button>
+            </AlertDescription>
+          </Alert>
+        ) : migrationPending ? (
+          <p className="mb-4 text-sm text-muted-foreground">Restoring queued recordings…</p>
+        ) : null}
         <StackedUpload
           items={queue}
           onRemove={onRemove}

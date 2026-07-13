@@ -462,6 +462,8 @@ pub struct RecordingJobView {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playback_path: Option<String>,
     pub name: String,
     pub session_mode: SessionMode,
     pub session_origin: SessionOrigin,
@@ -483,6 +485,7 @@ impl RecordingJobView {
                 .source_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            playback_path: None,
             name: record.display_name.clone(),
             session_mode: record.session_mode,
             session_origin: record.session_origin,

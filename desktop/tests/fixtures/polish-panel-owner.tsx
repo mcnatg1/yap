@@ -5,13 +5,14 @@ import { PolishPanel } from "@/components/panels/polish-panel";
 import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
 
 const item: RecordingJobView = {
-  id: 1,
-  intent: "recording",
+  id: "job-meeting",
   name: "meeting.wav",
-  output: "C:/meeting.txt",
-  path: "C:/meeting.wav",
+  outputPath: "C:/meeting.txt",
+  sourcePath: "C:/meeting.wav",
   pipeline: createInitialPipelineState(),
   route: "serverBatch",
+  sessionMode: "meeting",
+  sessionOrigin: "importedFile",
   status: "complete",
 };
 

@@ -124,7 +124,7 @@ function DevelopmentPolishPanel({
   originalText,
   polishedText,
 }: PolishPanelProps) {
-  const ready = Boolean(item?.output && isRecordingFinished(item.status));
+  const ready = Boolean(item?.outputPath && isRecordingFinished(item.status));
   const [tone, setTone] = useState<PolishTone>("light");
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -172,9 +172,9 @@ function DevelopmentPolishPanel({
   }, [currentContext]);
 
   async function runPolish() {
-    if (!item?.output || originalText === undefined || running || saving) return;
+    if (!item?.outputPath || originalText === undefined || running || saving) return;
 
-    const outputPath = item.output;
+    const outputPath = item.outputPath;
     const source = originalText;
     const requestedContext = currentContext;
     const requestedTone = tone;

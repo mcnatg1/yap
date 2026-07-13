@@ -1,260 +1,140 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { isRecordingCancellable, type RecordingJobView } from "@/lib/app-types";
 import {
-  acceptedFormats,
-  acceptedRecordingDrops,
-  isRecordingActive,
-  type PlaybackAdmission,
-  type QueuedRecordingPath,
-  type RecordingJobView,
-} from "@/lib/app-types";
-import {
-  allowRecordingPlaybackPath,
-  playbackAdmissionDeadlineMs,
-  releaseRecordingPlaybackPaths,
-  settlePlaybackAdmissionBeforeDeadline,
-} from "@/lib/playback-registry";
-import {
-  availableQueuedServerSlots,
-  createQueuedServerRecordingJobs,
-  nextRecordingQueueId,
-  readRecordingQueue,
-  writeRecordingQueue,
+  cancelRecordingJob,
+  createRecordingImports,
+  migrateLegacyRecordingQueue,
+  recordingJobsSnapshot,
+  retryRecordingJob,
 } from "@/recording-queue";
 
-type QueueOwnerPorts = {
-  allowPlaybackPath?: (path: string) => Promise<PlaybackAdmission>;
-  getQueue: () => RecordingJobView[];
-  maxAdmissionConcurrency?: number;
-  releasePlaybackPaths?: (paths: Iterable<string>) => Promise<void>;
-  setQueue: (queue: RecordingJobView[]) => void;
-  warn?: (message: string) => void;
-};
+type MigrationState = "pending" | "ready" | "failed";
 
-type ApprovedRecording = QueuedRecordingPath & PlaybackAdmission;
-
-function queueFullWarning(accepted: number, candidates: number) {
-  return accepted
-    ? `Queued ${accepted} of ${candidates} recordings. Connect to your organization's transcription server before adding more.`
-    : "The organization server queue is full. Connect before adding more recordings.";
+function migrationBlockedError() {
+  return new Error("Legacy recording queue migration must finish before jobs can change.");
 }
 
-export function createImportedRecordingQueueOwner({
-  allowPlaybackPath = allowRecordingPlaybackPath,
-  getQueue,
-  maxAdmissionConcurrency = 4,
-  releasePlaybackPaths = releaseRecordingPlaybackPaths,
-  setQueue,
-  warn = (message) => toast.warning(message),
-}: QueueOwnerPorts) {
-  let active = true;
-  let generation = 0;
-  let nextId = nextRecordingQueueId(getQueue());
-  let pendingSlots = 0;
-  let runningAdmissions = 0;
-  const pendingPaths = new Set<string>();
-  const waitingAdmissions: Array<() => void> = [];
-
-  function runNextAdmission() {
-    while (
-      runningAdmissions < Math.max(1, maxAdmissionConcurrency)
-      && waitingAdmissions.length
-    ) {
-      runningAdmissions += 1;
-      waitingAdmissions.shift()!();
-    }
-  }
-
-  function scheduleAdmission<T>(work: () => Promise<T>) {
-    return new Promise<T>((resolve, reject) => {
-      waitingAdmissions.push(() => {
-        void work().then(resolve, reject).finally(() => {
-          runningAdmissions -= 1;
-          runNextAdmission();
-        });
-      });
-      runNextAdmission();
-    });
-  }
-
-  function invalidatePending() {
-    generation += 1;
-    pendingPaths.clear();
-    pendingSlots = 0;
-    nextId = nextRecordingQueueId(getQueue());
-  }
-
-  function releaseDiscarded(items: ApprovedRecording[]) {
-    if (!items.length) return;
-    void releasePlaybackPaths(items.map((item) => item.playbackPath)).catch(() => undefined);
-  }
-
-  function finishReservation(item: QueuedRecordingPath, operationGeneration: number) {
-    if (!active || generation !== operationGeneration) return false;
-    pendingSlots = Math.max(0, pendingSlots - 1);
-    pendingPaths.delete(item.path);
-    return true;
-  }
-
-  function commitApproved(item: ApprovedRecording, operationGeneration: number) {
-    if (!finishReservation(item, operationGeneration)) {
-      releaseDiscarded([item]);
-      return undefined;
-    }
-
-    const latest = getQueue();
-    const addable = acceptedRecordingDrops(latest.map((entry) => entry.path), [item])
-      .slice(0, availableQueuedServerSlots(latest))[0];
-    if (!addable) {
-      releaseDiscarded([item]);
-      return undefined;
-    }
-
-    const [newItem] = createQueuedServerRecordingJobs([item]);
-    setQueue([...latest, {
-      ...newItem,
-      playbackByteLength: item.byteLength,
-    }].sort((left, right) => left.id - right.id));
-    return item.id;
-  }
-
-  async function addPaths(paths: string[]) {
-    if (!active) return undefined;
-
-    const current = getQueue();
-    nextId = Math.max(nextId, nextRecordingQueueId(current));
-    const firstId = nextId;
-    nextId += paths.length;
-    const incoming = paths.map((path, index) => ({ id: firstId + index, path }));
-    const acceptedCandidates = acceptedRecordingDrops(
-      [...current.map((item) => item.path), ...pendingPaths],
-      incoming,
-    );
-    const availableSlots = Math.max(
-      0,
-      availableQueuedServerSlots(current) - pendingSlots,
-    );
-    const accepted = acceptedCandidates.slice(0, availableSlots);
-
-    if (paths.length && !acceptedCandidates.length) {
-      warn(`Drop ${acceptedFormats} files.`);
-      return undefined;
-    }
-    if (acceptedCandidates.length > accepted.length) {
-      warn(queueFullWarning(accepted.length, acceptedCandidates.length));
-    }
-    if (!accepted.length) return undefined;
-
-    const operationGeneration = generation;
-    const admissionDeadlineAt = Date.now() + playbackAdmissionDeadlineMs;
-    pendingSlots += accepted.length;
-    for (const item of accepted) pendingPaths.add(item.path);
-
-    const outcomes = await Promise.all(accepted.map((item) => scheduleAdmission(async () => {
-      if (!active || generation !== operationGeneration) return undefined;
-
-      const admission = await settlePlaybackAdmissionBeforeDeadline(
-        () => allowPlaybackPath(item.path),
-        (playbackPath) => releasePlaybackPaths([playbackPath]),
-        admissionDeadlineAt,
-      );
-      if (!admission) {
-        finishReservation(item, operationGeneration);
-        return false;
-      }
-      const approved: ApprovedRecording = { ...item, ...admission };
-      return commitApproved(approved, operationGeneration);
-    })));
-
-    if (!active || generation !== operationGeneration) return undefined;
-    if (outcomes.some((outcome) => outcome === false)) {
-      warn("Some recordings could not be prepared for playback.");
-    }
-    const committedIds = outcomes.filter((outcome): outcome is number => (
-      typeof outcome === "number"
-    ));
-    return committedIds[committedIds.length - 1];
-  }
-
-  return {
-    activate() {
-      if (active) return;
-      active = true;
-      invalidatePending();
-    },
-    addPaths,
-    clear() {
-      invalidatePending();
-      setQueue([]);
-    },
-    dispose() {
-      if (!active) return;
-      active = false;
-      invalidatePending();
-    },
-  };
-}
-
-export function useImportedRecordingQueue(onClear: () => void) {
-  const [queue, setQueueState] = useState<RecordingJobView[]>(readRecordingQueue);
-  const queueRef = useRef(queue);
+export function useRecordingJobs(onClear: () => void) {
+  const [queue, setQueue] = useState<RecordingJobView[]>([]);
+  const [migrationState, setMigrationState] = useState<MigrationState>("pending");
+  const [migrationError, setMigrationError] = useState<string>();
+  const migrationStateRef = useRef<MigrationState>("pending");
+  const refreshPromiseRef = useRef<Promise<RecordingJobView[]> | undefined>(undefined);
   const onClearRef = useRef(onClear);
   onClearRef.current = onClear;
 
-  const setQueue = useCallback<Dispatch<SetStateAction<RecordingJobView[]>>>((update) => {
-    const next = typeof update === "function" ? update(queueRef.current) : update;
-    queueRef.current = next;
-    setQueueState(next);
+  const updateMigrationState = useCallback((state: MigrationState, error?: string) => {
+    migrationStateRef.current = state;
+    setMigrationState(state);
+    setMigrationError(error);
   }, []);
-  const ownerRef = useRef<ReturnType<typeof createImportedRecordingQueueOwner> | undefined>(
-    undefined,
-  );
-  if (!ownerRef.current) {
-    ownerRef.current = createImportedRecordingQueueOwner({
-      getQueue: () => queueRef.current,
-      setQueue: (next) => setQueue(next),
+
+  const refresh = useCallback(async () => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+    const pending = recordingJobsSnapshot().then((snapshot) => {
+      setQueue(snapshot);
+      return snapshot;
+    }).finally(() => {
+      if (refreshPromiseRef.current === pending) refreshPromiseRef.current = undefined;
     });
-  }
-
-  useEffect(() => {
-    const owner = ownerRef.current!;
-    owner.activate();
-    return () => owner.dispose();
+    refreshPromiseRef.current = pending;
+    return pending;
   }, []);
 
-  useEffect(() => {
+  const migrateAndLoad = useCallback(async () => {
+    updateMigrationState("pending");
     try {
-      writeRecordingQueue(queue);
+      if (isTauri()) await migrateLegacyRecordingQueue();
+      updateMigrationState("ready");
+      return await refresh();
     } catch (error) {
-      console.warn("Queued recordings could not be saved.", error);
-      toast.warning("Queued recordings could not be saved.");
+      const message = `Queued recording migration needs attention: ${String(error)}`;
+      updateMigrationState("failed", message);
+      throw error;
     }
-  }, [queue]);
+  }, [refresh, updateMigrationState]);
 
-  const addPaths = useCallback(
-    (paths: string[]) => ownerRef.current!.addPaths(paths),
-    [],
-  );
+  useEffect(() => {
+    let active = true;
+    let unlisten: UnlistenFn | undefined;
+    void (async () => {
+      if (isTauri()) {
+        try {
+          unlisten = await listen("recording-jobs-changed", () => {
+            if (active && migrationStateRef.current === "ready") {
+              void refresh().catch((error) => {
+                toast.error(`Recording jobs could not be refreshed: ${String(error)}`);
+              });
+            }
+          });
+        } catch (error) {
+          console.warn("Recording job updates could not be subscribed.", error);
+        }
+      }
+      if (!active) {
+        unlisten?.();
+        return;
+      }
+      await migrateAndLoad().catch(() => {
+        if (active) toast.error("Queued recordings could not be migrated. Retry to continue.");
+      });
+    })();
 
-  const removeItem = useCallback((id: number) => {
-    setQueue((items) => {
-      const item = items.find((entry) => entry.id === id);
-      if (!item || isRecordingActive(item.status)) return items;
-      return items.filter((entry) => entry.id !== id);
-    });
-  }, [setQueue]);
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [migrateAndLoad, refresh]);
 
-  const clearQueue = useCallback(() => {
-    ownerRef.current!.clear();
-    onClearRef.current();
+  const ensureMigrationReady = useCallback(() => {
+    if (migrationStateRef.current !== "ready") throw migrationBlockedError();
   }, []);
+
+  const addPaths = useCallback(async (paths: string[]) => {
+    ensureMigrationReady();
+    const created = await createRecordingImports(paths);
+    await refresh();
+    return created[created.length - 1]?.id;
+  }, [ensureMigrationReady, refresh]);
+
+  const removeItem = useCallback(async (id: string) => {
+    ensureMigrationReady();
+    const item = queue.find((entry) => entry.id === id);
+    if (!item || !isRecordingCancellable(item.status)) return;
+    await cancelRecordingJob(id);
+    await refresh();
+  }, [ensureMigrationReady, queue, refresh]);
+
+  const retryItem = useCallback(async (id: string) => {
+    ensureMigrationReady();
+    await retryRecordingJob(id);
+    await refresh();
+  }, [ensureMigrationReady, refresh]);
+
+  const clearQueue = useCallback(async () => {
+    ensureMigrationReady();
+    for (const item of queue) {
+      if (isRecordingCancellable(item.status)) {
+        await cancelRecordingJob(item.id);
+      }
+    }
+    await refresh();
+    onClearRef.current();
+  }, [ensureMigrationReady, queue, refresh]);
 
   return {
     addPaths,
     clearQueue,
+    migrationError,
+    migrationState,
     queue,
+    refresh,
     removeItem,
-    setQueue,
+    retryItem,
+    retryMigration: migrateAndLoad,
   };
 }

@@ -195,6 +195,7 @@ function RecordingPlayer({
   const [waveformMounted, setWaveformMounted] = useState(false);
   const [waveformRequested, setWaveformRequested] = useState(false);
   const recordingPath = item.playbackPath;
+  const sourcePath = item.sourcePath;
   const recordingSrc = useMemo(
     () => (isTauri() && recordingPath ? recordingPath : undefined),
     [recordingPath],
@@ -233,13 +234,12 @@ function RecordingPlayer({
   useEffect(() => {
     const audio = audioRef.current;
     const container = waveformRef.current;
-    const byteLength = item.playbackByteLength;
+    const byteLength = maxWaveformSourceBytes + 1;
     if (
       !audio ||
       !container ||
       !recordingSrc ||
-      durationSeconds === undefined ||
-      byteLength === undefined
+      durationSeconds === undefined
     ) return;
 
     const mounted = mountDecodedWaveform({
@@ -282,9 +282,9 @@ function RecordingPlayer({
       mounted.dispose();
       setWaveformMounted(false);
     };
-  }, [durationSeconds, item.playbackByteLength, recordingSrc, waveformRequested]);
+  }, [durationSeconds, recordingSrc, waveformRequested]);
 
-  if (!recordingPath || !recordingSrc) return null;
+  if (!recordingPath || !recordingSrc || !sourcePath) return null;
 
   function setDisplaySeconds(seconds: number) {
     const wholeSeconds = Math.floor(seconds);
@@ -380,7 +380,7 @@ function RecordingPlayer({
                 {durationSeconds === undefined ? "Local file" : formatElapsed(Math.floor(durationSeconds))}
               </Badge>
             </div>
-            <p className="truncate text-xs text-muted-foreground" id={statusId} title={item.path}>
+            <p className="truncate text-xs text-muted-foreground" id={statusId} title={sourcePath}>
               {recordingStatus}
             </p>
           </div>
@@ -388,7 +388,7 @@ function RecordingPlayer({
         <ButtonGroup aria-label="Recording actions">
           <Button
             aria-label={`Open recording ${item.name}`}
-            onClick={() => onOpen(item.path)}
+            onClick={() => onOpen(sourcePath)}
             size="sm"
             type="button"
             variant="secondary"
@@ -398,7 +398,7 @@ function RecordingPlayer({
           </Button>
           <Button
             aria-label={`Reveal recording ${item.name}`}
-            onClick={() => onReveal(item.path)}
+            onClick={() => onReveal(sourcePath)}
             size="sm"
             type="button"
             variant="ghost"
@@ -549,20 +549,20 @@ export function TranscriptPanel({
   onCopy: (item: RecordingJobView) => void;
   onOpen: (path: string) => void;
   onOpenHelp?: () => void;
-  onRetry: (id: number) => void;
+  onRetry: (id: string) => void;
   onReveal: (path: string) => void;
   running: boolean;
   text?: string;
   variant?: "panel" | "modal";
 }) {
-  const output = item?.output;
+  const output = item?.outputPath;
   const isDone = isRecordingFinished(item?.status);
   const isRunning = item ? isRecordingActive(item.status) : false;
   const isError = item?.status === "failed";
   const transcriptText = projectTranscriptText(text);
 
   useEffect(() => {
-    if (!isDone || !item?.output) return;
+    if (!isDone || !item?.outputPath) return;
 
     const copyItem = item;
 
@@ -607,8 +607,7 @@ export function TranscriptPanel({
                 </>
               )
               : isRunning
-                ? item?.progressMessage ??
-                  (item ? recordingActivityLabel(item.status) : "Working")
+                ? item ? recordingActivityLabel(item.status) : "Working"
                 : isError
                   ? "Transcription failed"
                   : item
@@ -693,17 +692,7 @@ export function TranscriptPanel({
               <div className="flex flex-col gap-3">
                 <Badge variant="secondary">
                   {isRunning ? (
-                    item.progressMessage ? (
-                      <>
-                        {item.progressMessage}
-                        {item.progressPercent !== undefined ? (
-                          <>
-                            {" "}
-                            · <span className="tabular-nums">{item.progressPercent}%</span>
-                          </>
-                        ) : null}
-                      </>
-                    ) : elapsedSeconds ? (
+                    elapsedSeconds ? (
                       <>
                         Transcribing · <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
                       </>

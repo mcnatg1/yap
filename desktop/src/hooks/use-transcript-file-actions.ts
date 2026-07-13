@@ -124,10 +124,10 @@ export function isPolishSaveCancelled(error: unknown) {
 
 export function useTranscriptFileActions(loadTranscriptText: TranscriptTextLoader) {
   async function copyTranscript(item: RecordingJobView) {
-    if (!item.output) return;
+    if (!item.outputPath) return;
 
     try {
-      const text = await loadTranscriptText(item.output);
+      const text = await loadTranscriptText(item.outputPath);
       await navigator.clipboard.writeText(text);
       toast.success(text.trim() ? "Transcript copied" : "Empty transcript copied");
     } catch {

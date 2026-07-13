@@ -13,22 +13,23 @@ import {
 } from "@/polish";
 
 const firstItem: RecordingJobView = {
-  id: 1,
-  intent: "recording",
+  id: "job-first",
   name: "first.wav",
-  output: "C:/first.txt",
-  path: "C:/first.wav",
+  outputPath: "C:/first.txt",
+  sourcePath: "C:/first.wav",
   pipeline: createInitialPipelineState(),
   route: "serverBatch",
+  sessionMode: "meeting",
+  sessionOrigin: "importedFile",
   status: "complete",
 };
 
 const secondItem: RecordingJobView = {
   ...firstItem,
-  id: 2,
+  id: "job-second",
   name: "second.wav",
-  output: "C:/second.txt",
-  path: "C:/second.wav",
+  outputPath: "C:/second.txt",
+  sourcePath: "C:/second.wav",
 };
 
 function deferred<T>() {
@@ -281,7 +282,7 @@ describe("Polish save ownership", () => {
 
   it("does not let a hung cancelled save lock the next source", async () => {
     const owner = createPolishOperationOwner();
-    const hungItem = { ...firstItem, output: "C:/hung-first.txt" };
+    const hungItem = { ...firstItem, outputPath: "C:/hung-first.txt" };
     const { request } = ownedSave(owner, hungItem);
     const started = deferred<void>();
     const hungSaving = persistPolishedTranscript(request, () => {
@@ -306,7 +307,7 @@ describe("Polish save ownership", () => {
 
   it("fails a later same-output save after a bounded wait without racing writes", async () => {
     const owner = createPolishOperationOwner();
-    const sameOutputItem = { ...firstItem, output: "C:/bounded-save.txt" };
+    const sameOutputItem = { ...firstItem, outputPath: "C:/bounded-save.txt" };
     const { request: staleRequest } = ownedSave(owner, sameOutputItem, "Stale draft");
     const started = deferred<void>();
     void persistPolishedTranscript(staleRequest, () => {

@@ -18,8 +18,8 @@ describe("history job projection", () => {
     });
 
     expect(job.status).toBe("partial");
-    expect(job.error).toBe("Live audio could not be saved. Transcript was saved.");
-    expect(job.intent).toBe("live");
+    expect(job.id).toBe("history:c:\\users\\me\\appdata\\local\\yap\\live-recordings\\live-123.txt");
+    expect(job.sessionOrigin).toBe("liveCapture");
     expect(job.playbackPath).toBeUndefined();
     expect(job.pipeline.postprocessing).toBe("error");
   });
@@ -35,8 +35,8 @@ describe("history job projection", () => {
       sourcePath,
     }));
 
-    expect(job.intent).toBe("live");
-    expect(job.path).toBe(sourcePath);
+    expect(job.sessionOrigin).toBe("liveCapture");
+    expect(job.sourcePath).toBe(sourcePath);
     expect(job.playbackPath).toBeUndefined();
   });
 
@@ -48,7 +48,7 @@ describe("history job projection", () => {
       sourcePath: "C:\\Users\\me\\Downloads\\meeting.wav",
     });
 
-    expect(job.intent).toBe("live");
+    expect(job.id).toBe("history:c:\\users\\me\\documents\\meeting.txt");
     expect(job.playbackPath).toBeUndefined();
   });
 

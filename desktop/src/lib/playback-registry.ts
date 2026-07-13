@@ -10,13 +10,6 @@ const maxWaveformAdmissionBytesExact = BigInt(maxWaveformAdmissionBytes);
 const unclaimedAdmissionGraceMs = 5_000;
 const runtimePlaybackPathPattern = /^\/media\/[0-9a-f]{64}$/;
 
-export type RestoredQueuePlaybackAdmission = {
-  byteLength: number;
-  id: number;
-  playbackPath: string;
-  sourcePath?: string;
-};
-
 export type RestoredHistoryPlaybackAdmission = {
   byteLength: number;
   outputPath: string;
@@ -376,24 +369,6 @@ export function currentPlaybackPaths(
   return [...paths];
 }
 
-export function clearTerminalQueuePlaybackAdmissions(queue: RecordingJobView[]) {
-  let changed = false;
-  const next = queue.map((item) => {
-    if (
-      (item.status !== "cancelled" && item.status !== "failed") ||
-      (!item.playbackPath && item.playbackByteLength === undefined)
-    ) {
-      return item;
-    }
-    const cleared = { ...item };
-    delete cleared.playbackPath;
-    delete cleared.playbackByteLength;
-    changed = true;
-    return cleared;
-  });
-  return changed ? next : queue;
-}
-
 export async function releaseRecordingPlaybackPaths(
   playbackPaths: Iterable<string>,
   release: ReleasePlayback = releaseRecordingPlaybackPath,
@@ -537,57 +512,6 @@ function schedulePlaybackRestore(
     restoreTasksByPath.set(path, task);
     pendingRestoreTasks.push(task);
     pumpRestoreTasks();
-  });
-}
-
-export async function restoreQueuePlaybackPaths(
-  queue: RecordingJobView[],
-  options: RestoreOptions = {},
-) {
-  const dependencies = restoreDependencies(options);
-  if (!dependencies.runtime || dependencies.signal?.aborted) return [];
-  const deadlineAt = Date.now() + playbackAdmissionDeadlineMs;
-  const missing = queue.filter(
-    (item) =>
-      item.intent === "recording" &&
-      item.status !== "cancelled" &&
-      item.status !== "failed" &&
-      (!item.playbackPath || item.playbackByteLength === undefined),
-  );
-
-  const restored = await Promise.all(missing.map(async (item) => {
-    const admission = await schedulePlaybackRestore(item.path, dependencies, deadlineAt);
-    if (admission) dependencies.claim(admission.playbackPath, deadlineAt);
-    return admission ? {
-      id: item.id,
-      sourcePath: item.path,
-      ...admission,
-    } : undefined;
-  }));
-  return restored.filter(
-    (entry): entry is Exclude<typeof entry, undefined> => entry !== undefined,
-  );
-}
-
-export function applyRestoredQueuePlaybackPaths(
-  queue: RecordingJobView[],
-  restored: RestoredQueuePlaybackAdmission[],
-) {
-  if (!restored.length) return queue;
-  const byId = new Map(restored.map((item) => [item.id, item]));
-  return queue.map((item) => {
-    const admission = byId.get(item.id);
-    return admission &&
-      item.status !== "cancelled" &&
-      item.status !== "failed" &&
-      (!admission.sourcePath || admission.sourcePath === item.path) &&
-      (!item.playbackPath || item.playbackByteLength === undefined)
-      ? {
-          ...item,
-          playbackByteLength: admission.byteLength,
-          playbackPath: admission.playbackPath,
-        }
-      : item;
   });
 }
 

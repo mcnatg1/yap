@@ -106,10 +106,39 @@ impl JobLedger {
             .transpose()
     }
 
+    pub fn find_recoverable_imported_job_by_source(
+        &self,
+        source_path: &Path,
+    ) -> Result<Option<RecordingJobRecord>, JobLedgerError> {
+        let source_path = path_text(source_path, "source_path")?;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {JOB_COLUMNS} FROM recording_jobs WHERE session_origin = 'imported_file' AND source_path = ?1 AND status NOT IN ('complete', 'partial', 'cancelled') ORDER BY created_at_ms, job_id LIMIT 1"
+        ))?;
+        statement
+            .query_row([source_path], raw_job_from_row)
+            .optional()?
+            .map(TryInto::try_into)
+            .transpose()
+    }
+
     pub fn list_recoverable_jobs(&self) -> Result<Vec<RecordingJobRecord>, JobLedgerError> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(&format!(
             "SELECT {JOB_COLUMNS} FROM recording_jobs WHERE status NOT IN ('complete', 'partial', 'cancelled') ORDER BY created_at_ms, job_id"
+        ))?;
+        let rows = statement.query_map([], raw_job_from_row)?;
+        rows.map(|row| {
+            row.map_err(JobLedgerError::from)
+                .and_then(TryInto::try_into)
+        })
+        .collect()
+    }
+
+    pub fn list_jobs(&self) -> Result<Vec<RecordingJobRecord>, JobLedgerError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {JOB_COLUMNS} FROM recording_jobs ORDER BY created_at_ms, job_id"
         ))?;
         let rows = statement.query_map([], raw_job_from_row)?;
         rows.map(|row| {
@@ -178,12 +207,84 @@ impl JobLedger {
         updated.try_into()
     }
 
-    pub fn retry(
+    pub fn accept_to_queued_server(
         &self,
         job_id: &str,
         updated_at_ms: u64,
     ) -> Result<RecordingJobRecord, JobLedgerError> {
         let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = query_job(&transaction, job_id)?
+            .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?;
+        let current: RecordingJobRecord = raw.try_into()?;
+        if current.status != RecordingJobStatus::Accepted
+            || transition_policy(current.status, RecordingJobStatus::Preflighting)
+                != TransitionPolicy::Ordinary
+            || transition_policy(
+                RecordingJobStatus::Preflighting,
+                RecordingJobStatus::QueuedServer,
+            ) != TransitionPolicy::Ordinary
+        {
+            return Err(JobLedgerError::InvalidTransition {
+                from: current.status,
+                to: RecordingJobStatus::QueuedServer,
+            });
+        }
+        transaction.execute(
+            "UPDATE recording_jobs SET status = 'queued_server', route = 'server_batch', updated_at_ms = ?1 WHERE job_id = ?2",
+            params![updated_at_ms, job_id],
+        )?;
+        let updated = query_job(&transaction, job_id)?.expect("accepted queued job exists");
+        transaction.commit()?;
+        updated.try_into()
+    }
+
+    pub fn retry(
+        &self,
+        job_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        self.retry_with_expiry(job_id, updated_at_ms, None)
+    }
+
+    pub fn retry_with_expiry(
+        &self,
+        job_id: &str,
+        updated_at_ms: u64,
+        expires_at_ms: Option<u64>,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        self.retry_to_status(
+            job_id,
+            updated_at_ms,
+            expires_at_ms,
+            RecordingJobStatus::Preflighting,
+        )
+    }
+
+    pub fn retry_to_queued_server(
+        &self,
+        job_id: &str,
+        updated_at_ms: u64,
+        expires_at_ms: Option<u64>,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        self.retry_to_status(
+            job_id,
+            updated_at_ms,
+            expires_at_ms,
+            RecordingJobStatus::QueuedServer,
+        )
+    }
+
+    fn retry_to_status(
+        &self,
+        job_id: &str,
+        updated_at_ms: u64,
+        expires_at_ms: Option<u64>,
+        final_status: RecordingJobStatus,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let expires_at_ms = optional_sqlite_integer(expires_at_ms, "expires_at_ms")?;
         loop {
             let mut connection = self.lock()?;
             let raw = query_job(&connection, job_id)?
@@ -211,10 +312,12 @@ impl JobLedger {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let changed = transaction.execute(
-                "UPDATE recording_jobs SET status = 'preflighting', attempt_count = ?1, next_attempt_at_ms = NULL, updated_at_ms = ?2 WHERE job_id = ?3 AND status = ?4 AND attempt_count = ?5 AND attempt_count < ?6",
+                "UPDATE recording_jobs SET status = ?1, attempt_count = ?2, next_attempt_at_ms = NULL, updated_at_ms = ?3, expires_at_ms = COALESCE(?4, expires_at_ms) WHERE job_id = ?5 AND status = ?6 AND attempt_count = ?7 AND attempt_count < ?8",
                 params![
+                    final_status.as_db(),
                     next_attempt_count,
                     updated_at_ms,
+                    expires_at_ms,
                     job_id,
                     current.status.as_db(),
                     expected_attempt_count,
@@ -257,6 +360,36 @@ impl JobLedger {
         let updated = query_job(&transaction, job_id)?.expect("cancelled job exists");
         transaction.commit()?;
         updated.try_into()
+    }
+
+    pub fn fail_source_validation(
+        &self,
+        job_id: &str,
+        error_code: &str,
+        updated_at_ms: u64,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if query_job(&transaction, job_id)?.is_none() {
+            return Err(JobLedgerError::NotFound(job_id.into()));
+        }
+        transaction.execute(
+            "UPDATE recording_jobs SET status = 'failed', error_code = ?1, error_message = NULL, updated_at_ms = ?2 WHERE job_id = ?3",
+            params![error_code, updated_at_ms, job_id],
+        )?;
+        let updated = query_job(&transaction, job_id)?.expect("failed job exists");
+        transaction.commit()?;
+        updated.try_into()
+    }
+
+    pub fn expire_pending_jobs(&self, now_ms: u64) -> Result<usize, JobLedgerError> {
+        let now_ms = sqlite_integer(now_ms, "updated_at_ms")?;
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE recording_jobs SET status = 'failed', error_code = 'PENDING_EXPIRED', error_message = NULL, updated_at_ms = ?1 WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?1 AND status IN ('accepted', 'preflighting', 'blocked_setup_required', 'blocked_server_unavailable', 'blocked_sign_in_required', 'queued_local_fallback', 'queued_server')",
+            [now_ms],
+        )?)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, JobLedgerError> {

@@ -5,6 +5,10 @@ mod setup;
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     let builder = builder
         .manage(media_protocol::MediaOwner::new())
+        .manage(
+            crate::jobs::commands::RecordingJobs::open_default()
+                .expect("recording job ledger must open before commands are registered"),
+        )
         .manage(crate::server_connector::ServerConnector::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
@@ -12,6 +16,11 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::server_connector::refresh_server_connection,
         crate::server_connector::server_settings,
         crate::server_connector::set_server_settings,
+        crate::jobs::commands::recording_jobs_snapshot,
+        crate::jobs::commands::recording_jobs_create_imports,
+        crate::jobs::commands::recording_jobs_import_legacy,
+        crate::jobs::commands::recording_job_cancel,
+        crate::jobs::commands::recording_job_retry,
         setup::fallback_model_status,
         setup::fallback_model_install,
         setup::fallback_model_cancel_install,

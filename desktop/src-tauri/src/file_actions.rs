@@ -37,6 +37,64 @@ pub struct RecordingPlaybackAdmission {
     waveform_eligible: bool,
 }
 
+pub(crate) struct RecordingJobSourceAdmission {
+    pub(crate) canonical_path: std::path::PathBuf,
+    pub(crate) playback_path: String,
+}
+
+#[derive(Debug)]
+pub(crate) enum RecordingJobSourceError {
+    Missing,
+    Unsafe(String),
+}
+
+pub(crate) fn authorize_recording_job_source_at(
+    path: &std::path::Path,
+    owner: &crate::commands::media_protocol::MediaOwner,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<RecordingJobSourceAdmission, RecordingJobSourceError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RecordingJobSourceError::Missing
+        } else {
+            RecordingJobSourceError::Unsafe(format!("Failed to inspect recording source: {error}"))
+        }
+    })?;
+    if !metadata.file_type().is_file() || metadata_is_reparse_point(&metadata) {
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source must be a regular file and not a reparse point.".into(),
+        ));
+    }
+    let admission = owner
+        .admit(path, MAX_DECODED_WAVEFORM_BYTES)
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    let canonical_path = register_playback_path_at_from_owned_dir(
+        path.display().to_string(),
+        registry_path,
+        owned_dir,
+    )
+    .map_err(RecordingJobSourceError::Unsafe)?;
+    revalidate_owned_playback_path_from_dir(&canonical_path, owned_dir)
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    Ok(RecordingJobSourceAdmission {
+        canonical_path,
+        playback_path: admission.url,
+    })
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 #[tauri::command]
 pub fn allow_recording_playback_path(
     window: tauri::WebviewWindow,

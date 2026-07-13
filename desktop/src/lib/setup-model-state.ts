@@ -83,7 +83,6 @@ export function projectFallbackModelState({
     engineReady,
     fallbackEnabled,
     modelInstalled,
-    requestQueueUnblock: false,
     requestSetupPrompt,
     setupPrompted: alreadyPrompted || requestSetupPrompt,
     setupState,

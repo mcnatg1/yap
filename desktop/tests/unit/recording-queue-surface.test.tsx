@@ -12,12 +12,13 @@ describe("imported recording queue surface", () => {
   it("renders no local execution action or synthetic queue progress without a connector", () => {
     const item: RecordingJobView = {
       error: "Server unavailable",
-      id: 1,
-      intent: "recording",
+      id: "job-meeting",
       name: "meeting.wav",
-      path: "C:/meeting.wav",
+      sourcePath: "C:/meeting.wav",
       pipeline: createInitialPipelineState(),
       route: "serverBatch",
+      sessionMode: "meeting",
+      sessionOrigin: "importedFile",
       status: "failed",
     };
     const legacyExecutionProps = {
@@ -37,8 +38,10 @@ describe("imported recording queue surface", () => {
           onClear={vi.fn()}
           onRemove={vi.fn()}
           onReveal={vi.fn()}
+          onRetryMigration={vi.fn()}
           onSelect={vi.fn()}
           queue={[item]}
+          migrationPending={false}
         />
       </TooltipProvider>,
     );
@@ -56,8 +59,9 @@ describe("imported recording queue surface", () => {
       source("../../src/lib/setup-model-state.ts"),
     ].join("\n");
 
-    expect(ownedSources).not.toMatch(/queued_local_fallback|local_transcribing/);
-    expect(ownedSources).not.toMatch(/startTranscribe|transcribeItems|runQueue|retryItem/);
-    expect(source("../../src/App.tsx")).toContain("useImportedRecordingQueue");
+    expect(source("../../src/App.tsx")).not.toMatch(/startTranscribe|transcribeItems|runQueue/);
+    expect(source("../../src/App.tsx")).toContain("useRecordingJobs");
+    expect(source("../../src/hooks/use-imported-recording-queue.ts"))
+      .not.toMatch(/queued_local_fallback|local_transcribing/);
   });
 });

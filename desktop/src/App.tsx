@@ -16,7 +16,7 @@ import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog"
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useHistoryActions } from "@/hooks/use-history-actions";
-import { useImportedRecordingQueue } from "@/hooks/use-imported-recording-queue";
+import { useRecordingJobs } from "@/hooks/use-imported-recording-queue";
 import { useLiveHistorySync } from "@/hooks/use-live-history-sync";
 import { useRecordingSelection } from "@/hooks/use-recording-selection";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
@@ -41,20 +41,18 @@ import {
   type HistoryPlaybackAdmissions,
 } from "@/lib/playback-registry";
 
-const ignoreFallbackReady = () => undefined;
-const unavailableRecordingRetry = () => undefined;
+const unavailableHistoryRetry = () => undefined;
 
 function withHistoryPlaybackAdmission(
   item: RecordingJobView | undefined,
   entry: TranscriptHistoryEntry | undefined,
   admissions: HistoryPlaybackAdmissions,
 ) {
-  if (!item || !entry || item.output !== entry.outputPath) return item;
+  if (!item || !entry || item.outputPath !== entry.outputPath) return item;
   const admission = projectHistoryPlaybackAdmission(entry, admissions);
   if (!admission) return item;
   return {
     ...item,
-    playbackByteLength: admission.byteLength,
     playbackPath: admission.playbackPath,
   };
 }
@@ -74,10 +72,13 @@ export default function App() {
   const {
     addPaths: enqueueImportedPaths,
     clearQueue,
+    migrationError,
+    migrationState,
     queue,
     removeItem,
-    setQueue,
-  } = useImportedRecordingQueue(clearTranscriptText);
+    retryItem,
+    retryMigration,
+  } = useRecordingJobs(clearTranscriptText);
   const {
     copyTranscript,
     openAppPath,
@@ -107,7 +108,7 @@ export default function App() {
   } = useRecordingSelection({ history, queue });
   const {
     historyPlaybackAdmissions,
-  } = useRegisteredPlayback(queue, setQueue, history, selectedHistoryEntry);
+  } = useRegisteredPlayback(queue, history, selectedHistoryEntry);
   const selectedHistoryItem = useMemo(
     () => withHistoryPlaybackAdmission(
       selectedHistoryItemWithoutPlaybackMetadata,
@@ -207,7 +208,6 @@ export default function App() {
     selectHistoryEntry,
   });
   const settings = useSettingsControl({
-    onFallbackReady: ignoreFallbackReady,
     onStatusChange: setStatus,
   });
   settingsRefreshRef.current = settings.refresh;
@@ -222,10 +222,15 @@ export default function App() {
   }, [settings.setupPromptRequest, showDetails]);
 
   useEffect(() => {
-    if (selectedItem?.output && !Object.prototype.hasOwnProperty.call(transcriptText, selectedItem.output)) {
-      void loadTranscriptText(selectedItem.output).catch(() => toast.error("Preview unavailable"));
+    if (migrationError) setStatus(migrationError);
+    else if (migrationState === "pending") setStatus("Restoring queued recordings");
+  }, [migrationError, migrationState]);
+
+  useEffect(() => {
+    if (selectedItem?.outputPath && !Object.prototype.hasOwnProperty.call(transcriptText, selectedItem.outputPath)) {
+      void loadTranscriptText(selectedItem.outputPath).catch(() => toast.error("Preview unavailable"));
     }
-  }, [selectedItem?.output, transcriptText]);
+  }, [loadTranscriptText, selectedItem?.outputPath, transcriptText]);
 
   function goToTranscribe() {
     openWorkspace("transcribe");
@@ -275,8 +280,11 @@ export default function App() {
           onClear={clearQueue}
           onRemove={removeItem}
           onReveal={(path) => void revealPath(path)}
+          onRetryMigration={retryMigration}
           onSelect={selectQueueItem}
           queue={queue}
+          migrationError={migrationError}
+          migrationPending={migrationState === "pending"}
           selectedId={selectedId}
         />
       ) : null}
@@ -309,8 +317,8 @@ export default function App() {
             toast.success("Polished draft ready");
           }}
           onSave={savePolishedTranscript}
-          originalText={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
-          polishedText={selectedItem?.output ? polishedText[selectedItem.output] : undefined}
+          originalText={selectedItem?.outputPath ? transcriptText[selectedItem.outputPath] : undefined}
+          polishedText={selectedItem?.outputPath ? polishedText[selectedItem.outputPath] : undefined}
         />
       ) : null}
     </>
@@ -323,10 +331,10 @@ export default function App() {
         onCopy={copyTranscript}
         onOpen={(path) => void openAppPath(path)}
         onOpenHelp={() => openWorkspace("help")}
-        onRetry={unavailableRecordingRetry}
+        onRetry={(id) => void retryItem(id)}
         onReveal={(path) => void revealPath(path)}
         running={false}
-        text={selectedItem?.output ? transcriptText[selectedItem.output] : undefined}
+        text={selectedItem?.outputPath ? transcriptText[selectedItem.outputPath] : undefined}
       />
     </div>
   ) : null;
@@ -436,11 +444,11 @@ export default function App() {
           if (!open) closeHistoryReview();
         }}
         onOpenHelp={() => openWorkspace("help")}
-        onRetry={unavailableRecordingRetry}
+        onRetry={unavailableHistoryRetry}
         onReveal={(path) => void revealPath(path)}
         open={workspaceView === "home" && Boolean(selectedHistoryItem)}
         running={false}
-        text={selectedHistoryItem?.output ? transcriptText[selectedHistoryItem.output] : undefined}
+        text={selectedHistoryItem?.outputPath ? transcriptText[selectedHistoryItem.outputPath] : undefined}
       />
       <TranscriptPreviewDialog
         entry={previewEntry}

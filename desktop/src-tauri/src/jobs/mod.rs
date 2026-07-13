@@ -1,3 +1,4 @@
+pub mod commands;
 mod ledger;
 mod migrations;
 mod model;
