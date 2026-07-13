@@ -40,6 +40,11 @@
     "resources": {
       "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../../THIRD_PARTY_PROVENANCE.json": "THIRD_PARTY_PROVENANCE.json"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

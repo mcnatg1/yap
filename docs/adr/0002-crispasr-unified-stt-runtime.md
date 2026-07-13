@@ -97,7 +97,8 @@ Quantization policy: **Q4_K as default** for the local fallback. The client does
 
 ```
 %APPDATA%\com.mcnatg1.yap\models\     (Windows; Tauri app_data_dir)
-~/.yap/models/                 (Unix fallback)
+$XDG_DATA_HOME/com.mcnatg1.yap/models/ (Linux; defaults to ~/.local/share/...)
+~/Library/Application Support/com.mcnatg1.yap/models/ (macOS)
 ```
 
 - First-run or installer step makes the verified Moonshine GGUF, tokenizer, and punctuation companion available before local fallback is offered.

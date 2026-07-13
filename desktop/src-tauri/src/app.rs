@@ -1,6 +1,6 @@
 use tauri::Manager;
 
-use crate::{authorization, commands, live, runtime, stt, tray};
+use crate::{authorization, commands, live, paths, runtime, stt, tray};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitRequestDisposition {
@@ -17,6 +17,9 @@ fn exit_request_disposition(exit_authorized: bool) -> ExitRequestDisposition {
 }
 
 pub(crate) fn run() {
+    paths::migrate_legacy_app_data().unwrap_or_else(|error| {
+        panic!("failed to migrate legacy Yap app data without data loss: {error}")
+    });
     std::panic::set_hook(Box::new(|panic| {
         stt::log_yap(&format!("panic: {panic}"));
     }));

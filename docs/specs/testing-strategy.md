@@ -34,14 +34,20 @@ The lifecycle smoke runs only on a fresh GitHub-hosted Windows runner or in an e
 Windows VM (`YAP_DISPOSABLE_WINDOWS=1`). It fails if production install, registry, or app-data state
 already exists; verifies the installer hash when supplied; uses bounded process handles for install,
 app launch, and uninstall; proves the app writes its log under the canonical Tauri directory; and
-uses stock silent uninstall. Stock silent uninstall preserves app data. The workflow makes no
-automated delete-data claim and performs no script-owned recursive cleanup; disposal of the Windows
-environment is the cleanup boundary.
+uses stock silent uninstall. It also hashes the installed notice and provenance resources against
+the reviewed repository inputs. Stock silent uninstall preserves app data and the product
+install-location registry record; disposal of the Windows environment clears that residual state.
+The workflow makes no automated delete-data claim and performs no script-owned recursive cleanup.
+
+The application performs the one-time storage transition before opening any runtime state. It moves
+only recognized Yap runtime entries from the former `%LOCALAPPDATA%\Yap` tree, leaves installer files
+in place, rejects links/reparse points, preflights every destination conflict, and fails startup rather
+than overwriting or silently abandoning either copy.
 
 The supported release workflow stages a verified GitHub draft from an immutable commit on `main`.
-The private repository plan does not support required-reviewer environment rules, so the workflow
-never publishes the draft itself. Final publication is an explicit GitHub UI action after reviewing
-the draft assets and `release-metadata.json`.
+The live `production-release` environment currently has branch-policy protection but no required-
+reviewer rule. The workflow therefore never publishes the draft itself. Final publication is an
+explicit GitHub UI action after reviewing the draft assets and `release-metadata.json`.
 
 ### Overlay and motion contract
 

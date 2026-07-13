@@ -37,6 +37,11 @@ Yap uses Tauri's stock NSIS template and canonical app-data path. On Windows, ru
 There are no Yap-specific NSIS hooks, delete tokens, quarantine directories, or test installer
 identity.
 
+On first start after this path change, Yap moves only recognized runtime entries (models, recordings,
+logs, settings, the job ledger, playback registries, and install identity) from the former
+`%LOCALAPPDATA%\Yap` directory. It leaves installed binaries and installer resources in place. A
+destination conflict or migration failure stops startup without overwriting either copy.
+
 Builds and static release-contract checks may run on a normal workstation. The install/launch/
 uninstall lifecycle may not: it mutates the real production installer identity and is therefore
 bounded by a fresh GitHub-hosted Windows runner, Windows Sandbox, or another disposable Windows VM.
@@ -50,5 +55,7 @@ pnpm test:nsis:disposable
 The harness requires a clean profile, verifies the exact installer hash when supplied, launches the
 installed app until it creates `%APPDATA%\com.mcnatg1.yap\logs\yap.log`, bounds and reaps every
 process it starts, runs stock silent uninstall, and confirms that stock silent uninstall preserves
-app data. It never recursively deletes application data; disposal of the Windows environment is the
-lifecycle cleanup boundary. Never set `YAP_DISPOSABLE_WINDOWS=1` in an everyday account.
+app data and Tauri's product install-location registry record. It also verifies the installed notice
+and provenance files against the reviewed repository inputs. It never recursively deletes application
+data; disposal of the Windows environment is the lifecycle cleanup boundary. Never set
+`YAP_DISPOSABLE_WINDOWS=1` in an everyday account.

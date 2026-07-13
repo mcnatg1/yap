@@ -470,6 +470,7 @@ pub fn delete_saved_live_session(
     )
 }
 
+#[cfg(test)]
 fn recordings_dir_from<F>(env: F) -> std::path::PathBuf
 where
     F: Fn(&str) -> Option<String>,

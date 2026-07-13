@@ -1476,6 +1476,7 @@ test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", asyn
   assert.equal(config.identifier, "com.mcnatg1.yap");
   assert.match(paths, new RegExp(`PRODUCTION_IDENTIFIER: &str = "${config.identifier}"`));
   assert.equal(config.bundle.windows?.nsis?.installerHooks, undefined);
+  assert.equal(config.bundle.windows?.nsis?.installMode, "currentUser");
   assert.doesNotMatch(JSON.stringify(config), /installerHooks|nsis-hooks\.nsh/);
   assert.match(smoke, /GITHUB_ACTIONS/);
   assert.match(smoke, /RUNNER_ENVIRONMENT/);
@@ -1483,10 +1484,15 @@ test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", asyn
   assert.match(smoke, /YAP_DISPOSABLE_WINDOWS/);
   assert.match(smoke, /com\.mcnatg1\.yap/);
   assert.match(smoke, /ApplicationData/);
+  assert.match(smoke, /LocalApplicationData/);
+  assert.match(smoke, /expectedInstallLocation/);
   assert.match(smoke, /Start-Process/);
   assert.match(smoke, /WaitForExit/);
   assert.match(smoke, /Kill\(\$true\)/);
   assert.match(smoke, /ExpectedInstallerSha256/);
+  assert.match(smoke, /THIRD_PARTY_NOTICES\.md/);
+  assert.match(smoke, /THIRD_PARTY_PROVENANCE\.json/);
+  assert.match(smoke, /stockSilentUninstallPreservedProductRegistry/);
   assert.match(smoke, /@\("\/S"\)/);
   assert.match(smoke, /preserved/i);
   assert.doesNotMatch(smoke, /DELETEAPPDATA|RMDir|Remove-Item|YAP_APP_DATA_DIR/);

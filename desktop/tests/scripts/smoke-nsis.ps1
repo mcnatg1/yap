@@ -26,6 +26,7 @@ if (-not ($isHostedDisposable -or $isExplicitDisposable)) {
 }
 
 $desktopRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $desktopRoot ".."))
 if ([string]::IsNullOrWhiteSpace($BundleDirectory)) {
   $BundleDirectory = Join-Path $desktopRoot "src-tauri\target\release\bundle\nsis"
 }
@@ -50,9 +51,17 @@ if ($normalizedExpectedSha256) {
 $appDataRoot = Join-Path `
   ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) `
   "com.mcnatg1.yap"
+$expectedInstallLocation = Join-Path `
+  ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) `
+  "Yap"
 $productRegistryPath = "HKCU:\Software\mcnatg1\Yap"
 $uninstallRegistryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yap"
-foreach ($path in @($appDataRoot, $productRegistryPath, $uninstallRegistryPath)) {
+foreach ($path in @(
+    $appDataRoot,
+    $expectedInstallLocation,
+    $productRegistryPath,
+    $uninstallRegistryPath
+  )) {
   if (Test-Path -LiteralPath $path) {
     throw "The disposable Windows environment is not clean: $path already exists."
   }
@@ -105,12 +114,33 @@ $mainBinaryName = [string]$installed.MainBinaryName
 if ([string]::IsNullOrWhiteSpace($installLocation) -or [string]::IsNullOrWhiteSpace($mainBinaryName)) {
   throw "The stock NSIS registry entry is missing InstallLocation or MainBinaryName."
 }
+$installLocation = [System.IO.Path]::GetFullPath($installLocation)
+if ($installLocation -ine [System.IO.Path]::GetFullPath($expectedInstallLocation)) {
+  throw "Stock NSIS installed to an unexpected location: $installLocation"
+}
 $appExecutable = Join-Path $installLocation $mainBinaryName
 $uninstaller = Join-Path $installLocation "uninstall.exe"
 foreach ($path in @($appExecutable, $uninstaller)) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "Stock NSIS install did not create $path."
   }
+}
+
+$resourceHashes = [ordered]@{}
+foreach ($resourceName in @("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_PROVENANCE.json")) {
+  $expectedResource = Join-Path $repoRoot $resourceName
+  $installedResource = Join-Path $installLocation $resourceName
+  foreach ($path in @($expectedResource, $installedResource)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Required release resource is missing: $path"
+    }
+  }
+  $expectedResourceSha256 = (Get-FileHash -LiteralPath $expectedResource -Algorithm SHA256).Hash
+  $installedResourceSha256 = (Get-FileHash -LiteralPath $installedResource -Algorithm SHA256).Hash
+  if ($installedResourceSha256 -cne $expectedResourceSha256) {
+    throw "Installed $resourceName does not match the reviewed repository input."
+  }
+  $resourceHashes[$resourceName] = $installedResourceSha256
 }
 
 $appProcess = Start-Process -FilePath $appExecutable -PassThru
@@ -147,6 +177,16 @@ if (Test-Path -LiteralPath $installLocation) {
 if (-not (Test-Path -LiteralPath $appDataRoot -PathType Container)) {
   throw "Stock silent uninstall unexpectedly removed the canonical app-data directory."
 }
+if (-not (Test-Path -LiteralPath $productRegistryPath)) {
+  throw "Stock silent uninstall unexpectedly removed its preserved product registry key."
+}
+$preservedInstallLocation = [string](Get-Item -LiteralPath $productRegistryPath).GetValue("")
+if (
+  [string]::IsNullOrWhiteSpace($preservedInstallLocation) -or
+  [System.IO.Path]::GetFullPath($preservedInstallLocation) -ine $installLocation
+) {
+  throw "Stock silent uninstall did not preserve the expected product install-location record."
+}
 
 $afterSha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
 if ($afterSha256 -cne $beforeSha256) {
@@ -158,7 +198,9 @@ $result = [ordered]@{
   installer = $installer.FullName
   installerSha256 = $afterSha256
   appDataRoot = $appDataRoot
+  installedResourceSha256 = $resourceHashes
   stockSilentUninstallPreservedAppData = $true
+  stockSilentUninstallPreservedProductRegistry = $true
   lifecycleBoundary = if ($isHostedDisposable) { "github-hosted" } else { "explicit-disposable-windows" }
 }
 $resultJson = $result | ConvertTo-Json -Depth 4
