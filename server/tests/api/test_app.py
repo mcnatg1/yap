@@ -148,6 +148,7 @@ class HealthServiceTests(unittest.TestCase):
         host, port = self.server.server_address[:2]
         with socket.create_connection((host, port), timeout=2) as client:
             client.sendall(request)
+            client.shutdown(socket.SHUT_WR)
             response = bytearray()
             while chunk := client.recv(4096):
                 response.extend(chunk)
@@ -356,7 +357,7 @@ class HealthServiceTests(unittest.TestCase):
                     client.setsockopt(
                         socket.SOL_SOCKET,
                         socket.SO_LINGER,
-                        struct.pack("hh", 1, 0),
+                        struct.pack("HH" if os.name == "nt" else "ii", 1, 0),
                     )
                     client.sendall(
                         b"GET /v1/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
