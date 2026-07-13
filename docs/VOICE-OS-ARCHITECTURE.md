@@ -1,6 +1,6 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-12)
+**Status:** Living document (2026-07-13)
 **Authority:** Decisions are normative according to status in [ADR 0001–0022](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 For implementation truth rather than decision intent, use the living [ADR implementation status audit](ADR-IMPLEMENTATION-STATUS.md). An accepted ADR or a documented flowchart node is not proof that its code exists.
@@ -733,8 +733,8 @@ timeline
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
 | **1** | Capture foundation and durable imported-job ledger implemented | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, a Rust orchestrator projection, and the Rust-owned SQLite imported-job ledger exist. |
 | **2** | Implemented baseline; hosted proof remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Windows native WDIO, NSIS packaging, local test-identity installer smokes, and release-artifact contract tests pass; hosted real-model/native release CI and measured latency/accuracy gates remain. |
-| **3** | Implemented boundary; live-node evidence remains separate | `server/` contains versioned HTTP/live contracts and a bounded loopback capability-health service with stable errors and safe binding. The desktop implements validated connector settings, bounded health/retry state, stale-generation protection, retry cancellation, and a Rust-owned durable job ledger with restart/idempotent-migration proof. This is not upload, WSS, auth, or server inference evidence. |
-| **4** | Host bootstrap only | `infra/yap-server-node/` and the runbook exist; no Yap application service is deployed. |
+| **3** | Implemented; local and GB10 private-link gates complete | Contracts, loopback capability-health, connector/retry state, and the durable Rust ledger are implemented. Exact `099e558a27a747a7a2f24ec4e86f9c13f7604c13` passed the GB10 ARM64/Python 3.12 gate. The command-line production connector reached `Ready`; a separate tunnel-refusal run reached `Retrying`. This is not same-process native UI transition, persistent service, upload/WSS/auth/ASR, or inference evidence. |
+| **4** | Host bootstrap and transient health proof only | Infra and the runbook exist. Exact `099e558a27a747a7a2f24ec4e86f9c13f7604c13` was promoted and run transiently on loopback, then stopped. No workload router, model-pool layout, service unit, persistent process, external application listener, or firewall change exists. Clock synchronization and root UFW read-back remain later gates. |
 | **5** | Planned | Remote long-recording transcription waits on upload/drain, WSS, authentication, and the node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |

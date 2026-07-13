@@ -20,6 +20,8 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 
 Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects `pwsh.exe` explicitly, and verifies that floor in every Windows CI job. A hash-pinned PowerShell 7.4.17 compatibility lane parses every tracked script and runs the focused native-process suite at the supported minor-version floor. The canonical Phase 3 contract boundary is implemented: machine-readable contracts, loopback capability health, connector state/retry, and the durable desktop job ledger. Upload drain, WSS, server ASR, authentication, and model pools remain later product work.
 
+The exact GB10 private-link smoke is pinned to immutable release `099e558a27a747a7a2f24ec4e86f9c13f7604c13`: the ARM64/Python 3.12 server suite passed 49/49, transient loopback health reached the command-line production connector as `Ready`, a separate refused-tunnel run projected `Retrying`, and teardown left no Yap process or port-18765 listener. No persistent service, external application bind, or firewall change was introduced; later local fixes require promotion and a fresh GB10 gate before they can claim live-node evidence.
+
 ## Repository Layout
 
 ```text

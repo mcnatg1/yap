@@ -1,6 +1,6 @@
 # Yap Server Node Setup Runbook
 
-Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback, and official large recordings go to `yap-server` when it is reachable.
+Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 5 is intended to send authorized long recordings to `yap-server`; Phase 3 currently provides health reachability and durable queued-job ownership only.
 
 The first supported node profile is DGX Spark GB10. A later GB300-class node should keep the same server contract and change only host-specific config: NIC names, CIDRs, GPU/runtime sizing, and deployment capacity.
 
@@ -37,6 +37,12 @@ The 2026-07-12 read-only audit found:
 Do **not** rerun the baseline setup script on this prepared, multi-purpose host.
 Its landing zone and SSH hardening already exist, and a rerun would perform
 unnecessary package, firewall, logging, and service operations.
+
+The validated 2026-07-13 smoke used exact immutable release
+`099e558a27a747a7a2f24ec4e86f9c13f7604c13` transiently. It was stopped after
+validation; no persistent service remains. Any newer SHA requires promotion and
+fresh GB10 evidence and must not inherit the `099e558a27a747a7a2f24ec4e86f9c13f7604c13`
+result.
 
 Phase 3 uses a loopback-only health process on the GB10:
 
@@ -262,9 +268,10 @@ The Docker command creates an ephemeral container; run it only when that runtime
 validation is authorized. The firewall command requires an interactive sudo
 session and must never receive a password through a script or command line.
 
-Expected state for the current Phase 3 boundary: private-link SSH works, no Yap
-application port is externally reachable, the health process is loopback-only,
-the SSH forward binds only Windows loopback, and a stopped tunnel makes the
-connector offline. Host and container GPU proof, synchronized time, and an
-effective firewall read-back are separate evidence items; do not infer them
-from service status alone.
+The completed Phase 3 proof established private-link SSH, loopback-only health,
+a loopback-only Windows forward, command-line production connector `Ready`
+while reachable, and `Retrying` in a separate tunnel-refusal invocation. It did
+not establish a same-process native UI transition. Cleanup left no Yap process
+or local/remote port-18765 listener. No application firewall rule or external bind was
+added. Host clock synchronization and root UFW read-back remain separate later
+gates; do not infer them from service status alone.

@@ -35,6 +35,8 @@ The tooling-only PowerShell migration is implemented: repo-owned Windows scripts
 
 The [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) plan is the landed canonical Phase 3 implementation record: machine-readable contract, capability health service, connector state/retry, and SQLite job ledger. Phase 5 upload drain, WSS runtime, server ASR, authentication, model pools, and diarization remain gated and are not implied by Phase 3 health reachability.
 
+The full local Phase 3 gate and exact GB10 private-link gate are complete. GB10 evidence is pinned only to `099e558a27a747a7a2f24ec4e86f9c13f7604c13`: 49/49 ARM64/Python 3.12 checks, transient loopback health, command-line connector `Ready`, separate tunnel-refusal `Retrying`, and teardown with no Yap process or port-18765 listener. It is not evidence for a persistent service, same-process native UI transition, upload, WSS, authentication, ASR, external listener, or firewall change; later local fixes were not part of that GB10 run.
+
 The [client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md) is a landed implementation record. Its unchecked future inference/transport gates are not evidence that the capture foundation is absent.
 
 ## Runbooks

@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-13, Phase 3 contract/connector/ledger boundary; full Phase 3 gate pending
+**As of:** 2026-07-13; the Phase 3 local gate is complete. Exact GB10 private-link evidence remains pinned to `099e558a27a747a7a2f24ec4e86f9c13f7604c13`.
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -35,7 +35,7 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 | [0011](adr/0011-vector-rag-retrieval.md) | Accepted retrieval principles; team projection amended by 0017/0022 | Server | **0** | None | No FTS/vector store, embeddings, chunker, RRF, calibration, citations, permission filtering, or graph projection | Phase 9 after authoritative OKF and access boundaries |
 | [0012](adr/0012-mcp-server-surface.md) | Accepted Phase 9 target; team hosting amended by 0017 | Server | **0** | None | No MCP runtime, tools/resources, transport, opt-in, authorization, or tests | Phase 9 after permission-filtered KB APIs |
 | [0013](adr/0013-global-hotkey-injection.md) | Accepted; Windows implementation active | Client | **160** | Dual shortcut commands, transactional registration, persistence, non-focusable overlay, target revalidation, Unicode injection, clipboard fallback, required native WDIO, and installer smoke evidence | Settings still use typed chord fields; paste-last has no default; no deliberate chord recorder/Cancel/Reset flow, macOS/Linux adapters, or broad real-app/elevation matrix | Replace the text fields with safe physical-chord capture and usable defaults, then expand native compatibility evidence |
-| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021 | Shared | **70** | Client route vocabulary/orchestrator projection, versioned OpenAPI/live contracts, bounded loopback capability-health API, validated connector health/capability/retry state, durable SQLite imported jobs, stable errors, safe binding, and hardened host bootstrap | No queue drain, WSS/upload workers, TLS/QUIC edge, auth, model pools, or server inference | Phase 5 remote STT |
+| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021 | Shared | **70** | Client route vocabulary/orchestrator projection, versioned OpenAPI/live contracts, bounded loopback capability-health API, validated connector health/capability/retry state, durable SQLite imported jobs, stable errors, safe binding, hardened host bootstrap, and an exact private-link GB10 transient health smoke | No persistent service, queue drain, WSS/upload workers, TLS/QUIC edge, auth, model pools, or server inference | Phase 5 remote STT |
 | [0015](adr/0015-two-pass-diarization-speaker-identity.md) | Superseded by 0020 | Server | **0** | No implementation of the retired ECAPA/VBx design | Entire retired design absent by intent | Do not implement; use 0020 |
 | [0016](adr/0016-auth-identity-bridge.md) | Canonical Phase 7 decision | Shared | **15** | Evidence/result contracts require provenance for named server assertions | No MSAL, credential storage, Yap-token validation, identity DB, grants, enrollment, deletion, or audit | Phase 7 after the server boundary works privately |
 | [0017](adr/0017-knowledge-base-compiler.md) | Canonical team KB/compiler decision; format/projection amended by 0022 | Server | **0** | None beyond repository documentation | No Lane 1 store, `yap-knowledge`, compiler, databases, permission inheritance, APIs, or IaC | Phase 9 after identity and result authority |
@@ -47,18 +47,23 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 
 ## Verification snapshot
 
-The numeric full-matrix results below are the preceding audit snapshot; they are not a claim that Task 7 reran the full Phase 3 gate:
+The evidence below combines the completed full local Phase 3 matrix with scoped
+post-gate reruns. After the final server-log and client queue corrections, the
+affected server, frontend unit, production-build, and Playwright suites were
+rerun. Rust/Clippy, native WDIO, release-contract, provenance, and installer
+results are retained from the full matrix because those later commits did not
+touch their code or contracts.
 
-- Frontend unit tests: **262/262 passed**.
-- Rust: **548 library tests plus 15 integration/parity tests passed**; Clippy passed with warnings denied.
-- Server contract, health service, and infra: **49/49 tests passed**.
-- Production frontend build: passed.
-- Playwright: **17/17 passed** after correcting stale history/recovery authority fixtures.
-- Required native WDIO: **9/9 passed**, including overlay close-to-tray, shared tray restore, and real tray quit.
-- Release contract: **11/11 passed**, including dirty-tree, untracked-input, mutable-seal, process-liveness, and NSIS hook regressions.
+- Server contract, health service, and infra: **50/50 passed**. The post-GB10 request-target redaction fix also passed its focused API suite **23/23**.
+- Frontend unit tests: **256/256 passed**; the production TypeScript/Vite build passed with 295 modules.
+- Rust: **674 executed tests passed**; Clippy passed with warnings denied.
+- Playwright: **19/19 passed** after the Phase 3 UI gate regressions were repaired in `b98feee`.
+- Required native WDIO passed all four spec files and 10 required assertions; the optional hardware/model probe remained skipped.
+- Release contract: **12/12 passed**.
 - Safe installer evidence: the isolated `Yap.Test` NSIS bundle built successfully; local preserve-data and explicit token/sentinel delete smokes both passed with zero residual footprint and an unchanged installer SHA-256.
-- Third-party provenance: exact pinned Freeflow revision, license, and selected upstream file hashes verified.
+- Third-party provenance: the exact pinned Freeflow revision, license, and selected upstream file hashes verified.
+- GB10 evidence is pinned to exact `099e558a27a747a7a2f24ec4e86f9c13f7604c13`: Ubuntu ARM64/Python 3.12 server, contract, and infra checks passed **49/49**; transient loopback health and the command-line production connector reached `Ready`; a separate refused-tunnel invocation reached `Retrying`; teardown left no Yap process or local/remote port-18765 listener.
 
-Task 7 targeted evidence adds file-backed ledger reopen/idempotent migration tests, Rust connector failure-mode/loopback Python contract tests, offline/unset Playwright routing proof, and a two-PID native restart that recovers the same Rust-owned queued job with fresh WebView localStorage. The root Phase 3 gate remains responsible for refreshing full-matrix totals.
+Later local security and correctness fixes were not contained in the pinned GB10 artifact and do not inherit its live-node evidence. The GB10 run did not prove a persistent service or same-process native UI transition, and it introduced no upload, WSS, authentication, ASR, external listener, or firewall change.
 
 These checks do not activate missing product gates. There is no committed licensed real-speech/WER fixture, meeting RTTM/diarization fixture suite, remote upload/drain or server inference path, or authenticated end-to-end test. Scores must be revised only when those authoritative artifacts change.

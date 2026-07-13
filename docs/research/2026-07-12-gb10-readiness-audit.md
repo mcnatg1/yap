@@ -1,21 +1,28 @@
 # GB10 readiness audit
 
 - **Audited:** 2026-07-12
+- **Validation addendum:** 2026-07-13
 - **Target:** Dell Pro Max GB10 on the direct Windows-to-GB10 Ethernet link
-- **Method:** Read-only local and SSH inspection; no sudo, installs, downloads,
-  containers, firewall edits, or service changes were used for this audit.
+- **Method:** The original host audit used read-only local and SSH inspection.
+  The later Phase 3 gate promoted and ran one immutable, transient Yap release;
+  it made no firewall, routing, persistent-service, or external-bind change.
 
-This audit records executable reality before Yap's Phase 3 server boundary is
-implemented. It is non-normative: the Phase 3 implementation plan and ADRs own
-the product contract, while this document owns the observed host baseline.
+The original sections record the 2026-07-12 pre-implementation host baseline.
+They are not current implementation status. On 2026-07-13, the Phase 3
+private-link gate completed against exact immutable release
+`099e558a27a747a7a2f24ec4e86f9c13f7604c13`. This document is non-normative:
+the Phase 3 implementation record and ADRs own the product contract, while this
+document owns the observed host and live-smoke evidence.
 
 ## Decision
 
-The GB10 is ready to run the dependency-free Phase 3 health service, but it is
-not an isolated appliance and no Yap application service is deployed yet.
-Phase 3 must therefore use a loopback-only server reached through an SSH local
-forward over the private Ethernet alias. It must not open a firewall port or
-bind to a wildcard address.
+The selected loopback-only SSH-forward design was executed successfully. The
+GB10 Ubuntu ARM64/Python 3.12 server, contract, and infrastructure checks passed
+49/49. Through the live tunnel, the command-line production connector projected
+`Ready`; in a separate tunnel-refusal invocation it projected `Retrying`. This
+did not prove a same-process native UI `Ready`-to-`Retrying` transition. Cleanup
+left no Yap process or local/remote port-18765 listener, and no external bind or firewall
+change was made. The host remains multi-homed and is not an isolated appliance.
 
 | Area | Observed state | Phase 3 decision |
 | --- | --- | --- |
@@ -23,8 +30,8 @@ bind to a wildcard address.
 | Isolation | GB10 also has active Wi-Fi default routes plus overlay interfaces | Treat the host as multi-homed, not air-gapped |
 | TCP exposure | SSH is the only externally bound TCP listener observed | Add no application listener outside loopback |
 | Host firewall | UFW is active; effective user rules require root to inspect | Tunnel-first needs no new UFW rule; verify rules before any direct bind |
-| Server runtime | Python 3.12.3 is present; no framework is needed for the planned health process | Run the standard-library health service from an immutable release directory |
-| Yap deployment | `/srv/yap-server` exists, but releases/state directories are empty and there is no Yap process or unit | Phase 3 begins from a clean landing zone |
+| Server runtime | Python 3.12.3 ran the dependency-free health process successfully | Keep the standard-library health service in an immutable release directory |
+| Yap deployment | Exact release `099e558a27a747a7a2f24ec4e86f9c13f7604c13` is retained under `/srv/yap-server/releases/`; no Yap process, port-18765 listener, or Yap service unit remains | Preserve the immutable smoke artifact; a persistent deployment is future work |
 | Durable ledger | SQLite 3.45.1 exists on the host | Phase 3's authoritative job ledger remains Rust-owned on the desktop, per plan |
 | ASR | No cleared Yap ASR runtime or model is deployed | Advertise all ASR capabilities as false |
 | Time | Host NTP is inactive and the GB10 was about 18.6 seconds ahead of the Windows client | Health-only validation may proceed; fix time before auth, leases, replay windows, or server-owned timestamps |
@@ -86,8 +93,8 @@ current no-auth Phase 3 boundary.
 
 ## Phase 3 tunnel boundary
 
-Use port `18765` consistently in development, tests, and the first GB10 smoke.
-Start the future server process on the GB10 with:
+Port `18765` is the validated development and GB10 smoke boundary.
+The validated transient process ran on the GB10 with:
 
 ```bash
 YAP_SERVER_HOST=127.0.0.1 \
@@ -126,7 +133,7 @@ must first:
 
 ## Runtime and model findings
 
-The current health process can run with Python's standard library and does not
+The health process ran successfully with Python's standard library and did not
 need FastAPI, Uvicorn, a container, or a new host package. No Phase 3 health
 response may advertise `batchJobs`, `liveStreaming`, or `jobStatus` until a
 real implementation exists.
@@ -142,21 +149,26 @@ The server contains useful but unapproved donor assets:
 
 Do not copy or deploy those model assets in Yap until license provenance,
 hashes, ARM64/CUDA 13 compatibility, accuracy, and performance are proved.
-The real imported-recording vertical slice remains a later goal stage.
+The desktop durable imported-job boundary is implemented. Remote upload, drain,
+server ASR, and completed imported-recording processing remain Phase 5 work.
 
-## Remaining gates
+## Phase 3 validation result
 
-Before Phase 3 can be called complete:
+Phase 3 completed with the following live-node evidence:
 
-- implement and contract-test the OpenAPI/live-event schemas;
-- implement the loopback-only health process with truthful capabilities;
-- implement the generation-safe desktop connector and Rust-owned SQLite job
-  ledger;
-- deploy an immutable health-only release under `/srv/yap-server/releases/`;
-- validate the connector through the private-link SSH forward on the real GB10;
-- prove that a dead tunnel becomes offline and never falls back to Wi-Fi; and
-- keep upload, WSS runtime, server ASR, auth, model pools, and firewall exposure
-  unimplemented.
+- Exact immutable release:
+  `099e558a27a747a7a2f24ec4e86f9c13f7604c13`.
+- Deployment archive SHA-256:
+  `8c37e9c49720dc734adef5963b8bf1ce7d4856658a4bcb7180376b2aa3c859cf`.
+- GB10 Ubuntu ARM64/Python 3.12 server, contract, and infrastructure suite:
+  **49/49 passed**.
+- Live loopback health through the private-link SSH forward and command-line
+  production connector projection: `Ready`.
+- Separate dead-tunnel/refused-connection invocation: `Retrying`.
+- Compiled/runtime inspection found no node-address or Wi-Fi fallback literal.
+- Teardown left no local or remote port-18765 listener and no Yap process.
+- No persistent service, upload, WSS runtime, authentication, ASR, model pool,
+  external application listener, or firewall change was introduced.
 
 Clock synchronization and root-level firewall inspection are explicit gates
 before later time-sensitive auth or direct network exposure. They do not
