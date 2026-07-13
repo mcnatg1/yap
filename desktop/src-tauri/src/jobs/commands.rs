@@ -346,14 +346,6 @@ impl RecordingJobs {
         let mut authorized_paths = Vec::new();
         for record in self.ledger.list_recoverable_jobs()? {
             recoverable_ids.insert(record.job_id.clone());
-            if record.error_code.as_deref() == Some("PENDING_EXPIRED") {
-                self.release_playback(&record.job_id, media);
-                let mut view = RecordingJobView::from_record(&record);
-                view.source_path = None;
-                view.playback_path = None;
-                views.push(view);
-                continue;
-            }
             match self.project_with_playback(record.clone(), media) {
                 Ok(view) => {
                     if view.playback_path.is_some() {
@@ -364,14 +356,10 @@ impl RecordingJobs {
                     views.push(view);
                 }
                 Err(error) if error.code == "SOURCE_MISSING" || error.code == "SOURCE_UNSAFE" => {
-                    self.release_playback(&record.job_id, media);
                     let failed =
                         self.ledger
                             .fail_source_validation(&record.job_id, &error.code, now_ms)?;
-                    let mut view = RecordingJobView::from_record(&failed);
-                    view.source_path = None;
-                    view.playback_path = None;
-                    views.push(view);
+                    views.push(self.project_failed_capability_free(&failed, media));
                 }
                 Err(error) => return Err(error),
             }
@@ -612,6 +600,9 @@ impl RecordingJobs {
         record: crate::jobs::RecordingJobRecord,
         media: &MediaOwner,
     ) -> Result<RecordingJobView, JobCommandError> {
+        if record.status == RecordingJobStatus::Failed {
+            return Ok(self.project_failed_capability_free(&record, media));
+        }
         let Some(source) = record.source_path.as_deref() else {
             return Ok(RecordingJobView::from_record(&record));
         };
@@ -676,23 +667,32 @@ impl RecordingJobs {
         media: &MediaOwner,
         now_ms: u64,
     ) -> Result<RecordingJobView, JobCommandError> {
+        if record.status == RecordingJobStatus::Failed {
+            return Ok(self.project_failed_capability_free(&record, media));
+        }
         match self.project_validated(record.clone(), source, media) {
             Ok(view) => Ok(view),
             Err(error) => {
-                self.release_playback(&record.job_id, media);
-                self.remove_job_authority_best_effort(
-                    record.source_path.as_deref(),
-                    "failed projection",
-                );
                 let failed =
                     self.ledger
                         .fail_source_validation(&record.job_id, &error.code, now_ms)?;
-                let mut view = RecordingJobView::from_record(&failed);
-                view.source_path = None;
-                view.playback_path = None;
-                Ok(view)
+                Ok(self.project_failed_capability_free(&failed, media))
             }
         }
+    }
+
+    fn project_failed_capability_free(
+        &self,
+        record: &crate::jobs::RecordingJobRecord,
+        media: &MediaOwner,
+    ) -> RecordingJobView {
+        debug_assert_eq!(record.status, RecordingJobStatus::Failed);
+        self.release_playback(&record.job_id, media);
+        self.remove_job_authority_best_effort(record.source_path.as_deref(), "failed projection");
+        let mut view = RecordingJobView::from_record(record);
+        view.source_path = None;
+        view.playback_path = None;
+        view
     }
 
     #[cfg(test)]
@@ -840,7 +840,7 @@ mod tests {
     use super::*;
     use crate::{commands::media_protocol::MediaOwner, jobs::JobLedger};
     use std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         fs,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -892,42 +892,123 @@ mod tests {
     }
 
     #[test]
-    fn create_returns_and_notifies_a_durable_failed_view_when_admission_fails_after_commit() {
+    fn authority_failed_create_stays_capability_free_until_explicit_retry() {
         let dir = temp_dir("create-admission-failure");
+        let database = dir.join("jobs.sqlite3");
+        let general_registry = dir.join("recording-playback-registry.json");
         let source = dir.join("meeting.wav");
-        fs::write(&source, b"RIFF-command-fixture").unwrap();
-        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let source_bytes = b"RIFF-command-fixture";
+        fs::write(&source, source_bytes).unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
         let media = MediaOwner::new();
         jobs.inject_projection_failures_for_test(vec![command_error(
             "PLAYBACK_AUTHORITY_FAILED",
             "injected admission failure",
         )]);
+        let authority_denied_before_event_snapshot = Cell::new(false);
+        let authority_denied_after_event_snapshot = Cell::new(false);
+        let event_snapshot = RefCell::new(None);
 
         let created = mutate_then_notify(
             || jobs.create_imports(&media, vec![source.display().to_string()], 1_500),
             || {
-                let committed = jobs.ledger.list_recoverable_jobs().unwrap();
-                assert_eq!(committed.len(), 1);
-                assert_eq!(committed[0].status, RecordingJobStatus::Failed);
-                assert_eq!(
-                    committed[0].error_code.as_deref(),
-                    Some("PLAYBACK_AUTHORITY_FAILED")
-                );
+                authority_denied_before_event_snapshot.set(open_and_reveal_are_denied(
+                    &jobs,
+                    &source,
+                    &general_registry,
+                ));
+                let snapshot = jobs.snapshot(&media, 1_501).unwrap();
+                authority_denied_after_event_snapshot.set(open_and_reveal_are_denied(
+                    &jobs,
+                    &source,
+                    &general_registry,
+                ));
+                *event_snapshot.borrow_mut() = Some(snapshot);
             },
         )
         .unwrap();
+        let event_snapshot = event_snapshot.into_inner().unwrap();
+        let duplicate = jobs
+            .create_imports(&media, vec![source.display().to_string()], 1_502)
+            .unwrap();
+        let duplicate_authority_denied =
+            open_and_reveal_are_denied(&jobs, &source, &general_registry);
+        let committed = jobs.ledger.get_job(&created[0].id).unwrap().unwrap();
 
-        assert_eq!(created[0].status, RecordingJobStatus::Failed);
         assert_eq!(
-            created[0].error.as_deref(),
+            committed.error_code.as_deref(),
             Some("PLAYBACK_AUTHORITY_FAILED")
         );
-        assert_eq!(created[0].source_path, None);
-        assert_eq!(created[0].playback_path, None);
-        assert_eq!(media.active_admission_count_for_test(), 0);
-        assert!(!jobs.registry_path.exists());
+        assert_eq!(
+            committed.source_path.as_deref(),
+            Some(canonical_source.as_path())
+        );
+        assert_eq!(duplicate[0].id, created[0].id);
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
 
         drop(media);
+        drop(jobs);
+
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+        let media = MediaOwner::new();
+        let restart_snapshot = jobs.snapshot(&media, 1_503).unwrap();
+        let restart_authority_denied =
+            open_and_reveal_are_denied(&jobs, &source, &general_registry);
+        let restarted = jobs.ledger.get_job(&created[0].id).unwrap().unwrap();
+        assert_eq!(
+            restarted.source_path.as_deref(),
+            Some(canonical_source.as_path())
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+
+        let observations = [
+            ("immediate response", &created[0]),
+            ("event snapshot", &event_snapshot[0]),
+            ("duplicate create", &duplicate[0]),
+            ("restart snapshot", &restart_snapshot[0]),
+        ];
+        let authority_denials = [
+            (
+                "before event snapshot",
+                authority_denied_before_event_snapshot.get(),
+            ),
+            (
+                "after event snapshot",
+                authority_denied_after_event_snapshot.get(),
+            ),
+            ("after duplicate create", duplicate_authority_denied),
+            ("after restart snapshot", restart_authority_denied),
+        ];
+        assert!(
+            authority_denials.iter().all(|(_, denied)| *denied),
+            "open/reveal authorization must remain denied: {authority_denials:#?}"
+        );
+        assert!(
+            observations
+                .iter()
+                .all(|(_, view)| capability_free_failed(view)),
+            "every durable failed projection must be capability-free: {observations:#?}"
+        );
+
+        let retried = jobs.retry(&media, &created[0].id, 1_504, || {}).unwrap();
+        assert_eq!(retried.status, RecordingJobStatus::QueuedServer);
+        assert_eq!(retried.source_path.as_deref(), canonical_source.to_str());
+        assert!(retried.playback_path.is_some());
+        assert_eq!(
+            crate::file_actions::openable_app_path_from_registries(
+                source.display().to_string(),
+                &general_registry,
+                &jobs.registry_path,
+                &jobs.owned_dir,
+            )
+            .unwrap(),
+            canonical_source
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+
+        drop(media);
+        drop(jobs);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1291,8 +1372,9 @@ mod tests {
             assert_eq!(durable.len(), MAX_RECORDING_JOBS);
             assert!(durable.iter().all(|job| {
                 job.status == RecordingJobStatus::Cancelled
+                    && job.source_path.is_some()
                     && job.error_code.as_deref() == Some("TEST_FAILED")
-                    && !job.cancellation_requested
+                    && job.cancellation_requested
             }));
         }
 
@@ -1699,11 +1781,15 @@ mod tests {
     }
 
     #[test]
-    fn retry_returns_and_notifies_a_durable_failed_view_when_readmission_fails() {
+    fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() {
         let dir = temp_dir("retry-admission-failure");
+        let database = dir.join("jobs.sqlite3");
+        let general_registry = dir.join("recording-playback-registry.json");
         let source = dir.join("retry.wav");
-        fs::write(&source, b"RIFF-retry-admission-fixture").unwrap();
-        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let source_bytes = b"RIFF-retry-admission-fixture";
+        fs::write(&source, source_bytes).unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
         let media = MediaOwner::new();
         let job_id = jobs
             .create_imports(&media, vec![source.display().to_string()], 8_700)
@@ -1717,27 +1803,91 @@ mod tests {
             "PLAYBACK_AUTHORITY_FAILED",
             "injected retry admission failure",
         )]);
+        let authority_denied_before_event_snapshot = Cell::new(false);
+        let authority_denied_after_event_snapshot = Cell::new(false);
+        let event_snapshot = RefCell::new(None);
 
         let retried = mutate_then_notify(
             || jobs.retry(&media, &job_id, 8_702, || {}),
             || {
-                let committed = jobs.ledger.get_job(&job_id).unwrap().unwrap();
-                assert_eq!(committed.status, RecordingJobStatus::Failed);
-                assert_eq!(committed.attempt_count, 1);
-                assert_eq!(
-                    committed.error_code.as_deref(),
-                    Some("PLAYBACK_AUTHORITY_FAILED")
-                );
+                authority_denied_before_event_snapshot.set(open_and_reveal_are_denied(
+                    &jobs,
+                    &source,
+                    &general_registry,
+                ));
+                let snapshot = jobs.snapshot(&media, 8_703).unwrap();
+                authority_denied_after_event_snapshot.set(open_and_reveal_are_denied(
+                    &jobs,
+                    &source,
+                    &general_registry,
+                ));
+                *event_snapshot.borrow_mut() = Some(snapshot);
             },
         )
         .unwrap();
+        let event_snapshot = event_snapshot.into_inner().unwrap();
+        let committed = jobs.ledger.get_job(&job_id).unwrap().unwrap();
 
-        assert_eq!(retried.status, RecordingJobStatus::Failed);
-        assert_eq!(retried.error.as_deref(), Some("PLAYBACK_AUTHORITY_FAILED"));
-        assert_eq!(retried.source_path, None);
-        assert_eq!(retried.playback_path, None);
+        assert_eq!(committed.status, RecordingJobStatus::Failed);
+        assert_eq!(committed.attempt_count, 1);
+        assert_eq!(
+            committed.error_code.as_deref(),
+            Some("PLAYBACK_AUTHORITY_FAILED")
+        );
+        assert_eq!(
+            committed.source_path.as_deref(),
+            Some(canonical_source.as_path())
+        );
+        assert!(capability_free_failed(&retried));
+        assert!(capability_free_failed(&event_snapshot[0]));
+        assert!(authority_denied_before_event_snapshot.get());
+        assert!(authority_denied_after_event_snapshot.get());
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
 
         drop(media);
+        drop(jobs);
+
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+        let media = MediaOwner::new();
+        let restart_snapshot = jobs.snapshot(&media, 8_704).unwrap();
+        assert!(capability_free_failed(&restart_snapshot[0]));
+        assert!(open_and_reveal_are_denied(
+            &jobs,
+            &source,
+            &general_registry
+        ));
+        let restarted = jobs.ledger.get_job(&job_id).unwrap().unwrap();
+        assert_eq!(restarted.attempt_count, 1);
+        assert_eq!(
+            restarted.source_path.as_deref(),
+            Some(canonical_source.as_path())
+        );
+
+        let second_retry = jobs.retry(&media, &job_id, 8_705, || {}).unwrap();
+        assert_eq!(second_retry.status, RecordingJobStatus::QueuedServer);
+        assert_eq!(
+            second_retry.source_path.as_deref(),
+            canonical_source.to_str()
+        );
+        assert!(second_retry.playback_path.is_some());
+        assert_eq!(
+            jobs.ledger.get_job(&job_id).unwrap().unwrap().attempt_count,
+            2
+        );
+        assert_eq!(
+            crate::file_actions::openable_app_path_from_registries(
+                source.display().to_string(),
+                &general_registry,
+                &jobs.registry_path,
+                &jobs.owned_dir,
+            )
+            .unwrap(),
+            canonical_source
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+
+        drop(media);
+        drop(jobs);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1831,6 +1981,29 @@ mod tests {
     #[cfg(windows)]
     fn remove_reparse_point(link: &Path) -> std::io::Result<()> {
         fs::remove_dir(link)
+    }
+
+    fn capability_free_failed(view: &RecordingJobView) -> bool {
+        view.status == RecordingJobStatus::Failed
+            && view.source_path.is_none()
+            && view.playback_path.is_none()
+    }
+
+    fn open_and_reveal_are_denied(
+        jobs: &RecordingJobs,
+        source: &Path,
+        general_registry: &Path,
+    ) -> bool {
+        let authorization_denied = || {
+            crate::file_actions::openable_app_path_from_registries(
+                source.display().to_string(),
+                general_registry,
+                &jobs.registry_path,
+                &jobs.owned_dir,
+            )
+            .is_err()
+        };
+        authorization_denied() && authorization_denied()
     }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {

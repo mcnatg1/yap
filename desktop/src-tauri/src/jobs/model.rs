@@ -30,6 +30,7 @@ pub enum JobLedgerError {
     },
     RetryRequired,
     CancellationRequired,
+    DismissRequired,
     LockPoisoned,
 }
 
@@ -81,6 +82,9 @@ impl fmt::Display for JobLedgerError {
             }
             Self::CancellationRequired => formatter
                 .write_str("cancellation transitions must use JobLedger::request_cancellation"),
+            Self::DismissRequired => {
+                formatter.write_str("dismiss transitions must use JobLedger::dismiss_failed")
+            }
             Self::LockPoisoned => formatter.write_str("job ledger connection lock is poisoned"),
         }
     }
@@ -385,6 +389,7 @@ pub(crate) enum TransitionPolicy {
     Ordinary,
     Retry,
     Cancellation,
+    Dismiss,
     Forbidden,
 }
 
@@ -421,6 +426,7 @@ pub(crate) const fn transition_policy(
             | S::Failed,
             S::Preflighting,
         ) => TransitionPolicy::Retry,
+        (S::Failed, S::Cancelled) => TransitionPolicy::Dismiss,
         (
             S::Accepted
             | S::BlockedSetupRequired
@@ -623,6 +629,10 @@ mod tests {
             transition_policy(RecordingJobStatus::Failed, RecordingJobStatus::Uploading),
             TransitionPolicy::Forbidden
         );
+        assert_eq!(
+            transition_policy(RecordingJobStatus::Failed, RecordingJobStatus::Cancelled),
+            TransitionPolicy::Dismiss
+        );
 
         for status in [
             RecordingJobStatus::Accepted,
@@ -649,7 +659,6 @@ mod tests {
             RecordingJobStatus::DiarizationRunning,
             RecordingJobStatus::Complete,
             RecordingJobStatus::Partial,
-            RecordingJobStatus::Failed,
             RecordingJobStatus::Cancelled,
         ] {
             assert_eq!(

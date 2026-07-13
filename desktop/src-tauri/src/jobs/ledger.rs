@@ -239,6 +239,7 @@ impl JobLedger {
             TransitionPolicy::Ordinary => {}
             TransitionPolicy::Retry => return Err(JobLedgerError::RetryRequired),
             TransitionPolicy::Cancellation => return Err(JobLedgerError::CancellationRequired),
+            TransitionPolicy::Dismiss => return Err(JobLedgerError::DismissRequired),
             TransitionPolicy::Forbidden => {
                 return Err(JobLedgerError::InvalidTransition {
                     from: current.status,
@@ -423,14 +424,16 @@ impl JobLedger {
         let raw = query_job(&transaction, job_id)?
             .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?;
         let current: RecordingJobRecord = raw.try_into()?;
-        if current.status != RecordingJobStatus::Failed {
+        if transition_policy(current.status, RecordingJobStatus::Cancelled)
+            != TransitionPolicy::Dismiss
+        {
             return Err(JobLedgerError::InvalidTransition {
                 from: current.status,
                 to: RecordingJobStatus::Cancelled,
             });
         }
         transaction.execute(
-            "UPDATE recording_jobs SET status = 'cancelled', updated_at_ms = ?1 WHERE job_id = ?2 AND status = 'failed'",
+            "UPDATE recording_jobs SET status = 'cancelled', cancellation_requested = 1, updated_at_ms = ?1 WHERE job_id = ?2 AND status = 'failed'",
             params![updated_at_ms, job_id],
         )?;
         let updated = query_job(&transaction, job_id)?.expect("dismissed job exists");
@@ -1071,6 +1074,44 @@ mod tests {
         let cancelled = ledger.request_cancellation("cancel-job", 300).unwrap();
         assert_eq!(cancelled.status, RecordingJobStatus::Cancelled);
         assert!(cancelled.cancellation_requested);
+        assert!(source.exists());
+        drop(ledger);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_dismissal_uses_its_central_policy_and_preserves_failure_provenance() {
+        let dir = temp_dir("external-dismiss");
+        let source = dir.join("user-owned-failed.wav");
+        fs::write(&source, b"RIFF-user-owned-failed").unwrap();
+        let ledger = JobLedger::open_in_memory().unwrap();
+        let mut failed = imported_job_at("dismiss-job", source.clone());
+        failed.status = RecordingJobStatus::Failed;
+        failed.error_code = Some("PLAYBACK_AUTHORITY_FAILED".into());
+        failed.error_message = Some("playback authority could not be established".into());
+        ledger.insert_job(&failed).unwrap();
+
+        assert!(matches!(
+            ledger.transition("dismiss-job", RecordingJobStatus::Cancelled, 300),
+            Err(JobLedgerError::DismissRequired)
+        ));
+        assert!(matches!(
+            ledger.request_cancellation("dismiss-job", 301),
+            Err(JobLedgerError::InvalidTransition { .. })
+        ));
+        let dismissed = ledger.dismiss_failed("dismiss-job", 302).unwrap();
+
+        assert_eq!(dismissed.status, RecordingJobStatus::Cancelled);
+        assert!(dismissed.cancellation_requested);
+        assert_eq!(dismissed.source_path.as_deref(), Some(source.as_path()));
+        assert_eq!(
+            dismissed.error_code.as_deref(),
+            Some("PLAYBACK_AUTHORITY_FAILED")
+        );
+        assert_eq!(
+            dismissed.error_message.as_deref(),
+            Some("playback authority could not be established")
+        );
         assert!(source.exists());
         drop(ledger);
         fs::remove_dir_all(dir).unwrap();
