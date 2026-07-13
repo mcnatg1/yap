@@ -364,19 +364,21 @@ class HealthServiceTests(unittest.TestCase):
                     )
 
             deadline = time.monotonic() + 2
-            while not self.logger.messages and time.monotonic() < deadline:
+            while (
+                len(self.logger.messages) < attempts
+                and time.monotonic() < deadline
+            ):
                 time.sleep(0.01)
 
-        self.assertGreaterEqual(len(self.logger.messages), 1)
+        self.assertEqual(len(self.logger.messages), attempts)
         self.assertEqual(stderr.getvalue(), "")
         for line in self.logger.messages:
             self.assertLessEqual(len(line), 1024)
             self.assertEqual(json.loads(line)["status"], 200)
 
-        logged_disconnects = len(self.logger.messages)
         status, _, _ = self._request("/v1/health")
         self.assertEqual(status, 200)
-        self.assertEqual(len(self.logger.messages), logged_disconnects + 1)
+        self.assertEqual(len(self.logger.messages), attempts + 1)
 
     def test_partial_headers_time_out_without_blocking_the_server(self) -> None:
         host, port = self.server.server_address[:2]
