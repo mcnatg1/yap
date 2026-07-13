@@ -1,4 +1,139 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function installQueuedServerBridge(
+  page: Page,
+  serverState: "not_set" | "offline",
+) {
+  await page.addInitScript((state) => {
+    Object.defineProperty(globalThis, "isTauri", { value: true });
+    const calls: string[] = [];
+    Object.assign(globalThis, { __queuedServerBoundaryTest: { calls } });
+    let callbackId = 0;
+    const serverSnapshot = {
+      apiVersion: null,
+      capabilities: { batchJobs: false, jobStatus: false, liveStreaming: false },
+      checkedAtMs: state === "offline" ? 1 : null,
+      errorCode: state === "offline" ? "CONNECTION_FAILED" : null,
+      retryAtMs: null,
+      state,
+    };
+    const queuedJob = {
+      id: `durable-${state}-job`,
+      name: `${state.replace("_", "-")}-interview.wav`,
+      pipeline: {
+        alignment: "notStarted",
+        diarization: "notStarted",
+        intake: "done",
+        postprocessing: "notStarted",
+        preprocessing: "notStarted",
+        transcription: "notStarted",
+      },
+      playbackPath: "http://127.0.0.1:43123/media/queued-proof",
+      route: "serverBatch",
+      sessionMode: "meeting",
+      sessionOrigin: "importedFile",
+      sourcePath: `C:\\recordings\\${state}-interview.wav`,
+      status: "queued_server",
+    };
+
+    Object.assign(globalThis, {
+      __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
+      __TAURI_INTERNALS__: {
+        convertFileSrc: (path: string) => `asset:${path}`,
+        metadata: {
+          currentWebview: { label: "main" },
+          currentWindow: { label: "main" },
+        },
+        transformCallback: () => ++callbackId,
+        invoke: async (command: string) => {
+          calls.push(command);
+          if (command === "plugin:event|listen") return ++callbackId;
+          if (command === "plugin:event|unlisten") return undefined;
+          if (command === "recording_jobs_snapshot") return [queuedJob];
+          if (command === "setup_status") return {
+            engineBinaryStatus: "ready",
+            engineReady: true,
+            engineStatus: "Ready",
+            fallbackEnabled: true,
+            model: "test",
+            modelInstalled: true,
+            root: "C:\\Yap",
+          };
+          if (command === "fallback_model_status") return {
+            id: "nemotron-3.5-asr-streaming-0.6b-1120ms-int8",
+            label: "Nemotron",
+            modelsDir: "C:\\Yap\\models",
+            status: "ready",
+          };
+          if (command === "server_connection_status" || command === "refresh_server_connection") {
+            return serverSnapshot;
+          }
+          if (command === "server_settings") return {
+            baseUrl: state === "offline" ? "https://server.example" : null,
+            enabled: state === "offline",
+            schemaVersion: 1,
+          };
+          if (command === "live_status") return {
+            captureMode: "pushToTalk",
+            hotkey: "Ctrl+Shift+Space",
+            pasteHotkey: "",
+            route: "localFallback",
+            status: "idle",
+            visibility: "enabled",
+          };
+          if (command === "list_local_compute_targets") {
+            return [{ id: "auto", label: "Auto", selected: true }];
+          }
+          if (command === "list_saved_live_sessions") {
+            return { maintenanceWarnings: [], sessions: [] };
+          }
+          if (
+            command === "list_input_devices" ||
+            command === "list_recoverable_live_sessions" ||
+            command === "resolve_owned_live_transcript_paths"
+          ) return [];
+          if (command === "read_text_file" || command === "read_text_preview") return "";
+          return undefined;
+        },
+      },
+    });
+  }, serverState);
+}
+
+for (const scenario of [
+  { label: "server unset", state: "not_set" },
+  { label: "offline server", state: "offline" },
+] as const) {
+  test(`${scenario.label} keeps durable imported jobs queued without local transcription`, async ({ page }) => {
+    await installQueuedServerBridge(page, scenario.state);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Transcribe", exact: true }).click();
+
+    const name = `${scenario.state.replace("_", "-")}-interview.wav`;
+    await expect(page.getByRole("button", { name: `Select ${name}` })).toBeVisible();
+    await expect(page.getByText("Waiting in queue", { exact: true })).toBeVisible();
+    await expect(page.getByRole("paragraph").filter({ hasText:
+      "Queued for your organization's transcription server. It will start when Yap connects.",
+    })).toBeVisible();
+    await expect(page.getByText("Transcribing", { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("yap.recordingQueue.v1"))).toBeNull();
+
+    await page.getByRole("button", { name: "Open settings" }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await settings.getByRole("button", { name: "System", exact: true }).click();
+    await expect(settings.getByText("Local fallback", { exact: true }).locator("..")).toContainText("Ready");
+
+    const calls = await page.evaluate(() =>
+      (globalThis as unknown as { __queuedServerBoundaryTest: { calls: string[] } })
+        .__queuedServerBoundaryTest.calls,
+    );
+    expect(calls).not.toContain("start_transcribe");
+    expect(calls).not.toContain("fallback_model_install");
+    expect(calls.filter((command) =>
+      command.startsWith("recording_job") && command !== "recording_jobs_snapshot"
+    )).toEqual([]);
+  });
+}
 
 test("main app renders the home surface", async ({ page }) => {
   await page.goto("/");
@@ -175,7 +310,16 @@ test("history keeps committed review actions separate from recoverable capture a
               status: "ready",
             };
           }
-          if (command === "server_connection_status") return "ready";
+          if (command === "server_connection_status") {
+            return {
+              apiVersion: "1",
+              capabilities: { batchJobs: false, jobStatus: false, liveStreaming: false },
+              checkedAtMs: 1,
+              errorCode: null,
+              retryAtMs: null,
+              state: "ready",
+            };
+          }
           if (command === "live_status") {
             return {
               captureMode: "pushToTalk",
@@ -186,6 +330,7 @@ test("history keeps committed review actions separate from recoverable capture a
               visibility: "enabled",
             };
           }
+          if (command === "recording_jobs_snapshot") return [];
           if (command === "list_input_devices" || command === "resolve_owned_live_transcript_paths") return [];
           if (command === "list_local_compute_targets") return [{ id: "auto", label: "Auto", selected: true }];
           if (command === "read_text_file" || command === "read_text_preview") return "";

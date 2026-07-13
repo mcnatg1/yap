@@ -1,92 +1,140 @@
-import {
-  audioExts,
-  basename,
-  createInitialPipelineState,
-  extension,
-  queuedServerMessage,
-  type QueuedRecordingPath,
-  type RecordingJobView,
-} from "@/lib/app-types";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
-const recordingQueueKey = "yap.recordingQueue.v1";
+import { audioExts, extension, type RecordingJobView } from "@/lib/app-types";
+
+export const legacyRecordingQueueKey = "yap.recordingQueue.v1";
 export const maxStoredQueueJobs = 200;
 
-type QueueStorage = Pick<Storage, "getItem" | "setItem">;
-type ApprovedQueuedRecordingPath = QueuedRecordingPath & { playbackPath: string };
+export type LegacyQueueJob = {
+  id: number;
+  path: string;
+};
 
-function isStoredQueuedRecording(value: unknown): value is Pick<RecordingJobView, "id" | "path"> {
+export type LegacyQueueImport = {
+  schemaVersion: 1;
+  jobs: LegacyQueueJob[];
+};
+
+export type LegacyImportAcknowledgement = {
+  legacyId: number;
+  jobId: string;
+};
+
+export type LegacyImportRejection = {
+  legacyId: number;
+  code: string;
+  message: string;
+};
+
+export type LegacyImportResult = {
+  accepted: LegacyImportAcknowledgement[];
+  duplicates: LegacyImportAcknowledgement[];
+  rejected: LegacyImportRejection[];
+};
+
+type LegacyQueueStorage = Pick<Storage, "getItem" | "removeItem">;
+type LegacyQueueDiscardStorage = Pick<Storage, "removeItem">;
+type LegacyImporter = (payload: LegacyQueueImport) => Promise<LegacyImportResult>;
+
+function isLegacyQueueJob(value: unknown): value is LegacyQueueJob {
   if (!value || typeof value !== "object") return false;
   const item = value as Record<string, unknown>;
-  return (
-    Number.isSafeInteger(item.id) &&
+  return Number.isSafeInteger(item.id) &&
     Number(item.id) > 0 &&
     typeof item.path === "string" &&
-    audioExts.has(extension(item.path))
-  );
+    audioExts.has(extension(item.path));
 }
 
-export function normalizeRecordingQueue(value: unknown): RecordingJobView[] {
-  if (!Array.isArray(value)) return [];
+export function parseLegacyRecordingQueue(value: unknown): LegacyQueueJob[] {
+  if (!Array.isArray(value)) throw new Error("Legacy recording queue is not an array.");
 
-  const seen = new Set<string>();
+  const seenPaths = new Set<string>();
   return value
-    .filter(isStoredQueuedRecording)
-    .sort((a, b) => b.id - a.id)
+    .filter(isLegacyQueueJob)
+    .sort((left, right) => right.id - left.id)
     .filter((item) => {
-      if (seen.has(item.path)) return false;
-      seen.add(item.path);
+      if (seenPaths.has(item.path)) return false;
+      seenPaths.add(item.path);
       return true;
     })
     .slice(0, maxStoredQueueJobs)
-    .sort((a, b) => a.id - b.id)
-    .map((item, index) => ({
-      error: queuedServerMessage,
-      id: index + 1,
-      intent: "recording",
-      name: basename(item.path),
-      path: item.path,
-      pipeline: createInitialPipelineState(),
-      route: "serverBatch",
-      status: "queued_server",
-    }));
+    .sort((left, right) => left.id - right.id)
+    .map(({ id, path }) => ({ id, path }));
 }
 
-export function readRecordingQueue(storage: QueueStorage | undefined = globalThis.localStorage) {
-  if (!storage) return [];
+function acknowledgementIds(result: LegacyImportResult) {
+  return [
+    ...result.accepted.map(({ legacyId }) => legacyId),
+    ...result.duplicates.map(({ legacyId }) => legacyId),
+    ...result.rejected.map(({ legacyId }) => legacyId),
+  ].sort((left, right) => left - right);
+}
 
-  try {
-    return normalizeRecordingQueue(JSON.parse(storage.getItem(recordingQueueKey) ?? "[]"));
-  } catch {
-    return [];
+function assertCompleteAcknowledgement(
+  jobs: LegacyQueueJob[],
+  result: LegacyImportResult,
+) {
+  if (
+    !result ||
+    !Array.isArray(result.accepted) ||
+    !Array.isArray(result.duplicates) ||
+    !Array.isArray(result.rejected)
+  ) {
+    throw new Error("Rust returned an invalid legacy queue acknowledgement.");
+  }
+  const expected = jobs.map(({ id }) => id).sort((left, right) => left - right);
+  const acknowledged = acknowledgementIds(result);
+  if (
+    expected.length !== acknowledged.length ||
+    expected.some((id, index) => id !== acknowledged[index])
+  ) {
+    throw new Error("Rust did not acknowledge every legacy recording queue row.");
   }
 }
 
-export function writeRecordingQueue(jobs: RecordingJobView[], storage: QueueStorage = globalThis.localStorage) {
-  const queued = jobs.filter((job) => job.intent === "recording" && job.route === "serverBatch" && job.status === "queued_server");
-  storage.setItem(recordingQueueKey, JSON.stringify(normalizeRecordingQueue(queued)));
+async function invokeLegacyImport(payload: LegacyQueueImport) {
+  return invoke<LegacyImportResult>("recording_jobs_import_legacy", { payload });
 }
 
-export function availableQueuedServerSlots(jobs: RecordingJobView[]) {
-  const queued = jobs.filter((job) => job.intent === "recording" && job.route === "serverBatch" && job.status === "queued_server");
-  return Math.max(0, maxStoredQueueJobs - queued.length);
+export async function migrateLegacyRecordingQueue(
+  storage: LegacyQueueStorage | undefined = globalThis.localStorage,
+  importLegacy: LegacyImporter = invokeLegacyImport,
+) {
+  if (!storage) return { acknowledged: 0, migrated: false };
+  const stored = storage.getItem(legacyRecordingQueueKey);
+  if (stored === null) return { acknowledged: 0, migrated: false };
+
+  const jobs = parseLegacyRecordingQueue(JSON.parse(stored));
+  const result = await importLegacy({ schemaVersion: 1, jobs });
+  assertCompleteAcknowledgement(jobs, result);
+  storage.removeItem(legacyRecordingQueueKey);
+  return { acknowledged: jobs.length, migrated: true, result };
 }
 
-export function createQueuedServerRecordingJobs(
-  recordings: ApprovedQueuedRecordingPath[],
-): RecordingJobView[] {
-  return recordings.map(({ id, path, playbackPath }) => ({
-    error: queuedServerMessage,
-    id,
-    intent: "recording",
-    name: basename(path),
-    path,
-    playbackPath,
-    pipeline: createInitialPipelineState(),
-    route: "serverBatch",
-    status: "queued_server",
-  }));
+export function discardLegacyRecordingQueue(
+  storage: LegacyQueueDiscardStorage | undefined = globalThis.localStorage,
+) {
+  storage?.removeItem(legacyRecordingQueueKey);
 }
 
-export function nextRecordingQueueId(jobs: RecordingJobView[]) {
-  return jobs.reduce((next, job) => Math.max(next, job.id + 1), 1);
+export async function recordingJobsSnapshot() {
+  if (!isTauri()) return [];
+  return invoke<RecordingJobView[]>("recording_jobs_snapshot");
+}
+
+export async function createRecordingImports(paths: string[]) {
+  if (!isTauri()) return [];
+  return invoke<RecordingJobView[]>("recording_jobs_create_imports", { paths });
+}
+
+export async function cancelRecordingJob(jobId: string) {
+  return invoke<RecordingJobView>("recording_job_cancel", { jobId });
+}
+
+export async function dismissRecordingJob(jobId: string) {
+  return invoke<RecordingJobView>("recording_job_dismiss", { jobId });
+}
+
+export async function retryRecordingJob(jobId: string) {
+  return invoke<RecordingJobView>("recording_job_retry", { jobId });
 }

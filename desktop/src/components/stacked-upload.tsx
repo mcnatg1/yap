@@ -18,7 +18,6 @@ import {
 } from "@/components/ui/attachment";
 import { Badge } from "@/components/ui/badge";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
@@ -35,10 +34,10 @@ import { cn } from "@/lib/utils";
 
 type Props = {
   items: RecordingJobView[];
-  onRemove: (id: number) => void;
+  onRemove: (id: string) => void;
   onReveal: (path: string) => void;
-  onSelect: (id: number) => void;
-  selectedId?: number;
+  onSelect: (id: string) => void;
+  selectedId?: string;
 };
 
 const statusMeta = {
@@ -51,6 +50,11 @@ const statusMeta = {
     label: "Checking",
     icon: Loader2,
     variant: "outline" as const,
+  },
+  blocked_setup_required: {
+    label: "Setup",
+    icon: XCircle,
+    variant: "secondary" as const,
   },
   blocked_server_unavailable: {
     label: "Server",
@@ -67,6 +71,11 @@ const statusMeta = {
     icon: Clock3,
     variant: "secondary" as const,
   },
+  queued_local_fallback: {
+    label: "Local queued",
+    icon: Clock3,
+    variant: "secondary" as const,
+  },
   preprocessing: {
     label: "Preparing",
     icon: Loader2,
@@ -79,6 +88,11 @@ const statusMeta = {
   },
   server_processing: {
     label: "Server",
+    icon: Loader2,
+    variant: "outline" as const,
+  },
+  local_transcribing: {
+    label: "Local",
     icon: Loader2,
     variant: "outline" as const,
   },
@@ -122,12 +136,15 @@ const statusMeta = {
 const attachmentState = {
   accepted: "idle",
   preflighting: "processing",
+  blocked_setup_required: "idle",
   blocked_server_unavailable: "idle",
   blocked_sign_in_required: "idle",
   queued_server: "idle",
+  queued_local_fallback: "idle",
   preprocessing: "processing",
   uploading: "uploading",
   server_processing: "processing",
+  local_transcribing: "processing",
   saving: "processing",
   diarization_queued: "idle",
   diarization_running: "processing",
@@ -182,30 +199,28 @@ function UploadCard({
   isSelected: boolean;
   item: RecordingJobView;
   offset: number;
-  onRemove: (id: number) => void;
+  onRemove: (id: string) => void;
   onReveal: (path: string) => void;
-  onSelect: (id: number) => void;
+  onSelect: (id: string) => void;
 }) {
   const meta = statusMeta[item.status];
   const Icon = meta.icon;
   const isActive = isRecordingActive(item.status);
-  const detail =
-    item.error ??
-    (item.status === "complete"
+  const detail = item.status === "complete"
       ? "Saved"
       : item.status === "partial"
         ? "Partial"
       : item.status === "cancelled"
         ? "Cancelled"
       : isActive
-        ? item.progressMessage ?? meta.label
+        ? meta.label
         : item.status === "accepted"
           ? "Ready"
           : item.status === "queued_server"
             ? queuedServerMessage
           : item.status.startsWith("blocked_")
             ? "Waiting"
-          : "Needs attention");
+          : "Needs attention";
 
   return (
     <li className="list-none">
@@ -236,14 +251,14 @@ function UploadCard({
             {meta.label}
           </Badge>
 
-          {item.output ? (
+          {item.outputPath ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <AttachmentAction
                   aria-label="Reveal transcript"
                   onClick={(event) => {
                     event.stopPropagation();
-                    onReveal(item.output!);
+                    onReveal(item.outputPath!);
                   }}
                   size="icon-sm"
                   type="button"
@@ -277,9 +292,6 @@ function UploadCard({
 
         <AttachmentTrigger aria-label={`Select ${item.name}`} onClick={() => onSelect(item.id)} />
       </Attachment>
-      {item.progressPercent !== undefined ? (
-        <Progress className="mt-3 h-1.5" value={item.progressPercent} />
-      ) : null}
     </li>
   );
 }

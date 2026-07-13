@@ -5,14 +5,15 @@
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md) (OKF dirs, Archivist), [ADR 0009](0009-knowledge-worker-protocol.md) (worker writes these)
 **Amended by:** [ADR 0017](0017-knowledge-base-compiler.md) — in the **team profile**, conversations enter **Lane 1** (content-addressed append store) rather than being written directly to OKF by the client worker; the **KB compiler** in `yap-server` normalises Lane 1 captures to OKF markdown and commits curated/stitched conversations to `yap-knowledge` (Lane 2).
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) — the example's fixed `SPEAKER_XX`, `source`, vault, and Opus assumptions are historical. Before implementation, the schema must represent session mode/origin separately from physical tracks, accept WAV or a later negotiated transport codec, and render revisioned `Unknown` / `Speaker N` or fully provenanced server identities. The general Markdown/YAML and raw/polished principles remain accepted; the sample is not an implementation-ready v1 contract.
+**Amended by:** [ADR 0022](0022-google-okf-permission-safe-projections.md) — the pinned Google OKF v0.1 draft is the canonical Phase 9 base format. Yap adds a compatible enterprise profile for stable resource identity, typed relationships, provenance, and permission-safe compiled projections. The schema below remains historical.
 
 ## Context
 
-ADR 0004 named the OKF directories (`conversations/`, `jargon_glossary/`, `work_artifacts/`, …) and said "Markdown + YAML frontmatter" but gave no concrete file schema. The Archivist (worker) and any reader (history UI, Librarian, MCP) need a pinned format. This ADR recorded an initial schema sketch; ADR 0017 and ADR 0020 later made its storage lane, source, codec, and speaker fields incomplete. The canonical Phase 9 schema must amend or replace that sketch before implementation.
+ADR 0004 named the OKF directories (`conversations/`, `jargon_glossary/`, `work_artifacts/`, …) and said "Markdown + YAML frontmatter" but gave no concrete file schema. The Archivist (worker) and any reader (history UI, Librarian, MCP) need a pinned format. This ADR recorded an initial schema sketch; ADR 0017 and ADR 0020 later made its storage lane, source, codec, and speaker fields incomplete. ADR 0022 replaces the pending base schema with pinned Google OKF v0.1 plus a compatible Yap Enterprise OKF profile.
 
 ## Accepted principles
 
-Conversation outputs remain **Markdown + YAML frontmatter**, UTF-8, human-readable, and git-friendly. Raw text is never discarded when a polished representation exists. Exact paths, storage lanes, source/track fields, audio references, and speaker assertions remain pending under ADR 0017 and ADR 0020.
+Conversation outputs remain **Markdown + YAML frontmatter**, UTF-8, human-readable, and git-friendly. Raw text is never discarded when a polished representation exists. ADR 0022 governs OKF conformance, stable resource identity, relationships, and projections; ADR 0017 and ADR 0020 govern storage lanes, source/track fields, audio references, and speaker assertions.
 
 ## Historical schema sketch (non-normative)
 

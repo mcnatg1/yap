@@ -72,12 +72,15 @@ export type ServerConnectionState =
 export type RecordingJobStatus =
   | "accepted"
   | "preflighting"
+  | "blocked_setup_required"
   | "blocked_server_unavailable"
   | "blocked_sign_in_required"
+  | "queued_local_fallback"
   | "queued_server"
   | "preprocessing"
   | "uploading"
   | "server_processing"
+  | "local_transcribing"
   | "saving"
   | "diarization_queued"
   | "diarization_running"
@@ -86,7 +89,6 @@ export type RecordingJobStatus =
   | "failed"
   | "cancelled";
 
-type RecordingIntent = "live" | "recording";
 type RecordingRoute = "localFallback" | "serverBatch" | "serverLive";
 type PipelineStageStatus = "notStarted" | "queued" | "running" | "done" | "error" | "skipped";
 type LiveOverlayVisibility = "enabled" | "hidden";
@@ -146,25 +148,17 @@ export type PlaybackAdmission = {
 };
 
 export type RecordingJobView = {
-  id: number;
-  path: string;
+  id: string;
+  sourcePath?: string;
   playbackPath?: string;
-  playbackByteLength?: number;
+  outputPath?: string;
+  error?: string;
   name: string;
-  intent: RecordingIntent;
+  sessionMode: "dictation" | "meeting";
+  sessionOrigin: "liveCapture" | "importedFile";
   status: RecordingJobStatus;
   route?: RecordingRoute;
-  output?: string;
-  error?: string;
-  progressPhase?: string;
-  progressPercent?: number;
-  progressMessage?: string;
   pipeline: RecordingPipelineState;
-};
-
-export type QueuedRecordingPath = {
-  id: number;
-  path: string;
 };
 
 export type SetupSnapshot = {
@@ -178,6 +172,7 @@ const activeRecordingStatuses = new Set<RecordingJobStatus>([
   "preprocessing",
   "uploading",
   "server_processing",
+  "local_transcribing",
   "saving",
   "diarization_running",
 ]);
@@ -193,19 +188,6 @@ export function createInitialPipelineState(): RecordingPipelineState {
     diarization: "notStarted",
     postprocessing: "notStarted",
   };
-}
-
-export function acceptedRecordingDrops(
-  currentPaths: Iterable<string>,
-  incoming: QueuedRecordingPath[],
-) {
-  const existing = new Set(currentPaths);
-  const seen = new Set<string>();
-  return incoming.filter(({ path }) => {
-    if (!audioExts.has(extension(path)) || existing.has(path) || seen.has(path)) return false;
-    seen.add(path);
-    return true;
-  });
 }
 
 export function deriveSetupState(snapshot: SetupSnapshot): SetupState {
@@ -246,6 +228,15 @@ export function isFallbackModelBusy(
 
 export function isRecordingActive(status: RecordingJobStatus) {
   return activeRecordingStatuses.has(status);
+}
+
+export function isRecordingCancellable(status: RecordingJobStatus) {
+  return status === "accepted" ||
+    status === "blocked_setup_required" ||
+    status === "blocked_server_unavailable" ||
+    status === "blocked_sign_in_required" ||
+    status === "queued_local_fallback" ||
+    status === "queued_server";
 }
 
 export function isRecordingFinished(status?: RecordingJobStatus) {

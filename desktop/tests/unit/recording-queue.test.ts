@@ -1,179 +1,124 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
-  createInitialPipelineState,
-  isRecordingActive,
-  queuedServerMessage,
-  type RecordingJobStatus,
-  type RecordingJobView,
-} from "@/lib/app-types";
-import {
-  availableQueuedServerSlots,
-  createQueuedServerRecordingJobs,
+  discardLegacyRecordingQueue,
+  legacyRecordingQueueKey,
   maxStoredQueueJobs,
-  nextRecordingQueueId,
-  normalizeRecordingQueue,
-  readRecordingQueue,
-  writeRecordingQueue,
+  migrateLegacyRecordingQueue,
+  parseLegacyRecordingQueue,
 } from "@/recording-queue";
 
-function storageWith(value: string) {
-  const storage = { value };
+function storageWith(value: string | null) {
+  let current = value;
   return {
-    getItem: () => storage.value,
-    setItem(_key: string, next: string) {
-      storage.value = next;
-    },
+    getItem: vi.fn(() => current),
+    removeItem: vi.fn(() => {
+      current = null;
+    }),
   };
 }
 
-describe("recording queue storage", () => {
-  it("hydrates queued server recordings with compact safe ids", () => {
-    const jobs = normalizeRecordingQueue([
-      { id: 3, name: "meeting.wav", path: "C:/meeting.wav", error: "Queued" },
-      { id: 4, path: "C:/notes.txt" },
-      { id: 5, path: "C:/meeting.wav" },
-      { id: 6, path: "C:/demo.mp3" },
+describe("recording queue migration", () => {
+  it("parses only supported legacy rows and bounds the newest 200 without renumbering", () => {
+    const parsed = parseLegacyRecordingQueue([
+      { id: 1, path: "C:/old.wav" },
+      { id: 2, path: "C:/notes.txt" },
+      ...Array.from({ length: 205 }, (_, index) => ({
+        id: index + 3,
+        path: `C:/take-${index + 1}.wav`,
+      })),
     ]);
 
-    expect(jobs).toMatchObject([
-      { error: queuedServerMessage, id: 1, path: "C:/meeting.wav", route: "serverBatch", status: "queued_server" },
-      { error: queuedServerMessage, id: 2, name: "demo.mp3", path: "C:/demo.mp3", route: "serverBatch", status: "queued_server" },
-    ]);
-    expect(nextRecordingQueueId(jobs)).toBe(3);
+    expect(parsed).toHaveLength(maxStoredQueueJobs);
+    expect(parsed[0]).toEqual({ id: 8, path: "C:/take-6.wav" });
+    expect(parsed.at(-1)).toEqual({ id: 207, path: "C:/take-205.wav" });
   });
 
-  it("repairs duplicate ids without dropping path-unique recordings", () => {
-    const jobs = normalizeRecordingQueue([
-      { id: 7, path: "C:/first.wav" },
-      { id: 7, path: "C:/second.wav" },
-      { id: 8, path: "C:/third.wav" },
-    ]);
+  it("removes localStorage only after Rust acknowledges every row", async () => {
+    const storage = storageWith(JSON.stringify([
+      { id: 7, path: "C:/accepted.wav" },
+      { id: 8, path: "C:/duplicate.wav" },
+      { id: 9, path: "C:/missing.wav" },
+    ]));
+    const importLegacy = vi.fn(async () => ({
+      accepted: [{ legacyId: 7, jobId: "legacy-7-a" }],
+      duplicates: [{ legacyId: 8, jobId: "job-existing" }],
+      rejected: [{ legacyId: 9, code: "SOURCE_MISSING", message: "Missing" }],
+    }));
 
-    expect(jobs.map((job) => job.id)).toEqual([1, 2, 3]);
-    expect(jobs.map((job) => job.path)).toEqual([
-      "C:/first.wav",
-      "C:/second.wav",
-      "C:/third.wav",
-    ]);
-    expect(new Set(jobs.map((job) => job.id)).size).toBe(jobs.length);
+    await expect(migrateLegacyRecordingQueue(storage, importLegacy)).resolves.toMatchObject({
+      acknowledged: 3,
+      migrated: true,
+    });
+    expect(importLegacy).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      jobs: [
+        { id: 7, path: "C:/accepted.wav" },
+        { id: 8, path: "C:/duplicate.wav" },
+        { id: 9, path: "C:/missing.wav" },
+      ],
+    });
+    expect(storage.removeItem).toHaveBeenCalledWith(legacyRecordingQueueKey);
   });
 
-  it("rejects unsafe persisted ids before assigning unique safe ids", () => {
-    const jobs = normalizeRecordingQueue([
-      { id: Number.MAX_SAFE_INTEGER, path: "C:/safe-max.wav" },
-      { id: Number.MAX_SAFE_INTEGER + 1, path: "C:/unsafe.wav" },
-      { id: Number.POSITIVE_INFINITY, path: "C:/infinite.wav" },
-      { id: 1.5, path: "C:/fractional.wav" },
-      { id: 1, path: "C:/normal.wav" },
-    ]);
+  it("retains localStorage when acknowledgement is incomplete or the command fails", async () => {
+    const partialStorage = storageWith(JSON.stringify([
+      { id: 1, path: "C:/one.wav" },
+      { id: 2, path: "C:/two.wav" },
+    ]));
+    await expect(migrateLegacyRecordingQueue(partialStorage, async () => ({
+      accepted: [{ legacyId: 1, jobId: "legacy-1-a" }],
+      duplicates: [],
+      rejected: [],
+    }))).rejects.toThrow(/acknowledge every/i);
+    expect(partialStorage.removeItem).not.toHaveBeenCalled();
 
-    expect(jobs.map(({ id, path }) => ({ id, path }))).toEqual([
-      { id: 1, path: "C:/normal.wav" },
-      { id: 2, path: "C:/safe-max.wav" },
-    ]);
-    expect(jobs.every((job) => Number.isSafeInteger(job.id))).toBe(true);
-    expect(nextRecordingQueueId(jobs)).toBe(3);
+    const failedStorage = storageWith(JSON.stringify([{ id: 3, path: "C:/three.wav" }]));
+    await expect(migrateLegacyRecordingQueue(failedStorage, async () => {
+      throw new Error("database unavailable");
+    })).rejects.toThrow("database unavailable");
+    expect(failedStorage.removeItem).not.toHaveBeenCalled();
   });
 
-  it("stores only queued server jobs", () => {
-    const storage = storageWith("[]");
-    const queued: RecordingJobView = {
-      error: "Server queued",
-      id: 2,
-      intent: "recording",
-      name: "take.wav",
-      path: "C:/take.wav",
-      playbackPath: "C:/take.wav",
-      pipeline: createInitialPipelineState(),
-      route: "serverBatch",
-      status: "queued_server",
+  it.each([
+    ["malformed JSON", "{"],
+    ["a non-array value", JSON.stringify({ id: 1, path: "C:/one.wav" })],
+  ])("retains the legacy key when it contains %s", async (_description, stored) => {
+    const storage = storageWith(stored);
+    const importLegacy = vi.fn();
+
+    await expect(migrateLegacyRecordingQueue(storage, importLegacy)).rejects.toThrow();
+
+    expect(importLegacy).not.toHaveBeenCalled();
+    expect(storage.removeItem).not.toHaveBeenCalled();
+    expect(storage.getItem(legacyRecordingQueueKey)).toBe(stored);
+  });
+
+  it("explicitly discards only the one-time legacy key", () => {
+    const values = new Map([
+      [legacyRecordingQueueKey, "malformed"],
+      ["yap.unrelated", "keep-me"],
+    ]);
+    const storage = {
+      removeItem: vi.fn((key: string) => values.delete(key)),
     };
 
-    writeRecordingQueue([
-      queued,
-      { ...queued, id: 3, path: "C:/done.wav", status: "complete" },
-    ], storage);
+    discardLegacyRecordingQueue(storage);
 
-    expect(readRecordingQueue(storage)).toMatchObject([
-      { id: 1, path: "C:/take.wav", status: "queued_server" },
-    ]);
-    expect(readRecordingQueue(storage)[0].playbackPath).toBeUndefined();
+    expect(storage.removeItem).toHaveBeenCalledOnce();
+    expect(storage.removeItem).toHaveBeenCalledWith(legacyRecordingQueueKey);
+    expect(values.get(legacyRecordingQueueKey)).toBeUndefined();
+    expect(values.get("yap.unrelated")).toBe("keep-me");
   });
 
-  it("bounds persisted queue payloads", () => {
-    const jobs = normalizeRecordingQueue(
-      Array.from({ length: 205 }, (_, index) => ({
-        id: index + 1,
-        path: `C:/take-${index + 1}.wav`,
-      })).reverse(),
-    );
+  it("does nothing when the one-time legacy key is absent", async () => {
+    const storage = storageWith(null);
+    const importLegacy = vi.fn();
 
-    expect(jobs).toHaveLength(200);
-    expect(jobs[0]).toMatchObject({ id: 1, path: "C:/take-6.wav" });
-    expect(jobs.at(-1)).toMatchObject({ id: 200, path: "C:/take-205.wav" });
-  });
-
-  it("round-trips only the newest bounded queued-server payload", () => {
-    const storage = storageWith("[]");
-    const jobs = createQueuedServerRecordingJobs(
-      Array.from({ length: maxStoredQueueJobs + 5 }, (_, index) => ({
-        id: index + 1,
-        path: `C:/take-${index + 1}.wav`,
-        playbackPath: `http://127.0.0.1/media/${index + 1}`,
-      })),
-    );
-
-    writeRecordingQueue(jobs, storage);
-
-    const restored = readRecordingQueue(storage);
-    expect(restored).toHaveLength(maxStoredQueueJobs);
-    expect(restored[0].path).toBe("C:/take-6.wav");
-    expect(restored.at(-1)?.path).toBe("C:/take-205.wav");
-    expect(restored.every((job) => job.route === "serverBatch" && job.status === "queued_server"))
-      .toBe(true);
-  });
-
-  it("projects approved selected recordings into queued server jobs", () => {
-    const jobs = createQueuedServerRecordingJobs(
-      [{ id: 9, path: "C:/meeting.wav", playbackPath: "\\\\?\\C:\\meeting.wav" }],
-    );
-
-    expect(jobs).toMatchObject([
-      {
-        error: queuedServerMessage,
-        id: 9,
-        intent: "recording",
-        name: "meeting.wav",
-        path: "C:/meeting.wav",
-        playbackPath: "\\\\?\\C:\\meeting.wav",
-        route: "serverBatch",
-        status: "queued_server",
-      },
-    ]);
-    expect(jobs[0].pipeline).toEqual(createInitialPipelineState());
-  });
-
-  it("counts only queued server recordings against persisted queue slots", () => {
-    const queued = createQueuedServerRecordingJobs(
-      Array.from({ length: 2 }, (_, index) => ({
-        id: index + 1,
-        path: `C:/meeting-${index}.wav`,
-        playbackPath: `C:/meeting-${index}.wav`,
-      })),
-    );
-
-    expect(availableQueuedServerSlots([
-      ...queued,
-      { ...queued[0], id: 10, status: "complete" },
-    ])).toBe(maxStoredQueueJobs - 2);
-  });
-
-  it("uses a model-agnostic server status and truthful queue copy", () => {
-    const serverProcessingStatus: RecordingJobStatus = "server_processing";
-
-    expect(isRecordingActive(serverProcessingStatus)).toBe(true);
-    expect(queuedServerMessage).toContain("organization's transcription server");
-    expect(queuedServerMessage).not.toMatch(/\blocal\b|\bprivate\b/i);
+    await expect(migrateLegacyRecordingQueue(storage, importLegacy)).resolves.toEqual({
+      acknowledged: 0,
+      migrated: false,
+    });
+    expect(importLegacy).not.toHaveBeenCalled();
   });
 });

@@ -58,7 +58,7 @@ export function TranscriptReviewDialog({
   onOpen: (path: string) => void;
   onOpenChange: (open: boolean) => void;
   onOpenHelp?: () => void;
-  onRetry: (id: number) => void;
+  onRetry: (id: string) => void;
   onReveal: (path: string) => void;
   open: boolean;
   running: boolean;

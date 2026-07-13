@@ -22,8 +22,12 @@ import {
   listenFallbackModelProgress,
   listenFallbackModelStatus,
   openFallbackModelFolder,
+  projectServerConnectionTestMessage,
   removeFallbackModel,
+  saveServerSettings,
+  serverSettings,
   setFallbackModelEnabled,
+  testServerConnection,
   verifyFallbackModel,
 } from "@/settings";
 
@@ -92,5 +96,30 @@ describe("settings model lifecycle bindings", () => {
 
     expect(listenMock).not.toHaveBeenCalled();
     expect(unlisten()).toBeUndefined();
+  });
+
+  it("invokes typed server settings and connection commands", async () => {
+    const settings = {
+      schemaVersion: 1 as const,
+      enabled: true,
+      baseUrl: "https://server.example",
+    };
+    invokeMock.mockResolvedValue(settings);
+
+    await serverSettings();
+    await saveServerSettings(settings);
+    await testServerConnection();
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["server_settings"],
+      ["set_server_settings", { settings }],
+      ["refresh_server_connection"],
+    ]);
+  });
+
+  it("projects terse inline connection results", () => {
+    expect(projectServerConnectionTestMessage("ready")).toBe("Connection ready.");
+    expect(projectServerConnectionTestMessage("offline")).toBe("Server is offline.");
+    expect(projectServerConnectionTestMessage("sign_in_required")).toBe("Sign-in required.");
   });
 });

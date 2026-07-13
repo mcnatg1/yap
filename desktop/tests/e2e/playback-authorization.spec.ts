@@ -1,7 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { makeTestToneWav } from "../fixtures/audio-fixture";
-
 const mediaDuration = 100.9;
 
 async function installPlaybackBridge(
@@ -33,6 +31,7 @@ async function installPlaybackBridge(
       highWaterMark: 0,
       released: [] as string[],
       restoreCalls: 0,
+      jobs: [] as Array<Record<string, unknown>>,
       tokens: new Map<string, string>(),
     };
     Object.assign(globalThis, { __playbackTest: state });
@@ -64,7 +63,16 @@ async function installPlaybackBridge(
             modelsDir: "C:\\Yap\\models",
             status: "ready",
           };
-          if (command === "server_connection_status") return "ready";
+          if (command === "server_connection_status") {
+            return {
+              apiVersion: "1",
+              capabilities: { batchJobs: false, jobStatus: false, liveStreaming: false },
+              checkedAtMs: 1,
+              errorCode: null,
+              retryAtMs: null,
+              state: "ready",
+            };
+          }
           if (command === "live_status") return {
             captureMode: "pushToTalk",
             hotkey: "Ctrl+Shift+Space",
@@ -78,6 +86,43 @@ async function installPlaybackBridge(
           if (command === "list_saved_live_sessions") return { maintenanceWarnings: [], sessions: [] };
           if (command === "resolve_owned_live_transcript_paths") return [];
           if (command === "read_text_file" || command === "read_text_preview") return "";
+          if (command === "recording_jobs_import_legacy") {
+            const payload = args.payload as { jobs: Array<{ id: number; path: string }> };
+            const accepted = payload.jobs.map((job, index) => {
+              const token = (index + 1).toString(16).padStart(64, "0");
+              const playbackPath = `http://127.0.0.1:43123/media/${token}`;
+              state.tokens.set(job.path, playbackPath);
+              state.jobs.push({
+                id: `legacy-${job.id}-${token.slice(0, 16)}`,
+                name: job.path.split("\\").pop() ?? job.path,
+                pipeline: {
+                  alignment: "notStarted",
+                  diarization: "notStarted",
+                  intake: "done",
+                  postprocessing: "notStarted",
+                  preprocessing: "notStarted",
+                  transcription: "notStarted",
+                },
+                playbackPath,
+                route: "serverBatch",
+                sessionMode: "meeting",
+                sessionOrigin: "importedFile",
+                sourcePath: job.path,
+                status: "queued_server",
+              });
+              return { legacyId: job.id, jobId: `legacy-${job.id}-${token.slice(0, 16)}` };
+            });
+            return { accepted, duplicates: [], rejected: [] };
+          }
+          if (command === "recording_jobs_snapshot") return structuredClone(state.jobs);
+          if (command === "recording_job_cancel") {
+            const index = state.jobs.findIndex((job) => job.id === args.jobId);
+            const [cancelled] = index >= 0 ? state.jobs.splice(index, 1) : [];
+            return { ...cancelled, status: "cancelled" };
+          }
+          if (command === "recording_job_retry") {
+            return state.jobs.find((job) => job.id === args.jobId);
+          }
           if (command === "release_recording_playback") {
             state.released.push(String(args.playbackPath));
             return undefined;
@@ -120,97 +165,21 @@ async function seedTranscriptHistory(page: Page, count: number) {
   }, count);
 }
 
-test("decoded waveform state follows ready and error while native playback stays available", async ({ page }) => {
-  const testTone = Buffer.from(makeTestToneWav({ durationMs: 100 }));
-  let resolveFirstFetchStarted!: () => void;
-  let resolveSecondFetchStarted!: () => void;
-  let releaseNativeFetch!: () => void;
-  let releaseFirstFetch!: () => void;
-  let releaseSecondFetch!: () => void;
-  const firstFetchStarted = new Promise<void>((resolve) => { resolveFirstFetchStarted = resolve; });
-  const secondFetchStarted = new Promise<void>((resolve) => { resolveSecondFetchStarted = resolve; });
-  const nativeFetchRelease = new Promise<void>((resolve) => { releaseNativeFetch = resolve; });
-  const firstFetchRelease = new Promise<void>((resolve) => { releaseFirstFetch = resolve; });
-  const secondFetchRelease = new Promise<void>((resolve) => { releaseSecondFetch = resolve; });
-  let waveformFetches = 0;
-
-  await page.route("http://127.0.0.1:43123/media/**", async (route) => {
-    if (route.request().resourceType() !== "fetch") {
-      await nativeFetchRelease;
-      await route.fulfill({ body: testTone, contentType: "audio/wav" });
-      return;
-    }
-
-    waveformFetches += 1;
-    if (waveformFetches === 1) {
-      resolveFirstFetchStarted();
-      await firstFetchRelease;
-      await route.fulfill({ body: testTone, contentType: "audio/wav" });
-      return;
-    }
-
-    resolveSecondFetchStarted();
-    await secondFetchRelease;
-    await route.fulfill({ body: "not audio", contentType: "audio/wav" });
-  });
-
-  await installPlaybackBridge(
-    page,
-    ["C:\\small.wav", "C:\\small-broken.wav", "C:\\large.wav"],
-    0,
-    30,
-  );
+test("Rust-projected playback stays available without queue reauthorization", async ({ page }) => {
+  await installPlaybackBridge(page, ["C:\\small.wav"], 0, 30);
   await page.goto("/");
   await page.getByRole("button", { name: "Transcribe", exact: true }).click();
   await page.getByRole("button", { name: "Select small.wav" }).click();
 
   const slider = page.getByRole("slider", { name: "Seek recording small.wav" });
   const audio = page.locator("audio");
-  await expect(slider).toHaveAttribute("data-waveform-mode", "pending");
   await expect(audio).toHaveAttribute("src", /^http:\/\/127\.0\.0\.1:43123\/media\//);
-  releaseNativeFetch();
   await audio.dispatchEvent("loadedmetadata");
   await expect(slider).toHaveAttribute("data-waveform-mode", "lightweight");
   await expect(slider).not.toHaveAttribute("data-waveform-mounted", "true");
-
-  await page.getByRole("button", { name: "Play recording small.wav" }).click();
-  await firstFetchStarted;
-  await expect(slider).toHaveAttribute("data-waveform-mode", "lightweight");
-  await expect(slider).not.toHaveAttribute("data-waveform-mounted", "true");
-  await expect(page.getByTestId("lightweight-seek-track")).toBeVisible();
-
-  releaseFirstFetch();
-  await expect(slider).toHaveAttribute("data-waveform-mode", "decoded");
-  await expect(slider).toHaveAttribute("data-waveform-mounted", "true");
-  await expect(page.getByTestId("lightweight-seek-track")).toHaveCount(0);
-  await slider.focus();
-  await page.keyboard.press("End");
-  await expect.poll(() => audio.evaluate((element) => element.currentTime)).toBe(30);
-
-  await page.getByRole("button", { name: "Select small-broken.wav" }).click();
-  const brokenSlider = page.getByRole("slider", { name: "Seek recording small-broken.wav" });
-  await audio.dispatchEvent("loadedmetadata");
-  await expect(brokenSlider).toHaveAttribute("data-waveform-mode", "lightweight");
-
-  await page.getByRole("button", { name: "Play recording small-broken.wav" }).click();
-  await secondFetchStarted;
-  await expect(brokenSlider).toHaveAttribute("data-waveform-mode", "lightweight");
-  await expect(brokenSlider).not.toHaveAttribute("data-waveform-mounted", "true");
-  await expect(page.getByTestId("lightweight-seek-track")).toBeVisible();
-
-  releaseSecondFetch();
-  await expect.poll(() => brokenSlider.evaluate((element) =>
-    [...element.children].filter((child) => child.shadowRoot).length)).toBe(0);
-  await expect(brokenSlider).toHaveAttribute("data-waveform-mode", "lightweight");
-  await expect(brokenSlider).not.toHaveAttribute("data-waveform-mounted", "true");
-  await expect(page.getByRole("button", {
-    name: /^(?:Play|Pause) recording small-broken\.wav$/,
-  })).toBeEnabled();
-
-  await page.getByRole("button", { name: "Select large.wav" }).click();
-  const largeSlider = page.getByRole("slider", { name: "Seek recording large.wav" });
-  await expect(largeSlider).toHaveAttribute("data-waveform-mode", "lightweight");
-  await expect(largeSlider).not.toHaveAttribute("data-waveform-mounted", "true");
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __playbackTest: { restoreCalls: number } })
+      .__playbackTest.restoreCalls)).toBe(0);
 });
 
 test("lightweight seeking uses visible bounds, exact endpoints, ARIA, and release", async ({ page }) => {
@@ -241,28 +210,22 @@ test("lightweight seeking uses visible bounds, exact endpoints, ARIA, and releas
   await expect(slider).toHaveAttribute("aria-valuetext", "1:40 of 1:40");
 
   await page.getByRole("button", { name: "Remove file" }).click();
-  await expect.poll(() => page.evaluate(() =>
-    (globalThis as unknown as { __playbackTest: { released: string[] } })
-      .__playbackTest.released.length)).toBe(1);
+  await expect(page.getByRole("button", { name: "Select large.wav" })).toHaveCount(0);
 });
 
-test("queue restoration stays globally bounded across effect generations", async ({ page }) => {
+test("legacy queue imports once and uses only ledger-projected playback", async ({ page }) => {
   await installPlaybackBridge(
     page,
     Array.from({ length: 20 }, (_, index) => `C:\\large-${index}.wav`),
-    1_000,
   );
   await page.goto("/");
   await page.getByRole("button", { name: "Transcribe", exact: true }).click();
-  await page.getByRole("button", { name: "Remove file" }).first().click();
 
-  await expect.poll(() => page.evaluate(() =>
+  await expect(page.getByRole("button", { name: /^Select large-/ })).toHaveCount(20);
+  expect(await page.evaluate(() => localStorage.getItem("yap.recordingQueue.v1"))).toBeNull();
+  expect(await page.evaluate(() =>
     (globalThis as unknown as { __playbackTest: { restoreCalls: number } })
-      .__playbackTest.restoreCalls)).toBe(20);
-  const highWaterMark = await page.evaluate(() =>
-    (globalThis as unknown as { __playbackTest: { highWaterMark: number } })
-      .__playbackTest.highWaterMark);
-  expect(highWaterMark).toBe(4);
+      .__playbackTest.restoreCalls)).toBe(0);
 });
 
 test("history playback is admitted only after selecting one entry", async ({ page }) => {

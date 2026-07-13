@@ -38,10 +38,8 @@ type SetupStatus = {
 const setupSkipKey = "yap-local-fallback-setup-skipped";
 
 export function useSettingsControl({
-  onFallbackReady,
   onStatusChange,
 }: {
-  onFallbackReady: () => void;
   onStatusChange: (status: string) => void;
 }) {
   const [auth, setAuth] = useState("Checking");
@@ -54,8 +52,8 @@ export function useSettingsControl({
   const setupPromptedRef = useRef(false);
   const fallbackEnabledRef = useRef(fallbackEnabled);
   const modelInstalledRef = useRef(modelInstalled);
-  const callbacksRef = useRef({ onFallbackReady, onStatusChange });
-  callbacksRef.current = { onFallbackReady, onStatusChange };
+  const callbacksRef = useRef({ onStatusChange });
+  callbacksRef.current = { onStatusChange };
 
   const { refreshServerState, serverLabel } = useServerConnection();
   const live = useLiveControl();
@@ -103,7 +101,6 @@ export function useSettingsControl({
     setFallbackEnabled(projection.fallbackEnabled);
     setModelInstalled(projection.modelInstalled);
     if (projection.requestSetupPrompt) setSetupPromptRequest(true);
-    if (projection.requestQueueUnblock) callbacksRef.current.onFallbackReady();
   }, []);
 
   const applySetupStatus = useCallback((setup: SetupStatus) => {

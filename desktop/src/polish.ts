@@ -38,7 +38,7 @@ export type PolishSaveRequest = Readonly<{
 }>;
 
 export function polishSourceIdentity(item: RecordingJobView, sourceText: string) {
-  return JSON.stringify([item.id, item.path, item.output ?? "", sourceText]);
+  return JSON.stringify([item.id, item.sourcePath ?? "", item.outputPath ?? "", sourceText]);
 }
 
 export function createPolishSaveRequest({
@@ -57,7 +57,7 @@ export function createPolishSaveRequest({
   token: PolishSaveToken;
 }): PolishSaveRequest | undefined {
   if (
-    !item.output
+    !item.outputPath
     || !text.trim()
     || sourceIdentity !== polishSourceIdentity(item, sourceText)
     || !context.startsWith(`${sourceIdentity}\0`)
@@ -67,7 +67,7 @@ export function createPolishSaveRequest({
 
   return Object.freeze({
     isCurrent: token.isCurrent,
-    outputPath: item.output,
+    outputPath: item.outputPath,
     revision: token.draft.runId,
     signal: token.signal,
     sourceIdentity,

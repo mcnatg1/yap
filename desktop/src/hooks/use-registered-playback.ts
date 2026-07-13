@@ -1,48 +1,24 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState } from "react";
 
 import type { TranscriptHistoryEntry } from "@/history";
 import type { RecordingJobView } from "@/lib/app-types";
 import {
-  applyRestoredQueuePlaybackPaths,
-  clearTerminalQueuePlaybackAdmissions,
   currentPlaybackPaths,
   mergeHistoryPlaybackAdmissions,
   reconcilePlaybackAdmissionLifecycle,
   releaseRecordingPlaybackPaths,
   restoreHistoryPlaybackAdmission,
-  restoreQueuePlaybackPaths,
   trimHistoryPlaybackAdmissions,
   type HistoryPlaybackAdmissions,
 } from "@/lib/playback-registry";
 
 export function useRegisteredPlayback(
   queue: RecordingJobView[],
-  setQueue: Dispatch<SetStateAction<RecordingJobView[]>>,
   history: TranscriptHistoryEntry[],
   selectedHistoryEntry?: TranscriptHistoryEntry,
 ) {
   const [historyPlaybackAdmissions, setHistoryPlaybackAdmissions] =
     useState<HistoryPlaybackAdmissions>({});
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void Promise.resolve()
-      .then(() => controller.signal.aborted
-        ? []
-        : restoreQueuePlaybackPaths(queue, { signal: controller.signal }))
-      .then((restored) => {
-        if (controller.signal.aborted) {
-          void releaseRecordingPlaybackPaths(restored.map((entry) => entry.playbackPath));
-          return;
-        }
-        if (!restored.length) return;
-        setQueue((current) => applyRestoredQueuePlaybackPaths(current, restored));
-      });
-
-    return () => {
-      controller.abort();
-    };
-  }, [queue, setQueue]);
 
   useEffect(() => {
     const selectedHistory = selectedHistoryEntry
@@ -82,12 +58,7 @@ export function useRegisteredPlayback(
     reconcilePlaybackAdmissionLifecycle(
       currentPlaybackPaths(queue, historyPlaybackAdmissions),
     );
-    if (queue.some((item) =>
-      (item.status === "cancelled" || item.status === "failed") &&
-      (item.playbackPath || item.playbackByteLength !== undefined))) {
-      setQueue(clearTerminalQueuePlaybackAdmissions);
-    }
-  }, [historyPlaybackAdmissions, queue, setQueue]);
+  }, [historyPlaybackAdmissions, queue]);
 
   return {
     historyPlaybackAdmissions,

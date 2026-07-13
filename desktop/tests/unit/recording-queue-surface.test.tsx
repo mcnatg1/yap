@@ -12,12 +12,13 @@ describe("imported recording queue surface", () => {
   it("renders no local execution action or synthetic queue progress without a connector", () => {
     const item: RecordingJobView = {
       error: "Server unavailable",
-      id: 1,
-      intent: "recording",
+      id: "job-meeting",
       name: "meeting.wav",
-      path: "C:/meeting.wav",
+      sourcePath: "C:/meeting.wav",
       pipeline: createInitialPipelineState(),
       route: "serverBatch",
+      sessionMode: "meeting",
+      sessionOrigin: "importedFile",
       status: "failed",
     };
     const legacyExecutionProps = {
@@ -34,11 +35,15 @@ describe("imported recording queue surface", () => {
       <TooltipProvider>
         <QueuePanel
           {...legacyExecutionProps}
+          legacyDiscardAllowed={false}
           onClear={vi.fn()}
+          onDiscardLegacyQueue={vi.fn()}
           onRemove={vi.fn()}
           onReveal={vi.fn()}
+          onRetryMigration={vi.fn()}
           onSelect={vi.fn()}
           queue={[item]}
+          migrationPending={false}
         />
       </TooltipProvider>,
     );
@@ -56,8 +61,45 @@ describe("imported recording queue surface", () => {
       source("../../src/lib/setup-model-state.ts"),
     ].join("\n");
 
-    expect(ownedSources).not.toMatch(/queued_local_fallback|local_transcribing/);
-    expect(ownedSources).not.toMatch(/startTranscribe|transcribeItems|runQueue|retryItem/);
-    expect(source("../../src/App.tsx")).toContain("useImportedRecordingQueue");
+    expect(source("../../src/App.tsx")).not.toMatch(/startTranscribe|transcribeItems|runQueue/);
+    expect(source("../../src/App.tsx")).toContain("useRecordingJobs");
+    expect(source("../../src/hooks/use-imported-recording-queue.ts"))
+      .not.toMatch(/queued_local_fallback|local_transcribing/);
+  });
+
+  it("offers confirmed legacy discard only when a migration failure allows it", () => {
+    const renderFailure = (legacyDiscardAllowed: boolean) => renderToStaticMarkup(
+      <TooltipProvider>
+        <QueuePanel
+          legacyDiscardAllowed={legacyDiscardAllowed}
+          migrationError="Queued recording migration needs attention"
+          migrationPending={false}
+          onClear={vi.fn()}
+          onDiscardLegacyQueue={vi.fn()}
+          onRemove={vi.fn()}
+          onReveal={vi.fn()}
+          onRetryMigration={vi.fn()}
+          onSelect={vi.fn()}
+          queue={[]}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(renderFailure(false)).not.toContain("Discard old queue");
+    expect(renderFailure(true)).toContain("Discard old queue");
+
+    const panelSource = source("../../src/components/panels/queue-panel.tsx");
+    expect(panelSource).toContain("Discard the old queue?");
+    expect(panelSource).toContain("onClick={onDiscardLegacyQueue}");
+  });
+
+  it("wires the guarded discard owner from the recording jobs hook into the queue panel", () => {
+    const appSource = source("../../src/App.tsx");
+    expect(appSource).toContain("discardLegacyQueue,");
+    expect(appSource).toContain("legacyDiscardAllowed,");
+    expect(appSource).toContain("legacyDiscardAllowed={legacyDiscardAllowed}");
+    expect(appSource).toContain(
+      'onDiscardLegacyQueue={() => reportRecordingAction(discardLegacyQueue, "Could not discard old queue")}',
+    );
   });
 });

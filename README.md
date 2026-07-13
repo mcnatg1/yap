@@ -10,7 +10,7 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 - Product surface: installed Tauri desktop app only. Do not add phone/mobile-specific
   layouts; support normal and narrow desktop windows.
 - Local fallback install: explicit setup/settings action; runtime never silently downloads models.
-- Client workflow: typed recording-job state for setup, local fallback, future server routing, preprocessing, and diarization.
+- Client workflow: Rust-owned durable imported-job state, typed React projections, connector health/retry state, and reserved future preprocessing/diarization stages.
 - Batch/large recordings: future GB-class server Cohere path.
 - Offline without a suitable server/GPU path: queue or block instead of producing low-confidence
   official-looking transcripts.
@@ -18,7 +18,9 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
 - Editor-specific config is not tracked. Use whichever editor you want.
 - MVP repo posture: staged monorepo, no Nx/Turborepo, no separate `yap-contracts` yet.
 
-Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects `pwsh.exe` explicitly, and verifies that floor in every Windows CI job. A hash-pinned PowerShell 7.4.17 compatibility lane parses every tracked script and runs the focused native-process suite at the supported minor-version floor. This tooling boundary does not change the product architecture order: the next **product** implementation plan remains the canonical Phase 3 server contract and durable connector.
+Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects `pwsh.exe` explicitly, and verifies that floor in every Windows CI job. A hash-pinned PowerShell 7.4.17 compatibility lane parses every tracked script and runs the focused native-process suite at the supported minor-version floor. The canonical Phase 3 contract boundary is implemented: machine-readable contracts, loopback capability health, connector state/retry, and the durable desktop job ledger. Upload drain, WSS, server ASR, authentication, and model pools remain later product work.
+
+The exact GB10 private-link smoke is pinned to immutable release `099e558a27a747a7a2f24ec4e86f9c13f7604c13`: the ARM64/Python 3.12 server suite passed 49/49, transient loopback health reached the command-line production connector as `Ready`, a separate refused-tunnel run projected `Retrying`, and teardown left no Yap process or port-18765 listener. No persistent service, external application bind, or firewall change was introduced; later local fixes require promotion and a fresh GB10 gate before they can claim live-node evidence.
 
 ## Repository Layout
 
@@ -51,6 +53,7 @@ Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects
     |-- src/                          React app.
     |   |-- App.tsx                   Main app state and screen composition.
     |   |-- live.ts                   Tauri live-session event/invoke client.
+    |   |-- recording-queue.ts        Durable recording-job invoke/projection client and one-time legacy migration.
     |   |-- settings.ts               Tauri fallback/setup event/invoke client.
     |   |-- history.ts                localStorage transcript history.
     |   |-- polish.ts                 Text polish client.
@@ -65,13 +68,17 @@ Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects
         |-- nsis-hooks.nsh            Windows installer/uninstaller policy hooks.
         |-- examples/nemotron_profile.rs Local live runtime profiler.
         |-- tests/parity.rs           Mock verbose-json parity contract.
+        |-- tests/job_ledger.rs       File-backed restart and idempotent legacy migration proof.
+        |-- tests/server_connector.rs Health/failure/retry and Python contract integration proof.
         `-- src/
             |-- app.rs                App/tray/window lifecycle.
             |-- lib.rs                Tauri wiring and command registration.
             |-- commands/             Native invoke handlers, including media admission.
             |-- audio/                Capture, framing, timeline, bounded sinks, recording, evidence/results.
             |-- live/                 Live session, hotkeys, overlay, injection, runtime, history/recovery.
-            |-- runtime/              Route/orchestrator state skeleton.
+            |-- jobs/                 Rust-owned SQLite recording-job ledger, transitions, and command boundary.
+            |-- runtime/              Route/orchestrator state and connector projection.
+            |-- server_connector/     Validated settings, bounded health client, retry/cancellation state.
             `-- stt/
                 |-- dispatch.rs       Local fallback runtime state only.
                 |-- error.rs          Stable STT error codes/messages.
@@ -90,9 +97,9 @@ work, plus setup/install/remove controls for the pinned sherpa model artifacts.
 1. The React UI calls live/setup commands through `desktop/src/live.ts` and `desktop/src/settings.ts`.
 2. Tauri owns mic capture, hotkey state, the live overlay window, and the local fallback runtime.
 3. `stt::nemotron` resolves/downloads the pinned Nemotron INT8 artifact set; the live worker keeps one in-process sherpa recognizer warm.
-4. Larger recording jobs queue or block until the server contract exists instead of silently producing official-looking local batch transcripts.
+4. Larger recording jobs are committed to the Rust-owned SQLite ledger and remain queued for future server execution instead of silently producing official-looking local batch transcripts.
 
-Imported recording jobs currently use a transitional React/localStorage queue with Rust-authorized playback paths. It is not durable server execution authority; the Phase 3 connector plan replaces it with Rust-owned string IDs and a SQLite job ledger.
+Imported recording jobs use Rust-minted string IDs and a SQLite ledger as authority. React renders typed snapshots/events. The old `yap.recordingQueue.v1` localStorage value is read only by the one-time legacy importer and is deleted only after Rust acknowledges every row; it is never execution authority. The Phase 3 connector validates configured server origins and capability health, but it does not upload, drain, or transcribe queued imports.
 
 ## Development
 
@@ -171,4 +178,4 @@ These are intentionally local and ignored:
 - No runtime STT model/backend selector.
 - No command palette or generated UI drawer.
 - No editor-specific project config.
-- No production `yap-server` connector yet.
+- No production upload drain, WSS transport, authenticated server session, model pool, or server inference path yet; the implemented connector is limited to validated settings and capability-health state/retry.

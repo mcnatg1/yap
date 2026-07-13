@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import { liveSettingsLocked, projectFallbackLifecycle, projectLiveOverlayAction } from "@/components/panels/app-sheets";
 import {
-  acceptedRecordingDrops,
   createInitialPipelineState,
   deriveSetupState,
   deriveSetupStateFromFallbackModel,
@@ -14,6 +13,7 @@ import {
   serverConnectionLabel,
   setupStateLabel,
 } from "@/lib/app-types";
+import { serverCanRouteImportedRecording, serverCanRouteLive } from "@/server";
 
 describe("client recording workflow projection", () => {
   const baseFallbackModel = {
@@ -62,6 +62,33 @@ describe("client recording workflow projection", () => {
     expect(serverConnectionLabel("disabled")).toBe("Disabled");
   });
 
+  it("fails closed when projecting server capabilities", () => {
+    const readyWithoutCapabilities = {
+      state: "ready" as const,
+      checkedAtMs: 10,
+      retryAtMs: null,
+      apiVersion: "1",
+      capabilities: { batchJobs: false, liveStreaming: false, jobStatus: false },
+      errorCode: null,
+    };
+
+    expect(serverCanRouteImportedRecording(readyWithoutCapabilities)).toBe(false);
+    expect(serverCanRouteLive(readyWithoutCapabilities)).toBe(false);
+    expect(serverCanRouteImportedRecording({
+      ...readyWithoutCapabilities,
+      capabilities: { ...readyWithoutCapabilities.capabilities, batchJobs: true },
+    })).toBe(true);
+    expect(serverCanRouteLive({
+      ...readyWithoutCapabilities,
+      capabilities: { ...readyWithoutCapabilities.capabilities, liveStreaming: true },
+    })).toBe(true);
+    expect(serverCanRouteLive({
+      ...readyWithoutCapabilities,
+      state: "offline",
+      capabilities: { ...readyWithoutCapabilities.capabilities, liveStreaming: true },
+    })).toBe(false);
+  });
+
   it("labels the pinned local fallback model clearly", () => {
     expect(fallbackModelLabel("Nemotron 3.5 ASR Streaming 0.6B INT8")).toBe("Nemotron 3.5 ASR Streaming 0.6B INT8");
     expect(fallbackModelLabel("custom.gguf")).toBe("custom");
@@ -73,19 +100,6 @@ describe("client recording workflow projection", () => {
     expect(isRecordingFinished("complete")).toBe(true);
     expect(isRecordingFinished("partial")).toBe(true);
     expect(isRecordingFinished("queued_server")).toBe(false);
-  });
-
-  it("accepts only new supported recording drops while preserving allocated ids", () => {
-    expect(acceptedRecordingDrops(["C:/a.wav"], [
-      { id: 10, path: "C:/a.wav" },
-      { id: 11, path: "C:/b.txt" },
-      { id: 12, path: "C:/c.wav" },
-      { id: 13, path: "C:/c.wav" },
-      { id: 14, path: "C:/d.mp3" },
-    ])).toEqual([
-      { id: 12, path: "C:/c.wav" },
-      { id: 14, path: "C:/d.mp3" },
-    ]);
   });
 
   it("guards workspace event payloads at runtime", () => {

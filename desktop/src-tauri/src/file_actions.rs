@@ -10,6 +10,7 @@ use tokio::{sync::Semaphore, time::timeout_at};
 const MAX_DECODED_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
+const MAX_RECORDING_JOB_PLAYBACK_PATHS: usize = 200;
 const MAX_HIDDEN_PRUNE_CANDIDATES: usize = 200;
 const MAX_CONCURRENT_TRANSCRIPT_READS: usize = 4;
 const TRANSCRIPT_READ_TIMEOUT: Duration = Duration::from_secs(8);
@@ -35,6 +36,115 @@ pub struct RecordingPlaybackAdmission {
     playback_path: String,
     byte_length: String,
     waveform_eligible: bool,
+}
+
+pub(crate) struct RecordingJobSourceAdmission {
+    pub(crate) canonical_path: std::path::PathBuf,
+    pub(crate) playback_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValidatedRecordingJobSource {
+    pub(crate) canonical_path: std::path::PathBuf,
+    pub(crate) fingerprint: crate::commands::media_protocol::MediaSourceFingerprint,
+}
+
+#[derive(Debug)]
+pub(crate) enum RecordingJobSourceError {
+    Missing,
+    Unsafe(String),
+}
+
+pub(crate) fn validate_recording_job_source_at(
+    path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<ValidatedRecordingJobSource, RecordingJobSourceError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RecordingJobSourceError::Missing
+        } else {
+            RecordingJobSourceError::Unsafe(format!("Failed to inspect recording source: {error}"))
+        }
+    })?;
+    if !metadata.file_type().is_file() || metadata_is_reparse_point(&metadata) {
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source must be a regular file and not a reparse point.".into(),
+        ));
+    }
+    let canonical_path = playable_recording_path(path.display().to_string())
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    let canonical_metadata = std::fs::symlink_metadata(&canonical_path)
+        .map_err(|error| RecordingJobSourceError::Unsafe(error.to_string()))?;
+    if !canonical_metadata.file_type().is_file() || metadata_is_reparse_point(&canonical_metadata) {
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source must be a regular file and not a reparse point.".into(),
+        ));
+    }
+    if canonical_path_is_inside_owned_live_directory(&canonical_path, owned_dir) {
+        crate::live::recordings::canonical_committed_live_path_from_dir(
+            &canonical_path,
+            owned_dir,
+            false,
+        )
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    }
+    let fingerprint = crate::commands::media_protocol::inspect_media_source(&canonical_path)
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    Ok(ValidatedRecordingJobSource {
+        canonical_path,
+        fingerprint,
+    })
+}
+
+pub(crate) fn authorize_validated_recording_job_source_at(
+    source: &ValidatedRecordingJobSource,
+    owner: &crate::commands::media_protocol::MediaOwner,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<RecordingJobSourceAdmission, RecordingJobSourceError> {
+    let admission = owner
+        .admit_unchanged(
+            &source.canonical_path,
+            &source.fingerprint,
+            MAX_DECODED_WAVEFORM_BYTES,
+        )
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    let canonical_path = register_recording_job_playback_path_at_from_owned_dir(
+        source.canonical_path.display().to_string(),
+        registry_path,
+        owned_dir,
+    )
+    .map_err(|error| {
+        owner.release(&admission.url);
+        RecordingJobSourceError::Unsafe(error)
+    })?;
+    if canonical_path != source.canonical_path {
+        owner.release(&admission.url);
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source changed while playback was being authorized.".into(),
+        ));
+    }
+    Ok(RecordingJobSourceAdmission {
+        canonical_path,
+        playback_path: admission.url,
+    })
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(test)]
+pub(crate) fn metadata_is_reparse_point_for_test(metadata: &std::fs::Metadata) -> bool {
+    metadata_is_reparse_point(metadata)
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 #[tauri::command]
@@ -353,16 +463,46 @@ pub fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(),
 }
 
 fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
-    openable_app_path_from(
+    openable_app_path_from_registries(
         path,
         &recording_playback_registry_path(),
+        &recording_job_playback_registry_path(),
         &crate::live::recordings::recordings_dir(),
     )
 }
 
+pub(crate) fn openable_app_path_from_registries(
+    path: String,
+    general_registry_path: &std::path::Path,
+    job_registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    openable_app_path_from_registry_paths_with_limits(
+        path,
+        &[
+            (general_registry_path, MAX_REGISTERED_PLAYBACK_PATHS),
+            (job_registry_path, MAX_RECORDING_JOB_PLAYBACK_PATHS),
+        ],
+        owned_dir,
+    )
+}
+
+#[cfg(test)]
 fn openable_app_path_from(
     path: String,
     registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    openable_app_path_from_registry_paths_with_limits(
+        path,
+        &[(registry_path, MAX_REGISTERED_PLAYBACK_PATHS)],
+        owned_dir,
+    )
+}
+
+fn openable_app_path_from_registry_paths_with_limits(
+    path: String,
+    registry_paths: &[(&std::path::Path, usize)],
     owned_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     let path = std::path::PathBuf::from(path);
@@ -380,7 +520,12 @@ fn openable_app_path_from(
             is_transcript_path(&path),
         );
     }
-    registered_canonical_recording_path_at(&path, registry_path)
+    for (registry_path, limit) in registry_paths {
+        if registered_canonical_recording_path_at_with_limit(&path, registry_path, *limit).is_ok() {
+            return Ok(path);
+        }
+    }
+    Err("Recording file is not registered for playback.".into())
 }
 
 fn playable_recording_path(path: String) -> Result<std::path::PathBuf, String> {
@@ -411,6 +556,45 @@ fn register_playback_path_at_from_owned_dir(
     registry_path: &std::path::Path,
     owned_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
+    register_playback_path_at_from_owned_dir_with_limit(
+        path,
+        registry_path,
+        owned_dir,
+        MAX_REGISTERED_PLAYBACK_PATHS,
+        "The playback registry is full; remove an old imported recording before adding another.",
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn register_general_playback_path_at_for_test(
+    path: String,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    register_playback_path_at_from_owned_dir(path, registry_path, owned_dir)
+}
+
+fn register_recording_job_playback_path_at_from_owned_dir(
+    path: String,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    register_playback_path_at_from_owned_dir_with_limit(
+        path,
+        registry_path,
+        owned_dir,
+        MAX_RECORDING_JOB_PLAYBACK_PATHS,
+        "The recording job playback registry is full.",
+    )
+}
+
+fn register_playback_path_at_from_owned_dir_with_limit(
+    path: String,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+    limit: usize,
+    full_message: &str,
+) -> Result<std::path::PathBuf, String> {
     let path = playable_recording_path(path)?;
     if canonical_path_is_inside_owned_live_directory(&path, owned_dir) {
         return crate::live::recordings::canonical_committed_live_path_from_dir(
@@ -420,12 +604,12 @@ fn register_playback_path_at_from_owned_dir(
     let _guard = playback_registry_lock()
         .lock()
         .map_err(|_| "Playback registry lock is unavailable.".to_string())?;
-    let mut paths = read_registered_playback_paths(registry_path)?;
+    let mut paths = read_registered_playback_paths_with_limit(registry_path, limit)?;
     let already_registered = paths
         .iter()
         .any(|registered| same_registry_path(registered, &path));
-    if !already_registered && paths.len() >= MAX_REGISTERED_PLAYBACK_PATHS {
-        return Err("The playback registry is full; remove an old imported recording before adding another.".into());
+    if !already_registered && paths.len() >= limit {
+        return Err(full_message.into());
     }
     paths.retain(|registered| !same_registry_path(registered, &path));
     paths.insert(0, path.clone());
@@ -492,7 +676,19 @@ fn registered_canonical_recording_path_at(
     path: &std::path::Path,
     registry_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    if read_registered_playback_paths(registry_path)?
+    registered_canonical_recording_path_at_with_limit(
+        path,
+        registry_path,
+        MAX_REGISTERED_PLAYBACK_PATHS,
+    )
+}
+
+fn registered_canonical_recording_path_at_with_limit(
+    path: &std::path::Path,
+    registry_path: &std::path::Path,
+    limit: usize,
+) -> Result<std::path::PathBuf, String> {
+    if read_registered_playback_paths_with_limit(registry_path, limit)?
         .iter()
         .any(|registered| same_registry_path(registered, path))
     {
@@ -505,8 +701,20 @@ fn recording_playback_registry_path() -> std::path::PathBuf {
     crate::paths::app_data_dir().join("recording-playback-registry.json")
 }
 
+pub(crate) fn recording_job_playback_registry_path() -> std::path::PathBuf {
+    crate::paths::app_data_dir().join("recording-job-playback-registry.json")
+}
+
+#[cfg(test)]
 fn read_registered_playback_paths(
     registry_path: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    read_registered_playback_paths_with_limit(registry_path, MAX_REGISTERED_PLAYBACK_PATHS)
+}
+
+fn read_registered_playback_paths_with_limit(
+    registry_path: &std::path::Path,
+    limit: usize,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     let text = match std::fs::read_to_string(registry_path) {
         Ok(text) => text,
@@ -528,8 +736,51 @@ fn read_registered_playback_paths(
         .into_iter()
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute() && is_recording_media_path(path))
-        .take(MAX_REGISTERED_PLAYBACK_PATHS)
+        .take(limit)
         .collect())
+}
+
+pub(crate) fn remove_recording_job_playback_path_at(
+    path: &std::path::Path,
+    registry_path: &std::path::Path,
+) -> Result<(), String> {
+    let _guard = playback_registry_lock()
+        .lock()
+        .map_err(|_| "Playback registry lock is unavailable.".to_string())?;
+    let mut paths =
+        read_registered_playback_paths_with_limit(registry_path, MAX_RECORDING_JOB_PLAYBACK_PATHS)?;
+    let original_len = paths.len();
+    paths.retain(|registered| !same_registry_path(registered, path));
+    if paths.len() != original_len {
+        write_registered_playback_paths(registry_path, &paths)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reconcile_recording_job_playback_paths_at(
+    recoverable_paths: &[std::path::PathBuf],
+    registry_path: &std::path::Path,
+) -> Result<(), String> {
+    let _guard = playback_registry_lock()
+        .lock()
+        .map_err(|_| "Playback registry lock is unavailable.".to_string())?;
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for path in recoverable_paths {
+        if !path.is_absolute() || !is_recording_media_path(path) {
+            continue;
+        }
+        if paths
+            .iter()
+            .any(|registered| same_registry_path(registered, path))
+        {
+            continue;
+        }
+        paths.push(path.clone());
+        if paths.len() == MAX_RECORDING_JOB_PLAYBACK_PATHS {
+            break;
+        }
+    }
+    write_registered_playback_paths(registry_path, &paths)
 }
 
 fn write_registered_playback_paths(
@@ -997,13 +1248,19 @@ mod tests {
     #[test]
     fn transcript_actions_reject_resolved_non_transcript_files() {
         let dir = temp_test_dir("txt-symlink");
-        let target = dir.join("secret.json");
+        let target_dir = dir.join("reparse-target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("secret.json");
         let link = dir.join("live-104.txt");
         std::fs::write(&target, "{}").unwrap();
-        if create_file_symlink(&target, &link).is_err() {
-            std::fs::remove_dir_all(dir).ok();
-            return;
-        }
+        create_reparse_point(&target, &link).expect(
+            "reparse fixture creation failed; tests require file symlinks or NTFS directory junctions",
+        );
+        let link_metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            link_metadata.file_type().is_symlink() || metadata_is_reparse_point(&link_metadata),
+            "fixture must be a symlink or Windows reparse point"
+        );
 
         assert_eq!(
             read_text_file_at_from_dir(link.display().to_string(), &dir).unwrap_err(),
@@ -1018,6 +1275,7 @@ mod tests {
                 .unwrap_err(),
             "Only transcript text files can be polished."
         );
+        remove_reparse_point(&link).unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1425,7 +1683,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn create_file_symlink(
+    fn create_reparse_point(
         target: &std::path::Path,
         link: &std::path::Path,
     ) -> std::io::Result<()> {
@@ -1433,10 +1691,34 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn create_file_symlink(
+    fn create_reparse_point(
         target: &std::path::Path,
         link: &std::path::Path,
     ) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_file(target, link)
+        let target_dir = target.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
+        })?;
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target_dir)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_reparse_point(link: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_file(link)
+    }
+
+    #[cfg(windows)]
+    fn remove_reparse_point(link: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_dir(link)
     }
 }

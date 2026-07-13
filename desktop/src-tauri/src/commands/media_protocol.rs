@@ -35,6 +35,12 @@ pub(crate) struct MediaAdmission {
     pub(crate) waveform_eligible: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaSourceFingerprint {
+    identity: FileIdentity,
+    length: u64,
+}
+
 pub(crate) struct MediaOwner {
     inner: Arc<MediaOwnerInner>,
     server: Mutex<Option<MediaServer>>,
@@ -74,6 +80,16 @@ impl MediaOwner {
         path: &Path,
         waveform_byte_limit: u64,
     ) -> Result<MediaAdmission, String> {
+        let fingerprint = inspect_media_source(path)?;
+        self.admit_unchanged(path, &fingerprint, waveform_byte_limit)
+    }
+
+    pub(crate) fn admit_unchanged(
+        &self,
+        path: &Path,
+        expected: &MediaSourceFingerprint,
+        waveform_byte_limit: u64,
+    ) -> Result<MediaAdmission, String> {
         if !path.is_absolute() {
             return Err("Recording playback requires an absolute path.".into());
         }
@@ -83,6 +99,9 @@ impl MediaOwner {
             .map_err(|error| format!("Failed to open recording for playback: {error}"))?;
         let snapshot = file_snapshot(&file)?;
         drop(file);
+        if &snapshot != expected {
+            return Err("Recording source changed while playback was being authorized.".into());
+        }
 
         let authority = self.ensure_server()?;
         let token = self.inner.insert_admission(MediaEntry {
@@ -131,13 +150,23 @@ impl MediaOwner {
     }
 
     #[cfg(test)]
-    fn active_admission_count_for_test(&self) -> usize {
+    pub(crate) fn active_admission_count_for_test(&self) -> usize {
         self.inner
             .registry
             .lock()
             .map(|registry| registry.entries.len())
             .unwrap_or(0)
     }
+}
+
+pub(crate) fn inspect_media_source(path: &Path) -> Result<MediaSourceFingerprint, String> {
+    if !path.is_absolute() {
+        return Err("Recording playback requires an absolute path.".into());
+    }
+    media_mime(path).ok_or_else(|| "Choose a supported audio or video file.".to_string())?;
+    let file = open_no_follow(path)
+        .map_err(|error| format!("Failed to open recording for playback: {error}"))?;
+    file_snapshot(&file)
 }
 
 fn admission_metadata(length: u64, waveform_byte_limit: u64) -> (String, bool) {
@@ -663,12 +692,7 @@ fn open_admitted_file(entry: &MediaEntry) -> Result<File, AdmissionOpenError> {
     Ok(file)
 }
 
-struct FileSnapshot {
-    identity: FileIdentity,
-    length: u64,
-}
-
-fn file_snapshot(file: &File) -> Result<FileSnapshot, String> {
+fn file_snapshot(file: &File) -> Result<MediaSourceFingerprint, String> {
     let metadata = file
         .metadata()
         .map_err(|error| format!("Failed to inspect recording: {error}"))?;
@@ -681,7 +705,7 @@ fn file_snapshot(file: &File) -> Result<FileSnapshot, String> {
     {
         return Err("Recording playback rejects reparse points.".into());
     }
-    Ok(FileSnapshot {
+    Ok(MediaSourceFingerprint {
         identity: file_identity(file)?,
         length: metadata.len(),
     })

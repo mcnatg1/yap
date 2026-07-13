@@ -18,7 +18,7 @@ export function useRecordingSelection({
   history: TranscriptHistoryEntry[];
   queue: RecordingJobView[];
 }) {
-  const [selectedId, setSelectedId] = useState<number>();
+  const [selectedId, setSelectedId] = useState<string>();
   const [selectedHistoryOutput, setSelectedHistoryOutput] = useState<string>();
   const [reviewMorphOrigin, setReviewMorphOrigin] = useState<ReviewMorphOrigin>();
 
@@ -63,12 +63,12 @@ export function useRecordingSelection({
     if (selectedHistoryOutput === outputPath) setSelectedHistoryOutput(undefined);
   }, [selectedHistoryOutput]);
 
-  const selectQueueItem = useCallback((id: number) => {
+  const selectQueueItem = useCallback((id: string) => {
     setSelectedHistoryOutput(undefined);
     setSelectedId(id);
   }, []);
 
-  const selectQueueItemOnly = useCallback((id: number) => {
+  const selectQueueItemOnly = useCallback((id: string) => {
     setSelectedId(id);
   }, []);
 

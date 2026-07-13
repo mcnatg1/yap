@@ -6,7 +6,8 @@
 **Amended by:** [ADR 0019](0019-local-streaming-model-selection.md) — the team profile still defaults to server-hosted live ASR when connected, but the desktop-local offline/degraded fallback is Nemotron 3.5 ASR Streaming 0.6B INT8 through `sherpa-onnx`.
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
-**Implementation status:** Client capture/local fallback and a server health/router skeleton exist. The network service, capability contract, connector, durable jobs, upload/WSS, auth, and server inference are not implemented.
+**Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
+**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Upload/drain, WSS, authenticated sessions, model pools, TLS/QUIC edge, and server inference are not implemented.
 
 ## Context
 
@@ -275,10 +276,12 @@ The GB-class server node:
 
 ```rust
 enum DeploymentProfile { Solo, TeamConfigured }
-enum ConnectorState { Disabled, Connecting, Offline, SignInRequired, Ready }
+enum ConnectorState { NotSet, Disabled, Connecting, Offline, SignInRequired, Retrying, Ready }
 ```
 
-The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured + Offline`; it does not silently become Solo. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is offline. `Ready` is accepted only after the version, auth state, and required advertised capabilities validate.
+The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured` and unavailable; it does not silently become Solo. Its observable connector state may be `Offline` and then `Retrying` when retry backoff arms. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is unavailable. `Ready` means a compatible, healthy service is reachable and its auth projection does not require sign-in; advertised capabilities may all be false. Batch and live routing additionally require the matching advertised capability.
+
+The implemented Phase 3 connector covers configured-origin validation, bounded health checks, capability and auth-required state projection, fail-closed retries, and settings-generation cancellation. It does not stream audio, upload or drain recording jobs, authenticate a user, or process a queued job.
 
 ### Client connector state machine (team profile)
 
@@ -286,11 +289,11 @@ The server URL is set in Settings during organization onboarding. A configured b
 stateDiagram-v2
     [*] --> Disconnected
     Disconnected --> Connecting: server_url present
-    Connecting --> Connected: version + auth + capabilities valid
+    Connecting --> Connected: compatible health + auth projected
     Connecting --> QueuedOffline: timeout / malformed or incompatible health
     Connecting --> SignInRequired: auth required
-    Connected --> LiveStreaming: live mic
-    Connected --> BatchUploading: larger recording
+    Connected --> LiveStreaming: live mic + liveStreaming
+    Connected --> BatchUploading: larger recording + batchJobs
     LiveStreaming --> Connected: stream final
     BatchUploading --> Connected: job accepted
     LiveStreaming --> LocalFallback: socket loss
@@ -304,11 +307,13 @@ On `Connected` loss, live dictation may switch to local fallback with a visible 
 
 ### Canonical Phases 3–5 deliverables
 
-- [ ] `server/` staging area and Phase 3 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
+- [x] `server/` staging area, machine-readable Phase 3 contract, and loopback capability-health process in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
+- [x] Client capability-health connector: validated settings, bounded HTTP checks, fail-closed state/capability projection, generation safety, and retry cancellation
+- [x] Rust-owned SQLite imported-job ledger with restart recovery and idempotent legacy migration
 - [ ] Workload router: per-user queues, priority, pool dispatch
 - [ ] Streaming ASR pool: GPU ASR, WSS endpoint
 - [ ] Cohere batch pool: concurrent GPU workers, job queue
-- [ ] Client server-connector: WSS live path + HTTP batch upload + profile detection
+- [ ] Client transport: WSS live path + HTTP batch upload/drain + authenticated profile detection
 - [ ] Local-fallback logic: auto-switch on server unreachability
 
 ## Open questions

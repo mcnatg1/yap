@@ -2,6 +2,7 @@
 
 **Date:** 2026-07-01
 **Status:** Accepted (roadmap — canonical Phase 9)
+**Amended by:** [ADR 0022](0022-google-okf-permission-safe-projections.md) — adopts pinned Google OKF v0.1, defines the Yap Enterprise OKF profile and permission-safe virtual views, requires a Postgres/pgvector plus typed-edge baseline, and makes Neo4j a benchmark-gated graph challenger.
 **Builds on:** [ADR 0014](0014-server-tier-compute-topology.md) (server tier), [ADR 0016](0016-auth-identity-bridge.md) (auth drives permissions), [ADR 0010](0010-okf-conversation-schema.md) (OKF file schema), [ADR 0011](0011-vector-rag-retrieval.md) (vector retrieval), [ADR 0012](0012-mcp-server-surface.md) (MCP surface)
 **Identity-key rule:** Per [ADR 0016](0016-auth-identity-bridge.md), every user and group reference is tenant-scoped. Bare Entra object IDs are historical shorthand and are not valid cache, index, or authorization keys.
 **Consolidates / supersedes server-profile details in:** [ADR 0009](0009-knowledge-worker-protocol.md) (knowledge worker IPC → server KB compiler API), [ADR 0010](0010-okf-conversation-schema.md) (adds two-lane store context), [ADR 0011](0011-vector-rag-retrieval.md) (SQLite → server-side vector DB for team profile), [ADR 0012](0012-mcp-server-surface.md) (MCP now runs in yap-server)
@@ -28,7 +29,7 @@ The knowledge base for the team profile is primarily **text**: meeting transcrip
 > Permission files = mutable access source-of-truth.
 > Postgres = compiled ledger.
 > Redis = speed layer.
-> Vector DB = disposable semantic search index.
+> Relationship/vector projections = disposable indexes; Postgres/pgvector is the baseline and Neo4j is a gated challenger.
 > S3 = raw blobs, backups, and snapshots.
 > Agent artifacts = generated knowledge with provenance + inherited permissions.**
 
@@ -89,7 +90,7 @@ flowchart TB
     subgraph CompiledLayers["Compiled layers (all disposable + rebuildable)"]
         PG["Postgres\n(durable compiled ledger:\nmetadata · permissions · lineage · audit)"]
         Redis["Redis\n(hot cache:\nexpanded per-user allowed doc IDs\nby build/permission version)"]
-        VDB["Vector DB\n(semantic RAG index:\nMilvus / pgvector-class;\ndisposable — rebuild from OKF)"]
+        VDB["Relationship + vector projections\n(Postgres/pgvector baseline;\noptional Neo4j challenger)"]
         S3["S3 / object storage\n(raw blobs · backups ·\nimmutable snapshots · exports)"]
     end
 
@@ -123,7 +124,9 @@ JSONB is used for compiled policies and provenance blobs; these are **compiler o
 
 Redis is **never** the permission source-of-truth. It is a speed layer over Postgres. A Redis miss falls back to Postgres, never to the raw permission file.
 
-#### Vector DB (Milvus / pgvector-class)
+#### Relationship and vector projections
+
+ADR 0022 requires Postgres typed relationship tables plus pgvector as the Phase 9 baseline. Neo4j is an optional graph/vector challenger and is implemented only after representative fixtures demonstrate a material multi-hop benefit that justifies another service. The chunk fields below apply to any vector adapter; typed relationship records additionally carry source provenance, authority, permission hash, and build generation.
 
 | Schema field | Notes |
 |--------------|-------|
@@ -205,7 +208,7 @@ KB compiler:
   3. Deterministic compile:
      a. Postgres — upsert metadata, compiled permissions, lineage, audit
      b. Redis — refresh expanded per-user allowed paths (keyed by build version)
-     c. Vector DB — re-embed changed docs; invalidate stale chunks by permission_hash
+     c. Relationship/vector projections — update Postgres edges and pgvector embeddings plus any promoted adapter; invalidate stale records by permission hash and build generation
      d. Allowed OKF tree — recreate permission-filtered view from current source
   ↓
 Users + agents see updated knowledge
@@ -235,7 +238,7 @@ ADR 0009–0012's local OKF markdown + SQLite index is **retained as-is for the 
 
 ### Neutral
 
-- The OKF conversation schema (ADR 0010) frontmatter fields are unchanged; the KB compiler is a new consumer of that schema, not a replacement.
+- ADR 0010's example frontmatter is historical. ADR 0022's pinned Google OKF base and Yap Enterprise OKF profile govern canonical Phase 9 concepts and compiler behavior.
 - The vector DB schema adds `permission_hash`, `access_tags`, `repo_commit`/`content_hash` fields to the ADR 0011 chunk schema; the retrieval flow and confidence gate are preserved.
 
 ## Implementation notes
@@ -289,7 +292,7 @@ The compiler resolves permission-file names inside the configured tenant and exp
 - [ ] Lane 2 webhook handler (push → compile trigger)
 - [ ] Postgres schema: metadata, permissions, lineage, audit
 - [ ] Redis hot cache: allowed-paths by user + build version
-- [ ] Vector DB integration (Milvus or pgvector; schema above)
+- [ ] Postgres typed relationships + pgvector baseline; Neo4j benchmark challenger (ADR 0022)
 - [ ] S3 integration: raw blob storage + backup lifecycle
 - [ ] Permission inheritance for agent artifacts
 - [ ] Deterministic rebuild CLI (`yap-server rebuild-index`)
@@ -299,7 +302,7 @@ The compiler resolves permission-file names inside the configured tenant and exp
 ## Open questions
 
 1. **Lane 1 migration threshold** — What specific metric (e.g. transcript commits/day, repo size, CI time) triggers migration from the Git-compatible Lane 1 design to a dedicated content-addressed store? Monitoring-driven; not a fixed number.
-2. **Vector DB choice** — Milvus vs pgvector vs Qdrant? Evaluate during canonical Phase 9 against the GB-class server node profile (RAM, storage IOPS, GPU-accelerated ANN). Record the decision in an ADR amendment.
+2. **Graph challenger promotion** — Postgres/pgvector is the required baseline under ADR 0022. Benchmark Neo4j's multi-hop accuracy, filtered recall, hybrid rank quality, latency, resources, rebuild behavior, licensing, and operations before deciding whether it should replace the relational relationship projection, the vector adapter, both, or neither.
 3. **Permission compile latency SLA** — How quickly must a permission change propagate to all users? (Seconds? Minutes?) This drives the compile pipeline design (incremental vs full rebuild).
 4. **`yap-knowledge` repo host** — Self-hosted Gitea on the org LAN vs GitHub Enterprise? Must be reachable from `yap-server`; must satisfy the org's data-residency requirements.
 

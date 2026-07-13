@@ -75,7 +75,7 @@ describe("setup model state", () => {
     ).toBe(false);
   });
 
-  it("never requests imported queue mutation when the fallback model becomes ready", () => {
+  it("never exposes imported queue mutation from setup projection", () => {
     const projection = projectFallbackModelState({
       alreadyPrompted: true,
       currentFallbackEnabled: false,
@@ -84,7 +84,7 @@ describe("setup model state", () => {
       view: fallbackView("ready"),
     });
 
-    expect(projection.requestQueueUnblock).toBe(false);
+    expect(projection).not.toHaveProperty("requestQueueUnblock");
   });
 
   it.each([
@@ -96,7 +96,6 @@ describe("setup model state", () => {
         engineReady: true,
         fallbackEnabled: true,
         modelInstalled: true,
-        requestQueueUnblock: false,
         setupState: "fallback_ready",
         status: "Transcription engine ready",
       },
@@ -110,7 +109,6 @@ describe("setup model state", () => {
         engineReady: false,
         fallbackEnabled: false,
         modelInstalled: true,
-        requestQueueUnblock: false,
         setupState: "fallback_disabled",
         status: "Local fallback disabled",
       },
@@ -124,7 +122,6 @@ describe("setup model state", () => {
         engineReady: false,
         fallbackEnabled: true,
         modelInstalled: false,
-        requestQueueUnblock: false,
         setupState: "fallback_missing",
         status: "Local fallback model missing",
       },
@@ -138,7 +135,6 @@ describe("setup model state", () => {
         engineReady: false,
         fallbackEnabled: false,
         modelInstalled: true,
-        requestQueueUnblock: false,
         setupState: "fallback_disabled",
         status: "Local fallback disabled",
       },
@@ -152,7 +148,6 @@ describe("setup model state", () => {
         engineReady: false,
         fallbackEnabled: false,
         modelInstalled: true,
-        requestQueueUnblock: false,
         setupState: "fallback_disabled",
         status: "Fetching model",
       },
@@ -194,7 +189,6 @@ describe("setup model state", () => {
       engineReady: false,
       fallbackEnabled: false,
       modelInstalled: false,
-      requestQueueUnblock: false,
       setupState: "fallback_disabled",
       status: "Native setup pending",
     });

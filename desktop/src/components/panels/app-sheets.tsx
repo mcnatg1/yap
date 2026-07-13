@@ -59,6 +59,12 @@ import {
   type LiveSessionView,
 } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
+import {
+  projectServerConnectionTestMessage,
+  saveServerSettings,
+  serverSettings,
+  testServerConnection,
+} from "@/settings";
 
 type SettingsSection = "general" | "system" | "about";
 
@@ -330,6 +336,11 @@ export function SettingsSheet({
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const [hotkeyDraft, setHotkeyDraft] = useState(liveView.hotkey);
   const [pasteHotkeyDraft, setPasteHotkeyDraft] = useState(liveView.pasteHotkey);
+  const [serverUrlDraft, setServerUrlDraft] = useState("");
+  const [serverEnabled, setServerEnabled] = useState(false);
+  const [serverSettingsPending, setServerSettingsPending] = useState(false);
+  const [serverSettingsError, setServerSettingsError] = useState("");
+  const [serverSettingsNotice, setServerSettingsNotice] = useState("");
   const selectedComputeTarget = localComputeTargets.find((target) => target.selected)?.id ?? "auto";
   const fallbackLifecycle = projectFallbackLifecycle(fallbackModel, {
     commandPending: fallbackActionPending,
@@ -349,6 +360,66 @@ export function SettingsSheet({
       setSection("system");
     }
   }, [fallbackModel, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setServerSettingsPending(true);
+    setServerSettingsError("");
+    setServerSettingsNotice("");
+    void serverSettings()
+      .then((settings) => {
+        if (!active) return;
+        setServerUrlDraft(settings.baseUrl ?? "");
+        setServerEnabled(settings.enabled);
+      })
+      .catch((error: unknown) => {
+        if (active) setServerSettingsError(terseSettingsError(error, "Could not load server settings."));
+      })
+      .finally(() => {
+        if (active) setServerSettingsPending(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open]);
+
+  async function saveServerDraft() {
+    setServerSettingsPending(true);
+    setServerSettingsError("");
+    setServerSettingsNotice("");
+    try {
+      const saved = await saveServerSettings({
+        schemaVersion: 1,
+        enabled: serverEnabled,
+        baseUrl: serverUrlDraft.trim() || null,
+      });
+      setServerUrlDraft(saved.baseUrl ?? "");
+      setServerEnabled(saved.enabled);
+      setServerSettingsNotice("Saved.");
+      return saved;
+    } catch (error) {
+      setServerSettingsError(terseSettingsError(error, "Could not save server settings."));
+      return null;
+    } finally {
+      setServerSettingsPending(false);
+    }
+  }
+
+  async function runServerConnectionTest() {
+    const saved = await saveServerDraft();
+    if (!saved || !saved.enabled) return;
+    setServerSettingsPending(true);
+    setServerSettingsNotice("Checking connection.");
+    try {
+      setServerSettingsNotice(projectServerConnectionTestMessage(await testServerConnection()));
+    } catch (error) {
+      setServerSettingsError(terseSettingsError(error, "Connection check failed."));
+      setServerSettingsNotice("");
+    } finally {
+      setServerSettingsPending(false);
+    }
+  }
 
   function runFallbackAction(actionId: FallbackLifecycleActionId) {
     switch (actionId) {
@@ -554,6 +625,46 @@ export function SettingsSheet({
                 {section === "system" ? (
                   <SettingsGroup>
                     <SettingsRow
+                      detail={serverSettingsNotice || "HTTPS required outside approved private development."}
+                      error={serverSettingsError}
+                      label="Server"
+                      value={serverSettingsPending ? "Checking" : serverEnabled ? "Enabled" : "Disabled"}
+                    >
+                      <div className="flex w-full max-w-[520px] flex-wrap justify-end gap-2">
+                        <Input
+                          aria-label="Server URL"
+                          className="min-w-[240px] flex-1"
+                          disabled={serverSettingsPending}
+                          onChange={(event) => setServerUrlDraft(event.currentTarget.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") void saveServerDraft();
+                          }}
+                          placeholder="https://server.example"
+                          value={serverUrlDraft}
+                        />
+                        <Button
+                          aria-checked={serverEnabled}
+                          disabled={serverSettingsPending}
+                          onClick={() => setServerEnabled((enabled) => !enabled)}
+                          role="switch"
+                          type="button"
+                          variant={serverEnabled ? "default" : "secondary"}
+                        >
+                          {serverEnabled ? "Enabled" : "Disabled"}
+                        </Button>
+                        <Button disabled={serverSettingsPending} onClick={() => void saveServerDraft()} type="button" variant="secondary">
+                          Save
+                        </Button>
+                        <Button
+                          disabled={serverSettingsPending || !serverEnabled || !serverUrlDraft.trim()}
+                          onClick={() => void runServerConnectionTest()}
+                          type="button"
+                        >
+                          Test Connection
+                        </Button>
+                      </div>
+                    </SettingsRow>
+                    <SettingsRow
                       detail={liveActive ? "Stop live before changing compute." : "Local live uses the CPU runtime. Server owns GPU routing."}
                       label="Compute"
                       value={localComputeTargets.find((target) => target.selected)?.label ?? "Auto"}
@@ -658,12 +769,14 @@ function SettingsRow({
   action,
   children,
   detail,
+  error,
   label,
   value,
 }: {
   action?: ReactNode;
   children?: ReactNode;
   detail?: string;
+  error?: string;
   label: string;
   value: string;
 }) {
@@ -673,6 +786,7 @@ function SettingsRow({
         <div className="font-medium">{label}</div>
         <div className="mt-1 break-words text-sm text-foreground/80">{value}</div>
         {detail ? <div className="mt-1 break-words text-xs text-muted-foreground">{detail}</div> : null}
+        {error ? <div className="mt-1 break-words text-xs text-destructive">{error}</div> : null}
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
         {children}
@@ -680,6 +794,11 @@ function SettingsRow({
       </div>
     </div>
   );
+}
+
+function terseSettingsError(error: unknown, fallback: string) {
+  const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  return message.trim().split(/\r?\n/, 1)[0]?.slice(0, 160) || fallback;
 }
 
 export function HelpSheet({ onOpenChange, open }: { onOpenChange: (open: boolean) => void; open: boolean }) {

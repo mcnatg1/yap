@@ -9,7 +9,9 @@ This repo stays a staged monorepo through the MVP. Keep cleanup changes small, t
 | `desktop/` | Installed Yap client | React/Tauri app, local Nemotron fallback, desktop tests |
 | `desktop/src-tauri/src/live/` | Live dictation runtime | Mic capture, overlay state, hotkey/live stream code |
 | `desktop/src-tauri/src/stt/` | Local STT fallback | Nemotron pins, shared artifact helpers, parity helpers |
-| `server/` | Future `yap-server` staging | Small API/router code only when it has tests |
+| `desktop/src-tauri/src/jobs/` | Durable imported-job authority | SQLite ledger, transitions, source/playback trust, restart recovery |
+| `desktop/src-tauri/src/server_connector/` | Server reachability boundary | Validated settings, bounded health/capability checks, retry cancellation |
+| `server/` | `yap-server` staging | Versioned contract and bounded tested health/router slice; later code only with tests |
 | `infra/yap-server-node/` | Server host bootstrap | Host scripts/env examples; no app code |
 | `docs/adr/` | Decisions | Why the architecture is this way |
 | `docs/specs/` | Build specs | What to implement next |
@@ -29,13 +31,13 @@ This repo stays a staged monorepo through the MVP. Keep cleanup changes small, t
 | Docs | Kebab case except canonical root docs | `server-tier-mvp.md` |
 | Server Python package | Snake case | `yap_server` |
 
-Keep the folder name `desktop/` while this is a staged monorepo. Rename the repo/folder only when the Phase 12 split starts.
+Keep the folder name `desktop/` while this is a staged monorepo. Rename the repo/folder only when the canonical Phase 10 split starts.
 
 ## Tech debt table
 
 | Priority | Item | Current state | Next action |
 |----------|------|---------------|-------------|
-| P1 | Server connector does not exist yet | Batch jobs block/queue instead of routing to `yap-server` | Finish server contract, then add the desktop reachability/connector path |
+| P1 | Remote server processing path remains deferred | Connector and SQLite ledger queue imports durably but do not upload, drain, or process them | Phase 5 WSS/upload/drain/server ASR only after its transport and auth gates |
 | P1 | CI parity clip is opt-in | Mock verbose JSON fixture protects timestamp contract in normal CI; real audio sidecar tests are ignored unless `YAP_PARITY_CLIP` is set | Add a licensed speech fixture later if real audio parity must run in CI |
 | P2 | ShadCN icon metadata now matches Phosphor | `components.json` declares Phosphor, and app imports Phosphor directly | Keep direct imports; do not add an icon adapter |
 | P2 | Active spec filenames use client/server names | Historical phase links were renamed to `local-live-fallback-sidecar.md`, `live-dictation-client-ux.md`, `server-tier-mvp.md`, and `local-llm-sidecar.md` | Leave ADR phase aliases intact unless an ADR is amended |

@@ -1,13 +1,13 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-12)
-**Authority:** Decisions are normative in [ADR 0001–0020](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
+**Status:** Living document (2026-07-13)
+**Authority:** Decisions are normative according to status in [ADR 0001–0022](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 For implementation truth rather than decision intent, use the living [ADR implementation status audit](ADR-IMPLEMENTATION-STATUS.md). An accepted ADR or a documented flowchart node is not proof that its code exists.
 
 > **2026-07-08 — Local model reset:** Yap keeps one local live/offline fallback model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Client-side fusion routing is rejected; model routing belongs on the server.
 
-> **ADR precedence:** ADR 0014-0020 define the current thin-client, server, local-fallback, and meeting-processing direction. ADR 0020 supersedes conflicting diarization details in ADR 0004 and ADR 0015. The desktop owns capture, deterministic preprocessing, recording, hotkey/UI, local live fallback, optional anonymous speaker evidence, and future transport packaging. The server owns official long-recording STT, authoritative meeting reconciliation, purpose-authorized named identity, team storage, KB compilation, and agent workloads.
+> **ADR precedence:** ADR 0014-0022 define the current thin-client, server, local-fallback, meeting-processing, transport-evolution, and knowledge-projection direction. ADR 0020 supersedes conflicting diarization details in ADR 0004 and ADR 0015. ADR 0021 makes HTTP/3 a gated future secure-edge target without changing the bounded Phase 3 loopback service. ADR 0022 adopts pinned Google OKF v0.1, requires a permission-safe Postgres/pgvector plus typed-relationship baseline, and makes Neo4j an optional benchmark-gated challenger; no database becomes the knowledge or authorization source-of-truth. The desktop owns capture, deterministic preprocessing, recording, hotkey/UI, local live fallback, optional anonymous speaker evidence, and future transport packaging. The server owns official long-recording STT, authoritative meeting reconciliation, purpose-authorized named identity, team storage, KB compilation, and agent workloads.
 
 ---
 
@@ -53,10 +53,10 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | Primary input | File imports + explicit live mic + global dictation hotkey; paste-last is optional and imports remain a queue shell | Same client inputs plus future connected server routes |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
-| STT runtime | **Nemotron INT8 sherpa fallback** + future server connector | Same client shell; heavier pools move server-side |
+| STT runtime | **Nemotron INT8 sherpa fallback** + server health connector; remote transport deferred | Same client shell; heavier pools move server-side |
 | Polish | Development-only Ollama call today; bundled `llama-server` is deferred | Scribe + agents through a governed client/server LLM boundary |
 | Speakers | Plain dictation; optional anonymous meeting labels later | Revisioned diarization + purpose-authorized server identity + OKF |
-| Knowledge | Transcripts history (solo) / `yap-knowledge` Git + compiler (team) | OKF + glossary agents + Q&A |
+| Knowledge | Transcripts history (solo) / `yap-knowledge` Google OKF + compiler (team) | Permission-safe OKF graph/vector views + glossary agents + Q&A |
 
 ---
 
@@ -70,14 +70,14 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | LLM | No shipped local LLM; development Polish currently calls Ollama | Future server LLM pool (GPU, multi-tenant) |
 | Diarization | Optional local `Unknown` / `Speaker N`; no durable profiles | Server-authoritative reconciliation; algorithms selected by benchmark (ADR 0020) |
 | Identity | Per-transcript contact labels only; no biometric matching | Entra ID / MSAL + explicit voice enrollment (ADR 0016/0020) |
-| Knowledge base | Future local OKF Markdown; canonical schema pending Phase 9 | Future `yap-knowledge` Git + KB compiler (Phase 9, ADR 0017) |
-| Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node |
+| Knowledge base | Future Google OKF Markdown with local SQLite retrieval | Future `yap-knowledge` Git + deterministic compiler + Postgres permissions/relationships + pgvector baseline; optional Neo4j challenger (Phase 9, ADR 0017/0022) |
+| Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node; future HTTP/3 secure edge with HTTP/2 or HTTP/1.1 fallback |
 
-The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, and local Nemotron fallback are implemented. Opus encoding and the server connector remain deferred. Server unavailability should queue or block larger recordings instead of silently producing official-looking transcripts from the fallback.
+The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, local Nemotron fallback, durable imported-job ownership, and connector health/capability/retry state are implemented. Opus, WSS, upload/drain, authentication, and remote execution remain deferred. Server unavailability queues or blocks larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
-Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0020](adr/0020-meeting-capture-diarization-authority.md) (meeting capture and diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth and purpose-authorized identity) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos)
+Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR 0020](adr/0020-meeting-capture-diarization-authority.md) (meeting capture and diarization) · [ADR 0016](adr/0016-auth-identity-bridge.md) (auth and purpose-authorized identity) · [ADR 0017](adr/0017-knowledge-base-compiler.md) (KB compiler) · [ADR 0018](adr/0018-three-repo-topology.md) (repos) · [ADR 0021](adr/0021-http3-secure-edge-transport.md) (gated HTTP/3 edge) · [ADR 0022](adr/0022-google-okf-permission-safe-projections.md) (Google OKF and permission-safe graph/vector views)
 
 ---
 
@@ -92,15 +92,16 @@ Details: [ADR 0014](adr/0014-server-tier-compute-topology.md) (topology) · [ADR
 7. **Align raw STT**, never polished LLM text, before word→speaker intersection.
 8. **On-prem GPU** = "our hardware, our network" — not cloud; extends local-first trust to the org's LAN (team profile).
 9. **Auth** = Entra ID / MSAL; `(tid, oid)` principal key; Yap API audience validation; explicit consent before any durable voice profile.
-10. **KB compiler** = Git source-of-truth + deterministic compile → Postgres + Redis + vector DB (all indexes disposable).
+10. **KB compiler** = pinned Google OKF/Git source-of-truth + deterministic compile → Postgres permission/relationship ledger + pgvector baseline + optional Redis; Neo4j must earn promotion.
+11. **Transport evolution** = bounded loopback service now; authenticated HTTP/3 secure edge later, with TCP fallback and benchmark gates.
 
-Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md) · [0020](adr/0020-meeting-capture-diarization-authority.md)
+Details: [ADR 0001](adr/0001-dual-stt-backends.md) · [0002](adr/0002-crispasr-unified-stt-runtime.md) · [0003](adr/0003-long-term-voice-architecture.md) · [0004](adr/0004-background-diarization-okf-agents.md) · [0005](adr/0005-llama-server-agents.md) · [0006](adr/0006-silero-agents-state-machine.md) · [0014](adr/0014-server-tier-compute-topology.md) · [0016](adr/0016-auth-identity-bridge.md) · [0017](adr/0017-knowledge-base-compiler.md) · [0018](adr/0018-three-repo-topology.md) · [0019](adr/0019-local-streaming-model-selection.md) · [0020](adr/0020-meeting-capture-diarization-authority.md) · [0021](adr/0021-http3-secure-edge-transport.md) · [0022](adr/0022-google-okf-permission-safe-projections.md)
 
 ---
 
 ## Pipeline charts
 
-Two views of the same target architecture - **high-level** for orientation, **low-level** for implementation. They include deferred components so each future boundary has a home; a node is current only when its label or the implementation-status sections below say so. Normative rules live in [ADR 0001–0020](adr/README.md); sections below expand each box.
+Two views of the same target architecture - **high-level** for orientation, **low-level** for implementation. They include deferred components so each future boundary has a home; a node is current only when its label or the implementation-status sections below say so. Normative rules live in [ADR 0001–0022](adr/README.md); sections below expand each box.
 
 **Target read order:** UI → **RuntimeOrchestrator** → local fallback or server connector. **L3** never blocks L2. If the deferred local LLM product is activated, **Polish** and **Scribe** share **llama-server** via the mutex rules in [ADR 0006](adr/0006-silero-agents-state-machine.md). Today Polish is a development-only Ollama call and Scribe/llama-server are absent.
 
@@ -116,7 +117,7 @@ flowchart TB
         UI["Transcribe · Live · History<br/>Polish dev-only · KB agents Phase 9"]
     end
 
-    Orch["RuntimeOrchestrator<br/>Nemotron lifecycle now<br/>server connector + bounded LLM deferred"]
+    Orch["RuntimeOrchestrator<br/>Nemotron + server health state now<br/>remote transport + bounded LLM deferred"]
 
     subgraph Sidecars["Local runtimes — current + deferred"]
         CR["in-process sherpa-onnx<br/>Nemotron INT8 fallback"]
@@ -167,7 +168,7 @@ Imported and official recording jobs never run through local Nemotron. When the 
 
 ### Team / server profile — high-level
 
-Thin client shell + GB-class server node. In the planned connected profile, server model pools own official inference; the deferred client connector will stream Opus audio and receive tokens/labels. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
+Thin client shell + GB-class server node. The client connector currently owns only validated health/capability/retry state. In the planned connected profile, deferred transport will stream Opus audio and receive tokens/labels from future server model pools. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
 
 ```mermaid
 flowchart TB
@@ -177,35 +178,40 @@ flowchart TB
         UI["Transcribe · Live · History · KB agents"]
         Mic["Capture · VAD hints · track manifest<br/>mic now · system loopback later"]
         Hotkey["Global hotkey · inject (ADR 0013)"]
-        Conn["Server connector\n(WSS live · HTTP batch)"]
+        Conn["Server connector\nhealth/capability/retry now\nWSS + HTTPS jobs deferred"]
         LocalFB["Local fallback sidecar\n(offline / degraded)"]
     end
 
     subgraph Server["yap-server - GB-class node (org LAN/VPN)"]
+        Edge["Secure transport edge\n(future HTTP/3 · TCP fallback · ADR 0021)"]
         Router["Workload router\n(per-tenant queues · fairness)"]
         ASR["Streaming ASR pool\n(WSS)"]
         Batch["Cohere batch pool\n(concurrent GPU workers)"]
         LLM["LLM pool\n(Scribe · agents · GPU)"]
         Diar["Diarization service\nserver reconciliation · ADR 0020"]
-        KB["KB compiler service\n(ADR 0017)"]
+        KB["Google OKF compiler + permission-safe relationship/vector views\n(Postgres/pgvector baseline · ADR 0017/0022)"]
     end
 
     subgraph KBRepo["yap-knowledge (Git)"]
-        KBData["OKF docs · permissions · schemas"]
+        KBData["Google OKF v0.1 docs · permissions · schemas"]
     end
 
     User --> UI
     UI --> Conn
     Mic --> Conn
-    Conn -->|"Opus stream (WSS)"| Router
-    Conn -->|"file upload (HTTP)"| Router
+    Conn -->|"live stream + control"| Edge
+    Conn -->|"durable file upload"| Edge
+    Edge -->|"authenticated requests"| Router
+    Router -->|"bounded responses"| Edge
+    Edge -->|"live + batch responses"| Conn
     Router --> ASR & Batch & LLM
     ASR & Batch --> Diar
-    ASR -->|"tokens"| Conn
-    Diar -->|"revisioned speaker result"| Conn
-    Batch -->|"transcript JSON"| Conn
-    LLM -->|"polish / agent response"| Conn
-    KB -->|"permission-filtered KB view"| Conn
+    ASR -->|"tokens"| Router
+    Diar -->|"revisioned speaker result"| Router
+    Batch -->|"transcript JSON"| Router
+    LLM -->|"polish / agent response"| Router
+    Router --> KB
+    KB -->|"permission-filtered KB view"| Router
     KBData -->|"webhook → compile"| KB
     Conn -.->|"server unreachable"| LocalFB
     Hotkey --> UI
@@ -278,8 +284,8 @@ flowchart TB
         Quarantine["quarantine/ on write fail"]
     end
 
-    subgraph L4["L4 — OKF knowledge base · Phase 9"]
-        KB["knowledge_base/"]
+    subgraph L4["L4 — Google OKF knowledge base · Phase 9"]
+        KB["yap-knowledge/"]
         Conv["conversations/"]
         Gloss["jargon_glossary/"]
         Art["work_artifacts/"]
@@ -296,7 +302,7 @@ flowchart TB
     subgraph L6["L6 — ecosystem gateways · Phase 9"]
         MCP["MCP server"]
         IDE["IDE open folder"]
-        Vec["Vector search / embeddings"]
+        Vec["Postgres/pgvector baseline\noptional Neo4j GraphRAG challenger"]
     end
 
     subgraph L7["L7 — ask your KB · Phase 9"]
@@ -350,6 +356,8 @@ flowchart TB
 
 **Meeting transport:** bounded windows may align to VAD boundaries but never grow without bound. Full retained source audio remains available for authoritative reprocessing; client VAD is advisory ([ADR 0020](adr/0020-meeting-capture-diarization-authority.md)).
 
+**Transport evolution:** the Phase 3 application stays on bounded loopback HTTP/1.1. After the remote transport and authentication baselines exist, the client-facing edge may promote HTTP/3 with HTTP/2 or HTTP/1.1 fallback. WSS over HTTP/3 and a supported WebTransport candidate must be benchmarked against the authenticated WSS baseline before promotion ([ADR 0021](adr/0021-http3-secure-edge-transport.md)).
+
 ---
 
 ## Decision-coverage matrix
@@ -400,7 +408,7 @@ Rows marked as future remain architecture-only. The Windows hotkey/injection pat
 | **L1** | OS listeners + pre-warm | Current client | Hotkey, foreground-field injection, warm recognizer/mic |
 | **L2** | Real-time critical path | Current + follow-on | Nemotron → UI/inject now; optional Scribe later |
 | **L3** | Async background | 8–9 | Align, diarize, stitch, OKF |
-| **L4** | OKF knowledge base | 9 | Markdown + YAML conversations |
+| **L4** | Google OKF knowledge base | 9 | Markdown/YAML concepts, typed Yap relationships, Git history, permission-safe projections |
 | **L5** | Agentic feedback | 9 | Student, Curator, Auditor |
 | **L6** | Ecosystem gateways | 9 | MCP, vector search, IDE folder |
 | **L7** | Ask-your-KB agent | 9 | Librarian + Analyst |
@@ -559,7 +567,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 ## Runtime orchestration (summary)
 
-**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust skeleton enforces the local Nemotron lifecycle; LLM scheduling, Silero, and the server connector are not wired:
+**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust boundary enforces the local Nemotron lifecycle and projects connector health/capabilities/retries. LLM scheduling, Silero, and remote server transport/processing are not wired:
 
 | Rule | Limit |
 |------|--------|
@@ -594,7 +602,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Settings and controls | Ship usable dictation and paste-last defaults. Enter an explicit "Change shortcut" mode that records one physical chord, normalizes it on release, supports Cancel and Reset, and preserves the previous registration on failure. | Do not require users to type chord strings, accept bare printable/OS-reserved chords, capture outside deliberate recording mode, or log/store raw key events. |
 | Docs and code | Update the ADR/spec/product surface in the same phase as the code. | Do not ship behavior that contradicts the client/server split: live local fallback is allowed; official long recordings queue for server. |
 | Speaker privacy | Persist anonymous timelines and user labels; keep local embeddings transient. | Do not turn contact import, transcript renaming, or meeting attendance into passive voice enrollment. |
-| Server staging | Keep `server/` to health, contract, route selection, and tests until the API/WSS contract is real. | Do not add placeholder pools/config/schema packages, app firewall exposure, Docker deployment, or service-disabling host tweaks before Phase 3-4 need them. |
+| Server staging | Keep the implemented Phase 3 boundary to tested health, contracts, and the route-selection skeleton. Add transport, queues, and worker runtimes only with their Phase 4-5 gates. | Do not mistake the skeleton for a production workload router or add placeholder worker code, app firewall exposure, Docker deployment, or service-disabling host tweaks ahead of a gated runtime. |
 
 ---
 
@@ -607,7 +615,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Live dropouts | Recording is the priority sink; callback loss becomes an explicit timeline gap |
 | Short or noisy turns | Under 1.6 seconds is weak evidence; use calibrated score, margin, quality, and cumulative speech rather than a forced match |
 | Speaker-label churn | Stable IDs within a result revision; merges, splits, server reconciliation, and user corrections create explicit revisions |
-| Queue backlog | Each sink degrades independently; automatic reconnect drain waits for a Rust-owned durable ledger |
+| Queue backlog | The Rust-owned durable ledger preserves backlog independently; automatic reconnect upload/drain remains deferred |
 
 ---
 
@@ -652,24 +660,25 @@ Yap (Tauri)  [yap-desktop]
 
 ### Target team / server profile
 
-The host bootstrap plus health value/route-selector tests exist. The connector, network service, pools, databases, and `yap-knowledge` repository below are deferred.
+The hardened host bootstrap, machine-readable HTTP/live contracts, bounded loopback capability-health service, desktop health connector/state machine, and durable SQLite imported-job ledger exist. Upload/WSS transport, queue drain, server processing, pools, databases, secure transport edge, and the `yap-knowledge` repository below are deferred.
 
 ```
 yap-desktop (Tauri) — thin client shell
   ├─ Track-aware capture       VAD hints + source manifests + explicit gaps
   ├─ sherpa recognizer         Offline fallback only (Nemotron INT8)
-  └─ Server connector          [deferred] WSS (live) + HTTP (batch)
+  └─ Server connector          health/config/retry implemented; [deferred] WSS + HTTPS jobs + HTTP/3 negotiation
 
 yap-server (GB-class server node, org LAN/VPN)
+  ├─ Secure transport edge      [future] HTTP/3 + HTTP/2 or HTTP/1.1 fallback (ADR 0021)
   ├─ Workload router            per-tenant queues, fairness, backpressure
   ├─ Streaming ASR pool         WSS endpoint
   ├─ Cohere batch pool          concurrent GPU workers
   ├─ LLM pool                   Scribe + agents, GPU
   ├─ Diarization service        authoritative model-selected reconciliation (ADR 0020)
-  ├─ KB compiler service        Lane 1 + Lane 2 → Postgres + Redis + vector DB (ADR 0017)
+  ├─ KB compiler service        Lane 1 + Google OKF Lane 2 → Postgres/pgvector + optional Redis (ADR 0017/0022)
   ├─ Identity DB (Postgres)     (tid, oid) → purpose-authorized versioned voice profile (ADR 0016/0020)
   ├─ Redis                      hot permission cache
-  ├─ Vector DB                  disposable semantic RAG index
+  ├─ Neo4j                      [optional] disposable GraphRAG challenger; promote only by benchmark
   └─ S3                         raw blobs, backups, snapshots
 
 yap-knowledge (Git repo, org LAN)
@@ -708,30 +717,30 @@ timeline
 | **0** | architecture | Reset around thin client, server brain, local fallback, and queued offline behavior. | ADR 0014/0018 |
 | **1** | desktop foundation | Recordings home, playback, setup, typed job projection seams, source-aware capture contracts, bounded sink fan-out, and crash-safe recording. | Phase 3 UI work; ADR 0020 prerequisite slices |
 | **2** | desktop fallback | Local Nemotron INT8 live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002/0019 |
-| **3** | contract | Server API/WSS contract, health, job model, error model, and client connector shape. | Old Phase 8; server-tier spec |
+| **3** | contract | Server API/WSS contract, health, job/error model, client connector health state, and Rust-owned durable imported-job ledger. | Old Phase 8; server-tier spec |
 | **4** | server node | GB-class node provisioning, firewall, model-pool layout, and workload router skeleton. | ADR 0014 |
 | **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server ASR routing. | Old Phase 5/8 |
 | **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
 | **7** | identity/access | Entra/MSAL bridge, Yap API audience, purpose grants, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
 | **8** | meeting evidence | Local anonymous speaker evidence, timestamped result revisions, server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
-| **9** | knowledge | OKF, KB compiler, agents, RAG, MCP, and permission-filtered views. | Old 7c-7e/11; ADR 0010/0011/0012/0017 |
-| **10** | enterprise/release | Zscaler/corporate access hardening, production publication governance/evidence, audit/deploy runbooks, and eventual repo split. | Old 7+/12; ADR 0013/0018 |
+| **9** | knowledge | Pinned Google OKF, KB compiler, agents, GraphRAG/vector retrieval, MCP, and permission-safe virtual views. | Old 7c-7e/11; ADR 0010/0011/0012/0017/0022 |
+| **10** | enterprise/release | Zscaler/corporate access hardening, HTTP/3 secure-edge evaluation, production publication governance/evidence, audit/deploy runbooks, and eventual repo split. | Old 7+/12; ADR 0013/0018/0021 |
 
 ### Current phase status
 
 | Phase | Status | Where we are now |
 |-------|--------|------------------|
 | **0** | Done enough | Docs now point at thin client + server brain as the main direction. |
-| **1** | Capture foundation implemented; job ledger remains | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, and a Rust orchestrator skeleton exist. The Rust-owned SQLite server-job ledger is still deferred. |
+| **1** | Capture foundation and durable imported-job ledger implemented | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, a Rust orchestrator projection, and the Rust-owned SQLite imported-job ledger exist. |
 | **2** | Implemented baseline; hosted proof remains | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Windows native WDIO, NSIS packaging, local test-identity installer smokes, and release-artifact contract tests pass; hosted real-model/native release CI and measured latency/accuracy gates remain. |
-| **3** | Skeleton only | `server/` contains a health value and route-selector tests; no network service, machine-readable contract, connector, or durable job ledger exists. |
-| **4** | Host bootstrap only | `infra/yap-server-node/` and the runbook exist; no Yap application service is deployed. |
-| **5** | Planned | Remote long-recording transcription waits on the contract and node runtime. |
+| **3** | Implemented; local and GB10 private-link gates complete | Contracts, loopback capability-health, connector/retry state, and the durable Rust ledger are implemented. Exact `099e558a27a747a7a2f24ec4e86f9c13f7604c13` passed the GB10 ARM64/Python 3.12 gate. The command-line production connector reached `Ready`; a separate tunnel-refusal run reached `Retrying`. This is not same-process native UI transition, persistent service, upload/WSS/auth/ASR, or inference evidence. |
+| **4** | Host bootstrap, route-selection skeleton, and transient health proof only | Infra, the runbook, a tested live/batch route-selection skeleton, and an empty model-pool namespace exist. Exact `099e558a27a747a7a2f24ec4e86f9c13f7604c13` was promoted and run transiently on loopback, then stopped. No production workload router, worker/model-pool runtime, service unit, persistent process, external application listener, or firewall change exists. Clock synchronization and root UFW read-back remain later gates. |
+| **5** | Planned | Remote long-recording transcription waits on upload/drain, WSS, authentication, and the node runtime. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
 | **8** | Capture prerequisites implemented; diarization deferred | ADR 0020 and the source-aware design are canonical. Track/timeline/recording prerequisites are implemented; the anonymous speaker model, real benchmark, result production, and server reconciliation are not. |
-| **9** | Planned | OKF, KB compiler, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
-| **10** | Later | Corporate access hardening, production publication governance, and repo split come after the MVP server is real. Installer packaging already exists and has local test-identity proof. |
+| **9** | Planned | Google OKF conformance, KB compiler, Postgres permission/relationship ledger, pgvector baseline, optional Neo4j challenger, agents, RAG, and MCP wait on preprocessing, identity, and diarization outputs. |
+| **10** | Later | Corporate access hardening, HTTP/3 edge promotion, production publication governance, and repo split come after the remote transport and authentication baselines are real. Installer packaging already exists and has local test-identity proof. |
 
 Solo/local fallback and team/server mode share concepts, but the server path is now canonical for the main roadmap.
 
@@ -739,13 +748,13 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Capture persistence rule:** current `live-s-...` sessions use one canonical recording contract (`PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`) and are complete only after immutable sidecar/commit publication. Partial artifacts are recoverable/deletable. Pre-release timestamp-era recordings remain untouched and unindexed; no migration adapter or alternate fixture path is planned.
 
-**Deferred after the verified capture foundation:** the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release workflow proof; and per-OS real-model/native hardware CI.
+**Deferred after the verified Phase 3 boundary:** upload/drain, WSS/auth/server inference, model pools and server processing; the HTTP/3 secure edge and transport benchmark; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release workflow proof; and per-OS real-model/native hardware CI.
 
 **Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
-**Next execution order:** the tooling-only PowerShell migration now requires Core 7.4 or newer in repo-owned Windows scripts and every Windows CI job, with the supported minor-version floor exercised by a hash-pinned 7.4.17 compatibility lane. The next **product** implementation plan remains [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md). That plan may create durable job ownership and real reachability, but upload drain, WSS runtime, ASR pools, auth, and diarization remain gated by their canonical phases.
+**Next execution order:** the tooling-only PowerShell migration requires Core 7.4 or newer in repo-owned Windows scripts and every Windows CI job, with the supported minor-version floor exercised by a hash-pinned 7.4.17 compatibility lane. [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) is the landed Phase 3 implementation record. Upload drain, WSS runtime, ASR pools, auth, diarization, and the HTTP/3 edge remain gated by their canonical phases. ADR 0021 does not authorize UDP exposure from the Phase 3 health boundary.
 
 ---
 
@@ -763,8 +772,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
 | **7** Identity/access | Entra sign-in, Yap API token validation, purpose grants, tenant-scoped identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
 | **8** Meeting evidence | Anonymous local labels, timestamped result revisions, benchmark gates, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) |
-| **9** Knowledge/agents | OKF, KB compiler, RAG, MCP | KB compiler spec; permission compile SLA |
-| **10** Enterprise/release | Zscaler/corp access, packaging, repo split | CI/CD migration; cross-repo link update |
+| **9** Knowledge/agents | Google OKF profile, deterministic compiler, Postgres/pgvector relationship/vector baseline, optional Neo4j challenger, RAG, MCP | ADR 0022 conformance/isolation/generation and challenger-promotion gates; permission compile SLA |
+| **10** Enterprise/release | Zscaler/corp access, HTTP/3 secure-edge benchmark/promotion, packaging, repo split | ADR 0021 transport evidence; CI/CD migration; cross-repo link update |
 
 ---
 
@@ -783,7 +792,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 **Orchestrator (Phase 1+)**
 
 - [x] Rust `RuntimeOrchestrator` state skeleton ([ADR 0006](adr/0006-silero-agents-state-machine.md))
-- [ ] Move complete recording-job lifecycle ownership from React into Rust
+- [x] Move imported recording-job lifecycle ownership from React/localStorage into Rust/SQLite
 - [ ] Silero ONNX in Rust audio path; `vad_segments` in manifests
 - [ ] Agent profile registry; v1 enable `scribe` only
 - [ ] Enforce one client-local Nemotron session, one HOT LLM, and one background LLM queue; server pools schedule independently
@@ -799,7 +808,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [x] Track-aware frames, manifests, content hashes, and explicit gaps
 - [x] Independent bounded recording, ASR, evidence, and transport sinks
 - [x] Crash-safe streaming recording, immutable capture sidecar/commit, and recover/delete lifecycle
-- [ ] Rust-owned durable reconnect ledger before automatic drain
+- [x] Rust-owned durable reconnect ledger (automatic drain remains Phase 5)
+- [ ] WSS/upload transport, automatic reconnect drain, and server processing
 
 **Meeting evidence and diarization (Phase 8)**
 
@@ -838,6 +848,8 @@ Current implementation ownership and completeness for all decisions: [ADR implem
 | Three-repo topology (`yap-desktop` / `yap-server` / `yap-knowledge`) | [0018](adr/0018-three-repo-topology.md) |
 | Local Nemotron INT8 streaming fallback | [0019](adr/0019-local-streaming-model-selection.md) |
 | Meeting capture, anonymous evidence, server reconciliation, contact/privacy boundary | [0020](adr/0020-meeting-capture-diarization-authority.md) |
+| HTTP/3 secure-edge evolution with TCP fallback and benchmark gates | [0021](adr/0021-http3-secure-edge-transport.md) |
+| Google OKF v0.1, Yap enterprise profile, Postgres/pgvector baseline, and permission-safe projection gates | [0022](adr/0022-google-okf-permission-safe-projections.md) |
 
 ### Build specs (how to implement)
 

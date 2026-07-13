@@ -4,6 +4,8 @@
 **Author:** Architecture
 **Status:** Superseded as an execution plan by the canonical roadmap in [VOICE-OS-ARCHITECTURE.md](../../VOICE-OS-ARCHITECTURE.md) and the meeting decision in [ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md). Retained as historical rationale.
 
+> **Knowledge-plan correction (2026-07-12):** [ADR 0022](../../adr/0022-google-okf-permission-safe-projections.md) supersedes this plan's claims that the original ADR 0010 frontmatter is unchanged and that the team profile should choose generically among Milvus/pgvector-class stores. Canonical Phase 9 now uses pinned Google OKF v0.1 plus the Yap Enterprise OKF profile, Postgres typed relationships, and a pgvector baseline. Neo4j is a benchmark-gated challenger. Do not implement the historical rows below as current storage or schema authority.
+
 ---
 
 ## Goal

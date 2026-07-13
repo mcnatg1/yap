@@ -4,10 +4,12 @@ mod authorization;
 mod commands;
 mod file_actions;
 mod install_identity;
+pub mod jobs;
 pub mod live;
 mod paths;
 pub mod runtime;
 mod runtime_policy;
+pub mod server_connector;
 pub mod stt;
 mod tray;
 
