@@ -1,12 +1,36 @@
 # Contained Windows Process Boundary Design
 
-**Status:** Approved on 2026-07-13; implementation planned
+**Status:** Lean contained-process MVP implemented and verified locally on 2026-07-13; hosted PR and merged-main verification pending
 
 **Date:** 2026-07-13
 
-**Scope:** Windows installer smoke execution and its deterministic CI boundary
+**Scope:** Windows installer smoke process ownership; advanced deterministic CI-boundary hardening is deferred
 
 **Target:** Installer, installed application, and uninstaller processes launched by the NSIS smoke harness
+
+## Lean MVP Scope Amendment (2026-07-13)
+
+This approved amendment supersedes the unfinished implementation obligations in Sections 6, 7, 11, 12, and 13 for the current MVP. The older design remains below as architectural history and a post-MVP hardening backlog; its unchecked or unmet items are not evidence that the contained-process MVP is incomplete.
+
+The implemented MVP boundary provides:
+
+- one authoritative `ContainedProcessLease` for each installer, installed-application, and uninstaller launch across the six real smoke phases: install, application, default uninstall, reinstall, explicit uninstall, and cleanup uninstall;
+- suspended process creation, Job assignment and membership verification, retained original process/thread handles, identity capture, and exactly one resume before child code can run;
+- retained-handle root-exit observation plus Job-quiescence proof, with a fail-closed mutation gate that preserves installer-owned paths when cleanup is unproven;
+- one argument encoder, a typed final NSIS `/D=<absolute path>` tail, case-insensitive environment override/removal, working-directory support, and bounded stdout/stderr capture;
+- no PID, `StartTime`, or CIM reconstruction as lifecycle authority; CIM is limited to a bounded executable-path diagnostic after lease disposal; and
+- five focused real-Windows lifecycle cases covering natural exit, timeout/termination, descendant containment, nested-Job containment, and immediate exit.
+
+The following work is explicitly deferred until after the MVP is landed and the user says `proceed`:
+
+- atomic nonce-bound child evidence and adversarial publication cases;
+- the exhaustive Task 4 fault matrix, eight-way concurrency, and 512-launch PID-churn campaign;
+- a canonical bounded harness/runner, artifact-redaction framework, and dual-PowerShell-runtime verification;
+- a dedicated `Windows process harness` CI job, required context, or workflow wiring;
+- cache, open-PR, ruleset, Actions-policy, evidence-only-PR, and other governance automation;
+- general PowerShell 7 migration, UI convergence, broader server work, HTTP/3, and WebSockets.
+
+Hosted PR and merged-main checks remain landing gates. They do not reactivate the deferred harness or governance scope.
 
 ## 1. Decision
 
@@ -373,3 +397,27 @@ Starting normally and assigning afterward permits application code or descendant
 ## 15. Follow-On Decision
 
 After this boundary is stable and Step 3 closes, `build-nsis-test.ps1` may be evaluated as a fourth consumer. Migration requires measured simplification and the same behavioral contract; it is not automatic. If no additional consumer needs the boundary, the API remains private to the release harness rather than becoming a shared platform abstraction.
+
+## 16. Implementation Evidence
+
+### Implemented core
+
+- `9d711ba test: verify contained Windows process lifecycles` added the focused real-Windows lifecycle and PowerShell ownership contracts, including captured RED failures before migration.
+- `be73e5a refactor: make the NSIS smoke lease authoritative` migrated every approved smoke phase, removed split PID/managed-process/CIM lifecycle ownership, and centralized fail-closed filesystem mutation authorization.
+
+### Local verification
+
+The single lean local release gate completed on 2026-07-13:
+
+- `pwsh -NoLogo -NoProfile -NonInteractive -File .\desktop\tests\scripts\windows-contained-process.contract.test.ps1` — passed.
+- `pwsh -NoLogo -NoProfile -NonInteractive -File .\desktop\tests\scripts\windows-contained-process.integration.test.ps1` — passed all five real-Windows cases.
+- `pwsh -NoLogo -NoProfile -NonInteractive -File .\desktop\tests\scripts\nsis-smoke-helpers.test.ps1` — passed.
+- `corepack pnpm@11.7.0 --dir ./desktop test:release-contract` — 33/33 checks passed. The first run exposed two inventory/contract drifts; only those two focused checks were rerun after correction.
+- `corepack pnpm@11.7.0 --dir ./desktop build:nsis:test` — passed.
+- `corepack pnpm@11.7.0 --dir ./desktop test:nsis:local` — the first run exposed a PowerShell ETS environment-value boundary defect; a focused RED/GREEN contract fixed it, and the rerun passed. Its fail-closed path retained the test footprint until a lease-proven recovery cleanup completed.
+- `corepack pnpm@11.7.0 --dir ./desktop test:nsis:test-delete` — passed.
+- `git diff --check` — passed.
+
+### Hosted verification
+
+The focused PR, exact-head emitted checks, match-head merge, and exact merged-main checks are pending. No deferred CI-harness or repository-governance work is required for this MVP landing.
