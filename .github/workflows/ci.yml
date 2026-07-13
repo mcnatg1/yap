@@ -103,9 +103,8 @@ jobs:
         with:
           name: frontend-test-artifacts
           path: |
-            desktop/test-results
-            desktop/playwright-report
-          if-no-files-found: ignore
+            desktop/tests/results/playwright
+          if-no-files-found: warn
 
   rust:
     runs-on: windows-latest

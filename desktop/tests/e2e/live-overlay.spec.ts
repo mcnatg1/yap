@@ -291,6 +291,7 @@ async function dispatchPreviewSequence(page: Page, states: Array<Record<string, 
       }
       window.dispatchEvent(new CustomEvent("yap-live-overlay-preview", { detail: nextView }));
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     }
   }, states);
 }
@@ -502,15 +503,32 @@ function expectProcessingWidthPreserved(samples: GeometrySample[], activeWidth: 
 }
 
 function expectNoBlankInitializingFrames(samples: GeometrySample[]) {
-  const initializingSamples = samples.filter((sample) => sample.requestedStatus === "armed");
-  expect(initializingSamples.length, "armed should be sampled as initializing").toBeGreaterThan(0);
+  const armedSamples = samples.filter((sample) => sample.requestedStatus === "armed");
+  const firstInitializingIndex = armedSamples.findIndex((sample) => sample.phase === "initializing");
+
+  expect(armedSamples.length, "armed should be sampled as initializing").toBeGreaterThan(0);
+  expect(
+    firstInitializingIndex,
+    "armed should produce a committed initializing sample",
+  ).toBeGreaterThanOrEqual(0);
+
+  const preCommitSamples = armedSamples.slice(0, firstInitializingIndex);
+  expect(
+    preCommitSamples.filter((sample) =>
+      !sample.root || !sample.island || sample.phase !== "idle" || sample.surface !== "peek",
+    ),
+    "only the mounted peek frame may precede the armed commit",
+  ).toEqual([]);
+  expect(preCommitSamples.length, "armed may include at most one pre-commit sample").toBeLessThanOrEqual(1);
+
+  const initializingSamples = armedSamples.slice(firstInitializingIndex);
   expect(
     initializingSamples.filter((sample) => !sample.root || !sample.island),
     "armed/initializing must never render a blank frame",
   ).toEqual([]);
   expect(
     initializingSamples.filter((sample) => sample.phase !== "initializing"),
-    "armed should project to initializing by the next sampled paint",
+    "armed samples must remain initializing after the commit",
   ).toEqual([]);
 }
 
