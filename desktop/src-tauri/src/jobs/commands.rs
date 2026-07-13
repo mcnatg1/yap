@@ -9,6 +9,8 @@ use crate::{
     },
 };
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -80,6 +82,8 @@ pub(crate) struct RecordingJobs {
     ledger: JobLedger,
     mutation: Mutex<()>,
     playback: Mutex<HashMap<String, CachedPlayback>>,
+    #[cfg(test)]
+    projection_failures: Mutex<VecDeque<JobCommandError>>,
     owned_dir: PathBuf,
     registry_path: PathBuf,
 }
@@ -197,8 +201,10 @@ impl RecordingJobs {
             ledger: JobLedger::open_default()?,
             mutation: Mutex::new(()),
             playback: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            projection_failures: Mutex::new(VecDeque::new()),
             owned_dir: crate::live::recordings::recordings_dir(),
-            registry_path: crate::paths::app_data_dir().join("recording-playback-registry.json"),
+            registry_path: crate::file_actions::recording_job_playback_registry_path(),
         })
     }
 
@@ -210,8 +216,9 @@ impl RecordingJobs {
             ledger,
             mutation: Mutex::new(()),
             playback: Mutex::new(HashMap::new()),
+            projection_failures: Mutex::new(VecDeque::new()),
             owned_dir,
-            registry_path: authority_dir.join("recording-playback-registry.json"),
+            registry_path: authority_dir.join("recording-job-playback-registry.json"),
         }
     }
 
@@ -255,18 +262,21 @@ impl RecordingJobs {
             ));
         }
 
-        let mut created = Vec::with_capacity(sources.len());
-        for source in sources {
+        let mut records_by_source = HashMap::new();
+        let mut new_jobs = Vec::new();
+        for source in &sources {
+            if records_by_source.contains_key(&source.canonical_path) {
+                continue;
+            }
             if let Some(existing) = self
                 .ledger
                 .find_recoverable_imported_job_by_source(&source.canonical_path)?
             {
-                created.push(self.project_validated(existing, source, media)?);
+                records_by_source.insert(source.canonical_path.clone(), existing);
                 continue;
             }
-            let id = mint_job_id(&source.canonical_path, now_ms);
-            let record = self.ledger.insert_job(&NewRecordingJob {
-                job_id: id,
+            new_jobs.push(NewRecordingJob {
+                job_id: mint_job_id(&source.canonical_path, now_ms),
                 session_mode: SessionMode::Meeting,
                 session_origin: SessionOrigin::ImportedFile,
                 source_path: Some(source.canonical_path.clone()),
@@ -290,8 +300,31 @@ impl RecordingJobs {
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 expires_at_ms: now_ms.checked_add(PENDING_JOB_LIFETIME_MS),
-            })?;
-            created.push(self.project_validated(record, source, media)?);
+            });
+        }
+        for record in self.ledger.insert_jobs(&new_jobs)? {
+            let source_path = record
+                .source_path
+                .clone()
+                .expect("new imported job has a source path");
+            records_by_source.insert(source_path, record);
+        }
+
+        let mut created = Vec::with_capacity(sources.len());
+        let mut projected_by_source: HashMap<PathBuf, RecordingJobView> = HashMap::new();
+        for source in sources {
+            if let Some(projected) = projected_by_source.get(&source.canonical_path) {
+                created.push(projected.clone());
+                continue;
+            }
+            let record = records_by_source
+                .get(&source.canonical_path)
+                .expect("validated source has a committed job")
+                .clone();
+            let source_path = source.canonical_path.clone();
+            let projected = self.project_committed_or_fail(record, source, media, now_ms)?;
+            projected_by_source.insert(source_path, projected.clone());
+            created.push(projected);
         }
         Ok(created)
     }
@@ -310,6 +343,7 @@ impl RecordingJobs {
         self.ledger.expire_pending_jobs(now_ms)?;
         let mut views = Vec::new();
         let mut recoverable_ids = HashSet::new();
+        let mut authorized_paths = Vec::new();
         for record in self.ledger.list_recoverable_jobs()? {
             recoverable_ids.insert(record.job_id.clone());
             if record.error_code.as_deref() == Some("PENDING_EXPIRED") {
@@ -321,7 +355,14 @@ impl RecordingJobs {
                 continue;
             }
             match self.project_with_playback(record.clone(), media) {
-                Ok(view) => views.push(view),
+                Ok(view) => {
+                    if view.playback_path.is_some() {
+                        if let Some(source_path) = record.source_path.clone() {
+                            authorized_paths.push(source_path);
+                        }
+                    }
+                    views.push(view);
+                }
                 Err(error) if error.code == "SOURCE_MISSING" || error.code == "SOURCE_UNSAFE" => {
                     self.release_playback(&record.job_id, media);
                     let failed =
@@ -336,6 +377,12 @@ impl RecordingJobs {
             }
         }
         self.reconcile_playback(&recoverable_ids, media)?;
+        if let Err(error) = crate::file_actions::reconcile_recording_job_playback_paths_at(
+            &authorized_paths,
+            &self.registry_path,
+        ) {
+            log_registry_cleanup_failure("snapshot reconciliation", &error);
+        }
         Ok(views)
     }
 
@@ -354,6 +401,7 @@ impl RecordingJobs {
         })?;
         let record = self.ledger.request_cancellation(job_id, now_ms)?;
         self.release_playback(job_id, media);
+        self.remove_job_authority_best_effort(record.source_path.as_deref(), "cancellation");
         let view = RecordingJobView::from_record(&record);
         drop(mutation);
         notify();
@@ -414,7 +462,7 @@ impl RecordingJobs {
             ),
             RetryKind::Unchanged => (current, false),
         };
-        let view = self.project_validated(record, source, media)?;
+        let view = self.project_committed_or_fail(record, source, media, now_ms)?;
         drop(mutation);
         if changed {
             notify();
@@ -437,6 +485,7 @@ impl RecordingJobs {
         })?;
         let record = self.ledger.dismiss_failed(job_id, now_ms)?;
         self.release_playback(job_id, media);
+        self.remove_job_authority_best_effort(record.source_path.as_deref(), "dismissal");
         let view = RecordingJobView::from_record(&record);
         drop(mutation);
         notify();
@@ -576,6 +625,15 @@ impl RecordingJobs {
         source: ValidatedRecordingJobSource,
         media: &MediaOwner,
     ) -> Result<RecordingJobView, JobCommandError> {
+        #[cfg(test)]
+        if let Some(error) = self
+            .projection_failures
+            .lock()
+            .expect("projection failure injection lock")
+            .pop_front()
+        {
+            return Err(error);
+        }
         let mut playback = self.playback.lock().map_err(|_| {
             command_error(
                 "JOB_STATE_UNAVAILABLE",
@@ -611,6 +669,40 @@ impl RecordingJobs {
         Ok(project_with_admission(record, admission))
     }
 
+    fn project_committed_or_fail(
+        &self,
+        record: crate::jobs::RecordingJobRecord,
+        source: ValidatedRecordingJobSource,
+        media: &MediaOwner,
+        now_ms: u64,
+    ) -> Result<RecordingJobView, JobCommandError> {
+        match self.project_validated(record.clone(), source, media) {
+            Ok(view) => Ok(view),
+            Err(error) => {
+                self.release_playback(&record.job_id, media);
+                self.remove_job_authority_best_effort(
+                    record.source_path.as_deref(),
+                    "failed projection",
+                );
+                let failed =
+                    self.ledger
+                        .fail_source_validation(&record.job_id, &error.code, now_ms)?;
+                let mut view = RecordingJobView::from_record(&failed);
+                view.source_path = None;
+                view.playback_path = None;
+                Ok(view)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn inject_projection_failures_for_test(&self, failures: Vec<JobCommandError>) {
+        self.projection_failures
+            .lock()
+            .expect("projection failure injection lock")
+            .extend(failures);
+    }
+
     fn release_playback(&self, job_id: &str, media: &MediaOwner) {
         let removed = self
             .playback
@@ -619,6 +711,17 @@ impl RecordingJobs {
             .and_then(|mut playback| playback.remove(job_id));
         if let Some(removed) = removed {
             media.release(&removed.playback_path);
+        }
+    }
+
+    fn remove_job_authority_best_effort(&self, path: Option<&Path>, action: &str) {
+        let Some(path) = path else {
+            return;
+        };
+        if let Err(error) =
+            crate::file_actions::remove_recording_job_playback_path_at(path, &self.registry_path)
+        {
+            log_registry_cleanup_failure(action, &error);
         }
     }
 
@@ -717,13 +820,19 @@ fn renewed_expiry(now_ms: u64) -> Result<u64, JobCommandError> {
     })
 }
 
+fn log_registry_cleanup_failure(action: &str, error: &str) {
+    crate::stt::log_yap(&format!(
+        "recording job playback registry {action} failed; snapshot reconciliation will retry: {error}"
+    ));
+}
+
 fn mutate_then_notify<T, E>(
     mutation: impl FnOnce() -> Result<T, E>,
     notify: impl FnOnce(),
 ) -> Result<T, E> {
-    let value = mutation()?;
+    let result = mutation();
     notify();
-    Ok(value)
+    result
 }
 
 #[cfg(test)]
@@ -731,11 +840,25 @@ mod tests {
     use super::*;
     use crate::{commands::media_protocol::MediaOwner, jobs::JobLedger};
     use std::{
+        cell::Cell,
         fs,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn mutation_adapter_notifies_even_when_the_operation_returns_an_error() {
+        let notified = Cell::new(false);
+
+        let result = mutate_then_notify(
+            || Err::<(), _>(command_error("INJECTED_FAILURE", "injected")),
+            || notified.set(true),
+        );
+
+        assert_eq!(result.unwrap_err().code, "INJECTED_FAILURE");
+        assert!(notified.get());
+    }
 
     #[test]
     fn create_imports_validates_and_native_allowlists_a_canonical_recording() {
@@ -759,11 +882,106 @@ mod tests {
             .as_deref()
             .is_some_and(|path| path.starts_with("http://127.0.0.1:")));
         assert_eq!(created[0].id, jobs.snapshot(&media, 1_001).unwrap()[0].id);
-        assert!(
-            fs::read_to_string(dir.join("recording-playback-registry.json"))
-                .unwrap()
-                .contains("meeting.wav")
+        assert!(fs::read_to_string(&jobs.registry_path)
+            .unwrap()
+            .contains("meeting.wav"));
+        assert!(!dir.join("recording-playback-registry.json").exists());
+
+        drop(media);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn create_returns_and_notifies_a_durable_failed_view_when_admission_fails_after_commit() {
+        let dir = temp_dir("create-admission-failure");
+        let source = dir.join("meeting.wav");
+        fs::write(&source, b"RIFF-command-fixture").unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+        jobs.inject_projection_failures_for_test(vec![command_error(
+            "PLAYBACK_AUTHORITY_FAILED",
+            "injected admission failure",
+        )]);
+
+        let created = mutate_then_notify(
+            || jobs.create_imports(&media, vec![source.display().to_string()], 1_500),
+            || {
+                let committed = jobs.ledger.list_recoverable_jobs().unwrap();
+                assert_eq!(committed.len(), 1);
+                assert_eq!(committed[0].status, RecordingJobStatus::Failed);
+                assert_eq!(
+                    committed[0].error_code.as_deref(),
+                    Some("PLAYBACK_AUTHORITY_FAILED")
+                );
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created[0].status, RecordingJobStatus::Failed);
+        assert_eq!(
+            created[0].error.as_deref(),
+            Some("PLAYBACK_AUTHORITY_FAILED")
         );
+        assert_eq!(created[0].source_path, None);
+        assert_eq!(created[0].playback_path, None);
+        assert_eq!(media.active_admission_count_for_test(), 0);
+        assert!(!jobs.registry_path.exists());
+
+        drop(media);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn multi_create_commits_every_row_before_returning_injected_projection_outcomes() {
+        let dir = temp_dir("multi-create-admission-failure");
+        let failed_source = dir.join("failed.wav");
+        let queued_source = dir.join("queued.wav");
+        fs::write(&failed_source, b"RIFF-failed-fixture").unwrap();
+        fs::write(&queued_source, b"RIFF-queued-fixture").unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+        jobs.inject_projection_failures_for_test(vec![command_error(
+            "PLAYBACK_AUTHORITY_FAILED",
+            "injected first-row admission failure",
+        )]);
+
+        let created = mutate_then_notify(
+            || {
+                jobs.create_imports(
+                    &media,
+                    vec![
+                        failed_source.display().to_string(),
+                        queued_source.display().to_string(),
+                    ],
+                    1_700,
+                )
+            },
+            || {
+                let committed = jobs.ledger.list_recoverable_jobs().unwrap();
+                assert_eq!(committed.len(), 2);
+                assert_eq!(
+                    committed
+                        .iter()
+                        .filter(|job| job.status == RecordingJobStatus::Failed)
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    committed
+                        .iter()
+                        .filter(|job| job.status == RecordingJobStatus::QueuedServer)
+                        .count(),
+                    1
+                );
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[0].status, RecordingJobStatus::Failed);
+        assert_eq!(created[0].playback_path, None);
+        assert_eq!(created[1].status, RecordingJobStatus::QueuedServer);
+        assert!(created[1].playback_path.is_some());
 
         drop(media);
         fs::remove_dir_all(dir).unwrap();
@@ -947,16 +1165,20 @@ mod tests {
 
         assert_eq!(error.code, "JOB_LIMIT_EXCEEDED");
         assert_eq!(
-            jobs.snapshot(&media, 4_002).unwrap().len(),
-            MAX_RECORDING_JOBS
-        );
-        assert_eq!(
             media.active_admission_count_for_test(),
             admissions_before_overflow
         );
         assert_eq!(
             fs::read(&jobs.registry_path).unwrap(),
             registry_before_overflow
+        );
+        assert_eq!(
+            jobs.snapshot(&media, 4_002).unwrap().len(),
+            MAX_RECORDING_JOBS
+        );
+        assert_eq!(
+            media.active_admission_count_for_test(),
+            admissions_before_overflow
         );
 
         let legacy_overflow = dir.join("legacy-overflow.wav");
@@ -1086,6 +1308,198 @@ mod tests {
 
         drop(media);
         drop(jobs);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn more_than_five_hundred_terminal_imports_do_not_exhaust_job_path_authority() {
+        let dir = temp_dir("terminal-authority-cycles");
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+        let mut sources = Vec::new();
+
+        for index in 0..=500 {
+            let source = dir.join(format!("terminal-{index:03}.wav"));
+            fs::write(&source, b"RIFF-terminal-authority-fixture").unwrap();
+            let created = jobs
+                .create_imports(
+                    &media,
+                    vec![source.display().to_string()],
+                    6_500 + index as u64 * 3,
+                )
+                .unwrap();
+            assert_eq!(created[0].status, RecordingJobStatus::QueuedServer);
+            if index % 2 == 0 {
+                jobs.cancel(&media, &created[0].id, 6_501 + index as u64 * 3, || {})
+                    .unwrap();
+            } else {
+                jobs.ledger
+                    .fail_source_validation(&created[0].id, "TEST_FAILED", 6_501 + index as u64 * 3)
+                    .unwrap();
+                jobs.dismiss(&media, &created[0].id, 6_502 + index as u64 * 3, || {})
+                    .unwrap();
+            }
+            sources.push(source);
+        }
+
+        let final_source = dir.join("still-authorized.wav");
+        fs::write(&final_source, b"RIFF-final-authority-fixture").unwrap();
+        let final_import = jobs
+            .create_imports(&media, vec![final_source.display().to_string()], 8_100)
+            .unwrap();
+
+        assert_eq!(final_import[0].status, RecordingJobStatus::QueuedServer);
+        assert!(sources.iter().all(|source| source.is_file()));
+
+        drop(media);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes() {
+        let dir = temp_dir("terminal-authority-removal");
+        let general_registry = dir.join("recording-playback-registry.json");
+        let cancelled_source = dir.join("cancelled.wav");
+        let dismissed_source = dir.join("dismissed.wav");
+        let general_source = dir.join("general.wav");
+        for source in [&cancelled_source, &dismissed_source, &general_source] {
+            fs::write(source, b"RIFF-terminal-authority-fixture").unwrap();
+        }
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+
+        let cancelled = jobs
+            .create_imports(&media, vec![cancelled_source.display().to_string()], 8_200)
+            .unwrap();
+        jobs.cancel(&media, &cancelled[0].id, 8_201, || {}).unwrap();
+        assert!(crate::file_actions::openable_app_path_from_registries(
+            cancelled_source.display().to_string(),
+            &general_registry,
+            &jobs.registry_path,
+            &jobs.owned_dir,
+        )
+        .is_err());
+
+        let dismissed = jobs
+            .create_imports(&media, vec![dismissed_source.display().to_string()], 8_202)
+            .unwrap();
+        jobs.ledger
+            .fail_source_validation(&dismissed[0].id, "TEST_FAILED", 8_203)
+            .unwrap();
+        jobs.dismiss(&media, &dismissed[0].id, 8_204, || {})
+            .unwrap();
+        assert!(crate::file_actions::openable_app_path_from_registries(
+            dismissed_source.display().to_string(),
+            &general_registry,
+            &jobs.registry_path,
+            &jobs.owned_dir,
+        )
+        .is_err());
+
+        let general = jobs
+            .create_imports(&media, vec![general_source.display().to_string()], 8_205)
+            .unwrap();
+        crate::file_actions::register_general_playback_path_at_for_test(
+            general_source.display().to_string(),
+            &general_registry,
+            &jobs.owned_dir,
+        )
+        .unwrap();
+        jobs.ledger
+            .fail_source_validation(&general[0].id, "TEST_FAILED", 8_206)
+            .unwrap();
+        jobs.dismiss(&media, &general[0].id, 8_207, || {}).unwrap();
+        assert_eq!(
+            crate::file_actions::openable_app_path_from_registries(
+                general_source.display().to_string(),
+                &general_registry,
+                &jobs.registry_path,
+                &jobs.owned_dir,
+            )
+            .unwrap(),
+            general_source.canonicalize().unwrap()
+        );
+        assert!([&cancelled_source, &dismissed_source, &general_source]
+            .iter()
+            .all(|source| source.is_file()));
+
+        drop(media);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restart_snapshot_prunes_job_authority_left_by_a_terminal_commit() {
+        let dir = temp_dir("restart-authority-prune");
+        let database = dir.join("jobs.sqlite3");
+        let general_registry = dir.join("recording-playback-registry.json");
+        let source = dir.join("stale.wav");
+        fs::write(&source, b"RIFF-stale-authority-fixture").unwrap();
+
+        {
+            let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+            let media = MediaOwner::new();
+            let created = jobs
+                .create_imports(&media, vec![source.display().to_string()], 8_300)
+                .unwrap();
+            assert!(crate::file_actions::openable_app_path_from_registries(
+                source.display().to_string(),
+                &general_registry,
+                &jobs.registry_path,
+                &jobs.owned_dir,
+            )
+            .is_ok());
+            jobs.ledger
+                .request_cancellation(&created[0].id, 8_301)
+                .unwrap();
+        }
+
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+        let media = MediaOwner::new();
+        assert!(jobs.snapshot(&media, 8_302).unwrap().is_empty());
+        assert!(crate::file_actions::openable_app_path_from_registries(
+            source.display().to_string(),
+            &general_registry,
+            &jobs.registry_path,
+            &jobs.owned_dir,
+        )
+        .is_err());
+        assert!(source.is_file());
+
+        drop(media);
+        drop(jobs);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_registry_cleanup_failure_does_not_hide_the_committed_transition() {
+        let dir = temp_dir("terminal-cleanup-failure");
+        let source = dir.join("cleanup.wav");
+        fs::write(&source, b"RIFF-cleanup-failure-fixture").unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+        let created = jobs
+            .create_imports(&media, vec![source.display().to_string()], 8_400)
+            .unwrap();
+        fs::remove_file(&jobs.registry_path).unwrap();
+        fs::create_dir(&jobs.registry_path).unwrap();
+
+        let cancelled = mutate_then_notify(
+            || jobs.cancel(&media, &created[0].id, 8_401, || {}),
+            || {
+                assert_eq!(
+                    jobs.ledger.get_job(&created[0].id).unwrap().unwrap().status,
+                    RecordingJobStatus::Cancelled
+                );
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cancelled.status, RecordingJobStatus::Cancelled);
+        assert!(jobs.snapshot(&media, 8_402).unwrap().is_empty());
+        assert!(source.is_file());
+
+        fs::remove_dir(&jobs.registry_path).unwrap();
+        drop(media);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1280,6 +1694,49 @@ mod tests {
         let at_boundary = jobs.snapshot(&media, renewed_expiry).unwrap();
         assert_eq!(at_boundary[0].status, RecordingJobStatus::Failed);
         assert_eq!(at_boundary[0].error.as_deref(), Some("PENDING_EXPIRED"));
+        drop(media);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retry_returns_and_notifies_a_durable_failed_view_when_readmission_fails() {
+        let dir = temp_dir("retry-admission-failure");
+        let source = dir.join("retry.wav");
+        fs::write(&source, b"RIFF-retry-admission-fixture").unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+        let job_id = jobs
+            .create_imports(&media, vec![source.display().to_string()], 8_700)
+            .unwrap()[0]
+            .id
+            .clone();
+        jobs.ledger
+            .fail_source_validation(&job_id, "INITIAL_FAILURE", 8_701)
+            .unwrap();
+        jobs.inject_projection_failures_for_test(vec![command_error(
+            "PLAYBACK_AUTHORITY_FAILED",
+            "injected retry admission failure",
+        )]);
+
+        let retried = mutate_then_notify(
+            || jobs.retry(&media, &job_id, 8_702, || {}),
+            || {
+                let committed = jobs.ledger.get_job(&job_id).unwrap().unwrap();
+                assert_eq!(committed.status, RecordingJobStatus::Failed);
+                assert_eq!(committed.attempt_count, 1);
+                assert_eq!(
+                    committed.error_code.as_deref(),
+                    Some("PLAYBACK_AUTHORITY_FAILED")
+                );
+            },
+        )
+        .unwrap();
+
+        assert_eq!(retried.status, RecordingJobStatus::Failed);
+        assert_eq!(retried.error.as_deref(), Some("PLAYBACK_AUTHORITY_FAILED"));
+        assert_eq!(retried.source_path, None);
+        assert_eq!(retried.playback_path, None);
+
         drop(media);
         fs::remove_dir_all(dir).unwrap();
     }

@@ -38,6 +38,54 @@ impl JobLedger {
         self.insert_job_with_chunks(job, &[])
     }
 
+    pub fn insert_jobs(
+        &self,
+        jobs: &[NewRecordingJob],
+    ) -> Result<Vec<RecordingJobRecord>, JobLedgerError> {
+        let jobs = jobs
+            .iter()
+            .map(ValidatedJob::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for job in &jobs {
+            transaction.execute(
+                "INSERT INTO recording_jobs (job_id, session_mode, session_origin, source_path, source_ownership, output_path, display_name, status, route, attempt_count, next_attempt_at_ms, cancellation_requested, capture_commit_path, capture_manifest_sha256, error_code, error_message, created_at_ms, updated_at_ms, expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                params![
+                    job.job_id,
+                    job.session_mode,
+                    job.session_origin,
+                    job.source_path,
+                    job.source_ownership,
+                    job.output_path,
+                    job.display_name,
+                    job.status,
+                    job.route,
+                    job.attempt_count,
+                    job.next_attempt_at_ms,
+                    job.cancellation_requested,
+                    job.capture_commit_path,
+                    job.capture_manifest_sha256,
+                    job.error_code,
+                    job.error_message,
+                    job.created_at_ms,
+                    job.updated_at_ms,
+                    job.expires_at_ms,
+                ],
+            )?;
+        }
+        let records = jobs
+            .iter()
+            .map(|job| {
+                query_job(&transaction, &job.job_id)?
+                    .expect("inserted job exists")
+                    .try_into()
+            })
+            .collect::<Result<Vec<_>, JobLedgerError>>()?;
+        transaction.commit()?;
+        Ok(records)
+    }
+
     pub fn insert_job_with_chunks(
         &self,
         job: &NewRecordingJob,
@@ -827,6 +875,16 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, JobLedgerError::Sqlite(_)));
         assert!(ledger.get_job("rollback-job").unwrap().is_none());
+    }
+
+    #[test]
+    fn multi_job_insert_rolls_back_every_row_when_one_insert_fails() {
+        let ledger = JobLedger::open_in_memory().unwrap();
+        let first = imported_job("duplicate-job");
+        let second = imported_job("duplicate-job");
+
+        assert!(ledger.insert_jobs(&[first, second]).is_err());
+        assert!(ledger.list_jobs().unwrap().is_empty());
     }
 
     #[test]
