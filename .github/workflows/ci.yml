@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   frontend:
     runs-on: windows-latest
@@ -22,7 +25,7 @@ jobs:
         shell: pwsh
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Verify PowerShell 7.4 Core
         shell: pwsh
         run: |
@@ -81,16 +84,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Tracked scripts failed PowerShell 7.4 parsing." }
           & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -File ./tests/scripts/nsis-smoke-helpers.test.ps1
           if ($LASTEXITCODE -ne 0) { throw "Focused PowerShell 7.4 helper suite failed." }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 11.7.0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .node-version
-      - uses: actions/cache@v6
+          package-manager-cache: false
+      - name: Restore pnpm dependency store
+        id: pnpm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~\AppData\Local\pnpm\store\v11
+          key: pnpm-store-v11-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/pnpm-lock.yaml') }}
+      - name: Restore Playwright browser downloads
+        id: playwright-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~\AppData\Local\ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('desktop/pnpm-lock.yaml') }}
+          key: playwright-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/pnpm-lock.yaml') }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level high
       - run: pnpm test:release-contract
@@ -98,13 +110,33 @@ jobs:
       - run: pnpm build
       - run: pnpm exec playwright install chromium
       - run: pnpm test:e2e
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: frontend-test-artifacts
           path: |
             desktop/tests/results/playwright
           if-no-files-found: warn
+      - name: Save pnpm dependency store from trusted main
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.pnpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~\AppData\Local\pnpm\store\v11
+          key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
+      - name: Save Playwright downloads from trusted main
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
 
   rust:
     runs-on: windows-latest
@@ -114,24 +146,26 @@ jobs:
         shell: pwsh
         working-directory: desktop/src-tauri
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Verify PowerShell 7.4 Core
         shell: pwsh
         run: |
           if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
             throw "CI requires PowerShell Core 7.4 or newer."
           }
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Restore Cargo dependency downloads
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
@@ -161,15 +195,54 @@ jobs:
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
+      - name: Verify Windows advisory boundary
+        run: |
+          $ErrorActionPreference = "Stop"
+          $windowsPackages = @(cargo tree --locked --offline --target x86_64-pc-windows-msvc --prefix none --format "{p}")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to inspect the locked Windows dependency graph."
+          }
+          $windowsGlibPackages = @($windowsPackages | Where-Object { $_ -match '^glib v' })
+          if ($windowsGlibPackages.Count -ne 0) {
+            throw "glib became reachable on Windows; reevaluate GHSA-wrw7-89jp-8q8g: $($windowsGlibPackages -join ', ')"
+          }
       - name: cargo audit
         run: |
-          $env:PATH = "$PWD\.cargo-tools\bin;$env:PATH"
-          if (-not (Test-Path ".cargo-tools\bin\cargo-audit.exe")) {
-            cargo install cargo-audit --locked --root .cargo-tools
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP "cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
+          $url = "https://github.com/RustSec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "cargo-audit-0.22.2"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -cne "0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab") {
+            throw "Pinned cargo-audit archive hash mismatch."
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+          $cargoAudit = Join-Path $extractRoot "cargo-audit-x86_64-pc-windows-msvc-v0.22.2\cargo-audit.exe"
+          if (-not (Test-Path -LiteralPath $cargoAudit -PathType Leaf)) {
+            throw "Pinned cargo-audit executable was not extracted."
+          }
+          $cargoAuditVersion = & $cargoAudit --version
+          if ($LASTEXITCODE -ne 0 -or $cargoAuditVersion -cne "cargo-audit 0.22.2") {
+            throw "Pinned cargo-audit executable has an unexpected version."
           }
           # Policy: cargo-audit warnings from Tauri's target-all desktop
           # transitive crates are allowed for now. Vulnerabilities fail CI.
-          cargo audit --target-os windows --target-arch x86_64
+          & $cargoAudit audit --target-os windows --target-arch x86_64
+          if ($LASTEXITCODE -ne 0) { throw "cargo-audit failed." }
+      - name: Save Cargo dependency downloads from trusted main
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   native-wdio:
     name: Native WDIO smoke (required, no hardware)
@@ -183,32 +256,39 @@ jobs:
         shell: pwsh
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Verify PowerShell 7.4 Core
         shell: pwsh
         run: |
           if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
             throw "CI requires PowerShell Core 7.4 or newer."
           }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 11.7.0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24.14.0"
-          cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
-      - uses: dtolnay/rust-toolchain@stable
+          package-manager-cache: false
+      - name: Restore pnpm dependency store
+        id: pnpm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~\AppData\Local\pnpm\store\v11
+          key: pnpm-store-v11-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/pnpm-lock.yaml') }}
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ env.RUST_TARGET }}
-      - uses: actions/cache@v6
+      - name: Restore Cargo dependency downloads
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-native-wdio-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri*.json') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
       - run: pnpm install --frozen-lockfile
       - name: Verify release-evidence configuration
         run: pnpm test:release-contract
@@ -224,7 +304,7 @@ jobs:
           if ($wdioExitCode -ne 0) {
             exit $wdioExitCode
           }
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: native-wdio-failure-${{ github.run_id }}
@@ -247,8 +327,8 @@ jobs:
           if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
             throw "CI requires PowerShell Core 7.4 or newer."
           }
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
       - run: python -m unittest discover -s server/tests -p "test_*.py"

@@ -4,10 +4,27 @@ updates:
     directory: /desktop
     schedule:
       interval: weekly
+    groups:
+      wdio-core:
+        patterns:
+          - "@wdio/cli"
+          - "@wdio/local-runner"
+          - "@wdio/mocha-framework"
+          - "@wdio/spec-reporter"
+          - webdriverio
+      wdio-tauri:
+        patterns:
+          - "@wdio/tauri-plugin"
+          - "@wdio/tauri-service"
   - package-ecosystem: cargo
     directory: /desktop/src-tauri
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: cpal
+        versions:
+          - 0.18.0
+          - 0.18.1
   - package-ecosystem: github-actions
     directory: /
     schedule:

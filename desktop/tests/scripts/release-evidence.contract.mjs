@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,15 +21,85 @@ import {
 const require = createRequire(import.meta.url);
 const { parse: parseYaml } = require("yaml");
 const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
-const releaseActions = Object.freeze({
-  cache: "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+const reviewedActions = Object.freeze({
+  cacheRestore: "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  cacheSave: "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   checkout: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
   downloadArtifact: "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
   setupNode: "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-  setupPnpm: "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+  setupPnpm: "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
+  setupPython: "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
   setupRust: "dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30",
-  uploadArtifact: "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+  uploadArtifact: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
 });
+const reviewedActionUses = new Set(Object.values(reviewedActions));
+const workflowPaths = Object.freeze([
+  ".github/workflows/ci.yml",
+  ".github/workflows/nsis-smoke.yml",
+  ".github/workflows/release.yml",
+]);
+const exactCacheKeys = Object.freeze({
+  cargo: "cargo-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}",
+  playwright: "playwright-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/pnpm-lock.yaml') }}",
+  pnpm: "pnpm-store-v11-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/pnpm-lock.yaml') }}",
+});
+const expectedCacheFamilies = Object.freeze({
+  ".github/workflows/ci.yml": Object.freeze({
+    frontend: Object.freeze(["playwright", "pnpm"]),
+    "native-wdio": Object.freeze(["cargo", "pnpm"]),
+    rust: Object.freeze(["cargo"]),
+  }),
+  ".github/workflows/nsis-smoke.yml": Object.freeze({
+    "nsis-bundle-smoke": Object.freeze(["cargo", "pnpm"]),
+  }),
+  ".github/workflows/release.yml": Object.freeze({
+    "build-nsis": Object.freeze(["cargo", "pnpm"]),
+  }),
+});
+const releaseActionUses = new Set([
+  reviewedActions.cacheRestore,
+  reviewedActions.checkout,
+  reviewedActions.downloadArtifact,
+  reviewedActions.setupNode,
+  reviewedActions.setupPnpm,
+  reviewedActions.setupRust,
+  reviewedActions.uploadArtifact,
+]);
+const reviewedWindowsGraphBoundaryRun = String.raw`
+$ErrorActionPreference = "Stop"
+$windowsPackages = @(cargo tree --locked --offline --target x86_64-pc-windows-msvc --prefix none --format "{p}")
+if ($LASTEXITCODE -ne 0) {
+  throw "Unable to inspect the locked Windows dependency graph."
+}
+$windowsGlibPackages = @($windowsPackages | Where-Object { $_ -match '^glib v' })
+if ($windowsGlibPackages.Count -ne 0) {
+  throw "glib became reachable on Windows; reevaluate GHSA-wrw7-89jp-8q8g: $($windowsGlibPackages -join ', ')"
+}
+`.trim();
+const reviewedCargoAuditRun = String.raw`
+$ErrorActionPreference = "Stop"
+$archive = Join-Path $env:RUNNER_TEMP "cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
+$url = "https://github.com/RustSec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
+$extractRoot = Join-Path $env:RUNNER_TEMP "cargo-audit-0.22.2"
+Invoke-WebRequest -Uri $url -OutFile $archive
+$actualSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualSha256 -cne "0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab") {
+  throw "Pinned cargo-audit archive hash mismatch."
+}
+Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+$cargoAudit = Join-Path $extractRoot "cargo-audit-x86_64-pc-windows-msvc-v0.22.2\cargo-audit.exe"
+if (-not (Test-Path -LiteralPath $cargoAudit -PathType Leaf)) {
+  throw "Pinned cargo-audit executable was not extracted."
+}
+$cargoAuditVersion = & $cargoAudit --version
+if ($LASTEXITCODE -ne 0 -or $cargoAuditVersion -cne "cargo-audit 0.22.2") {
+  throw "Pinned cargo-audit executable has an unexpected version."
+}
+# Policy: cargo-audit warnings from Tauri's target-all desktop
+# transitive crates are allowed for now. Vulnerabilities fail CI.
+& $cargoAudit audit --target-os windows --target-arch x86_64
+if ($LASTEXITCODE -ne 0) { throw "cargo-audit failed." }
+`.trim();
 
 async function readRepoFile(relativePath) {
   return readFile(path.join(repoRoot, relativePath), "utf8");
@@ -37,6 +107,19 @@ async function readRepoFile(relativePath) {
 
 async function readWorkflow(relativePath) {
   return parseYaml(await readRepoFile(relativePath));
+}
+
+async function discoveredWorkflowPaths() {
+  const workflowsRoot = path.join(repoRoot, ".github", "workflows");
+  const entries = await readdir(workflowsRoot, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && /\.ya?ml$/i.test(entry.name))
+    .map((entry) => `.github/workflows/${entry.name}`)
+    .sort();
+}
+
+function normalizedRunBody(source) {
+  return String(source).replaceAll("\r\n", "\n").trim();
 }
 
 function workflowSteps(workflow, jobName) {
@@ -118,29 +201,235 @@ async function createReleaseGitFixture(prefix = "yap-release-contract-") {
   return { commitSha, files, fixtureRoot };
 }
 
-function assertExactSafeCaches(workflow) {
+function workflowStepEntries(workflow) {
+  return Object.entries(workflow.jobs ?? {}).flatMap(([jobName, job]) =>
+    (job.steps ?? []).map((step, index) => ({ index, jobName, step }))
+  );
+}
+
+function cachePaths(step) {
+  return String(step.with?.path ?? "")
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function normalizedCachePath(cachePath) {
+  return cachePath.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function cacheFamily(step, label) {
+  const key = String(step.with?.key ?? "");
+  const family = Object.entries(exactCacheKeys).find(([, expected]) => key === expected)?.[0];
+  assert.ok(family, `${label} cache key must be one of the exact dependency keys; received ${key}`);
+  return family;
+}
+
+function assertSafeCachePaths(step, family, label) {
+  assert.equal(
+    step.with?.["restore-keys"],
+    undefined,
+    `${label} must not use a broad restore-keys prefix`,
+  );
+  const paths = cachePaths(step);
+  assert.ok(paths.length > 0, `${label} has no cache paths`);
+  for (const cachePath of paths) {
+    assert.doesNotMatch(
+      normalizedCachePath(cachePath),
+      /(^|\/)(?:target|node_modules|bundle|dist|coverage|test-results?|results|playwright-report|release-evidence|artifact-seal|installers?|models?|recordings?|transcripts?|advisory-db|\.rustsec|credentials?|secrets?|tokens?|certificates?|\.env(?:\.[^/]*)?)(?:\/|$)|\.(?:sqlite3?|db|pem|pfx|p12|key)(?:\/|$)/i,
+      `${label} includes mutable, sensitive, result, or release-evidence state: ${cachePath}`,
+    );
+  }
+
+  if (family === "pnpm") {
+    assert.deepEqual(
+      paths,
+      ["~\\AppData\\Local\\pnpm\\store\\v11"],
+      `${label} must use the exact reviewed pnpm 11 store directory`,
+    );
+  } else if (family === "playwright") {
+    assert.equal(paths.length, 1, `${label} must cache only Playwright browser downloads`);
+    assert.equal(
+      paths[0],
+      "~\\AppData\\Local\\ms-playwright",
+      `${label} must use the exact reviewed Playwright browser directory`,
+    );
+  } else {
+    assert.deepEqual(
+      [...paths].sort(),
+      ["~/.cargo/git/db", "~/.cargo/registry/cache", "~/.cargo/registry/index"],
+      `${label} must use exactly the three reviewed Cargo home dependency paths`,
+    );
+  }
+}
+
+function assertReviewedUse(usesValue, label) {
+  const uses = String(usesValue);
+  assert.match(
+    uses,
+    /@[0-9a-f]{40}$/,
+    `${label} must use an exact 40-character commit SHA: ${uses}`,
+  );
+  assert.ok(
+    reviewedActionUses.has(uses),
+    `${label} is not pinned to a reviewed revision: ${uses}`,
+  );
+}
+
+function assertReviewedActionPins(workflow, workflowPath) {
   for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
-    for (const step of job.steps ?? []) {
-      if (!String(step.uses ?? "").startsWith("actions/cache@")) continue;
-      assert.equal(
-        step.with?.["restore-keys"],
-        undefined,
-        `${jobName} cache must not use a broad restore prefix`,
-      );
-      assert.match(String(step.with?.key ?? ""), /hashFiles\(/, `${jobName} cache key is not exact`);
-      const cachePaths = String(step.with?.path ?? "")
-        .split(/\r?\n/)
-        .map((value) => value.trim())
-        .filter(Boolean);
-      assert.ok(cachePaths.length > 0, `${jobName} cache has no paths`);
-      for (const cachePath of cachePaths) {
-        assert.doesNotMatch(
-          cachePath.replaceAll("\\", "/"),
-          /(^|\/)target(\/|$)|(^|\/)bundle(\/|$)|(^|\/)dist(\/|$)/i,
-          `${jobName} cache includes build or bundle output: ${cachePath}`,
-        );
-      }
+    if (job.uses) {
+      assertReviewedUse(job.uses, `${workflowPath} ${jobName} reusable workflow`);
     }
+    for (const step of job.steps ?? []) {
+      if (step.uses) assertReviewedUse(step.uses, `${workflowPath} ${jobName} action`);
+    }
+  }
+}
+
+function assertExactCacheRestores(workflow, workflowPath) {
+  const expectedByJob = expectedCacheFamilies[workflowPath];
+  const actualByJob = new Map();
+  for (const { jobName, step } of workflowStepEntries(workflow)) {
+    const uses = String(step.uses ?? "");
+    if (
+      uses.startsWith("actions/setup-node@")
+      || uses.startsWith("actions/setup-python@")
+      || uses.startsWith("pnpm/action-setup@")
+    ) {
+      assert.equal(
+        step.with?.cache,
+        undefined,
+        `${workflowPath} ${jobName} must not use an action's native save-capable cache`,
+      );
+      assert.equal(
+        step.with?.["cache-dependency-path"],
+        undefined,
+        `${workflowPath} ${jobName} must not configure a native action cache dependency path`,
+      );
+    }
+    if (uses.startsWith("actions/setup-node@")) {
+      assert.equal(
+        step.with?.["package-manager-cache"],
+        false,
+        `${workflowPath} ${jobName} must disable setup-node's implicit package-manager cache`,
+      );
+    }
+    if (!uses.startsWith("actions/cache")) continue;
+    assert.notEqual(
+      uses.split("@")[0],
+      "actions/cache",
+      `${workflowPath} ${jobName} must not use monolithic actions/cache`,
+    );
+    if (uses !== reviewedActions.cacheRestore) continue;
+    const label = `${workflowPath} ${jobName}`;
+    const family = cacheFamily(step, label);
+    assertSafeCachePaths(step, family, label);
+    const families = actualByJob.get(jobName) ?? [];
+    families.push(family);
+    actualByJob.set(jobName, families);
+  }
+
+  assert.deepEqual(
+    [...actualByJob.keys()].sort(),
+    Object.keys(expectedByJob).sort(),
+    `${workflowPath} restore-only cache jobs do not match the dependency policy`,
+  );
+  for (const [jobName, expected] of Object.entries(expectedByJob)) {
+    assert.deepEqual(
+      [...(actualByJob.get(jobName) ?? [])].sort(),
+      [...expected].sort(),
+      `${workflowPath} ${jobName} dependency cache families do not match policy`,
+    );
+  }
+}
+
+function assertTrustedMainOnlyCacheSaves(workflow, workflowPath) {
+  for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+    const steps = job.steps ?? [];
+    const restores = steps
+      .map((step, index) => ({ index, step }))
+      .filter(({ step }) => step.uses === reviewedActions.cacheRestore);
+    const saves = steps
+      .map((step, index) => ({ index, step }))
+      .filter(({ step }) => step.uses === reviewedActions.cacheSave);
+    const maySave = workflowPath === ".github/workflows/ci.yml"
+      && (jobName === "frontend" || jobName === "rust");
+
+    if (!maySave) {
+      assert.equal(
+        saves.length,
+        0,
+        `${workflowPath} ${jobName} must be restore-only`,
+      );
+      continue;
+    }
+
+    assert.ok(restores.length > 0, `${workflowPath} ${jobName} has no dependency restores`);
+    assert.equal(
+      saves.length,
+      restores.length,
+      `${workflowPath} ${jobName} must save each restored dependency cache exactly once`,
+    );
+    const firstSaveIndex = Math.min(...saves.map(({ index }) => index));
+    for (const precedingStep of steps.slice(0, firstSaveIndex)) {
+      assert.ok(
+        precedingStep["continue-on-error"] === undefined
+          || precedingStep["continue-on-error"] === false,
+        `${workflowPath} ${jobName} must not tolerate a failed check before saving caches`,
+      );
+    }
+    for (const followingStep of steps.slice(firstSaveIndex + 1)) {
+      const isAnotherCacheSave = followingStep.uses === reviewedActions.cacheSave;
+      assert.ok(
+        isAnotherCacheSave,
+        `${workflowPath} ${jobName} cache saves must follow every substantive check`,
+      );
+    }
+    const pairedRestoreIds = new Set();
+    for (const { index: saveIndex, step: save } of saves) {
+      const keyReference = String(save.with?.key ?? "").match(
+        /^\${{\s*steps\.([a-z0-9_-]+)\.outputs\.cache-primary-key\s*}}$/i,
+      );
+      assert.ok(
+        keyReference,
+        `${workflowPath} ${jobName} save must reuse a restore cache-primary-key`,
+      );
+      const restoreId = keyReference[1];
+      const restore = restores.find(({ step }) => step.id === restoreId);
+      assert.ok(restore, `${workflowPath} ${jobName} save references unknown restore ${restoreId}`);
+      assert.ok(
+        restore.index < saveIndex,
+        `${workflowPath} ${jobName} save must run after restore ${restoreId}`,
+      );
+      assert.equal(
+        pairedRestoreIds.has(restoreId),
+        false,
+        `${workflowPath} ${jobName} restore ${restoreId} is saved more than once`,
+      );
+      pairedRestoreIds.add(restoreId);
+      assert.deepEqual(
+        cachePaths(save),
+        cachePaths(restore.step),
+        `${workflowPath} ${jobName} save paths must match restore ${restoreId}`,
+      );
+
+      const condition = String(save.if ?? "").trim();
+      const outerExpression = condition.match(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/);
+      const normalizedCondition = (outerExpression?.[1] ?? condition)
+        .replace(/\s+/g, " ")
+        .trim();
+      assert.equal(
+        normalizedCondition,
+        `success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.${restoreId}.outputs.cache-hit != 'true'`,
+        `${workflowPath} ${jobName} save must use the exact trusted-main success gate`,
+      );
+    }
+    assert.equal(
+      pairedRestoreIds.size,
+      restores.length,
+      `${workflowPath} ${jobName} has an unpaired dependency restore`,
+    );
   }
 }
 
@@ -184,8 +473,9 @@ test("required native WDIO executes every deterministic spec with Mocha runtime 
   );
   assert.ok(
     steps.some(
-      (step) => step.uses === "actions/upload-artifact@v6" && step.if === "failure()",
+      (step) => step.uses === reviewedActions.uploadArtifact && step.if === "failure()",
     ),
+    "native WDIO failure artifacts must use the reviewed upload-artifact v7.0.1 pin",
   );
   await assert.rejects(
     access(path.join(repoRoot, "desktop/tests/wdio/required-spec-policy.mjs")),
@@ -193,7 +483,7 @@ test("required native WDIO executes every deterministic spec with Mocha runtime 
   );
 });
 
-test("CI and smoke workflows use exact dependency caches and the explicit contract command", async () => {
+test("CI and smoke workflows run the explicit release contract on supported triggers", async () => {
   const ci = await readWorkflow(".github/workflows/ci.yml");
   const smoke = await readWorkflow(".github/workflows/nsis-smoke.yml");
   const frontendSteps = workflowSteps(ci, "frontend").steps;
@@ -204,10 +494,128 @@ test("CI and smoke workflows use exact dependency caches and the explicit contra
   assert.equal(smoke.on.workflow_dispatch, null);
   assert.ok(smoke.on.schedule);
   assert.equal(smoke.on.release, undefined);
-  const smokeUses = smokeSteps.filter((step) => step.uses).map((step) => step.uses);
-  for (const action of smokeUses) assert.match(action, /@[0-9a-f]{40}$/);
-  assertExactSafeCaches(ci);
-  assertExactSafeCaches(smoke);
+});
+
+test("CI workflow token defaults to read-only repository contents", async () => {
+  const ci = await readWorkflow(".github/workflows/ci.yml");
+  assert.deepEqual(
+    ci.permissions,
+    { contents: "read" },
+    "CI must declare only top-level contents: read permissions",
+  );
+});
+
+test("reviewed workflow inventory covers every workflow YAML file", async () => {
+  assert.deepEqual(
+    await discoveredWorkflowPaths(),
+    [...workflowPaths].sort(),
+    "every workflow file must be added to the reviewed action and cache policy inventory",
+  );
+});
+
+test("all CI, smoke, and release actions use exact reviewed commit pins", async () => {
+  for (const workflowPath of workflowPaths) {
+    assertReviewedActionPins(await readWorkflow(workflowPath), workflowPath);
+  }
+});
+
+test("workflow caches restore only exact dependency downloads from safe paths", async () => {
+  for (const workflowPath of workflowPaths) {
+    assertExactCacheRestores(await readWorkflow(workflowPath), workflowPath);
+  }
+});
+
+test("only successful trusted main CI pushes may save restored dependency caches", async () => {
+  for (const workflowPath of workflowPaths) {
+    assertTrustedMainOnlyCacheSaves(await readWorkflow(workflowPath), workflowPath);
+  }
+});
+
+test("cache policy rejects dynamic pnpm paths and truthy condition wrappers", () => {
+  const dynamicPnpmPath = "${{ steps.resolve-store.outputs.path }}";
+  assert.throws(
+    () => assertSafeCachePaths({
+      with: {
+        key: exactCacheKeys.pnpm,
+        path: dynamicPnpmPath,
+      },
+    }, "pnpm", "fixture pnpm"),
+    /exact reviewed pnpm 11 store directory/,
+  );
+
+  const unsafeWorkflow = {
+    jobs: {
+      frontend: {
+        steps: [
+          {
+            id: "pnpm-cache",
+            uses: reviewedActions.cacheRestore,
+            with: {
+              key: exactCacheKeys.pnpm,
+              path: dynamicPnpmPath,
+            },
+          },
+          { run: "pnpm test" },
+          {
+            if: "success() && format('{0}', github.event_name == 'push') && format('{0}', github.ref == 'refs/heads/main') && steps.pnpm-cache.outputs.cache-hit != 'true'",
+            uses: reviewedActions.cacheSave,
+            with: {
+              key: "${{ steps.pnpm-cache.outputs.cache-primary-key }}",
+              path: dynamicPnpmPath,
+            },
+          },
+        ],
+      },
+    },
+  };
+  assert.throws(
+    () => assertTrustedMainOnlyCacheSaves(unsafeWorkflow, ".github/workflows/ci.yml"),
+    /exact trusted-main success gate/,
+  );
+
+  const toleratedFailureWorkflow = structuredClone(unsafeWorkflow);
+  toleratedFailureWorkflow.jobs.frontend.steps[0].with.path = "~\\AppData\\Local\\pnpm\\store\\v11";
+  toleratedFailureWorkflow.jobs.frontend.steps[1]["continue-on-error"] = true;
+  toleratedFailureWorkflow.jobs.frontend.steps[2].with.path = "~\\AppData\\Local\\pnpm\\store\\v11";
+  toleratedFailureWorkflow.jobs.frontend.steps[2].if = "success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.pnpm-cache.outputs.cache-hit != 'true'";
+  assert.throws(
+    () => assertTrustedMainOnlyCacheSaves(toleratedFailureWorkflow, ".github/workflows/ci.yml"),
+    /must not tolerate a failed check before saving caches/,
+  );
+});
+
+test("CI fails closed if any glib version becomes Windows-reachable", async () => {
+  const ci = await readWorkflow(".github/workflows/ci.yml");
+  const { steps: rustSteps } = workflowSteps(ci, "rust");
+  const boundaryStep = rustSteps.find(
+    (step) => step.name === "Verify Windows advisory boundary",
+  );
+  assert.ok(boundaryStep, "CI rust job must verify the target-specific glib boundary");
+  assert.equal(
+    normalizedRunBody(boundaryStep.run),
+    reviewedWindowsGraphBoundaryRun,
+    "the Windows glib graph guard must match the reviewed fail-closed script",
+  );
+});
+
+test("CI runs the checksum-verified RustSec cargo-audit 0.22.2 binary", async () => {
+  const ci = await readWorkflow(".github/workflows/ci.yml");
+  const { steps: rustSteps } = workflowSteps(ci, "rust");
+  const allRunScripts = rustSteps.map((step) => String(step.run ?? "")).join("\n");
+  const auditStep = rustSteps.find((step) => step.name === "cargo audit");
+
+  assert.doesNotMatch(
+    allRunScripts,
+    /\bcargo(?:\.exe)?\s+install\b[^\r\n]*\bcargo-audit\b/i,
+    "CI must not compile cargo-audit from source",
+  );
+  assert.ok(auditStep, "CI rust job must download the pinned cargo-audit binary");
+  const auditRun = String(auditStep.run);
+  assert.equal(
+    normalizedRunBody(auditRun),
+    reviewedCargoAuditRun,
+    "the cargo-audit download, checksum, extraction, version, and invocation must match the reviewed script",
+  );
 });
 
 test("supported release path binds a default-branch commit to a read-only build and draft stage", async () => {
@@ -229,7 +637,7 @@ test("supported release path binds a default-branch commit to a read-only build 
   assert.equal(publishJob.environment, "production-release");
   assert.deepEqual(publishJob.needs, ["resolve-release", "build-nsis"]);
 
-  const resolveCheckout = resolveSteps.find((step) => step.uses === releaseActions.checkout);
+  const resolveCheckout = resolveSteps.find((step) => step.uses === reviewedActions.checkout);
   assert.equal(resolveCheckout.with.ref, "${{ github.event.repository.default_branch }}");
   assert.equal(resolveCheckout.with["fetch-depth"], 0);
   assert.equal(resolveCheckout.with["persist-credentials"], false);
@@ -238,7 +646,7 @@ test("supported release path binds a default-branch commit to a read-only build 
   assert.match(resolve.run, /merge-base --is-ancestor/);
   assert.doesNotMatch(resolve.run, /git fetch|refs\/remotes\/origin/);
 
-  const buildCheckout = buildSteps.find((step) => step.uses === releaseActions.checkout);
+  const buildCheckout = buildSteps.find((step) => step.uses === reviewedActions.checkout);
   assert.equal(buildCheckout.with.ref, "${{ needs.resolve-release.outputs.commit_sha }}");
   assert.equal(buildCheckout.with["persist-credentials"], false);
   const prepare = namedStepIndex(buildSteps, "Prepare immutable release context");
@@ -288,7 +696,7 @@ test("supported release path binds a default-branch commit to a read-only build 
   const releaseUses = [...resolveSteps, ...buildSteps, ...publishSteps]
     .filter((step) => step.uses)
     .map((step) => step.uses);
-  assert.deepEqual(new Set(releaseUses), new Set(Object.values(releaseActions)));
+  assert.deepEqual(new Set(releaseUses), releaseActionUses);
   for (const action of releaseUses) assert.match(action, /@[0-9a-f]{40}$/);
   const verify = publishSteps.find((step) => step.name === "Verify downloaded payload binding");
   assert.match(verify.run, /Get-FileHash/);
@@ -324,7 +732,6 @@ test("supported release path binds a default-branch commit to a read-only build 
   assert.doesNotMatch(publish.run, /gh release edit|--draft=false/);
   assert.equal(publish.env.GH_REPO, "${{ github.repository }}");
   assert.equal(publish.env.RELEASE_SHA, "${{ needs.resolve-release.outputs.commit_sha }}");
-  assertExactSafeCaches(release);
   await assert.rejects(
     access(path.join(repoRoot, ".github/workflows/prepublish-provenance.yml")),
     /ENOENT/,
