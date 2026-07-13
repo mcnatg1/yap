@@ -31,7 +31,12 @@ switch ($Mode) {
       -PassThru `
       -WindowStyle Hidden
     try {
-      [IO.File]::WriteAllText($ChildPidPath, $child.Id.ToString([Globalization.CultureInfo]::InvariantCulture))
+      $temporaryPidPath = "$ChildPidPath.$PID.tmp"
+      [IO.File]::WriteAllText(
+        $temporaryPidPath,
+        $child.Id.ToString([Globalization.CultureInfo]::InvariantCulture)
+      )
+      [IO.File]::Move($temporaryPidPath, $ChildPidPath)
     } finally {
       $child.Dispose()
     }

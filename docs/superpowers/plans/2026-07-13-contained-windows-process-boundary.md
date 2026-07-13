@@ -1,22 +1,30 @@
 # Contained Windows Process Boundary Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Current status:** The lean MVP amendment below is the only operative implementation plan. The archived enterprise plan is retained for post-MVP reference and must not be resumed without an explicit `proceed`.
 
-**Goal:** Replace the NSIS smoke harness's split PID, managed-process, Job Object, and CIM lifecycle ownership with one retained-handle Windows process lease, deterministic test evidence, and an independently named CI boundary.
+**Goal:** Replace the NSIS smoke harness's split PID, managed-process, Job Object, and CIM lifecycle ownership with one retained-handle Windows process lease and the essential real-Windows lifecycle evidence.
 
-**Architecture:** A Windows-only C# boundary validates launch requests, creates the process suspended, assigns it to a kill-on-close Job Object, retains the original process handle, and returns one non-detachable lease. The existing PowerShell smoke script remains the thin policy coordinator; a test-only nonce protocol corroborates process identity, while CIM remains only a post-disposal residual audit. A canonical PowerShell runner owns focused integration execution under exact runtime paths, separate from the Node release policy contract.
+**Architecture:** A Windows-only C# boundary validates launch requests, creates the process suspended, assigns and verifies it in a kill-on-close Job Object, retains the original process and Job handles, resumes once, and returns one non-detachable lease. The PowerShell smoke script is a thin policy coordinator and authorizes installer-owned mutation only after explicit root-exit and Job-quiescence proof. CIM remains only a bounded post-disposal executable-path diagnostic.
 
 **Tech Stack:** PowerShell Core 7.4+, C# compiled with `Add-Type`, Windows Job Objects and `CreateProcessW`, Node 24's built-in test runner, GitHub Actions, NSIS/Tauri release smoke.
 
 ## Lean MVP Scope Amendment (2026-07-13)
 
-This approved amendment supersedes all unfinished execution work in Tasks 3-10 below. Tasks 0-2 remain completed history. The detailed legacy tasks are retained only as a post-MVP hardening backlog and design record; their commands, checkboxes, completion definition, dedicated CI context, and governance steps are not current execution instructions.
+This approved amendment supersedes all unfinished execution work in Tasks 3-10 below. Tasks 0-2 remain completed history. Everything under **Archived Enterprise Plan (Non-Operative)** is retained only as a post-MVP hardening backlog and design record; its constraints, file inventory, commands, checkboxes, completion definition, dedicated CI context, and governance steps are not current execution instructions.
 
 The lean closure delivered one authoritative retained-handle `ContainedProcessLease` across the six actual NSIS smoke phases. It preserves suspended creation, assign-and-verify before one resume, original-handle ownership, root-exit and Job-quiescence proof, fail-closed filesystem mutation, typed NSIS `/D=`, argument/environment/working-directory/stream behavior, and diagnostic-only post-disposal CIM use. Five real-Windows cases cover the essential lifecycle boundary.
 
 Deferred work includes atomic nonce evidence, exhaustive fault/concurrency/PID-churn matrices, the canonical bounded runner and redaction framework, dual-runtime verification, a dedicated `Windows process harness` workflow/context, cache/open-PR/ruleset/Actions-policy/evidence-PR governance, general PowerShell 7 migration, UI convergence, broader server work, HTTP/3, and WebSockets.
 
-### Lean MVP closure checklist
+### Active MVP constraints and files
+
+- The lease remains the sole lifecycle authority for installer, application, and uninstaller launches; PID, `StartTime`, managed `Process`, and CIM cannot select or terminate them.
+- Every child is created suspended, assigned and verified before one resume, and represented by retained original process and Job handles until lease disposal.
+- Caught exceptions, disposal, missing PIDs, or a clean CIM diagnostic never restore mutation authority.
+- Only the three focused PowerShell contracts and the one lean local release gate are in scope.
+- Active code and test files are `windows-contained-process.cs`, `windows-contained-process.contract.test.ps1`, `windows-contained-process-fixture.ps1`, `windows-contained-process.integration.test.ps1`, `nsis-smoke-helpers.psm1`, `nsis-smoke-helpers.test.ps1`, `smoke-nsis.ps1`, and `release-evidence.contract.mjs` under `desktop/tests/scripts/`, plus this plan and the paired design.
+
+### Lean MVP closure evidence
 
 - [x] Preserve completed Tasks 0-2 and their reviewed public contracts.
 - [x] Capture focused RED evidence before migrating the real smoke consumers.
@@ -25,14 +33,16 @@ Deferred work includes atomic nonce evidence, exhaustive fault/concurrency/PID-c
 - [x] Gate every installer-owned filesystem mutation on lease-proven root exit and Job quiescence.
 - [x] Pass the focused contract, five-case integration, helper, release-contract, NSIS build, local smoke, delete smoke, and diff checks.
 - [x] Reconcile the design and plan with the implemented MVP and explicit deferrals.
-- [ ] Complete direct whole-slice review and resolve every Critical or Important finding.
-- [ ] Complete parallel native/process and CI/release final reviews and resolve every Critical or Important finding.
-- [ ] Push the focused PR, require every emitted check for the exact head, merge only that checked head, and verify the exact merged-main SHA.
-- [ ] Halt after reporting the contained-process MVP landing; wait for explicit `proceed`.
 
-The local implementation commits are `9d711ba test: verify contained Windows process lifecycles` and `be73e5a refactor: make the NSIS smoke lease authoritative`. Hosted verification remains pending.
+The local implementation commits are `9d711ba test: verify contained Windows process lifecycles` and `be73e5a refactor: make the NSIS smoke lease authoritative`. Direct/final review, exact-head PR checks, match-head merge, and exact-main verification remain mandatory landing gates, but their evidence belongs in the PR and final report rather than being preclaimed by this document commit.
 
-## Global Constraints
+---
+
+## Archived Enterprise Plan (Non-Operative)
+
+The remainder of this document records the superseded enterprise implementation sequence. Proposed files may not exist, expected test counts may describe work never implemented, and every instruction involving nonce evidence, exhaustive lifecycle matrices, canonical runners, redaction, dual runtimes, dedicated workflow contexts, or repository governance is deferred. Do not execute this remainder until the user explicitly says `proceed` and approves a new plan.
+
+### Historical Global Constraints
 
 - Support Windows 10 x64 or later; do not introduce a cross-platform process abstraction.
 - The minimum PowerShell runtime is Core 7.4; CI must exercise exact PowerShell 7.4.17 and the hosted current runtime.
@@ -52,7 +62,9 @@ The local implementation commits are `9d711ba test: verify contained Windows pro
 
 ---
 
-## Scope And File Map
+### Historical Scope And File Map
+
+This is a proposed target inventory, not a description of the lean MVP worktree.
 
 ### New focused files
 
@@ -1980,7 +1992,7 @@ Only after the evidence PR's exact merged SHA is green and both governance read-
 
 ---
 
-## Completion Definition
+## Archived Enterprise Completion Definition (Non-Operative)
 
 This plan is complete only when all of these are true:
 

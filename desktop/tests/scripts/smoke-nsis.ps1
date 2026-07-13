@@ -224,17 +224,10 @@ function Invoke-SmokeContainedProcess {
     return $result
   } catch {
     $typedFailure = Get-ContainedProcessFailure -Exception $_.Exception
-    if ($null -ne $typedFailure -and $typedFailure.CleanupProven) {
-      $script:filesystemCleanupAuthorized = $true
-      $evidence.cleanupAuthority.authorized = $true
-      $evidence.cleanupAuthority.failureStage = [string]$typedFailure.Stage
-      $evidence.cleanupAuthority.retainedPaths = @()
-    } else {
-      $script:filesystemCleanupAuthorized = $false
-      $evidence.cleanupAuthority.authorized = $false
-      $evidence.cleanupAuthority.failureStage = if ($null -eq $typedFailure) { $Phase } else { [string]$typedFailure.Stage }
-      $evidence.cleanupAuthority.retainedPaths = @($footprintPaths.Values) + @($smokeRoot)
-    }
+    $script:filesystemCleanupAuthorized = $false
+    $evidence.cleanupAuthority.authorized = $false
+    $evidence.cleanupAuthority.failureStage = if ($null -eq $typedFailure) { $Phase } else { [string]$typedFailure.Stage }
+    $evidence.cleanupAuthority.retainedPaths = @($footprintPaths.Values) + @($smokeRoot)
     throw
   }
 }

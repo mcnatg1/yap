@@ -111,6 +111,40 @@ $forbiddenMembers = @($smokeAst.FindAll({
 }, $true) | ForEach-Object { $_.Member.Value } | Where-Object { $_ -in @("Kill", "WaitForExit") })
 Assert-True ($forbiddenMembers.Count -eq 0) "Smoke orchestration reacquired managed Process lifecycle control."
 
+$smokeLeaseFunctions = @($smokeAst.FindAll({
+  param($Node)
+  $Node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+  $Node.Name -ceq "Invoke-SmokeContainedProcess"
+}, $true))
+Assert-True ($smokeLeaseFunctions.Count -eq 1) "Smoke orchestration must define exactly one cleanup-gated lease adapter."
+$launchCatches = @($smokeLeaseFunctions[0].Body.FindAll({
+  param($Node)
+  $Node -is [Management.Automation.Language.CatchClauseAst]
+}, $true))
+Assert-True ($launchCatches.Count -eq 1) "The smoke lease adapter must have exactly one fail-closed catch path."
+$catchAssignments = @($launchCatches[0].FindAll({
+  param($Node)
+  $Node -is [Management.Automation.Language.AssignmentStatementAst]
+}, $true))
+$authorizationAssignments = @($catchAssignments | Where-Object {
+  $_.Left.Extent.Text -in @(
+    '$script:filesystemCleanupAuthorized',
+    '$evidence.cleanupAuthority.authorized'
+  )
+})
+Assert-True (
+  $authorizationAssignments.Count -eq 2 -and
+  @($authorizationAssignments | Where-Object { $_.Right.Extent.Text -cne '$false' }).Count -eq 0
+) "A caught launch exception must never restore cleanup authorization."
+$retainedPathAssignments = @($catchAssignments | Where-Object {
+  $_.Left.Extent.Text -ceq '$evidence.cleanupAuthority.retainedPaths'
+})
+Assert-True (
+  $retainedPathAssignments.Count -eq 1 -and
+  $retainedPathAssignments[0].Right.Extent.Text -match '\$footprintPaths\.Values' -and
+  $retainedPathAssignments[0].Right.Extent.Text -match '\$smokeRoot'
+) "A caught launch exception must retain every protected installer-owned path."
+
 Assert-Throws {
   Assert-InstallerCleanupAuthorized -Authorized:$false -Operation "helper test mutation"
 } "blocked|not proven"

@@ -10,16 +10,16 @@
 
 ## Lean MVP Scope Amendment (2026-07-13)
 
-This approved amendment supersedes the unfinished implementation obligations in Sections 6, 7, 11, 12, and 13 for the current MVP. The older design remains below as architectural history and a post-MVP hardening backlog; its unchecked or unmet items are not evidence that the contained-process MVP is incomplete.
+This approved amendment supersedes every later statement that makes nonce evidence, exhaustive lifecycle testing, canonical runners, dual-runtime verification, a dedicated CI context, or governance work part of current MVP acceptance, including the unfinished obligations in Sections 6, 7, 11, 12, and 13. The older design remains below as architectural history and a post-MVP hardening backlog; its unchecked or unmet items are not evidence that the contained-process MVP is incomplete.
 
 The implemented MVP boundary provides:
 
 - one authoritative `ContainedProcessLease` for each installer, installed-application, and uninstaller launch across the six real smoke phases: install, application, default uninstall, reinstall, explicit uninstall, and cleanup uninstall;
-- suspended process creation, Job assignment and membership verification, retained original process/thread handles, identity capture, and exactly one resume before child code can run;
+- suspended process creation, Job assignment and membership verification, retained original process and Job handles, a thread handle retained through exactly one resume, and identity capture before child code can run;
 - retained-handle root-exit observation plus Job-quiescence proof, with a fail-closed mutation gate that preserves installer-owned paths when cleanup is unproven;
-- one argument encoder, a typed final NSIS `/D=<absolute path>` tail, case-insensitive environment override/removal, working-directory support, and bounded stdout/stderr capture;
+- one argument encoder, a typed final NSIS `/D=<absolute path>` tail, case-insensitive environment override/removal, working-directory support, and separate stdout/stderr redirection;
 - no PID, `StartTime`, or CIM reconstruction as lifecycle authority; CIM is limited to a bounded executable-path diagnostic after lease disposal; and
-- five focused real-Windows lifecycle cases covering natural exit, timeout/termination, descendant containment, nested-Job containment, and immediate exit.
+- five focused real-Windows lifecycle cases covering natural exit, timeout/termination, descendant containment, nested-Job containment, and the required stdout/stderr, environment, and working-directory behavior.
 
 The following work is explicitly deferred until after the MVP is landed and the user says `proceed`:
 
@@ -420,4 +420,4 @@ The single lean local release gate completed on 2026-07-13:
 
 ### Hosted verification
 
-The focused PR, exact-head emitted checks, match-head merge, and exact merged-main checks are pending. No deferred CI-harness or repository-governance work is required for this MVP landing.
+This document commit intentionally does not preclaim future hosted evidence. The focused PR, exact-head emitted checks, match-head merge, and exact merged-main checks remain landing gates whose exact identifiers belong in the PR and final report. No deferred CI-harness or repository-governance work is required for this MVP landing.
