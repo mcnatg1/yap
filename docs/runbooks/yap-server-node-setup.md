@@ -38,11 +38,12 @@ Do **not** rerun the baseline setup script on this prepared, multi-purpose host.
 Its landing zone and SSH hardening already exist, and a rerun would perform
 unnecessary package, firewall, logging, and service operations.
 
-The validated 2026-07-13 smoke used exact immutable release
-`099e558a27a747a7a2f24ec4e86f9c13f7604c13` transiently. It was stopped after
-validation; no persistent service remains. Any newer SHA requires promotion and
-fresh GB10 evidence and must not inherit the `099e558a27a747a7a2f24ec4e86f9c13f7604c13`
-result.
+The current validated 2026-07-13 smoke used exact immutable release
+`c3999b7b685dd668165d54b64d1af61e41adad05` transiently. Its deployment archive
+SHA-256 is `be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`.
+It was stopped after validation; no persistent service remains. Any newer
+executable SHA requires promotion and fresh GB10 evidence and must not inherit
+this result.
 
 Phase 3 uses a loopback-only health process on the GB10:
 

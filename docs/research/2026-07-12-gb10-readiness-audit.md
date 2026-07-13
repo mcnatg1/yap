@@ -9,8 +9,8 @@
 
 The original sections record the 2026-07-12 pre-implementation host baseline.
 They are not current implementation status. On 2026-07-13, the Phase 3
-private-link gate completed against exact immutable release
-`099e558a27a747a7a2f24ec4e86f9c13f7604c13`. This document is non-normative:
+private-link gate was refreshed against exact immutable release
+`c3999b7b685dd668165d54b64d1af61e41adad05`. This document is non-normative:
 the Phase 3 implementation record and ADRs own the product contract, while this
 document owns the observed host and live-smoke evidence.
 
@@ -18,7 +18,7 @@ document owns the observed host and live-smoke evidence.
 
 The selected loopback-only SSH-forward design was executed successfully. The
 GB10 Ubuntu ARM64/Python 3.12 server, contract, and infrastructure checks passed
-49/49. Through the live tunnel, the command-line production connector projected
+50/50. Through the live tunnel, the command-line production connector projected
 `Ready`; in a separate tunnel-refusal invocation it projected `Retrying`. This
 did not prove a same-process native UI `Ready`-to-`Retrying` transition. Cleanup
 left no Yap process or local/remote port-18765 listener, and no external bind or firewall
@@ -31,7 +31,7 @@ change was made. The host remains multi-homed and is not an isolated appliance.
 | TCP exposure | SSH is the only externally bound TCP listener observed | Add no application listener outside loopback |
 | Host firewall | UFW is active; effective user rules require root to inspect | Tunnel-first needs no new UFW rule; verify rules before any direct bind |
 | Server runtime | Python 3.12.3 ran the dependency-free health process successfully | Keep the standard-library health service in an immutable release directory |
-| Yap deployment | Exact release `099e558a27a747a7a2f24ec4e86f9c13f7604c13` is retained under `/srv/yap-server/releases/`; no Yap process, port-18765 listener, or Yap service unit remains | Preserve the immutable smoke artifact; a persistent deployment is future work |
+| Yap deployment | Exact release `c3999b7b685dd668165d54b64d1af61e41adad05` is retained read-only under `/srv/yap-server/releases/`; no Yap process, port-18765 listener, or Yap service unit remains | Preserve the immutable smoke artifact; a persistent deployment is future work |
 | Durable ledger | SQLite 3.45.1 exists on the host | Phase 3's authoritative job ledger remains Rust-owned on the desktop, per plan |
 | ASR | No cleared Yap ASR runtime or model is deployed | Advertise all ASR capabilities as false |
 | Time | Host NTP is inactive and the GB10 was about 18.6 seconds ahead of the Windows client | Health-only validation may proceed; fix time before auth, leases, replay windows, or server-owned timestamps |
@@ -157,11 +157,11 @@ server ASR, and completed imported-recording processing remain Phase 5 work.
 Phase 3 completed with the following live-node evidence:
 
 - Exact immutable release:
-  `099e558a27a747a7a2f24ec4e86f9c13f7604c13`.
+  `c3999b7b685dd668165d54b64d1af61e41adad05`.
 - Deployment archive SHA-256:
-  `8c37e9c49720dc734adef5963b8bf1ce7d4856658a4bcb7180376b2aa3c859cf`.
+  `be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`.
 - GB10 Ubuntu ARM64/Python 3.12 server, contract, and infrastructure suite:
-  **49/49 passed**.
+  **50/50 passed**.
 - Live loopback health through the private-link SSH forward and command-line
   production connector projection: `Ready`.
 - Separate dead-tunnel/refused-connection invocation: `Retrying`.

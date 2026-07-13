@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-13; the stock-NSIS Phase 3 replacement is implemented but its current checked-head gate is pending. Exact prior GB10 private-link evidence remains pinned to `099e558a27a747a7a2f24ec4e86f9c13f7604c13` and is not inherited by this branch.
+**As of:** 2026-07-13; the stock-NSIS Phase 3 implementation candidate `c3999b7b685dd668165d54b64d1af61e41adad05` passed the one-time local/native/server/GB10 gate. Checked-head hosted CI and the disposable-Windows installer lifecycle remain required before merge.
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -47,22 +47,22 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 
 ## Verification snapshot
 
-The evidence below is the prior Phase 3 baseline. It does not establish the
-checked-head gate for the stock-NSIS replacement. After the final server-log and
-client queue corrections, the affected server, frontend unit, production-build,
-and Playwright suites were rerun. Rust/Clippy, native WDIO, release-contract,
-provenance, and installer results are historical results from that matrix.
+The one-time Phase 3 implementation gate ran against exact candidate
+`c3999b7b685dd668165d54b64d1af61e41adad05`. The evidence-only documentation
+commit that follows does not change executable behavior; hosted checks still
+must pass on the final PR head.
 
-- Server contract, health service, and infra: **50/50 passed**. The post-GB10 request-target redaction fix also passed its focused API suite **23/23**.
-- Frontend unit tests: **256/256 passed**; the production TypeScript/Vite build passed with 295 modules.
-- Rust: **674 executed tests passed**; Clippy passed with warnings denied.
-- Playwright: **19/19 passed** after the Phase 3 UI gate regressions were repaired in `b98feee`.
-- Required native WDIO passed all four spec files and 10 required assertions; the optional hardware/model probe remained skipped.
-- Release contract: **12/12 passed**.
-- Installer closure: Yap now targets Tauri's canonical app-data namespace, uses stock NSIS without custom hooks, and has one disposable-Windows lifecycle harness with bounded process cleanup. The older `Yap.Test` token/sentinel deletion evidence is historical and is not evidence for the replacement; hosted lifecycle proof for the replacement is required on the checked PR head.
-- Third-party provenance: the exact pinned Freeflow revision, license, and selected upstream file hashes verified.
-- GB10 evidence is pinned to exact `099e558a27a747a7a2f24ec4e86f9c13f7604c13`: Ubuntu ARM64/Python 3.12 server, contract, and infra checks passed **49/49**; transient loopback health and the command-line production connector reached `Ready`; a separate refused-tunnel invocation reached `Retrying`; teardown left no Yap process or local/remote port-18765 listener.
+- Server contract, health service, and infra: **50/50 passed** locally and **50/50 passed** from the immutable GB10 release.
+- Frontend unit tests: **257/257 passed**; the production TypeScript/Vite build passed with 295 modules.
+- Rust: **660/660 library tests** plus **27/27 integration tests** passed; format and all-target Clippy passed with warnings denied.
+- Local live server boundary: **10/10 connector integration tests** passed against the bounded Python health process, followed by clean teardown.
+- Playwright: **19/19 passed**.
+- Required native WDIO passed all four spec files and 10 required assertions; the optional real-microphone/model probe remained explicitly skipped because no verified Nemotron model is installed.
+- Release contract: **32/32 passed**. The exact pinned upstream revisions, license evidence, and selected source hashes verified, and the pnpm high-severity audit found no known vulnerabilities.
+- Stock NSIS bundle: `Yap_0.1.0_x64-setup.exe`, 10,072,228 bytes, SHA-256 `c854a5b7b8e824fe305a9b78c7f0effc0b05c128125dddfb2163e0d730efb4b7`. It was built but not installed on the everyday Windows profile.
+- Installer closure: Yap targets Tauri's canonical app-data namespace, uses stock NSIS without custom hooks, and has one disposable-Windows lifecycle harness. Hosted lifecycle proof is still required on the checked PR head.
+- GB10 evidence: exact immutable release `c3999b7b685dd668165d54b64d1af61e41adad05`, archive SHA-256 `be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`; ARM64/Python 3.12 checks passed **50/50**, tunneled production connector projected `Ready`, a separate refusal invocation projected `Retrying`, and teardown left no Yap process or local/remote port-18765 listener.
 
-Later local security and correctness fixes were not contained in the pinned GB10 artifact and do not inherit its live-node evidence. The GB10 run did not prove a persistent service or same-process native UI transition, and it introduced no upload, WSS, authentication, ASR, external listener, or firewall change.
+The GB10 run did not prove a persistent service or same-process native UI transition, and it introduced no upload, WSS, authentication, ASR, external listener, or firewall change. The local machine did not have `cargo-audit`; the checksum-pinned RustSec audit remains a required hosted-CI lane.
 
 These checks do not activate missing product gates. There is no committed licensed real-speech/WER fixture, meeting RTTM/diarization fixture suite, remote upload/drain or server inference path, or authenticated end-to-end test. Scores must be revised only when those authoritative artifacts change.
