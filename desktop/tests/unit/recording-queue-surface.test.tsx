@@ -98,6 +98,8 @@ describe("imported recording queue surface", () => {
     expect(appSource).toContain("discardLegacyQueue,");
     expect(appSource).toContain("legacyDiscardAllowed,");
     expect(appSource).toContain("legacyDiscardAllowed={legacyDiscardAllowed}");
-    expect(appSource).toContain("onDiscardLegacyQueue={discardLegacyQueue}");
+    expect(appSource).toContain(
+      'onDiscardLegacyQueue={() => reportRecordingAction(discardLegacyQueue, "Could not discard old queue")}',
+    );
   });
 });
