@@ -834,12 +834,14 @@ test("NSIS smoke separates local-safe validation from isolated production deleti
 test("Windows release automation requires PowerShell 7.4 Core", async () => {
   const powerShellFiles = [
     "desktop/tests/scripts/build-nsis-test.ps1",
+    "desktop/tests/scripts/native-window-recovery.test.ps1",
     "desktop/tests/scripts/nsis-smoke-helpers.psm1",
     "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
     "desktop/tests/scripts/smoke-nsis-local.ps1",
     "desktop/tests/scripts/smoke-nsis-production-delete.ps1",
     "desktop/tests/scripts/smoke-nsis-test-delete.ps1",
     "desktop/tests/scripts/smoke-nsis.ps1",
+    "desktop/tests/wdio/native-window-recovery.psm1",
   ];
   const trackedPowerShellFiles = execFileSync(
     "git",

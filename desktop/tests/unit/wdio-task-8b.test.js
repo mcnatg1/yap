@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -369,6 +370,21 @@ describe("Task 8b canonical saved-session ownership", () => {
 });
 
 describe("Task 8b WDIO run isolation", () => {
+  const windowsIt = process.platform === "win32" ? it : it.skip;
+
+  windowsIt("polls native main-window recovery without weakening uniqueness", () => {
+    const recoveryTest = fileURLToPath(
+      new URL("../scripts/native-window-recovery.test.ps1", import.meta.url),
+    );
+    const output = execFileSync(
+      "pwsh.exe",
+      ["-NoProfile", "-NonInteractive", "-File", recoveryTest],
+      { encoding: "utf8", windowsHide: true },
+    );
+
+    expect(output).toContain("Native WDIO window-recovery tests passed.");
+  });
+
   it("attaches a worker to the launcher-owned isolation without reclaiming it", () => {
     const env = {};
     const isolation = privateIsolation("worker-attach", env);

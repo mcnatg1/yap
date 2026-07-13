@@ -329,16 +329,9 @@ Start-Sleep -Seconds 10
     Remove-Item -LiteralPath "Env:$removedEnvironmentKey" -ErrorAction SilentlyContinue
   }
 
-  $timeoutPidPath = Join-Path $processRoot "timeout.pid"
   $timeoutOutPath = Join-Path $processRoot "timeout.out.log"
   $timeoutErrPath = Join-Path $processRoot "timeout.err.log"
-  $timeoutScript = @"
-`$current = [Diagnostics.Process]::GetCurrentProcess()
-`$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
-"`$PID|`$identity" | Set-Content -LiteralPath '$timeoutPidPath' -Encoding ascii
-`$current.Dispose()
-Start-Sleep -Seconds 6
-"@
+  $timeoutScript = "Start-Sleep -Seconds 6"
   $timeoutEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($timeoutScript))
   $timeoutError = $null
   $timeoutWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -356,14 +349,12 @@ Start-Sleep -Seconds 6
   $timeoutWatch.Stop()
   Assert-True ($timeoutError -match "exceeded the 0.5 second deadline") "Deadline helper did not fail on timeout."
   Assert-True ($timeoutError -match '"residualProcessIds":\[\]') "Deadline helper omitted successful cleanup evidence."
-  Assert-True (Test-Path -LiteralPath $timeoutPidPath -PathType Leaf) "Timed process did not report its PID."
-  $timedProcessIdentity = (Get-Content -LiteralPath $timeoutPidPath -Raw).Trim().Split("|")
-  Assert-True ($timedProcessIdentity.Count -eq 2) "Timed-process identity evidence was malformed."
-  $timedProcessId = [int]$timedProcessIdentity[0]
+  Assert-True (
+    $timeoutError -match '^Process (?<processId>\d+) or its descendants exceeded'
+  ) "Deadline helper omitted the launched root process ID."
+  $timedProcessId = [int]$Matches.processId
   Assert-True ($timeoutWatch.Elapsed.TotalSeconds -lt 4.5) "Deadline cleanup waited for the timed process to exit naturally."
-  Assert-True (-not (
-    Test-ProcessIdentityAlive -ProcessId $timedProcessId -ExpectedIdentity $timedProcessIdentity[1]
-  )) "Timed process identity survived deadline cleanup."
+  Assert-True (-not (Test-ProcessAlive -ProcessId $timedProcessId)) "Timed process survived deadline cleanup."
   Assert-True ($timeoutError -match "terminatedProcessIds[^]]*$timedProcessId") "Deadline cleanup did not report terminating the timed process."
   Assert-True ($timeoutError -match '"reusedProcessIds":\[\]') "Creation-time precision misclassified the timed process as PID reuse."
   Assert-FileUnlocked -Path $timeoutOutPath -Message "Timed-process stdout was not reaped."

@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import {
   assertRecordingRootEmpty,
@@ -10,9 +12,17 @@ const execFileAsync = promisify(execFile);
 const mainWindowTitle = "Yap";
 const minMainWindowWidth = Math.floor(1122 * 0.7);
 const minMainWindowHeight = Math.floor(740 * 0.7);
+const nativeWindowRecoveryModule = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "native-window-recovery.psm1",
+);
 
 const recordingRoot = process.env.YAP_LIVE_RECORDINGS_DIR;
 if (!recordingRoot) throw new Error("WDIO requires an isolated YAP_LIVE_RECORDINGS_DIR.");
+
+function powerShellLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
 
 async function showMainWindowNatively() {
   const webdriverPort = Number(browser.options.port ?? 4445);
@@ -35,6 +45,7 @@ async function showMainWindowNatively() {
   }
   const script = `
 $ErrorActionPreference = "Stop"
+Import-Module -Name ${powerShellLiteral(nativeWindowRecoveryModule)} -Force
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -108,15 +119,14 @@ public static class WdioNativeWindow {
     }
 }
 '@
-$candidateCount = [WdioNativeWindow]::ShowMainWindowForProcess(
-    [uint32]${appPid},
-    ${JSON.stringify(mainWindowTitle)},
-    ${minMainWindowWidth},
-    ${minMainWindowHeight}
-)
-if ($candidateCount -ne 1) {
-    throw "Expected exactly one main Yap window for WDIO app PID ${appPid}; found $candidateCount."
-}
+$null = Wait-WdioUniqueWindowCandidate -Probe {
+    [WdioNativeWindow]::ShowMainWindowForProcess(
+        [uint32]${appPid},
+        ${JSON.stringify(mainWindowTitle)},
+        ${minMainWindowWidth},
+        ${minMainWindowHeight}
+    )
+} -Description "main Yap window for WDIO app PID ${appPid}" -MaxAttempts 50 -PollIntervalMilliseconds 100
 `;
   await execFileAsync(
     "pwsh.exe",
