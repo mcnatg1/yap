@@ -12,7 +12,6 @@ const releaseInputPaths = Object.freeze([
   "desktop/pnpm-lock.yaml",
   "desktop/src-tauri/Cargo.lock",
   "desktop/src-tauri/Cargo.toml",
-  "desktop/src-tauri/nsis-hooks.nsh",
   "desktop/src-tauri/rust-toolchain.toml",
   "desktop/src-tauri/tauri.conf.json",
 ]);
@@ -27,7 +26,6 @@ const ignoredReleaseInputPathspecs = Object.freeze([
   "desktop/src-tauri/build.rs",
   "desktop/src-tauri/capabilities",
   "desktop/src-tauri/icons",
-  "desktop/src-tauri/nsis-hooks.nsh",
   "desktop/src-tauri/src",
   "desktop/src-tauri/Cargo.lock",
   "desktop/src-tauri/Cargo.toml",

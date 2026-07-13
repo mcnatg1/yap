@@ -44,7 +44,7 @@ where
 }
 
 fn settings_dir() -> std::path::PathBuf {
-    settings_dir_from(|key| std::env::var(key).ok())
+    crate::paths::app_data_dir()
 }
 
 fn fallback_disabled_path() -> std::path::PathBuf {
@@ -138,12 +138,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_dir_uses_localappdata() {
+    fn settings_dir_uses_app_data_override() {
         let local = std::env::temp_dir().join("local-data");
         let dir = settings_dir_from(|key| match key {
-            "LOCALAPPDATA" => Some(local.display().to_string()),
+            "YAP_APP_DATA_DIR" => Some(local.display().to_string()),
             _ => None,
         });
-        assert_eq!(dir, local.join("Yap"));
+        assert_eq!(dir, local);
     }
 }

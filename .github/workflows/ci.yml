@@ -82,8 +82,6 @@ jobs:
           '@
           & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -Command $parserProbe
           if ($LASTEXITCODE -ne 0) { throw "Tracked scripts failed PowerShell 7.4 parsing." }
-          & $env:YAP_POWERSHELL_74 -NoProfile -NonInteractive -File ./tests/scripts/nsis-smoke-helpers.test.ps1
-          if ($LASTEXITCODE -ne 0) { throw "Focused PowerShell 7.4 helper suite failed." }
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 11.7.0

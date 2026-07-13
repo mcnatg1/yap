@@ -481,7 +481,12 @@ where
 }
 
 pub(crate) fn recordings_dir() -> std::path::PathBuf {
-    recordings_dir_from(|key| std::env::var(key).ok())
+    if let Some(dir) =
+        crate::paths::absolute_env_path(&|key| std::env::var(key).ok(), "YAP_LIVE_RECORDINGS_DIR")
+    {
+        return dir;
+    }
+    crate::paths::app_data_dir().join("live-recordings")
 }
 
 #[cfg(test)]
@@ -5035,10 +5040,10 @@ mod tests {
         assert_eq!(
             recordings_dir_from(|key| match key {
                 "YAP_LIVE_RECORDINGS_DIR" => Some("relative-live-recordings".into()),
-                "LOCALAPPDATA" => Some(local.display().to_string()),
+                "YAP_APP_DATA_DIR" => Some(local.display().to_string()),
                 _ => None,
             }),
-            local.join("Yap").join("live-recordings")
+            local.join("live-recordings")
         );
     }
 

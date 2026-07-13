@@ -14,7 +14,7 @@ Today `desktop/src/polish.ts` calls **Ollama** at `http://127.0.0.1:11434/api/ch
 We rejected relying on a **separate Ollama install** for shipped product UX. **Ollama uses llama.cpp under the hood** — bundling **`llama-server`** (llama.cpp’s OpenAI-compatible HTTP server) gives the same inference class with:
 
 - One Yap installer (no “install Ollama first”)
-- Models in `%LOCALAPPDATA%/Yap/models/` (Windows) / `~/Library/Application Support/Yap/models/` (macOS)
+- Models in `%APPDATA%/com.mcnatg1.yap/models/` (Windows) / `~/Library/Application Support/com.mcnatg1.yap/models/` (macOS)
 - Same sidecar lifecycle pattern as CrispASR
 - **CPU-first** on Windows and Mac (`--n-gpu-layers 0`); optional Metal on Apple Silicon later without changing architecture
 
@@ -38,7 +38,7 @@ Adopt a **bundled `llama-server` sidecar** managed by Tauri (Rust) as the **prim
 | Setting | Value |
 |---------|--------|
 | **GGUF** | Small instruct model, **~2B Q4_K** (e.g. Gemma-class e2b Q4 — exact file pinned in `desktop/llama-model.txt`) |
-| **Path** | `%LOCALAPPDATA%/Yap/models/<file>.gguf` |
+| **Path** | `%APPDATA%/com.mcnatg1.yap/models/<file>.gguf` |
 | **Server load** | `-m <path>` at sidecar start; single model resident for v1 |
 | **Context** | `-c 2048` (Scribe prompts are short) |
 | **Threads** | `-t 4` default on 16 GB machines (cap to avoid starving CrispASR) |
@@ -102,7 +102,7 @@ Yap (Tauri)
 
 ### Model cache
 
-Reuse the same directory as CrispASR GGUF weights (`YAP_MODELS_DIR` / `%LOCALAPPDATA%/Yap/models/`). First-run download or installer pre-cache for polish GGUF.
+Reuse the same directory as the local STT weights (`YAP_MODELS_DIR` / `%APPDATA%/com.mcnatg1.yap/models/` on Windows). First-run download or installer pre-cache for polish GGUF.
 
 ## Consequences
 

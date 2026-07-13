@@ -6035,6 +6035,7 @@ name = "yap-desktop"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "dirs",
  "libc",
  "reqwest",
  "rusqlite",

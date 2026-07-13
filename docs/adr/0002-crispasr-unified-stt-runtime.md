@@ -96,7 +96,7 @@ Quantization policy: **Q4_K as default** for the local fallback. The client does
 ### Model cache location
 
 ```
-%LOCALAPPDATA%\Yap\models\     (Windows)
+%APPDATA%\com.mcnatg1.yap\models\     (Windows; Tauri app_data_dir)
 ~/.yap/models/                 (Unix fallback)
 ```
 
@@ -191,7 +191,7 @@ flowchart TB
         Router -->|live only| MS
     end
 
-    subgraph Cache["%LOCALAPPDATA%/Yap/models"]
+    subgraph Cache["%APPDATA%/com.mcnatg1.yap/models"]
         G1[moonshine-streaming-tiny-q4_k.gguf]
         G2[tokenizer.bin]
         G3[fireredpunc-q4_k.gguf]
@@ -217,7 +217,7 @@ ASCII equivalent:
                     │  └─────────────────────────────────────┘ │
                     └──────────────────┬────────────────────────┘
                                        ▼
-                         %LOCALAPPDATA%\Yap\models\*
+                         %APPDATA%\com.mcnatg1.yap\models\*
                          (mmap + OS page cache)
 ```
 

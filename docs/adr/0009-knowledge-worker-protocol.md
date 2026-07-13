@@ -60,7 +60,7 @@ ADR 0004 mandates a **separate `yap-knowledge-worker` subprocess** and mentions 
 ### Lifecycle
 - Spawned by Tauri on first chunk; **idle exit after 5 min** empty queue + no active session ([ADR 0004 §10](0004-background-diarization-okf-agents.md)); Tauri restarts on next chunk.
 - `BELOW_NORMAL` priority (Win) / `nice 10` (Unix); ORT 2 threads.
-- Logs: `%LOCALAPPDATA%/Yap/logs/knowledge-worker.log` (chunk ms, queue depth, vault size).
+- Logs: `%APPDATA%/com.mcnatg1.yap/logs/knowledge-worker.log` on Windows (chunk ms, queue depth, vault size).
 
 ## Consequences
 

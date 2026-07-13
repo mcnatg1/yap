@@ -1,10 +1,12 @@
 # Server Contract And Durable Connector Implementation Plan
 
-> **Implementation status (2026-07-13):** Landed canonical Phase 3 implementation record. Tasks 1-7 and the full local Phase 3 gate are complete. The exact GB10 private-link execution is pinned to immutable release `099e558a27a747a7a2f24ec4e86f9c13f7604c13`; later repository changes were not part of that GB10 artifact. The unchecked boxes below preserve the original implementation recipe and are not backlog or status evidence.
+> **Implementation status (2026-07-13):** Landed canonical Phase 3 server-boundary record. Tasks 1-7 remain implemented. The stock-NSIS closure is implemented on the current Phase 3 branch, but its checked-head gate is pending. The earlier GB10 private-link execution is pinned to immutable release `099e558a27a747a7a2f24ec4e86f9c13f7604c13` and is not evidence for this branch. The unchecked boxes below preserve the original implementation recipe and are not backlog or status evidence.
 
 > **Evidence boundary:** Phase 3 proves the machine-readable contract, health-only service, capability-aware connector, retry behavior, and Rust-owned durable ledger. It does not prove a persistent server service, same-process native UI transition, upload/drain, WSS, authentication, ASR, model pools, or external network exposure.
 
 > **Reader note:** Do not execute this document as an unfinished plan. Use current code, executable tests, and the validation status above as implementation truth.
+
+> **Installer closure amendment (2026-07-13):** The Phase 3 server contract, connector, retry, and durable-ledger implementation remains required and unchanged. Installer lifecycle containment is no longer part of this plan's runtime design: Yap uses Tauri's canonical app-data path and stock NSIS, removes installer-only containment machinery, and runs lifecycle verification only in a disposable Windows environment.
 
 **Goal:** Complete Yap's canonical Phase 3 boundary with a versioned server API/WSS contract, a real desktop reachability connector, and a Rust-owned SQLite job ledger that can safely support later upload and reconnect drain.
 

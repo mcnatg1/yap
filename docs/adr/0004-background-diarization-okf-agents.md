@@ -161,7 +161,7 @@ Align to **raw** first (faithful to audio). **Polished text inherits speaker lab
 **Directories** (under user data, not repo):
 
 ```
-%LOCALAPPDATA%/Yap/knowledge_base/
+%APPDATA%/com.mcnatg1.yap/knowledge_base/
   conversations/      # timed, speaker-tagged transcripts
   jargon_glossary/    # term cards
   work_artifacts/     # todos, exports
@@ -246,7 +246,7 @@ These promote former “room for improvement” items into **non-optional** impl
 | STT text drift | Store **`text_raw` per chunk** from same STT pass as live display; alignment always uses raw |
 | OKF sprawl | Phase 7c writes OKF; until then append speaker tags to **existing Yap Transcripts JSON/history** |
 | Curator git surprise | Git init **opt-in** in Settings; never silent |
-| No observability | Local only: `%LOCALAPPDATA%/Yap/logs/knowledge-worker.log` — chunk ms, queue depth, vault size |
+| No observability | Local only: `%APPDATA%/com.mcnatg1.yap/logs/knowledge-worker.log` on Windows — chunk ms, queue depth, vault size |
 | Session stitch | **Archivist stitch job** at session end merges chunks + vault into one conversation file |
 
 **IPC:** knowledge worker listens on `127.0.0.1` (port from env `YAP_KNOWLEDGE_PORT`) or named pipe; JSON-lines protocol; localhost-only.

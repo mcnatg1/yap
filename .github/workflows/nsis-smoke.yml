@@ -69,9 +69,9 @@ jobs:
         run: node ./tests/scripts/assert-third-party-provenance.mjs
       - name: Build NSIS bundle
         run: pnpm tauri build --bundles nsis
-      - name: Install, launch, verify notices, and uninstall
+      - name: Verify stock lifecycle on disposable runner
         shell: pwsh
-        run: ./tests/scripts/smoke-nsis-production-delete.ps1
+        run: ./tests/scripts/smoke-nsis.ps1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
