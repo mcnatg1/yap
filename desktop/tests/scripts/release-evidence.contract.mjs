@@ -1499,6 +1499,14 @@ test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", asyn
   assert.match(smoke, /Start-Process/);
   assert.match(smoke, /WaitForExit/);
   assert.match(smoke, /Kill\(\$true\)/);
+  assert.match(
+    smoke,
+    /function Wait-ForPathAbsence[\s\S]*?Start-Sleep -Milliseconds 100/,
+  );
+  assert.match(
+    smoke,
+    /-LiteralPaths @\(\$uninstallRegistryPath, \$installLocation\)/,
+  );
   assert.match(smoke, /ExpectedInstallerSha256/);
   assert.match(smoke, /THIRD_PARTY_NOTICES\.md/);
   assert.match(smoke, /THIRD_PARTY_PROVENANCE\.json/);

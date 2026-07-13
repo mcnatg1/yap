@@ -103,6 +103,27 @@ function Invoke-BoundedProcess {
   }
 }
 
+function Wait-ForPathAbsence {
+  param(
+    [Parameter(Mandatory)]
+    [string[]]$LiteralPaths,
+    [Parameter(Mandatory)]
+    [string]$Label
+  )
+
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  while ($true) {
+    $remainingPaths = @($LiteralPaths | Where-Object { Test-Path -LiteralPath $_ })
+    if ($remainingPaths.Count -eq 0) {
+      return
+    }
+    if ($timer.Elapsed.TotalSeconds -ge $ProcessTimeoutSeconds) {
+      throw "$Label did not converge within $ProcessTimeoutSeconds seconds. Remaining paths: $($remainingPaths -join ', ')"
+    }
+    Start-Sleep -Milliseconds 100
+  }
+}
+
 Invoke-BoundedProcess -FilePath $installer.FullName -ArgumentList @("/S") -Label "Stock NSIS install"
 
 if (-not (Test-Path -LiteralPath $uninstallRegistryPath)) {
@@ -167,13 +188,9 @@ try {
 }
 
 Invoke-BoundedProcess -FilePath $uninstaller -ArgumentList @("/S") -Label "Stock NSIS uninstall"
-
-if (Test-Path -LiteralPath $uninstallRegistryPath) {
-  throw "Stock NSIS uninstall left its uninstall registry entry behind."
-}
-if (Test-Path -LiteralPath $installLocation) {
-  throw "Stock NSIS uninstall left its install directory behind."
-}
+Wait-ForPathAbsence `
+  -LiteralPaths @($uninstallRegistryPath, $installLocation) `
+  -Label "Stock NSIS uninstall cleanup"
 if (-not (Test-Path -LiteralPath $appDataRoot -PathType Container)) {
   throw "Stock silent uninstall unexpectedly removed the canonical app-data directory."
 }
