@@ -98,6 +98,11 @@ jobs:
         with:
           node-version: "24.14.0"
           package-manager-cache: false
+      - name: Bind pnpm dependency store
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\desktop\tests\scripts\bind-pnpm-cache-store.ps1"
+
       - name: Restore pnpm dependency store
         id: pnpm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

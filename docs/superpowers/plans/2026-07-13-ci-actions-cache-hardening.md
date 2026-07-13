@@ -107,6 +107,20 @@
 
 ### Task 6: Verify, Merge, And Clean Operational State
 
+#### Task 6a: Bind The Cache Path To pnpm's Effective Store
+
+The first trusted-main run after PR #42 saved Playwright successfully but emitted
+`Path Validation Error` for pnpm because the reviewed cache directory did not
+exist on the hosted runner. The cache policy must bind pnpm's consumer path, not
+assume its environment-specific default.
+
+- [x] Add a RED release-contract assertion requiring every pnpm-cached job to bind exactly one reviewed store before restore.
+- [x] Derive the Windows store from `LocalApplicationData`, prove it equals the literal cache path, and set `PNPM_CONFIG_STORE_DIR` for all later steps.
+- [x] Verify `pnpm store path` accepts the binding before persisting it through `GITHUB_ENV`.
+- [x] Re-run the full release contract (33/33).
+- [ ] Pass every public PR gate.
+- [ ] Require the next trusted-main run to save both canonical frontend caches before deleting obsolete entries.
+
 - [x] Run the release-contract test until GREEN (20/20).
 - [x] Run workflow YAML parsing, `git diff --check`, and focused dependency-policy checks.
 - [x] Request an independent security/release-boundary review and resolve every Critical or Important finding (0 remaining).
