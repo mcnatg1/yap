@@ -57,6 +57,15 @@ def _bounded(value: str | None, maximum: int) -> str:
     return value[:maximum] + "…"
 
 
+def _sanitized_log_path(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    try:
+        return urlsplit(value).path
+    except ValueError:
+        return ""
+
+
 class _DeadlineSocketReader(io.RawIOBase):
     def __init__(self, connection: socket.socket, deadline: float) -> None:
         super().__init__()
@@ -281,7 +290,10 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         event = {
             "event": "http_request",
             "method": _bounded(getattr(self, "command", ""), MAX_LOG_METHOD_CHARS),
-            "path": _bounded(getattr(self, "path", ""), MAX_LOG_PATH_CHARS),
+            "path": _bounded(
+                _sanitized_log_path(getattr(self, "path", "")),
+                MAX_LOG_PATH_CHARS,
+            ),
             "status": status,
             "requestId": self._request_id,
         }

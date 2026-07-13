@@ -313,6 +313,52 @@ class HealthServiceTests(unittest.TestCase):
         self.assertEqual(event["status"], 404)
         self.assertLessEqual(len(event["path"]), 513)
 
+    def test_request_logging_redacts_query_and_absolute_target_secrets(self) -> None:
+        status, _, body = self._request(
+            "/v1/health?token=relative-secret"
+        )
+        absolute_response = self._raw_request(
+            b"GET http://user:absolute-secret@127.0.0.1/v1/health"
+            b"?token=query-secret HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+        absolute_status, absolute_body = self._parse_raw_json_response(
+            absolute_response
+        )
+
+        expected_health = {
+            "service": "yap-server",
+            "status": "ok",
+            "apiVersion": "1",
+            "auth": "not_configured",
+            "capabilities": {
+                "batchJobs": False,
+                "liveStreaming": False,
+                "jobStatus": False,
+            },
+        }
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), expected_health)
+        self.assertEqual(absolute_status, 200)
+        self.assertEqual(absolute_body, expected_health)
+        self.assertEqual(len(self.logger.messages), 2)
+
+        serialized_logs = "\n".join(self.logger.messages)
+        for secret in (
+            "relative-secret",
+            "absolute-secret",
+            "query-secret",
+            "user",
+            "?token=",
+        ):
+            self.assertNotIn(secret, serialized_logs)
+
+        for line in self.logger.messages:
+            self.assertNotIn("\n", line)
+            self.assertLessEqual(len(line), 1024)
+            event = json.loads(line)
+            self.assertEqual(event["path"], "/v1/health")
+            self.assertRegex(event["requestId"], r"^req-[0-9a-f]{32}$")
+
     def test_request_log_bound_includes_json_escape_expansion(self) -> None:
         request_target = b"/v1/" + (b"\x80" * 600)
         response = self._raw_request(
