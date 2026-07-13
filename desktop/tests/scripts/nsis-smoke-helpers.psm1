@@ -1,6 +1,11 @@
 #requires -Version 7.4
 #requires -PSEdition Core
 
+$containedProcessSource = Join-Path $PSScriptRoot "windows-contained-process.cs"
+if (-not ("Yap.NsisSmoke.LaunchRequest" -as [type])) {
+  Add-Type -Path $containedProcessSource
+}
+
 $script:YapTestTreeSentinelName = ".yap-test-tree-sentinel"
 $script:YapTestTreeSentinelContents = "yap-test-owned-tree-v1"
 
