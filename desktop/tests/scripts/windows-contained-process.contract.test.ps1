@@ -194,6 +194,21 @@ try {
   Assert-True $mutationThrew "CleanupErrors was mutable."
   Assert-True ($failure.CleanupErrors.Count -eq $cleanupErrorCount) "CleanupErrors changed after construction."
 
+  $postCreateHandoff = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $postCreateHandoff.FailurePoint = [Yap.NsisSmoke.Testing.ScriptedFailurePoint]::PostCreateOwnershipHandoff
+  $postCreateLease = $null
+  $failure = $null
+  try {
+    $postCreateLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher(
+      $postCreateHandoff
+    ).Launch($failingRequest)
+  } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+  Assert-True ($failure -is [Yap.NsisSmoke.ContainedProcessException]) "Post-create handoff failure was untyped."
+  Assert-True ($failure.Stage.ToString() -ceq "CreateProcess") "Post-create handoff failure reported the wrong stage."
+  Assert-True ($null -eq $postCreateLease) "Post-create handoff failure returned a lease."
+  Assert-True ($postCreateHandoff.LiveChildCount -eq 0) "Post-create handoff failure left a scripted child alive."
+  Assert-True ($postCreateHandoff.OpenHandleCount -eq 0) "Post-create handoff failure leaked a raw test handle."
+
   foreach ($releaseCase in @(
     @{ Point = "ReleaseParentStdin"; Stage = "Dispose" },
     @{ Point = "ReleaseParentStdout"; Stage = "Dispose" },
@@ -209,14 +224,17 @@ try {
       [Yap.NsisSmoke.Testing.ScriptedFailurePoint],
       [string]$releaseCase.Point
     )
+    $releaseLease = $null
     $failure = $null
     try {
-      [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($releaseFailure).Launch($failingRequest)
+      $releaseLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher(
+        $releaseFailure
+      ).Launch($failingRequest)
     } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
     Assert-True ($failure.Stage.ToString() -ceq $releaseCase.Stage) "Launch-only release reported the wrong stage."
     Assert-True (-not $failure.CleanupProven) "A launch-only release failure was promoted to proven cleanup."
     Assert-True ($failure.CleanupErrors.Count -gt 0) "Launch-only release failure lost cleanup evidence."
-    Assert-True ($releaseFailure.LeaseConstructionCount -eq 0) "A lease escaped after launch-only release failed."
+    Assert-True ($null -eq $releaseLease) "A lease escaped after launch-only release failed."
     Assert-True ($releaseFailure.OpenHandleCount -eq 0) "Launch-only release failure leaked a test handle."
   }
 
@@ -258,14 +276,18 @@ try {
 
   $identityMismatch = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
   $identityMismatch.CapturedExecutablePath = Join-Path $root "not-the-requested-image.exe"
+  $identityLease = $null
   $failure = $null
   try {
-    [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($identityMismatch).Launch($failingRequest)
+    $identityLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher(
+      $identityMismatch
+    ).Launch($failingRequest)
   } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
   Assert-True ($failure.Stage.ToString() -ceq "CaptureIdentity") "Identity mismatch reported the wrong stage."
   Assert-True ($identityMismatch.ResumeThreadCallCount -eq 0) "Identity mismatch resumed child code."
   Assert-True $failure.CleanupProven "Identity mismatch cleanup was not proven."
-  Assert-True ($identityMismatch.LeaseConstructionCount -eq 0) "Identity mismatch returned a lease."
+  Assert-True ($null -eq $identityLease) "Identity mismatch returned a lease."
+  Assert-True ($identityMismatch.OpenHandleCount -eq 0) "Identity mismatch leaked a test handle."
 
   foreach ($operationCase in @(
     @{ Property = "WaitForSingleObjectLastError"; Code = 2101; Stage = "Wait"; Operation = "Wait" },

@@ -672,8 +672,6 @@ namespace Yap.NsisSmoke
         NativeCallResult<bool> ReleaseAttributeList(IntPtr attributeList);
 
         NativeCallResult<bool> FreeAllocation(IntPtr allocation, NativeAllocationKind kind);
-
-        void NotifyLeaseConstructed();
     }
 
     internal sealed class NativeWindowsProcessApi : IWindowsProcessApi
@@ -838,36 +836,76 @@ namespace Yap.NsisSmoke
                 },
                 AttributeList = attributeList
             };
-            NativeMethods.ProcessInformation processInformation;
-            bool succeeded = NativeMethods.CreateProcessW(
-                request.ExecutablePath,
-                commandLine,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                true,
-                NativeMethods.CreateSuspended |
-                    NativeMethods.CreateNoWindow |
-                    NativeMethods.ExtendedStartupInfoPresent |
-                    NativeMethods.CreateUnicodeEnvironment,
-                environment,
-                request.WorkingDirectory,
-                ref startup,
-                out processInformation);
-            if (!succeeded)
+            NativeMethods.ProcessInformation processInformation = default(NativeMethods.ProcessInformation);
+            SafeProcessHandle ownedProcess = null;
+            SafeThreadHandle ownedThread = null;
+            bool transferred = false;
+            try
             {
-                int error = Marshal.GetLastWin32Error();
+                bool succeeded = NativeMethods.CreateProcessW(
+                    request.ExecutablePath,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    true,
+                    NativeMethods.CreateSuspended |
+                        NativeMethods.CreateNoWindow |
+                        NativeMethods.ExtendedStartupInfoPresent |
+                        NativeMethods.CreateUnicodeEnvironment,
+                    environment,
+                    request.WorkingDirectory,
+                    ref startup,
+                    out processInformation);
+                if (!succeeded)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    return NativeCallResult<CreatedProcessHandles>.Failure(error);
+                }
+                ownedProcess = new SafeProcessHandle(processInformation.Process);
+                ownedThread = new SafeThreadHandle(processInformation.Thread);
+                CreatedProcessHandles owners = new CreatedProcessHandles(ownedProcess, ownedThread);
+                NativeCallResult<CreatedProcessHandles> result =
+                    NativeCallResult<CreatedProcessHandles>.Success(owners);
+                transferred = true;
+                return result;
+            }
+            finally
+            {
+                if (processInformation.Process != IntPtr.Zero && !transferred)
+                {
+                    CleanupUntransferredCreatedProcess(
+                        processInformation,
+                        ownedProcess,
+                        ownedThread);
+                }
                 GC.KeepAlive(standardInput);
                 GC.KeepAlive(standardOutput);
                 GC.KeepAlive(standardError);
-                return NativeCallResult<CreatedProcessHandles>.Failure(error);
             }
-            GC.KeepAlive(standardInput);
-            GC.KeepAlive(standardOutput);
-            GC.KeepAlive(standardError);
-            return NativeCallResult<CreatedProcessHandles>.Success(
-                new CreatedProcessHandles(
-                    new SafeProcessHandle(processInformation.Process),
-                    new SafeThreadHandle(processInformation.Thread)));
+        }
+
+        private static void CleanupUntransferredCreatedProcess(
+            NativeMethods.ProcessInformation processInformation,
+            SafeProcessHandle ownedProcess,
+            SafeThreadHandle ownedThread)
+        {
+            try
+            {
+                NativeMethods.TerminateProcessRaw(processInformation.Process, 0x59504150);
+                NativeMethods.WaitForSingleObjectRaw(processInformation.Process, 5000);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                try { NativeMethods.CloseHandle(processInformation.Thread); } catch { }
+                try { ownedThread?.MarkClosed(); } catch { }
+                try { ownedThread?.Dispose(); } catch { }
+                try { NativeMethods.CloseHandle(processInformation.Process); } catch { }
+                try { ownedProcess?.MarkClosed(); } catch { }
+                try { ownedProcess?.Dispose(); } catch { }
+            }
         }
 
         public NativeCallResult<bool> AssignProcessToJob(
@@ -1090,9 +1128,6 @@ namespace Yap.NsisSmoke
             return NativeCallResult<bool>.Success(true);
         }
 
-        public void NotifyLeaseConstructed()
-        {
-        }
     }
 
     internal static class NativeMethods
@@ -1324,6 +1359,13 @@ namespace Yap.NsisSmoke
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool TerminateProcess(SafeProcessHandle process, uint exitCode);
+
+        [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool TerminateProcessRaw(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", EntryPoint = "WaitForSingleObject", SetLastError = true)]
+        internal static extern uint WaitForSingleObjectRaw(IntPtr handle, uint milliseconds);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -1788,7 +1830,6 @@ namespace Yap.NsisSmoke
         {
             if (processHandle == null || jobHandle == null)
                 throw new InvalidOperationException("Lease resources were incomplete.");
-            api.NotifyLeaseConstructed();
             ContainedProcessLease lease = new ContainedProcessLease(
                 processHandle,
                 jobHandle,
