@@ -41,8 +41,15 @@ fn recording_coordinator(
     directory: PathBuf,
     session_id: SessionId,
 ) -> (Coordinator, RecordingSinkHandle) {
-    let (recording, receiver) =
-        bounded_sink::<RecordingInput>(SinkKind::Recording, RECORDING_QUEUE_CAPACITY);
+    recording_coordinator_with_capacity(directory, session_id, RECORDING_QUEUE_CAPACITY)
+}
+
+fn recording_coordinator_with_capacity(
+    directory: PathBuf,
+    session_id: SessionId,
+    capacity: usize,
+) -> (Coordinator, RecordingSinkHandle) {
+    let (recording, receiver) = bounded_sink::<RecordingInput>(SinkKind::Recording, capacity);
     let handle =
         RecordingSinkHandle::spawn(directory, session_id.clone(), recording.clone(), receiver);
     let coordinator = Coordinator::new(
@@ -296,10 +303,18 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
     const FOUR_HOURS_FRAMES: u64 = 4 * 60 * 60 * 16_000;
     const LOSS_EVENTS: u64 = 1_090;
     const COALESCED_PREFIX: u64 = 64;
+    const JOURNAL_STRESS_QUEUE_CAPACITY: usize = (LOSS_EVENTS + 2) as usize;
 
     let directory = temp_directory("four-hours");
     let session_id = session_id("four-hours");
-    let (mut coordinator, recording) = recording_coordinator(directory.clone(), session_id.clone());
+    // This is a journal/timeline stress test, not a writer-throughput test. The
+    // synthetic four-hour burst must fit without scheduler-dependent pacing;
+    // production queue saturation and capacity are covered separately.
+    let (mut coordinator, recording) = recording_coordinator_with_capacity(
+        directory.clone(),
+        session_id.clone(),
+        JOURNAL_STRESS_QUEUE_CAPACITY,
+    );
 
     coordinator
         .consume(&packet(0, vec![0.0; 16]), &Default::default())
@@ -328,16 +343,15 @@ fn four_hour_timeline_churn_is_bounded_monotonic_and_retains_only_written_pcm() 
             })
             .unwrap();
         source_position += dropped_frames;
-        if index % 16 == 15 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
     }
 
     assert_eq!(source_position, 16 + FOUR_HOURS_FRAMES);
     let outcome = coordinator.outcome(SinkKind::Recording).unwrap();
     assert_eq!(outcome.dropped_frames, 0);
     assert_eq!(outcome.accepted_frames, LOSS_EVENTS + 2);
-    assert!(coordinator.high_water_mark(SinkKind::Recording).unwrap() <= RECORDING_QUEUE_CAPACITY);
+    assert!(
+        coordinator.high_water_mark(SinkKind::Recording).unwrap() <= JOURNAL_STRESS_QUEUE_CAPACITY
+    );
     coordinator.close();
 
     let result = recording.finalize().unwrap();
