@@ -16,10 +16,92 @@ fn exit_request_disposition(exit_authorized: bool) -> ExitRequestDisposition {
     }
 }
 
+fn write_startup_migration_diagnostic(
+    directory: &std::path::Path,
+    detail: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..100_u8 {
+        let path = directory.join(format!(
+            "Yap-startup-migration-error-{}-{nonce}-{attempt}.log",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                writeln!(file, "Yap stopped before startup to protect existing data.")?;
+                writeln!(file, "Migration error: {detail}")?;
+                file.flush()?;
+                file.sync_all()?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique Yap startup diagnostic",
+    ))
+}
+
+fn stop_for_migration_error(error: &std::io::Error) -> ! {
+    let diagnostic =
+        write_startup_migration_diagnostic(&std::env::temp_dir(), &error.to_string()).ok();
+    let diagnostic_detail = diagnostic
+        .as_ref()
+        .map(|path| format!("\n\nDiagnostic: {}", path.display()))
+        .unwrap_or_else(|| "\n\nA diagnostic file could not be created.".to_string());
+    let message = format!(
+        "Yap did not start because its existing data could not be migrated safely. No source data was intentionally deleted. Close any other Yap process and inspect the conflict before trying again.\n\nReason: {error}{diagnostic_detail}"
+    );
+
+    #[cfg(windows)]
+    show_startup_error_dialog(&message);
+    #[cfg(not(windows))]
+    eprintln!("{message}");
+
+    std::process::exit(1)
+}
+
+#[cfg(windows)]
+fn show_startup_error_dialog(message: &str) {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+    use windows::{
+        core::PCWSTR,
+        Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK},
+    };
+
+    let message = OsStr::new(message)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let title = OsStr::new("Yap startup stopped")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 pub(crate) fn run() {
-    paths::migrate_legacy_app_data().unwrap_or_else(|error| {
-        panic!("failed to migrate legacy Yap app data without data loss: {error}")
-    });
+    if let Err(error) = paths::migrate_legacy_app_data() {
+        stop_for_migration_error(&error);
+    }
     std::panic::set_hook(Box::new(|panic| {
         stt::log_yap(&format!("panic: {panic}"));
     }));
@@ -132,7 +214,9 @@ pub(crate) fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_request_disposition, ExitRequestDisposition};
+    use super::{
+        exit_request_disposition, write_startup_migration_diagnostic, ExitRequestDisposition,
+    };
 
     #[test]
     fn exit_request_requires_semantic_quit_authorization() {
@@ -144,5 +228,23 @@ mod tests {
             exit_request_disposition(true),
             ExitRequestDisposition::Allow
         );
+    }
+
+    #[test]
+    fn startup_migration_diagnostic_is_created_outside_app_data() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-startup-diagnostic-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let path = write_startup_migration_diagnostic(&root, "migration conflict").unwrap();
+
+        assert_eq!(path.parent(), Some(root.as_path()));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("migration conflict"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

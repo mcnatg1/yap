@@ -39,10 +39,14 @@ the reviewed repository inputs. Stock silent uninstall preserves app data and th
 install-location registry record; disposal of the Windows environment clears that residual state.
 The workflow makes no automated delete-data claim and performs no script-owned recursive cleanup.
 
-The application performs the one-time storage transition before opening any runtime state. It moves
-only recognized Yap runtime entries from the former `%LOCALAPPDATA%\Yap` tree, leaves installer files
-in place, rejects links/reparse points, preflights every destination conflict, and fails startup rather
-than overwriting or silently abandoning either copy.
+The application performs the one-time storage transition before opening any runtime state. A
+cross-process file lock serializes starts. Yap recursively validates only recognized runtime entries
+from the former `%LOCALAPPDATA%\Yap` tree, rejects links/reparse points and dangling destinations,
+copies into staging on the canonical volume, flushes and hash-verifies the full trees, publishes and
+re-verifies every destination, and only then retires legacy sources. Installer files stay in place,
+and redirected profiles with Local and Roaming AppData on different volumes are supported. A conflict
+or failure stops startup with a native error and a uniquely created temporary diagnostic rather than
+overwriting or silently abandoning either copy.
 
 The supported release workflow stages a verified GitHub draft from an immutable commit on `main`.
 The live `production-release` environment currently has branch-policy protection but no required-

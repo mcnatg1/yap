@@ -1,8 +1,12 @@
 use std::{
-    ffi::OsStr,
-    fs, io,
+    ffi::{OsStr, OsString},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+use sha2::{Digest, Sha256};
 
 const PRODUCTION_IDENTIFIER: &str = "com.mcnatg1.yap";
 const LEGACY_APP_NAME: &str = "Yap";
@@ -68,10 +72,180 @@ where
 }
 
 fn migrate_legacy_entries(legacy: &Path, canonical: &Path) -> io::Result<LegacyMigrationOutcome> {
-    if !legacy.exists() {
+    migrate_legacy_entries_with_ready_hook(legacy, canonical, || {})
+}
+
+fn migrate_legacy_entries_with_ready_hook<F, R>(
+    legacy: &Path,
+    canonical: &Path,
+    ready: F,
+) -> io::Result<LegacyMigrationOutcome>
+where
+    F: FnOnce() -> R,
+{
+    let initial_entries = discover_legacy_entries(legacy, canonical)?;
+    if initial_entries.is_empty() {
         return Ok(LegacyMigrationOutcome::NotNeeded);
     }
-    if !legacy.is_dir() || is_link_or_reparse(legacy)? {
+
+    ensure_normal_directory(canonical)?;
+    let lock_path = canonical.join(".legacy-migration.lock");
+    if let Some(metadata) = metadata_if_present(&lock_path)? {
+        if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "legacy migration lock is not a normal file: {}",
+                    lock_path.display()
+                ),
+            ));
+        }
+    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    let lock_metadata = fs::symlink_metadata(&lock_path)?;
+    if !lock_metadata.is_file() || metadata_is_link_or_reparse(&lock_metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "legacy migration lock is not a normal file: {}",
+                lock_path.display()
+            ),
+        ));
+    }
+    ready();
+    lock_file.lock()?;
+    migrate_legacy_entries_locked(legacy, canonical)
+}
+
+fn migrate_legacy_entries_locked(
+    legacy: &Path,
+    canonical: &Path,
+) -> io::Result<LegacyMigrationOutcome> {
+    let entries = discover_legacy_entries(legacy, canonical)?;
+    if entries.is_empty() {
+        return Ok(LegacyMigrationOutcome::NotNeeded);
+    }
+
+    let mut unpublished = Vec::new();
+    for (source, destination) in &entries {
+        validate_regular_tree(source)?;
+        match metadata_if_present(destination)? {
+            Some(_) => {
+                validate_regular_tree(destination)?;
+                if !trees_equal(source, destination)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "legacy Yap runtime entry conflicts with canonical app data: {}",
+                            destination.display()
+                        ),
+                    ));
+                }
+            }
+            None => unpublished.push((source.clone(), destination.clone())),
+        }
+    }
+
+    let staging = if unpublished.is_empty() {
+        None
+    } else {
+        Some(create_unique_directory(
+            canonical,
+            ".legacy-migration-stage",
+        )?)
+    };
+    if let Some(staging) = &staging {
+        let stage_result = (|| {
+            for (source, _) in &unpublished {
+                let name = source.file_name().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("legacy entry has no file name: {}", source.display()),
+                    )
+                })?;
+                copy_tree_verified(source, &staging.join(name))?;
+            }
+            Ok::<(), io::Error>(())
+        })();
+        if let Err(error) = stage_result {
+            let _ = fs::remove_dir_all(staging);
+            return Err(error);
+        }
+
+        let publish_result = (|| {
+            for (source, destination) in &unpublished {
+                if metadata_if_present(destination)?.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "canonical app-data destination appeared during migration: {}",
+                            destination.display()
+                        ),
+                    ));
+                }
+                let staged = staging.join(source.file_name().expect("validated legacy entry name"));
+                fs::rename(&staged, destination)?;
+                if !trees_equal(source, destination)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "published legacy entry failed verification: {}",
+                            destination.display()
+                        ),
+                    ));
+                }
+            }
+            fs::remove_dir(staging)?;
+            Ok::<(), io::Error>(())
+        })();
+        if let Err(error) = publish_result {
+            let _ = fs::remove_dir_all(staging);
+            return Err(error);
+        }
+    }
+
+    for (source, destination) in &entries {
+        if !trees_equal(source, destination)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "canonical app-data entry changed before source retirement: {}",
+                    destination.display()
+                ),
+            ));
+        }
+    }
+
+    let retirement = create_unique_directory(legacy, ".yap-runtime-migrated")?;
+    for (source, _) in &entries {
+        let retired = retirement.join(source.file_name().expect("validated legacy entry name"));
+        if let Err(error) = fs::rename(source, &retired) {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "canonical data is verified, but legacy source retirement failed for {}: {error}",
+                    source.display()
+                ),
+            ));
+        }
+    }
+    let _ = fs::remove_dir_all(&retirement);
+
+    Ok(LegacyMigrationOutcome::Migrated {
+        entries: entries.len(),
+    })
+}
+
+fn discover_legacy_entries(legacy: &Path, canonical: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    let Some(metadata) = metadata_if_present(legacy)? else {
+        return Ok(Vec::new());
+    };
+    if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -81,74 +255,198 @@ fn migrate_legacy_entries(legacy: &Path, canonical: &Path) -> io::Result<LegacyM
         ));
     }
 
-    let mut entries = Vec::new();
+    let mut sources = Vec::new();
     for entry in fs::read_dir(legacy)? {
         let entry = entry?;
         if is_legacy_runtime_entry(&entry.file_name()) {
-            entries.push((entry.path(), canonical.join(entry.file_name())));
+            sources.push(entry.path());
         }
     }
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    if entries.is_empty() {
-        return Ok(LegacyMigrationOutcome::NotNeeded);
-    }
+    sources.sort();
+    Ok(sources
+        .into_iter()
+        .map(|source| {
+            let destination = canonical.join(
+                source
+                    .file_name()
+                    .expect("directory entry always has a file name"),
+            );
+            (source, destination)
+        })
+        .collect())
+}
 
-    for (source, destination) in &entries {
-        if is_link_or_reparse(source)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "legacy Yap runtime entry is a link or reparse point: {}",
-                    source.display()
-                ),
-            ));
-        }
-        if destination.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "legacy Yap runtime entry conflicts with canonical app data: {}",
-                    destination.display()
-                ),
-            ));
+fn ensure_normal_directory(path: &Path) -> io::Result<()> {
+    if metadata_if_present(path)?.is_none() {
+        fs::create_dir_all(path)?;
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("path is not a normal directory: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_regular_tree(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata_is_link_or_reparse(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "migration tree contains a link or reparse point: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.is_file() {
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("migration tree contains a special file: {}", path.display()),
+        ));
+    }
+    for entry in fs::read_dir(path)? {
+        validate_regular_tree(&entry?.path())?;
+    }
+    Ok(())
+}
+
+fn copy_tree_verified(source: &Path, destination: &Path) -> io::Result<()> {
+    validate_regular_tree(source)?;
+    if metadata_if_present(destination)?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "staging destination already exists: {}",
+                destination.display()
+            ),
+        ));
+    }
+    copy_tree(source, destination)?;
+    if !trees_equal(source, destination)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "staged copy does not match its source: {}",
+                source.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.is_file() {
+        let mut input = File::open(source)?;
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(destination)?;
+        io::copy(&mut input, &mut output)?;
+        output.flush()?;
+        output.sync_all()?;
+        return Ok(());
+    }
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn trees_equal(left: &Path, right: &Path) -> io::Result<bool> {
+    let left_metadata = fs::symlink_metadata(left)?;
+    let right_metadata = fs::symlink_metadata(right)?;
+    if metadata_is_link_or_reparse(&left_metadata) || metadata_is_link_or_reparse(&right_metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cannot compare a migration tree containing links or reparse points",
+        ));
+    }
+    if left_metadata.is_file() != right_metadata.is_file()
+        || left_metadata.is_dir() != right_metadata.is_dir()
+    {
+        return Ok(false);
+    }
+    if left_metadata.is_file() {
+        return Ok(sha256_file(left)? == sha256_file(right)?);
+    }
+    if !left_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cannot compare special files in a migration tree",
+        ));
+    }
+    let left_names = sorted_entry_names(left)?;
+    let right_names = sorted_entry_names(right)?;
+    if left_names != right_names {
+        return Ok(false);
+    }
+    for name in left_names {
+        if !trees_equal(&left.join(&name), &right.join(&name))? {
+            return Ok(false);
         }
     }
+    Ok(true)
+}
 
-    fs::create_dir_all(canonical)?;
-    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(entries.len());
-    for (source, destination) in &entries {
-        if let Err(error) = fs::rename(source, destination) {
-            let rollback_errors = moved
-                .iter()
-                .rev()
-                .filter_map(|(moved_source, moved_destination)| {
-                    fs::rename(moved_destination, moved_source).err()
-                })
-                .map(|rollback| rollback.to_string())
-                .collect::<Vec<_>>();
-            let detail = if rollback_errors.is_empty() {
-                error.to_string()
-            } else {
-                format!(
-                    "{error}; rollback also failed: {}",
-                    rollback_errors.join("; ")
-                )
-            };
-            return Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "failed to migrate {} to {}: {detail}",
-                    source.display(),
-                    destination.display()
-                ),
-            ));
+fn sorted_entry_names(path: &Path) -> io::Result<Vec<OsString>> {
+    let mut names = fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    Ok(names)
+}
+
+fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
         }
-        moved.push((source.clone(), destination.clone()));
+        hasher.update(&buffer[..read]);
     }
+    Ok(hasher.finalize().into())
+}
 
-    Ok(LegacyMigrationOutcome::Migrated {
-        entries: moved.len(),
-    })
+fn create_unique_directory(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..1000_u16 {
+        let candidate = parent.join(format!("{prefix}-{}-{nonce}-{attempt}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not allocate migration directory under {}",
+            parent.display()
+        ),
+    ))
 }
 
 fn is_legacy_runtime_entry(name: &OsStr) -> bool {
@@ -172,19 +470,18 @@ fn is_legacy_runtime_entry(name: &OsStr) -> bool {
         || name.starts_with("recording-job-playback-registry.json")
 }
 
-fn is_link_or_reparse(path: &Path) -> io::Result<bool> {
-    let metadata = fs::symlink_metadata(path)?;
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
-        return Ok(true);
+        return true;
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        Ok(metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
-    Ok(false)
+    false
 }
 
 #[cfg(windows)]
@@ -223,6 +520,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[cfg(unix)]
+    fn create_file_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(source, destination)
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_file(source, destination)
+    }
+
+    fn test_symlink_is_unavailable(error: &io::Error) -> bool {
+        cfg!(windows)
+            && (error.kind() == io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314))
+    }
 
     #[test]
     fn app_data_dir_prefers_explicit_override() {
@@ -351,6 +665,141 @@ mod tests {
 
         assert_eq!(outcome, LegacyMigrationOutcome::NotNeeded);
         assert!(!canonical.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_staging_copy_preserves_source_and_matches_every_byte() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            4
+        ));
+        let source = root.join("source");
+        let staged = root.join("staged");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested").join("model.bin"), b"model bytes").unwrap();
+        std::fs::write(source.join("settings.json"), b"{\"enabled\":true}").unwrap();
+
+        copy_tree_verified(&source, &staged).unwrap();
+
+        assert!(source.join("nested").join("model.bin").is_file());
+        assert!(trees_equal(&source, &staged).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_migrations_serialize_and_converge() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            5
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(legacy.join("models")).unwrap();
+        std::fs::write(legacy.join("models").join("model.bin"), b"model").unwrap();
+        std::fs::write(legacy.join("jobs.sqlite3"), b"ledger").unwrap();
+        let ready = Arc::new(Barrier::new(2));
+
+        let handles = (0..2)
+            .map(|_| {
+                let legacy = legacy.clone();
+                let canonical = canonical.clone();
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    migrate_legacy_entries_with_ready_hook(&legacy, &canonical, || ready.wait())
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, LegacyMigrationOutcome::Migrated { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(canonical.join("models").join("model.bin")).unwrap(),
+            b"model"
+        );
+        assert_eq!(
+            std::fs::read(canonical.join("jobs.sqlite3")).unwrap(),
+            b"ledger"
+        );
+        assert!(!legacy.join("models").exists());
+        assert!(!legacy.join("jobs.sqlite3").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_rejects_nested_links_before_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            6
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(legacy.join("models")).unwrap();
+        std::fs::write(root.join("outside-model.bin"), b"outside").unwrap();
+        if let Err(error) = create_file_symlink(
+            &root.join("outside-model.bin"),
+            &legacy.join("models").join("linked-model.bin"),
+        ) {
+            if test_symlink_is_unavailable(&error) {
+                std::fs::remove_dir_all(root).unwrap();
+                return;
+            }
+            panic!("could not create test symlink: {error}");
+        }
+
+        let error = migrate_legacy_entries(&legacy, &canonical).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!canonical.join("models").exists());
+        assert!(legacy.join("models").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_treats_a_dangling_destination_link_as_a_conflict() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            7
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(legacy.join("jobs.sqlite3"), b"legacy ledger").unwrap();
+        if let Err(error) = create_file_symlink(
+            &root.join("missing-target"),
+            &canonical.join("jobs.sqlite3"),
+        ) {
+            if test_symlink_is_unavailable(&error) {
+                std::fs::remove_dir_all(root).unwrap();
+                return;
+            }
+            panic!("could not create test symlink: {error}");
+        }
+
+        let error = migrate_legacy_entries(&legacy, &canonical).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(fs::symlink_metadata(canonical.join("jobs.sqlite3")).is_ok());
+        assert!(legacy.join("jobs.sqlite3").is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

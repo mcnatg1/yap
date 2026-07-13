@@ -1472,11 +1472,18 @@ test("provenance gate requires exact scoped review evidence and current local ha
 test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", async () => {
   const config = JSON.parse(await readRepoFile("desktop/src-tauri/tauri.conf.json"));
   const paths = await readRepoFile("desktop/src-tauri/src/paths.rs");
+  const app = await readRepoFile("desktop/src-tauri/src/app.rs");
   const smoke = await readRepoFile("desktop/tests/scripts/smoke-nsis.ps1");
   assert.equal(config.identifier, "com.mcnatg1.yap");
   assert.match(paths, new RegExp(`PRODUCTION_IDENTIFIER: &str = "${config.identifier}"`));
   assert.equal(config.bundle.windows?.nsis?.installerHooks, undefined);
   assert.equal(config.bundle.windows?.nsis?.installMode, "currentUser");
+  assert.match(paths, /\.legacy-migration\.lock/);
+  assert.match(paths, /copy_tree_verified/);
+  assert.match(paths, /output\.sync_all\(\)/);
+  assert.match(paths, /trees_equal/);
+  assert.match(app, /MessageBoxW/);
+  assert.match(app, /Yap-startup-migration-error/);
   assert.doesNotMatch(JSON.stringify(config), /installerHooks|nsis-hooks\.nsh/);
   assert.match(smoke, /GITHUB_ACTIONS/);
   assert.match(smoke, /RUNNER_ENVIRONMENT/);
