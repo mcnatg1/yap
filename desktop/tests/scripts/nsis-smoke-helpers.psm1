@@ -1276,7 +1276,16 @@ function Start-ProcessWithEnvironment {
   if (-not [string]::IsNullOrWhiteSpace($StderrPath)) {
     $parameters.RedirectStandardError = $StderrPath
   }
-  return Start-Process @parameters
+  $process = Start-Process @parameters
+  try {
+    # Retain one OS handle before returning. Later identity checks must stay
+    # bound to this exact process even if it exits and its PID is recycled.
+    [void]$process.Handle
+    return $process
+  } catch {
+    $process.Dispose()
+    throw
+  }
 }
 
 function Enter-SmokeRunLock {
