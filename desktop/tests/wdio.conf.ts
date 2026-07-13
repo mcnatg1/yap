@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -75,9 +76,14 @@ export const config = {
   async afterTest(_test, _context, result) {
     if (result.error) {
       const safeName = result.error.message.replace(/[^a-z0-9]+/gi, "-").slice(0, 80);
-      await browser.saveScreenshot(
-        path.join(testsRoot, "results", "wdio", `failure-${Date.now()}-${safeName}.png`),
+      const screenshotPath = path.join(
+        testsRoot,
+        "results",
+        "wdio",
+        `failure-${Date.now()}-${safeName}.png`,
       );
+      mkdirSync(path.dirname(screenshotPath), { recursive: true });
+      await browser.saveScreenshot(screenshotPath);
     }
     const artifacts = listRecordingArtifacts(isolation.recordingRoot);
     if (artifacts.length > 0) {
