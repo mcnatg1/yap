@@ -19,21 +19,21 @@
 
 | Spec | Roadmap area | Status |
 |------|--------------|--------|
-| [client-state-machine.md](specs/client-state-machine.md) | Desktop client workflow | Accepted target; current imported queue remains a transitional React/localStorage projection |
+| [client-state-machine.md](specs/client-state-machine.md) | Desktop client workflow | Phase 3 durable imported-job ownership implemented in Rust; React is a typed projection |
 | [model-download-ux.md](specs/model-download-ux.md) | Local fallback setup | Implemented baseline; model licensing, hosted real-model/native CI, and production-release proof remain |
 | [local-audio-preprocessing-stack.md](specs/local-audio-preprocessing-stack.md) | Local audio preparation | Capture/timeline/recording foundation implemented; Silero, meeting inference, and transport remain |
 | [local-live-fallback-sidecar.md](specs/local-live-fallback-sidecar.md) | Local live fallback | Implemented baseline; model licensing, hosted real-model/native CI, performance, and production-release proof remain |
 | [local-llm-sidecar.md](specs/local-llm-sidecar.md) | Local LLM polish | Deferred draft; solo profile only |
 | [live-dictation-client-ux.md](specs/live-dictation-client-ux.md) | Live dictation client | Windows baseline implemented; visible-bounds island and safe shortcut-recorder/default UX remain |
-| [server-tier-mvp.md](specs/server-tier-mvp.md) | Server tier MVP | Canonical Phase 3 draft; health/router skeleton only |
+| [server-tier-mvp.md](specs/server-tier-mvp.md) | Server tier MVP | Phase 3 contract, loopback health, connector state, and desktop ledger implemented; transport/inference deferred |
 | [2026-07-10-source-aware-diarization-design.md](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Capture foundation and meeting evidence | Capture/contract prerequisites implemented; speaker inference and server reconciliation not implemented |
 | [testing-strategy.md](specs/testing-strategy.md) | All | Living verification contract |
 
-## Next execution order
+## Current execution boundary
 
 The tooling-only PowerShell migration is implemented: repo-owned Windows scripts require PowerShell Core 7.4 or newer, executable selectors use `pwsh.exe`, and each Windows CI job validates its isolated runtime. A hash-pinned 7.4.17 compatibility lane parses all tracked scripts and runs the focused native-process suite. This does not broaden the product architecture or start server inference.
 
-The next **product** implementation plan is [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md): the canonical Phase 3 machine-readable contract, capability health service, connector, and SQLite job-ledger prerequisite for Phase 5. It deliberately stops before upload drain, WSS runtime, server ASR, authentication, or diarization.
+The [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) plan is the landed canonical Phase 3 implementation record: machine-readable contract, capability health service, connector state/retry, and SQLite job ledger. Phase 5 upload drain, WSS runtime, server ASR, authentication, model pools, and diarization remain gated and are not implied by Phase 3 health reachability.
 
 The [client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md) is a landed implementation record. Its unchecked future inference/transport gates are not evidence that the capture foundation is absent.
 

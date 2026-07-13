@@ -64,6 +64,12 @@ application port, needs no UFW change, and satisfies the connector's
 loopback-only HTTP policy. The client must fail closed when the tunnel dies and
 must never retry against the Wi-Fi address.
 
+For an explicitly manual Wi-Fi rehearsal, substitute `dgx-spark-lan` only as
+the SSH transport alias in the forwarding command. Keep both sides of the
+forward and the desktop connector URL at `127.0.0.1:18765`. Do not put the
+Wi-Fi/node address in app configuration, and do not add automatic alias or
+network failover.
+
 See the [GB10 readiness audit](../research/2026-07-12-gb10-readiness-audit.md)
 for the evidence and remaining gates.
 
@@ -113,6 +119,17 @@ script validates all app-port inputs before mutation, installs management rules
 before re-enabling UFW, and attempts to restore those rules if a later reset
 step fails. Treat any reported recovery failure as a console repair condition.
 
+## Product And IT Ownership Boundary
+
+| Owner | Responsibilities |
+| --- | --- |
+| Product | Configurable HTTPS origin (with loopback HTTP limited to the Phase 3 tunnel), capability and auth-required state gating, no embedded node IP, and fail-closed retry without automatic network failover |
+| IT | Internal DNS, ZPA app segment and policy, App Connector placement and redundancy, connector-to-server routing, TLS termination and certificates, firewall source ranges, and Entra policy |
+
+Product configuration cannot substitute for approved network topology, and IT
+network reachability does not imply that upload, authentication, or inference
+has shipped.
+
 ## Corporate LAN/VPN Mode
 
 For corporate use, get these from IT before opening the app endpoint:
@@ -124,6 +141,10 @@ For corporate use, get these from IT before opening the app endpoint:
 - Auth plan from ADR 0016, likely Entra/MSAL bearer tokens
 
 Then run with corporate CIDRs:
+
+All angle-bracket names and CIDRs below are documentation placeholders. Do not
+execute firewall/bootstrap changes with placeholders or guessed values; wait
+for approved IT topology and change authorization.
 
 ```bash
 sudo env \
@@ -161,6 +182,10 @@ Target shape:
 - TLS is required at the app entrypoint; auth is enforced above `/health`.
 
 Example once IT gives the Zscaler CIDRs:
+
+The values in this example remain placeholders until IT supplies the actual
+DNS, ZPA, routing, certificate, and source-range design. Do not apply the
+example as a firewall change by substituting laptop Wi-Fi addresses.
 
 ```bash
 sudo env \

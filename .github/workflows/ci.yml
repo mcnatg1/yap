@@ -122,6 +122,9 @@ jobs:
           if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
             throw "CI requires PowerShell Core 7.4 or newer."
           }
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v6
         with:
@@ -133,6 +136,32 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: contract connector integration
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$PWD\server\src"
+          $env:YAP_SERVER_HOST = "127.0.0.1"
+          $env:YAP_SERVER_PORT = "18765"
+          $server = Start-Process python -ArgumentList "-m", "yap_server" -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                Invoke-RestMethod "http://127.0.0.1:18765/v1/health" | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (-not $ready) { throw "Yap server health did not become ready" }
+            $env:YAP_TEST_SERVER_URL = "http://127.0.0.1:18765"
+            cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml --test server_connector
+            if ($LASTEXITCODE -ne 0) { throw "server connector integration failed" }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
       - name: cargo audit
         run: |
           $env:PATH = "$PWD\.cargo-tools\bin;$env:PATH"

@@ -3,7 +3,7 @@ pub mod config;
 mod state;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
@@ -17,6 +17,62 @@ pub struct ServerConnector {
     client: reqwest::Client,
     inner: Mutex<ConnectorInner>,
     generation: AtomicU64,
+}
+
+/// App-independent adapter over the production connector boundary.
+///
+/// This is intentionally narrow: integration tests and non-Tauri hosts can
+/// drive the same bounded HTTP client, state machine, generation checks, and
+/// retry cancellation used by the desktop command adapter without exposing
+/// those implementation modules.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ServerConnectorBoundary {
+    connector: Arc<ServerConnector>,
+}
+
+impl Default for ServerConnectorBoundary {
+    fn default() -> Self {
+        Self {
+            connector: Arc::new(ServerConnector::default()),
+        }
+    }
+}
+
+impl ServerConnectorBoundary {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn configure(&self, settings: &config::ServerSettings) -> ServerConnectionSnapshot {
+        self.connector.synchronize_settings_with(settings, |_| {})
+    }
+
+    pub fn snapshot(&self) -> ServerConnectionSnapshot {
+        self.connector.snapshot()
+    }
+
+    pub async fn refresh(&self) -> ServerConnectionSnapshot {
+        let Some((generation, base_url)) = self.connector.begin_health_request_with(|_| {}) else {
+            return self.snapshot();
+        };
+
+        let result = client::check_health(
+            &self.connector.client,
+            &base_url,
+            allow_insecure_private_server(),
+        )
+        .await;
+        let retry_connector = Arc::clone(&self.connector);
+        self.connector.accept_health_result_with(
+            generation,
+            result,
+            |_| {},
+            move |generation, retry_token, delay| {
+                spawn_boundary_retry(retry_connector, generation, retry_token, delay)
+            },
+        )
+    }
 }
 
 impl Default for ServerConnector {
@@ -71,17 +127,33 @@ impl ServerConnector {
         app: &tauri::AppHandle,
     ) -> Result<ServerConnectionSnapshot, config::ConfigError> {
         self.with_loaded_settings(config::load, |inner, settings| {
-            self.synchronize_settings_locked(inner, &settings, runtime_state, app)
+            self.synchronize_settings_locked(inner, &settings, |snapshot| {
+                project_transition(runtime_state, app, snapshot);
+            })
         })
     }
 
-    fn synchronize_settings_locked(
+    fn synchronize_settings_with<Project>(
+        &self,
+        settings: &config::ServerSettings,
+        project: Project,
+    ) -> ServerConnectionSnapshot
+    where
+        Project: Fn(&ServerConnectionSnapshot),
+    {
+        let mut inner = self.inner.lock().expect("server connector poisoned");
+        self.synchronize_settings_locked(&mut inner, settings, project)
+    }
+
+    fn synchronize_settings_locked<Project>(
         &self,
         inner: &mut ConnectorInner,
         settings: &config::ServerSettings,
-        runtime_state: &runtime::RuntimeOrchestratorState,
-        app: &tauri::AppHandle,
-    ) -> ServerConnectionSnapshot {
+        project: Project,
+    ) -> ServerConnectionSnapshot
+    where
+        Project: Fn(&ServerConnectionSnapshot),
+    {
         let mut generation = self.generation.load(Ordering::Acquire);
         if !inner.configuration_matches(generation, settings.enabled, settings.base_url.as_deref())
         {
@@ -89,7 +161,7 @@ impl ServerConnector {
                 generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
             }
             inner.apply_server_settings(generation, settings.enabled, settings.base_url.clone());
-            project_transition(runtime_state, app, &inner.snapshot());
+            project(&inner.snapshot());
         }
         inner.snapshot()
     }
@@ -101,34 +173,55 @@ impl ServerConnector {
             .snapshot()
     }
 
-    async fn refresh(
+    async fn refresh<R: tauri::Runtime>(
         &self,
-        app: &tauri::AppHandle,
+        app: &tauri::AppHandle<R>,
         runtime_state: &runtime::RuntimeOrchestratorState,
     ) -> ServerConnectionSnapshot {
-        let generation = self.generation.load(Ordering::Acquire);
-        let base_url = {
-            let mut inner = self.inner.lock().expect("server connector poisoned");
-            let base_url = inner.configured_base_url(generation);
-            if base_url.is_none() || !inner.begin_health_request(generation, now_ms()) {
-                return inner.snapshot();
-            }
-            project_transition(runtime_state, app, &inner.snapshot());
-            base_url.expect("enabled connector has a base URL")
+        let Some((generation, base_url)) = self.begin_health_request_with(|snapshot| {
+            project_transition(runtime_state, app, snapshot);
+        }) else {
+            return self.snapshot();
         };
 
         let result =
             client::check_health(&self.client, &base_url, allow_insecure_private_server()).await;
-        self.accept_health_result(app, runtime_state, generation, result)
+        let retry_app = app.clone();
+        self.accept_health_result_with(
+            generation,
+            result,
+            |snapshot| project_transition(runtime_state, app, snapshot),
+            move |generation, retry_token, delay| {
+                spawn_retry(retry_app, generation, retry_token, delay)
+            },
+        )
     }
 
-    fn accept_health_result(
+    fn begin_health_request_with<Project>(&self, project: Project) -> Option<(u64, String)>
+    where
+        Project: Fn(&ServerConnectionSnapshot),
+    {
+        let generation = self.generation.load(Ordering::Acquire);
+        let mut inner = self.inner.lock().expect("server connector poisoned");
+        let base_url = inner.configured_base_url(generation)?;
+        if !inner.begin_health_request(generation, now_ms()) {
+            return None;
+        }
+        project(&inner.snapshot());
+        Some((generation, base_url))
+    }
+
+    fn accept_health_result_with<Project, SpawnRetry>(
         &self,
-        app: &tauri::AppHandle,
-        runtime_state: &runtime::RuntimeOrchestratorState,
         generation: u64,
         result: client::HealthCheckResult,
-    ) -> ServerConnectionSnapshot {
+        project: Project,
+        spawn_retry_task: SpawnRetry,
+    ) -> ServerConnectionSnapshot
+    where
+        Project: Fn(&ServerConnectionSnapshot),
+        SpawnRetry: FnOnce(u64, u64, Duration) -> tauri::async_runtime::JoinHandle<()>,
+    {
         {
             let mut inner = self.inner.lock().expect("server connector poisoned");
             if self.generation.load(Ordering::Acquire) != generation {
@@ -139,15 +232,15 @@ impl ServerConnector {
             else {
                 return inner.snapshot();
             };
-            project_transition(runtime_state, app, &inner.snapshot());
+            project(&inner.snapshot());
 
             if let Some(delay) = transition.retry_after {
                 let retry_at_ms = now_ms().saturating_add(duration_ms(delay));
                 if inner.arm_retry(generation, retry_at_ms) {
                     let snapshot = inner.snapshot();
-                    project_transition(runtime_state, app, &snapshot);
+                    project(&snapshot);
                     let retry_token = inner.retry_token();
-                    let task = spawn_retry(app.clone(), generation, retry_token, delay);
+                    let task = spawn_retry_task(generation, retry_token, delay);
                     inner.install_retry_task(task);
                 }
             }
@@ -155,11 +248,31 @@ impl ServerConnector {
 
         self.snapshot()
     }
+
+    fn begin_scheduled_retry_with<Project>(
+        &self,
+        generation: u64,
+        retry_token: u64,
+        project: Project,
+    ) -> Option<String>
+    where
+        Project: Fn(&ServerConnectionSnapshot),
+    {
+        let mut inner = self.inner.lock().expect("server connector poisoned");
+        if self.generation.load(Ordering::Acquire) != generation
+            || !inner.begin_scheduled_retry(generation, retry_token)
+        {
+            return None;
+        }
+        let base_url = inner.configured_base_url(generation)?;
+        project(&inner.snapshot());
+        Some(base_url)
+    }
 }
 
-fn project_transition(
+fn project_transition<R: tauri::Runtime>(
     runtime_state: &runtime::RuntimeOrchestratorState,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     snapshot: &ServerConnectionSnapshot,
 ) {
     runtime_state.with(|orchestrator| {
@@ -170,8 +283,8 @@ fn project_transition(
     }
 }
 
-fn spawn_retry(
-    app: tauri::AppHandle,
+fn spawn_retry<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     generation: u64,
     retry_token: u64,
     delay: Duration,
@@ -182,21 +295,19 @@ fn spawn_retry(
     })
 }
 
-async fn run_scheduled_retry(app: tauri::AppHandle, generation: u64, retry_token: u64) {
+async fn run_scheduled_retry<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    generation: u64,
+    retry_token: u64,
+) {
     let connector = app.state::<ServerConnector>();
     let runtime_state = app.state::<runtime::RuntimeOrchestratorState>();
-    let base_url = {
-        let mut inner = connector.inner.lock().expect("server connector poisoned");
-        if connector.generation.load(Ordering::Acquire) != generation
-            || !inner.begin_scheduled_retry(generation, retry_token)
-        {
-            return;
-        }
-        let Some(base_url) = inner.configured_base_url(generation) else {
-            return;
-        };
-        project_transition(&runtime_state, &app, &inner.snapshot());
-        base_url
+    let Some(base_url) =
+        connector.begin_scheduled_retry_with(generation, retry_token, |snapshot| {
+            project_transition(&runtime_state, &app, snapshot);
+        })
+    else {
+        return;
     };
 
     let result = client::check_health(
@@ -205,7 +316,58 @@ async fn run_scheduled_retry(app: tauri::AppHandle, generation: u64, retry_token
         allow_insecure_private_server(),
     )
     .await;
-    connector.accept_health_result(&app, &runtime_state, generation, result);
+    let retry_app = app.clone();
+    connector.accept_health_result_with(
+        generation,
+        result,
+        |snapshot| project_transition(&runtime_state, &app, snapshot),
+        move |generation, retry_token, delay| {
+            spawn_retry(retry_app, generation, retry_token, delay)
+        },
+    );
+}
+
+fn spawn_boundary_retry(
+    connector: Arc<ServerConnector>,
+    generation: u64,
+    retry_token: u64,
+    delay: Duration,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        Box::pin(run_boundary_scheduled_retry(
+            connector,
+            generation,
+            retry_token,
+        ))
+        .await;
+    })
+}
+
+async fn run_boundary_scheduled_retry(
+    connector: Arc<ServerConnector>,
+    generation: u64,
+    retry_token: u64,
+) {
+    let Some(base_url) = connector.begin_scheduled_retry_with(generation, retry_token, |_| {})
+    else {
+        return;
+    };
+    let result = client::check_health(
+        &connector.client,
+        &base_url,
+        allow_insecure_private_server(),
+    )
+    .await;
+    let retry_connector = Arc::clone(&connector);
+    connector.accept_health_result_with(
+        generation,
+        result,
+        |_| {},
+        move |generation, retry_token, delay| {
+            spawn_boundary_retry(retry_connector, generation, retry_token, delay)
+        },
+    );
 }
 
 fn now_ms() -> u64 {

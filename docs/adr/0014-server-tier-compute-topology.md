@@ -7,7 +7,7 @@
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
 **Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
-**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, a bounded loopback capability-health service, and the router skeleton exist. The desktop connector, durable jobs, upload/WSS, auth, TLS/QUIC edge, and server inference are not implemented.
+**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Upload/drain, WSS, authenticated sessions, model pools, TLS/QUIC edge, and server inference are not implemented.
 
 ## Context
 
@@ -276,10 +276,12 @@ The GB-class server node:
 
 ```rust
 enum DeploymentProfile { Solo, TeamConfigured }
-enum ConnectorState { Disabled, Connecting, Offline, SignInRequired, Ready }
+enum ConnectorState { NotSet, Disabled, Connecting, Offline, SignInRequired, Retrying, Ready }
 ```
 
 The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured + Offline`; it does not silently become Solo. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is offline. `Ready` is accepted only after the version, auth state, and required advertised capabilities validate.
+
+The implemented Phase 3 connector covers configured-origin validation, bounded health checks, capability and auth-required state projection, fail-closed retries, and settings-generation cancellation. It does not stream audio, upload or drain recording jobs, authenticate a user, or process a queued job.
 
 ### Client connector state machine (team profile)
 
@@ -305,11 +307,13 @@ On `Connected` loss, live dictation may switch to local fallback with a visible 
 
 ### Canonical Phases 3–5 deliverables
 
-- [ ] `server/` staging area and Phase 3 contract scaffolded in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
+- [x] `server/` staging area, machine-readable Phase 3 contract, and loopback capability-health process in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
+- [x] Client capability-health connector: validated settings, bounded HTTP checks, fail-closed state/capability projection, generation safety, and retry cancellation
+- [x] Rust-owned SQLite imported-job ledger with restart recovery and idempotent legacy migration
 - [ ] Workload router: per-user queues, priority, pool dispatch
 - [ ] Streaming ASR pool: GPU ASR, WSS endpoint
 - [ ] Cohere batch pool: concurrent GPU workers, job queue
-- [ ] Client server-connector: WSS live path + HTTP batch upload + profile detection
+- [ ] Client transport: WSS live path + HTTP batch upload/drain + authenticated profile detection
 - [ ] Local-fallback logic: auto-switch on server unreachability
 
 ## Open questions

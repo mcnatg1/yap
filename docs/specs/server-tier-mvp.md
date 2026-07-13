@@ -1,9 +1,9 @@
 # Spec: Server Tier MVP
 
-**Status:** Draft canonical Phase 3 build contract; health/router skeleton only
+**Status:** Canonical Phase 3 boundary implemented; upload/WSS, queue drain, auth, model pools, and server inference remain deferred
 **Scope:** Stand up the first server path while keeping this repo as the MVP monorepo.
 
-The server tier introduces `yap-server` as a private service on an org-owned GB-class server node. The desktop remains the product surface; the server owns heavy inference, queues, and the future API contract.
+The server tier introduces `yap-server` as a private service on an org-owned GB-class server node. The desktop remains the product surface. Phase 3 implements the wire contract and capability-health boundary; the server's heavy inference and operational queues are future phases.
 
 ## Repo Layout
 
@@ -42,6 +42,16 @@ Avoid top-level `models/` and `workers/` during MVP. Model files live on the nod
 | Desktop connector | Settings URL + reachability check + fallback state transitions |
 | Host setup | `infra/yap-server-node/setup-server.sh` can prepare the node without opening app ports by default |
 
+## Implemented Phase 3 Boundary
+
+- `server/openapi/openapi.json` and `server/openapi/live-events.schema.json` define machine-readable health, future job/upload, and future live-event contracts.
+- `python -m yap_server` implements bounded loopback `GET /v1/health`; advertised batch/live/job-status capabilities remain `false`.
+- The Rust desktop connector validates configured origins, performs bounded health checks, fails closed on incompatible responses, rejects stale generations, and cancels retries when settings change.
+- The desktop SQLite ledger owns imported-job IDs, status, attempts, source provenance, cancellation intent, restart recovery, and idempotent legacy migration.
+- React renders Rust snapshots/events. It does not own queue execution through localStorage.
+
+This boundary intentionally does not implement job/chunk handlers, automatic queue drain, WSS transport, server ASR, authentication/token validation, model pools, or server processing.
+
 ## Non-goals
 
 - No separate `yap-contracts` repo.
@@ -57,3 +67,5 @@ Avoid top-level `models/` and `workers/` during MVP. Model files live on the nod
 - `python -m unittest discover -s server/tests -p "test_*.py"` passes with `PYTHONPATH=server/src`.
 - `infra/yap-server-node/setup-server.sh` stays idempotent and syntax-valid.
 - ADR 0018 still records the canonical Phase 10 three-repo split.
+- Connector integration covers healthy Python health plus refused, timeout, malformed, auth-required, disabled, stale-configuration, and retry-cancellation behavior.
+- Native restart restores the same Rust-owned queued job without WebView localStorage authority.
