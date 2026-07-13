@@ -130,14 +130,14 @@ Rust can use snake_case names internally and serialize typed snapshots/events to
 
 ## Route Policy
 
-| Input | Server ready | Fallback ready | Result |
-|-------|--------------|----------------|--------|
-| Live mic | Yes | Any | `serverLive` |
-| Live mic | No | Yes | `localFallback` |
-| Live mic | No | No | `blocked_setup_required` |
-| Larger recording | Yes | Any | `serverBatch` |
-| Larger recording | No | Any | `blocked_server_unavailable` or `queued_server` for retry |
-| Explicit local fallback test/dev file | No | Yes | `localFallback` |
+| Input | Server route condition | Fallback ready | Result |
+|-------|------------------------|----------------|--------|
+| Live mic | `Ready` + `liveStreaming` | Any | `serverLive` |
+| Live mic | Not `Ready` or no `liveStreaming` | Yes | `localFallback` |
+| Live mic | Not `Ready` or no `liveStreaming` | No | `blocked_setup_required` |
+| Larger recording | `Ready` + `batchJobs` | Any | `serverBatch` |
+| Larger recording | Not `Ready` or no `batchJobs` | Any | `blocked_server_unavailable` or `queued_server` for retry |
+| Explicit local fallback test/dev file | No server route | Yes | `localFallback` |
 
 The current desktop bridge never executes an ordinary imported file through local Nemotron; imports remain queued or blocked. The explicit test/dev-file row is a contract-only diagnostic route and must not become reachable from normal import UX.
 
@@ -150,11 +150,11 @@ stateDiagram-v2
     Preflighting --> BlockedSetupRequired
     Preflighting --> BlockedServerUnavailable
     Preflighting --> QueuedLocalFallback
-    Preflighting --> QueuedServer
+    Preflighting --> QueuedServer: imported + Ready + batchJobs
     BlockedSetupRequired --> Preflighting: setup fixed
     BlockedServerUnavailable --> Preflighting: server retry
     QueuedLocalFallback --> LocalTranscribing
-    QueuedServer --> Preprocessing
+    QueuedServer --> Preprocessing: Ready + batchJobs
     Preprocessing --> Uploading
     Uploading --> ServerProcessing
     LocalTranscribing --> Saving

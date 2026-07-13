@@ -289,11 +289,11 @@ The implemented Phase 3 connector covers configured-origin validation, bounded h
 stateDiagram-v2
     [*] --> Disconnected
     Disconnected --> Connecting: server_url present
-    Connecting --> Connected: version + auth + capabilities valid
+    Connecting --> Connected: compatible health + auth projected
     Connecting --> QueuedOffline: timeout / malformed or incompatible health
     Connecting --> SignInRequired: auth required
-    Connected --> LiveStreaming: live mic
-    Connected --> BatchUploading: larger recording
+    Connected --> LiveStreaming: live mic + liveStreaming
+    Connected --> BatchUploading: larger recording + batchJobs
     LiveStreaming --> Connected: stream final
     BatchUploading --> Connected: job accepted
     LiveStreaming --> LocalFallback: socket loss
