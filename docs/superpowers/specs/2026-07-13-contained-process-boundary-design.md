@@ -1,6 +1,6 @@
 # Contained Windows Process Boundary Design
 
-**Status:** Approved direction; specification awaiting user review
+**Status:** Approved on 2026-07-13; implementation planned
 
 **Date:** 2026-07-13
 
@@ -56,6 +56,8 @@ The correct seam is not a generic process framework. It is the one release-harne
 - No weakening of destructive-uninstall authorization or path validation.
 - No unrelated CI cache, dependency, governance, or application behavior change.
 
+The implementation plan sequences this design with the still-open operational closure from the separately approved `2026-07-13-ci-actions-cache-hardening.md` plan because both must be complete before Phase 3 can close. Those imported cache, full-SHA Actions-policy, and open-PR audit obligations are not consequences of this process-boundary design and do not expand its runtime scope. Only adding the new stable `Windows process harness` context to the existing protection set is boundary-specific governance work.
+
 ## 5. Architecture
 
 The design has production and test paths with one-way dependencies:
@@ -87,7 +89,7 @@ The launcher accepts arguments as data, never as a shell string. Every argument 
 
 NSIS's install directory is not represented as an arbitrary raw tail. `LaunchRequest` has private construction with separate normal-launch and NSIS-installer factories. Only the sealed NSIS factory accepts a typed `NsisInstallDirectory` value; the normal factory has no raw-tail parameter. The path must be absolute, contain no quote, NUL, carriage return, or line feed, and becomes the final raw `/D=<path>` token. No ordinary caller can construct or mutate an unquoted command tail.
 
-Environment construction is isolated in one tested Unicode environment-block builder. It reads the inherited block through `GetEnvironmentStringsW` so hidden drive-current-directory entries such as `=C:` are preserved, then applies caller overrides/removals case-insensitively with no duplicate keys. Callers cannot add or modify names beginning with `=`. The builder rejects invalid names and embedded NULs, sorts entries ordinally without case sensitivity, emits the required double-NUL terminator, and keeps the buffer pinned and alive through `CreateProcessW` with `CREATE_UNICODE_ENVIRONMENT`. Environment values are not copied into logs or evidence.
+Environment construction is isolated in one tested Unicode environment-block builder. It reads the inherited block through `GetEnvironmentStringsW` so hidden drive-current-directory entries such as `=C:` are preserved, then merges in a dictionary keyed by `OrdinalIgnoreCase`, rejecting inherited names that differ only by case and applying caller overrides/removals case-insensitively. Callers cannot add or modify names beginning with `=`. Only after merging does the builder sort a copied entry list with `OrdinalIgnoreCase` plus `Ordinal` as a deterministic emission tie-break, emit the required double-NUL terminator, and keep the buffer pinned and alive through `CreateProcessW` with `CREATE_UNICODE_ENVIRONMENT`. Environment values are not copied into logs or evidence.
 
 ### 5.2 `WindowsContainedProcessLauncher`
 
@@ -104,13 +106,16 @@ Launch order:
 7. Verify Job membership using the original handle.
 8. Capture immutable identity from the original handle: process ID, full native creation `FILETIME`, and resolved image path.
 9. Resume the primary thread exactly once, require the previous suspend count to equal `1`, and close the thread handle. Any other count is a launch failure and enters bounded cleanup.
-10. Transfer the process and Job handles into one `ContainedProcessLease`.
+10. Explicitly release and verify every launch-only parent resource while the launcher still owns the process and Job.
+11. Transfer the process and Job handles into one `ContainedProcessLease`.
 
 No application code can run before successful Job assignment. No code reconstructs the root process with `Process.GetProcessById`.
 
-Only the non-inheritable original process handle and non-inheritable Job handle transfer into the lease. Before returning, the launcher closes its parent copies of stdin/stdout/stderr, closes the primary thread handle, calls `DeleteProcThreadAttributeList`, and frees the attribute-list, inherited-handle-list, mutable command-line, and Unicode environment allocations according to their native ownership rules. None of these launch-only resources can escape through the lease. Child-inherited redirection handles remain valid in the child independently of the parent's closed copies.
+The production OS adapter is a stateless singleton. Every fallible native wrapper captures `GetLastWin32Error` immediately on its calling thread and returns one immutable per-call value/success/error result; there is no mutable `LastError` property or shared call state that parallel launches can overwrite. Logical failures after successful native calls carry no stale native code.
 
-If any stage fails, the launcher retains the primary error, terminates any created suspended process or Job membership, waits for bounded cleanup, closes every acquired handle, and appends cleanup failures without masking the primary failure. A failed launch never returns a partial lease.
+Only the non-inheritable original process handle and non-inheritable Job handle transfer into the lease. Before constructing that lease, the launcher closes its parent copies of stdin/stdout/stderr, closes the primary thread handle, calls `DeleteProcThreadAttributeList`, and frees the attribute-list, inherited-handle-list, mutable command-line, and Unicode environment allocations according to their native ownership rules. If explicit launch-only release fails, the launcher still owns process and Job and enters bounded failure cleanup; no already-constructed lease is lost behind a throwing `finally`. None of these launch-only resources can escape through the lease. Child-inherited redirection handles remain valid in the child independently of the parent's closed copies.
+
+If any stage fails, the launcher retains the primary error, terminates any created suspended process or Job membership, waits for bounded cleanup, releases every acquired handle/allocation, and appends cleanup failures without masking the primary failure. Cleanup is proven only when every launch-only resource released successfully and the created root/Job state satisfies the applicable exit/quiescence conditions. A close/release failure keeps proof false even when no process remains, and a failed launch never returns a partial lease.
 
 ### 5.3 `ContainedProcessLease`
 
@@ -176,6 +181,8 @@ Adversarial evidence tests cover an empty temporary file, partial JSON, stale va
 
 One checked-in entrypoint, `desktop/tests/scripts/run-contained-process-harness.ps1`, owns the integration command, result schema, and result-directory layout. It requires an absolute `PowerShellExecutable`, a runtime label, and a sentinel-owned result root. All workflows call this entrypoint rather than embedding or copying the suite body.
 
+The entrypoint's per-suite watchdog is runner-local and is not a fourth consumer of the installer/app/uninstaller boundary. It sets every suite's working directory to the canonical repository `desktop` directory, retains the exact managed `Process` object it starts, passes arguments through `ProcessStartInfo.ArgumentList`, and continuously drains redirected streams through bounded collectors that discard/count output beyond a fixed cap. Runtime expiry triggers one `Kill(entireProcessTree: true)`; retained-process exit and both collectors then share one monotonic cleanup deadline rather than receiving additive waits. It sanitizes each suite log, accumulates scalar results, and atomically publishes one final `result.json` after success or first failure. It never imports `nsis-smoke-helpers.psm1`, never reacquires a PID, and never authorizes installer-owned filesystem mutation. The explicit integration fixture, not this watchdog, creates the outer-Job condition used to test nested Job assignment.
+
 CI gains a separately named required job: `Windows process harness`. It runs:
 
 1. parser and load checks under the pinned PowerShell 7.4.17 runtime;
@@ -183,30 +190,28 @@ CI gains a separately named required job: `Windows process harness`. It runs:
 3. the same focused suite under the hosted current supported PowerShell runtime;
 4. deterministic cleanup and residual-process assertions.
 
-Before installing the pinned runtime, the job captures the hosted current `pwsh.exe` absolute path. It extracts 7.4.17 to a separate absolute path and does not add that directory to `PATH`. Each lane invokes its runtime by absolute path, passes that same path to nested child fixtures, and asserts `ProcessPath`, `PSEdition`, and the expected exact version. This prevents the compatibility lane from contaminating current-runtime resolution.
+Before installing the pinned runtime, the job captures the hosted current `pwsh.exe` absolute path. A named install/probe step has its own five-minute deadline, extracts 7.4.17 to a separate absolute path, and does not add that directory to `PATH`; timeout/mismatch leaves the pinned output absent but cannot skip the hosted-current lane. Each lane invokes its runtime by absolute path, passes that same path to nested child fixtures, and asserts `ProcessPath`, `PSEdition`, and the expected exact version. This prevents the compatibility lane from contaminating current-runtime resolution.
 
-The job runs on every pull request and `main` push without path filtering or a conditional skip, sets `timeout-minutes: 15` in addition to per-process deadlines, records both exact PowerShell identities, and fails if either runtime lane fails. It does not retry a failed integration case. On failure the canonical entrypoint writes nonce-bound expected/observed identity and cleanup evidence to its result root; CI uploads only that redacted structured evidence and redirected test logs with seven-day retention. Environment blocks, command lines, user data, and temporary nonce files are excluded.
+The job runs on every pull request and `main` push without path filtering or a conditional skip, sets `timeout-minutes: 25` in addition to per-process deadlines, records both exact PowerShell identities, and fails if either runtime lane fails. The ceiling exceeds the declared worst-case sum of both lane deadlines plus setup/publication margin, so the second lane, upload, and aggregate step cannot be skipped merely because the first lane consumed its budget. It does not retry a failed integration case. On failure the canonical entrypoint writes nonce-bound expected/observed identity and cleanup evidence to its result root; CI uploads only `artifact/result.json`, `artifact/*.stdout.log`, and `artifact/*.stderr.log` with seven-day retention and rejects directory-wide artifact globs. Environment blocks, command lines, user data, raw/private logs, other artifact files, and temporary nonce files are excluded.
 
-The frontend job no longer owns PowerShell process integration. Native WDIO no longer runs NSIS helper integration indirectly through the release contract. Scheduled NSIS smoke and release workflows invoke the canonical entrypoint once under their captured absolute current runtime before executing installer smoke; they do not copy its PowerShell body into workflow YAML. Every caller passes a known sentinel-owned result root and includes an upload step guarded by `if: failure()` that preserves the same redacted evidence and redirected-log set for seven days before the job terminates. This is intentional repetition at distinct release boundaries, not hidden duplication inside a policy test.
+The frontend job no longer owns PowerShell process integration. Native WDIO no longer runs NSIS helper integration indirectly through the release contract. Scheduled NSIS smoke and release workflows invoke the canonical entrypoint once under their captured absolute current runtime before executing installer smoke; they do not copy its PowerShell body into workflow YAML. Every caller passes a known sentinel-owned result root. The dedicated two-lane job uploads before its final aggregate under `if: always()` plus explicit lane-outcome failure checks; scheduled and release callers use `if: failure()`. Each preserves the same explicit redacted evidence/log allowlist for seven days. This is intentional repetition at distinct release boundaries, not hidden duplication inside a policy test.
 
-Repository governance must preserve the complete existing set and add the new context:
+Repository governance requires only stable, always-reported contexts:
 
 - `frontend`
 - `rust`
 - `server`
 - `Native WDIO smoke (required, no hardware)`
 - `Windows process harness`
-- `Analyze (actions)`
-- `Analyze (javascript-typescript)`
-- `Analyze (python)`
-- `Analyze (rust)`
 - `CodeQL`
 
-The redesign PR merges only after all ten contexts are green. The default-branch run must then complete with the same green set. Only afterward may governance add `Windows process harness` using its observed integration ID; the complete ruleset is read back and compared so no existing Analyze or CodeQL context is dropped.
+The four default-setup `Analyze (actions)`, `Analyze (javascript-typescript)`, `Analyze (python)`, and `Analyze (rust)` jobs are verified whenever GitHub emits them, but they are not individually required contexts: GitHub legitimately omits those matrix jobs on current dependency-only pull requests and reports the stable `CodeQL` aggregate as neutral instead. Requiring absent matrix internals would strand Dependabot updates. GitHub treats a neutral required check as successful; see [Troubleshooting required status checks](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks).
+
+The redesign PR merges only after all six stable contexts are successful and every emitted CodeQL analysis is green. The default-branch run must then complete all five GitHub Actions contexts, and the CodeQL analyses API must return the exact non-empty main-ref category set `/language:actions`, `/language:javascript-typescript`, `/language:python`, and `/language:rust` for the exact merged SHA, all complete and error-free. Only afterward may governance add `Windows process harness` using its observed integration ID; the complete ruleset is read back and compared so no stable context is dropped and matrix-internal `Analyze (...)` jobs are not accidentally pinned.
 
 ## 8. Error And Security Model
 
-Errors identify the failed stage (`validate`, `redirect`, `create-job`, `create-process`, `assign-job`, `capture-identity`, `resume`, `wait`, `terminate`, or `dispose`) and retain the native error code when applicable. They do not log the full environment, inherited secrets, or arbitrary command lines.
+Request factories reject invalid data with `ArgumentException` before any native resource is acquired. Contained-operation errors identify the failed stage (`redirect`, `create-job`, `create-process`, `assign-job`, `capture-identity`, `resume`, `wait`, `terminate`, or `dispose`) and retain the native error code only when a native API actually failed. They do not log the full environment, inherited secrets, or arbitrary command lines.
 
 All waits use monotonic time and explicit upper bounds supplied by the orchestrator. Explicit termination is idempotent, and disposal is an idempotent no-throw backstop. Cleanup failures from explicit operations are accumulated as evidence and cannot convert a failed cleanup into success.
 
@@ -301,7 +306,7 @@ Revisit triggers:
 - Atomic nonce evidence and every adversarial publication case from Section 6.
 - Parallel independent leases have no cross-talk.
 - PID churn after exit cannot make a recycled PID part of the original lease.
-- Residual executable-path audit finds zero processes after each case.
+- Every case proves retained-handle root exit and Job quiescence. Cases that use a case-local executable or descendant additionally prove the executable-path residual audit is empty; the end-to-end smoke always audits the installed application root after lease-controlled cleanup.
 
 ### Verification cadence
 
