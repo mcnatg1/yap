@@ -20,6 +20,7 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::jobs::commands::recording_jobs_create_imports,
         crate::jobs::commands::recording_jobs_import_legacy,
         crate::jobs::commands::recording_job_cancel,
+        crate::jobs::commands::recording_job_dismiss,
         crate::jobs::commands::recording_job_retry,
         setup::fallback_model_status,
         setup::fallback_model_install,

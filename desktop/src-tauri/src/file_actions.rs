@@ -42,18 +42,22 @@ pub(crate) struct RecordingJobSourceAdmission {
     pub(crate) playback_path: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValidatedRecordingJobSource {
+    pub(crate) canonical_path: std::path::PathBuf,
+    pub(crate) fingerprint: crate::commands::media_protocol::MediaSourceFingerprint,
+}
+
 #[derive(Debug)]
 pub(crate) enum RecordingJobSourceError {
     Missing,
     Unsafe(String),
 }
 
-pub(crate) fn authorize_recording_job_source_at(
+pub(crate) fn validate_recording_job_source_at(
     path: &std::path::Path,
-    owner: &crate::commands::media_protocol::MediaOwner,
-    registry_path: &std::path::Path,
     owned_dir: &std::path::Path,
-) -> Result<RecordingJobSourceAdmission, RecordingJobSourceError> {
+) -> Result<ValidatedRecordingJobSource, RecordingJobSourceError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             RecordingJobSourceError::Missing
@@ -66,17 +70,59 @@ pub(crate) fn authorize_recording_job_source_at(
             "Recording source must be a regular file and not a reparse point.".into(),
         ));
     }
+    let canonical_path = playable_recording_path(path.display().to_string())
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    let canonical_metadata = std::fs::symlink_metadata(&canonical_path)
+        .map_err(|error| RecordingJobSourceError::Unsafe(error.to_string()))?;
+    if !canonical_metadata.file_type().is_file() || metadata_is_reparse_point(&canonical_metadata) {
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source must be a regular file and not a reparse point.".into(),
+        ));
+    }
+    if canonical_path_is_inside_owned_live_directory(&canonical_path, owned_dir) {
+        crate::live::recordings::canonical_committed_live_path_from_dir(
+            &canonical_path,
+            owned_dir,
+            false,
+        )
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    }
+    let fingerprint = crate::commands::media_protocol::inspect_media_source(&canonical_path)
+        .map_err(RecordingJobSourceError::Unsafe)?;
+    Ok(ValidatedRecordingJobSource {
+        canonical_path,
+        fingerprint,
+    })
+}
+
+pub(crate) fn authorize_validated_recording_job_source_at(
+    source: &ValidatedRecordingJobSource,
+    owner: &crate::commands::media_protocol::MediaOwner,
+    registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
+) -> Result<RecordingJobSourceAdmission, RecordingJobSourceError> {
     let admission = owner
-        .admit(path, MAX_DECODED_WAVEFORM_BYTES)
+        .admit_unchanged(
+            &source.canonical_path,
+            &source.fingerprint,
+            MAX_DECODED_WAVEFORM_BYTES,
+        )
         .map_err(RecordingJobSourceError::Unsafe)?;
     let canonical_path = register_playback_path_at_from_owned_dir(
-        path.display().to_string(),
+        source.canonical_path.display().to_string(),
         registry_path,
         owned_dir,
     )
-    .map_err(RecordingJobSourceError::Unsafe)?;
-    revalidate_owned_playback_path_from_dir(&canonical_path, owned_dir)
-        .map_err(RecordingJobSourceError::Unsafe)?;
+    .map_err(|error| {
+        owner.release(&admission.url);
+        RecordingJobSourceError::Unsafe(error)
+    })?;
+    if canonical_path != source.canonical_path {
+        owner.release(&admission.url);
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source changed while playback was being authorized.".into(),
+        ));
+    }
     Ok(RecordingJobSourceAdmission {
         canonical_path,
         playback_path: admission.url,
@@ -88,6 +134,11 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(test)]
+pub(crate) fn metadata_is_reparse_point_for_test(metadata: &std::fs::Metadata) -> bool {
+    metadata_is_reparse_point(metadata)
 }
 
 #[cfg(not(windows))]
@@ -1055,13 +1106,19 @@ mod tests {
     #[test]
     fn transcript_actions_reject_resolved_non_transcript_files() {
         let dir = temp_test_dir("txt-symlink");
-        let target = dir.join("secret.json");
+        let target_dir = dir.join("reparse-target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("secret.json");
         let link = dir.join("live-104.txt");
         std::fs::write(&target, "{}").unwrap();
-        if create_file_symlink(&target, &link).is_err() {
-            std::fs::remove_dir_all(dir).ok();
-            return;
-        }
+        create_reparse_point(&target, &link).expect(
+            "reparse fixture creation failed; tests require file symlinks or NTFS directory junctions",
+        );
+        let link_metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            link_metadata.file_type().is_symlink() || metadata_is_reparse_point(&link_metadata),
+            "fixture must be a symlink or Windows reparse point"
+        );
 
         assert_eq!(
             read_text_file_at_from_dir(link.display().to_string(), &dir).unwrap_err(),
@@ -1076,6 +1133,7 @@ mod tests {
                 .unwrap_err(),
             "Only transcript text files can be polished."
         );
+        remove_reparse_point(&link).unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1483,7 +1541,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn create_file_symlink(
+    fn create_reparse_point(
         target: &std::path::Path,
         link: &std::path::Path,
     ) -> std::io::Result<()> {
@@ -1491,10 +1549,34 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn create_file_symlink(
+    fn create_reparse_point(
         target: &std::path::Path,
         link: &std::path::Path,
     ) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_file(target, link)
+        let target_dir = target.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
+        })?;
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target_dir)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_reparse_point(link: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_file(link)
+    }
+
+    #[cfg(windows)]
+    fn remove_reparse_point(link: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_dir(link)
     }
 }

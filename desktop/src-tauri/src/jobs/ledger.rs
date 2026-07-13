@@ -211,8 +211,10 @@ impl JobLedger {
         &self,
         job_id: &str,
         updated_at_ms: u64,
+        expires_at_ms: u64,
     ) -> Result<RecordingJobRecord, JobLedgerError> {
         let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let expires_at_ms = sqlite_integer(expires_at_ms, "expires_at_ms")?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let raw = query_job(&transaction, job_id)?
@@ -232,8 +234,8 @@ impl JobLedger {
             });
         }
         transaction.execute(
-            "UPDATE recording_jobs SET status = 'queued_server', route = 'server_batch', updated_at_ms = ?1 WHERE job_id = ?2",
-            params![updated_at_ms, job_id],
+            "UPDATE recording_jobs SET status = 'queued_server', route = 'server_batch', updated_at_ms = ?1, expires_at_ms = ?2 WHERE job_id = ?3",
+            params![updated_at_ms, expires_at_ms, job_id],
         )?;
         let updated = query_job(&transaction, job_id)?.expect("accepted queued job exists");
         transaction.commit()?;
@@ -358,6 +360,32 @@ impl JobLedger {
             params![updated_at_ms, job_id],
         )?;
         let updated = query_job(&transaction, job_id)?.expect("cancelled job exists");
+        transaction.commit()?;
+        updated.try_into()
+    }
+
+    pub fn dismiss_failed(
+        &self,
+        job_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = query_job(&transaction, job_id)?
+            .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?;
+        let current: RecordingJobRecord = raw.try_into()?;
+        if current.status != RecordingJobStatus::Failed {
+            return Err(JobLedgerError::InvalidTransition {
+                from: current.status,
+                to: RecordingJobStatus::Cancelled,
+            });
+        }
+        transaction.execute(
+            "UPDATE recording_jobs SET status = 'cancelled', updated_at_ms = ?1 WHERE job_id = ?2 AND status = 'failed'",
+            params![updated_at_ms, job_id],
+        )?;
+        let updated = query_job(&transaction, job_id)?.expect("dismissed job exists");
         transaction.commit()?;
         updated.try_into()
     }

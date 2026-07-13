@@ -1,6 +1,8 @@
 use crate::{
     commands::media_protocol::MediaOwner,
-    file_actions::{RecordingJobSourceAdmission, RecordingJobSourceError},
+    file_actions::{
+        RecordingJobSourceAdmission, RecordingJobSourceError, ValidatedRecordingJobSource,
+    },
     jobs::{
         JobLedger, JobLedgerError, NewRecordingJob, RecordingJobStatus, RecordingJobView,
         RecordingRoute, SessionMode, SessionOrigin, SourceOwnership,
@@ -8,7 +10,7 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -77,8 +79,14 @@ impl From<JobLedgerError> for JobCommandError {
 pub(crate) struct RecordingJobs {
     ledger: JobLedger,
     mutation: Mutex<()>,
+    playback: Mutex<HashMap<String, CachedPlayback>>,
     owned_dir: PathBuf,
     registry_path: PathBuf,
+}
+
+struct CachedPlayback {
+    source: ValidatedRecordingJobSource,
+    playback_path: String,
 }
 
 #[tauri::command]
@@ -111,12 +119,11 @@ pub(crate) fn recording_jobs_import_legacy(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     jobs: tauri::State<'_, RecordingJobs>,
-    media: tauri::State<'_, MediaOwner>,
     payload: LegacyQueueImport,
 ) -> Result<LegacyImportResult, JobCommandError> {
     ensure_main(&window)?;
     mutate_then_notify(
-        || jobs.import_legacy(&media, payload, now_ms()?),
+        || jobs.import_legacy(payload, now_ms()?),
         || emit_jobs_changed(&app),
     )
 }
@@ -126,11 +133,27 @@ pub(crate) fn recording_job_cancel(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     jobs: tauri::State<'_, RecordingJobs>,
+    media: tauri::State<'_, MediaOwner>,
     job_id: String,
 ) -> Result<RecordingJobView, JobCommandError> {
     ensure_main(&window)?;
     mutate_then_notify(
-        || jobs.cancel(&job_id, now_ms()?, || {}),
+        || jobs.cancel(&media, &job_id, now_ms()?, || {}),
+        || emit_jobs_changed(&app),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn recording_job_dismiss(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    jobs: tauri::State<'_, RecordingJobs>,
+    media: tauri::State<'_, MediaOwner>,
+    job_id: String,
+) -> Result<RecordingJobView, JobCommandError> {
+    ensure_main(&window)?;
+    mutate_then_notify(
+        || jobs.dismiss(&media, &job_id, now_ms()?, || {}),
         || emit_jobs_changed(&app),
     )
 }
@@ -173,6 +196,7 @@ impl RecordingJobs {
         Ok(Self {
             ledger: JobLedger::open_default()?,
             mutation: Mutex::new(()),
+            playback: Mutex::new(HashMap::new()),
             owned_dir: crate::live::recordings::recordings_dir(),
             registry_path: crate::paths::app_data_dir().join("recording-playback-registry.json"),
         })
@@ -185,6 +209,7 @@ impl RecordingJobs {
         Self {
             ledger,
             mutation: Mutex::new(()),
+            playback: Mutex::new(HashMap::new()),
             owned_dir,
             registry_path: authority_dir.join("recording-playback-registry.json"),
         }
@@ -210,7 +235,7 @@ impl RecordingJobs {
         }
         let sources = paths
             .iter()
-            .map(|path| self.authorize_source(media, Path::new(path)))
+            .map(|path| self.validate_source(Path::new(path)))
             .collect::<Result<Vec<_>, _>>()?;
         let mut new_sources = HashSet::new();
         for source in &sources {
@@ -236,7 +261,7 @@ impl RecordingJobs {
                 .ledger
                 .find_recoverable_imported_job_by_source(&source.canonical_path)?
             {
-                created.push(project_with_admission(existing, source));
+                created.push(self.project_validated(existing, source, media)?);
                 continue;
             }
             let id = mint_job_id(&source.canonical_path, now_ms);
@@ -266,7 +291,7 @@ impl RecordingJobs {
                 updated_at_ms: now_ms,
                 expires_at_ms: now_ms.checked_add(PENDING_JOB_LIFETIME_MS),
             })?;
-            created.push(project_with_admission(record, source));
+            created.push(self.project_validated(record, source, media)?);
         }
         Ok(created)
     }
@@ -284,8 +309,11 @@ impl RecordingJobs {
         })?;
         self.ledger.expire_pending_jobs(now_ms)?;
         let mut views = Vec::new();
+        let mut recoverable_ids = HashSet::new();
         for record in self.ledger.list_recoverable_jobs()? {
+            recoverable_ids.insert(record.job_id.clone());
             if record.error_code.as_deref() == Some("PENDING_EXPIRED") {
+                self.release_playback(&record.job_id, media);
                 let mut view = RecordingJobView::from_record(&record);
                 view.source_path = None;
                 view.playback_path = None;
@@ -295,6 +323,7 @@ impl RecordingJobs {
             match self.project_with_playback(record.clone(), media) {
                 Ok(view) => views.push(view),
                 Err(error) if error.code == "SOURCE_MISSING" || error.code == "SOURCE_UNSAFE" => {
+                    self.release_playback(&record.job_id, media);
                     let failed =
                         self.ledger
                             .fail_source_validation(&record.job_id, &error.code, now_ms)?;
@@ -306,11 +335,13 @@ impl RecordingJobs {
                 Err(error) => return Err(error),
             }
         }
+        self.reconcile_playback(&recoverable_ids, media)?;
         Ok(views)
     }
 
     fn cancel(
         &self,
+        media: &MediaOwner,
         job_id: &str,
         now_ms: u64,
         notify: impl FnOnce(),
@@ -322,6 +353,7 @@ impl RecordingJobs {
             )
         })?;
         let record = self.ledger.request_cancellation(job_id, now_ms)?;
+        self.release_playback(job_id, media);
         let view = RecordingJobView::from_record(&record);
         drop(mutation);
         notify();
@@ -347,27 +379,13 @@ impl RecordingJobs {
                 format!("Recording job {job_id:?} was not found."),
             )
         })?;
-        let source = current.source_path.as_deref().ok_or_else(|| {
-            command_error("SOURCE_UNSAFE", "Imported recording has no source path.")
-        })?;
-        let source = self.authorize_source(media, source)?;
-
-        let (record, changed) = match current.status {
-            RecordingJobStatus::Accepted => {
-                (self.ledger.accept_to_queued_server(job_id, now_ms)?, true)
-            }
+        let retry_kind = match current.status {
+            RecordingJobStatus::Accepted => RetryKind::Accepted,
             RecordingJobStatus::BlockedSetupRequired
             | RecordingJobStatus::BlockedServerUnavailable
             | RecordingJobStatus::BlockedSignInRequired
-            | RecordingJobStatus::Failed => (
-                self.ledger.retry_to_queued_server(
-                    job_id,
-                    now_ms,
-                    now_ms.checked_add(PENDING_JOB_LIFETIME_MS),
-                )?,
-                true,
-            ),
-            RecordingJobStatus::QueuedServer => (current, false),
+            | RecordingJobStatus::Failed => RetryKind::Retry,
+            RecordingJobStatus::QueuedServer => RetryKind::Unchanged,
             _ => {
                 return Err(command_error(
                     "INVALID_JOB_TRANSITION",
@@ -375,9 +393,28 @@ impl RecordingJobs {
                 ));
             }
         };
-        let mut view = RecordingJobView::from_record(&record);
-        view.source_path = Some(source.canonical_path.display().to_string());
-        view.playback_path = Some(source.playback_path);
+        let source = current.source_path.as_deref().ok_or_else(|| {
+            command_error("SOURCE_UNSAFE", "Imported recording has no source path.")
+        })?;
+        let source = self.validate_source(source)?;
+
+        let (record, changed) = match retry_kind {
+            RetryKind::Accepted => (
+                self.ledger
+                    .accept_to_queued_server(job_id, now_ms, renewed_expiry(now_ms)?)?,
+                true,
+            ),
+            RetryKind::Retry => (
+                self.ledger.retry_to_queued_server(
+                    job_id,
+                    now_ms,
+                    Some(renewed_expiry(now_ms)?),
+                )?,
+                true,
+            ),
+            RetryKind::Unchanged => (current, false),
+        };
+        let view = self.project_validated(record, source, media)?;
         drop(mutation);
         if changed {
             notify();
@@ -385,9 +422,29 @@ impl RecordingJobs {
         Ok(view)
     }
 
-    fn import_legacy(
+    fn dismiss(
         &self,
         media: &MediaOwner,
+        job_id: &str,
+        now_ms: u64,
+        notify: impl FnOnce(),
+    ) -> Result<RecordingJobView, JobCommandError> {
+        let mutation = self.mutation.lock().map_err(|_| {
+            command_error(
+                "JOB_STATE_UNAVAILABLE",
+                "Recording job state is unavailable.",
+            )
+        })?;
+        let record = self.ledger.dismiss_failed(job_id, now_ms)?;
+        self.release_playback(job_id, media);
+        let view = RecordingJobView::from_record(&record);
+        drop(mutation);
+        notify();
+        Ok(view)
+    }
+
+    fn import_legacy(
+        &self,
         payload: LegacyQueueImport,
         now_ms: u64,
     ) -> Result<LegacyImportResult, JobCommandError> {
@@ -429,8 +486,8 @@ impl RecordingJobs {
                 });
                 continue;
             }
-            let admission = match self.authorize_source(media, Path::new(&legacy.path)) {
-                Ok(admission) => admission,
+            let source = match self.validate_source(Path::new(&legacy.path)) {
+                Ok(source) => source,
                 Err(error) => {
                     result.rejected.push(LegacyImportRejection {
                         legacy_id: legacy.id,
@@ -442,7 +499,7 @@ impl RecordingJobs {
             };
             if let Some(existing) = self
                 .ledger
-                .find_recoverable_imported_job_by_source(&admission.canonical_path)?
+                .find_recoverable_imported_job_by_source(&source.canonical_path)?
             {
                 result.duplicates.push(LegacyImportAcknowledgement {
                     legacy_id: legacy.id,
@@ -464,10 +521,10 @@ impl RecordingJobs {
                 job_id: job_id.clone(),
                 session_mode: SessionMode::Meeting,
                 session_origin: SessionOrigin::ImportedFile,
-                source_path: Some(admission.canonical_path.clone()),
+                source_path: Some(source.canonical_path.clone()),
                 source_ownership: SourceOwnership::External,
                 output_path: None,
-                display_name: admission
+                display_name: source
                     .canonical_path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -496,18 +553,9 @@ impl RecordingJobs {
         Ok(result)
     }
 
-    fn authorize_source(
-        &self,
-        media: &MediaOwner,
-        path: &Path,
-    ) -> Result<RecordingJobSourceAdmission, JobCommandError> {
-        crate::file_actions::authorize_recording_job_source_at(
-            path,
-            media,
-            &self.registry_path,
-            &self.owned_dir,
-        )
-        .map_err(source_error)
+    fn validate_source(&self, path: &Path) -> Result<ValidatedRecordingJobSource, JobCommandError> {
+        crate::file_actions::validate_recording_job_source_at(path, &self.owned_dir)
+            .map_err(source_error)
     }
 
     fn project_with_playback(
@@ -518,15 +566,91 @@ impl RecordingJobs {
         let Some(source) = record.source_path.as_deref() else {
             return Ok(RecordingJobView::from_record(&record));
         };
-        let admission = crate::file_actions::authorize_recording_job_source_at(
-            source,
+        let source = self.validate_source(source)?;
+        self.project_validated(record, source, media)
+    }
+
+    fn project_validated(
+        &self,
+        record: crate::jobs::RecordingJobRecord,
+        source: ValidatedRecordingJobSource,
+        media: &MediaOwner,
+    ) -> Result<RecordingJobView, JobCommandError> {
+        let mut playback = self.playback.lock().map_err(|_| {
+            command_error(
+                "JOB_STATE_UNAVAILABLE",
+                "Recording playback state is unavailable.",
+            )
+        })?;
+        if let Some(cached) = playback.get(&record.job_id) {
+            if cached.source == source {
+                let admission = RecordingJobSourceAdmission {
+                    canonical_path: source.canonical_path,
+                    playback_path: cached.playback_path.clone(),
+                };
+                return Ok(project_with_admission(record, admission));
+            }
+        }
+        if let Some(stale) = playback.remove(&record.job_id) {
+            media.release(&stale.playback_path);
+        }
+        let admission = crate::file_actions::authorize_validated_recording_job_source_at(
+            &source,
             media,
             &self.registry_path,
             &self.owned_dir,
         )
         .map_err(source_error)?;
+        playback.insert(
+            record.job_id.clone(),
+            CachedPlayback {
+                source,
+                playback_path: admission.playback_path.clone(),
+            },
+        );
         Ok(project_with_admission(record, admission))
     }
+
+    fn release_playback(&self, job_id: &str, media: &MediaOwner) {
+        let removed = self
+            .playback
+            .lock()
+            .ok()
+            .and_then(|mut playback| playback.remove(job_id));
+        if let Some(removed) = removed {
+            media.release(&removed.playback_path);
+        }
+    }
+
+    fn reconcile_playback(
+        &self,
+        recoverable_ids: &HashSet<String>,
+        media: &MediaOwner,
+    ) -> Result<(), JobCommandError> {
+        let mut playback = self.playback.lock().map_err(|_| {
+            command_error(
+                "JOB_STATE_UNAVAILABLE",
+                "Recording playback state is unavailable.",
+            )
+        })?;
+        let stale_ids = playback
+            .keys()
+            .filter(|job_id| !recoverable_ids.contains(*job_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for job_id in stale_ids {
+            if let Some(stale) = playback.remove(&job_id) {
+                media.release(&stale.playback_path);
+            }
+        }
+        Ok(())
+    }
+}
+
+enum RetryKind {
+    Accepted,
+    Retry,
+    Unchanged,
 }
 
 fn project_with_admission(
@@ -582,6 +706,15 @@ fn command_error(code: impl Into<String>, message: impl Into<String>) -> JobComm
         code: code.into(),
         message: message.into(),
     }
+}
+
+fn renewed_expiry(now_ms: u64) -> Result<u64, JobCommandError> {
+    now_ms.checked_add(PENDING_JOB_LIFETIME_MS).ok_or_else(|| {
+        command_error(
+            "JOB_TIME_OUT_OF_RANGE",
+            "Recording job expiry is outside the supported time range.",
+        )
+    })
 }
 
 fn mutate_then_notify<T, E>(
@@ -651,7 +784,55 @@ mod tests {
         let duplicate = jobs.create_imports(&media, vec![path], 2_001).unwrap();
 
         assert_eq!(duplicate[0].id, first[0].id);
+        assert_eq!(duplicate[0].playback_path, first[0].playback_path);
+        assert_eq!(media.active_admission_count_for_test(), 1);
         assert_eq!(jobs.snapshot(&media, 2_002).unwrap().len(), 1);
+        assert_eq!(media.active_admission_count_for_test(), 1);
+
+        drop(media);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unrelated_mutations_preserve_playback_but_source_replacement_rotates_it() {
+        let dir = temp_dir("stable-playback");
+        let selected = dir.join("selected.wav");
+        let unrelated = dir.join("unrelated.wav");
+        let original = dir.join("selected-original.wav");
+        fs::write(&selected, b"RIFF-selected-original").unwrap();
+        fs::write(&unrelated, b"RIFF-unrelated").unwrap();
+        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
+        let media = MediaOwner::new();
+
+        let selected_job = jobs
+            .create_imports(&media, vec![selected.display().to_string()], 2_100)
+            .unwrap()[0]
+            .clone();
+        jobs.create_imports(&media, vec![unrelated.display().to_string()], 2_101)
+            .unwrap();
+        let after_unrelated = jobs.snapshot(&media, 2_102).unwrap();
+        let selected_after_unrelated = after_unrelated
+            .iter()
+            .find(|job| job.id == selected_job.id)
+            .unwrap();
+        assert_eq!(
+            selected_after_unrelated.playback_path,
+            selected_job.playback_path
+        );
+        assert_eq!(media.active_admission_count_for_test(), 2);
+
+        fs::rename(&selected, &original).unwrap();
+        fs::write(&selected, b"RIFF-selected-replacement").unwrap();
+        let after_replacement = jobs.snapshot(&media, 2_103).unwrap();
+        let selected_after_replacement = after_replacement
+            .iter()
+            .find(|job| job.id == selected_job.id)
+            .unwrap();
+        assert_ne!(
+            selected_after_replacement.playback_path,
+            selected_job.playback_path
+        );
+        assert_eq!(media.active_admission_count_for_test(), 2);
 
         drop(media);
         fs::remove_dir_all(dir).unwrap();
@@ -675,6 +856,8 @@ mod tests {
         );
         assert_eq!(invalid.unwrap_err().code, "SOURCE_MISSING");
         assert!(jobs.ledger.list_jobs().unwrap().is_empty());
+        assert!(!jobs.registry_path.exists());
+        assert_eq!(media.active_admission_count_for_test(), 0);
 
         let later_id = jobs
             .create_imports(&media, vec![later.display().to_string()], 2_700)
@@ -756,6 +939,8 @@ mod tests {
             jobs.create_imports(&media, paths, 4_000).unwrap().len(),
             MAX_RECORDING_JOBS
         );
+        let admissions_before_overflow = media.active_admission_count_for_test();
+        let registry_before_overflow = fs::read(&jobs.registry_path).unwrap();
         let error = jobs
             .create_imports(&media, vec![overflow.display().to_string()], 4_001)
             .unwrap_err();
@@ -764,6 +949,40 @@ mod tests {
         assert_eq!(
             jobs.snapshot(&media, 4_002).unwrap().len(),
             MAX_RECORDING_JOBS
+        );
+        assert_eq!(
+            media.active_admission_count_for_test(),
+            admissions_before_overflow
+        );
+        assert_eq!(
+            fs::read(&jobs.registry_path).unwrap(),
+            registry_before_overflow
+        );
+
+        let legacy_overflow = dir.join("legacy-overflow.wav");
+        fs::write(&legacy_overflow, b"RIFF-legacy-overflow-fixture").unwrap();
+        let legacy_admissions_before = media.active_admission_count_for_test();
+        let legacy_registry_before = fs::read(&jobs.registry_path).unwrap();
+        let legacy = jobs
+            .import_legacy(
+                LegacyQueueImport {
+                    schema_version: 1,
+                    jobs: vec![LegacyQueueJob {
+                        id: 999,
+                        path: legacy_overflow.display().to_string(),
+                    }],
+                },
+                4_003,
+            )
+            .unwrap();
+        assert_eq!(legacy.rejected[0].code, "JOB_LIMIT_EXCEEDED");
+        assert_eq!(
+            media.active_admission_count_for_test(),
+            legacy_admissions_before
+        );
+        assert_eq!(
+            fs::read(&jobs.registry_path).unwrap(),
+            legacy_registry_before
         );
 
         drop(media);
@@ -810,6 +1029,67 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_failed_jobs_preserves_provenance_and_frees_capacity_after_restart() {
+        let dir = temp_dir("dismiss-capacity");
+        let database = dir.join("jobs.sqlite3");
+        let paths = (0..MAX_RECORDING_JOBS)
+            .map(|index| {
+                let source = dir.join(format!("failed-{index:03}.wav"));
+                fs::write(&source, b"RIFF-failed-fixture").unwrap();
+                source
+            })
+            .collect::<Vec<_>>();
+        let replacement = dir.join("replacement.wav");
+        fs::write(&replacement, b"RIFF-replacement-fixture").unwrap();
+
+        {
+            let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+            let media = MediaOwner::new();
+            let created = jobs
+                .create_imports(
+                    &media,
+                    paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
+                    5_500,
+                )
+                .unwrap();
+            for (index, job) in created.iter().enumerate() {
+                jobs.ledger
+                    .fail_source_validation(&job.id, "TEST_FAILED", 5_600 + index as u64)
+                    .unwrap();
+                jobs.dismiss(&media, &job.id, 5_900 + index as u64, || {})
+                    .unwrap();
+            }
+
+            assert!(jobs.snapshot(&media, 6_200).unwrap().is_empty());
+            assert_eq!(media.active_admission_count_for_test(), 0);
+            let durable = jobs.ledger.list_jobs().unwrap();
+            assert_eq!(durable.len(), MAX_RECORDING_JOBS);
+            assert!(durable.iter().all(|job| {
+                job.status == RecordingJobStatus::Cancelled
+                    && job.error_code.as_deref() == Some("TEST_FAILED")
+                    && !job.cancellation_requested
+            }));
+        }
+
+        assert!(paths.iter().all(|path| path.is_file()));
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+        let media = MediaOwner::new();
+        assert!(jobs.snapshot(&media, 6_300).unwrap().is_empty());
+        let imported = jobs
+            .create_imports(&media, vec![replacement.display().to_string()], 6_301)
+            .unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].status, RecordingJobStatus::QueuedServer);
+
+        drop(media);
+        drop(jobs);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn cancellation_and_retry_follow_ledger_legality_and_preserve_external_files() {
         let dir = temp_dir("cancel-retry");
         let cancel_source = dir.join("cancel.wav");
@@ -828,20 +1108,40 @@ mod tests {
             .unwrap()[0]
             .id
             .clone();
+        let admissions_before_illegal_dismiss = media.active_admission_count_for_test();
+        assert!(jobs.dismiss(&media, &cancel_id, 6_002, || {}).is_err());
+        assert_eq!(
+            jobs.ledger.get_job(&cancel_id).unwrap().unwrap().status,
+            RecordingJobStatus::QueuedServer
+        );
+        assert_eq!(
+            media.active_admission_count_for_test(),
+            admissions_before_illegal_dismiss
+        );
         jobs.ledger
-            .fail_source_validation(&retry_id, "SOURCE_UNSAFE", 6_002)
+            .fail_source_validation(&retry_id, "SOURCE_UNSAFE", 6_003)
             .unwrap();
 
-        let cancelled = jobs.cancel(&cancel_id, 6_003, || {}).unwrap();
-        let retried = jobs.retry(&media, &retry_id, 6_004, || {}).unwrap();
+        let cancelled = jobs.cancel(&media, &cancel_id, 6_004, || {}).unwrap();
+        let retried = jobs.retry(&media, &retry_id, 6_005, || {}).unwrap();
 
         assert_eq!(cancelled.status, RecordingJobStatus::Cancelled);
         assert!(cancel_source.is_file());
         assert_eq!(retried.status, RecordingJobStatus::QueuedServer);
-        assert!(jobs.cancel(&cancel_id, 6_005, || {}).is_err());
-        assert!(jobs.retry(&media, &cancel_id, 6_006, || {}).is_err());
+        assert!(jobs.cancel(&media, &cancel_id, 6_006, || {}).is_err());
+        let admissions_before_illegal_retry = media.active_admission_count_for_test();
+        let registry_before_illegal_retry = fs::read(&jobs.registry_path).unwrap();
+        assert!(jobs.retry(&media, &cancel_id, 6_007, || {}).is_err());
+        assert_eq!(
+            media.active_admission_count_for_test(),
+            admissions_before_illegal_retry
+        );
+        assert_eq!(
+            fs::read(&jobs.registry_path).unwrap(),
+            registry_before_illegal_retry
+        );
         let recreated = jobs
-            .create_imports(&media, vec![cancel_source.display().to_string()], 6_007)
+            .create_imports(&media, vec![cancel_source.display().to_string()], 6_008)
             .unwrap();
         assert_ne!(recreated[0].id, cancel_id);
         assert_eq!(recreated[0].status, RecordingJobStatus::QueuedServer);
@@ -855,7 +1155,9 @@ mod tests {
         let dir = temp_dir("restart-reparse");
         let database = dir.join("jobs.sqlite3");
         let source = dir.join("source.wav");
-        let target = dir.join("target.wav");
+        let target_dir = dir.join("reparse-target");
+        fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("target.wav");
         fs::write(&source, b"RIFF-original-fixture").unwrap();
         fs::write(&target, b"RIFF-target-fixture").unwrap();
         {
@@ -865,10 +1167,15 @@ mod tests {
                 .unwrap();
         }
         fs::remove_file(&source).unwrap();
-        if create_file_symlink(&target, &source).is_err() {
-            fs::remove_dir_all(dir).unwrap();
-            return;
-        }
+        create_reparse_point(&target, &source).expect(
+            "reparse fixture creation failed; tests require file symlinks or NTFS directory junctions",
+        );
+        let link_metadata = fs::symlink_metadata(&source).unwrap();
+        assert!(
+            link_metadata.file_type().is_symlink()
+                || crate::file_actions::metadata_is_reparse_point_for_test(&link_metadata),
+            "fixture must be a symlink or Windows reparse point"
+        );
 
         let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
         let media = MediaOwner::new();
@@ -879,6 +1186,7 @@ mod tests {
         assert_eq!(snapshot[0].source_path, None);
         assert_eq!(snapshot[0].playback_path, None);
 
+        remove_reparse_point(&source).unwrap();
         drop(media);
         drop(jobs);
         fs::remove_dir_all(dir).unwrap();
@@ -901,7 +1209,7 @@ mod tests {
         .unwrap();
         let job_id = created[0].id.clone();
         mutate_then_notify(
-            || jobs.cancel(&job_id, 8_001, || {}),
+            || jobs.cancel(&media, &job_id, 8_001, || {}),
             || {
                 assert_eq!(
                     jobs.ledger.get_job(&job_id).unwrap().unwrap().status,
@@ -956,6 +1264,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(retried.status, RecordingJobStatus::QueuedServer);
+        let renewed_expiry = 8_501 + PENDING_JOB_LIFETIME_MS;
+        assert_eq!(
+            jobs.ledger
+                .get_job("job-accepted")
+                .unwrap()
+                .unwrap()
+                .expires_at_ms,
+            Some(renewed_expiry)
+        );
+        assert_eq!(
+            jobs.snapshot(&media, renewed_expiry - 1).unwrap()[0].status,
+            RecordingJobStatus::QueuedServer
+        );
+        let at_boundary = jobs.snapshot(&media, renewed_expiry).unwrap();
+        assert_eq!(at_boundary[0].status, RecordingJobStatus::Failed);
+        assert_eq!(at_boundary[0].error.as_deref(), Some("PENDING_EXPIRED"));
         drop(media);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -982,16 +1306,18 @@ mod tests {
             ],
         };
 
-        let first = jobs.import_legacy(&media, payload.clone(), 9_000).unwrap();
+        let first = jobs.import_legacy(payload.clone(), 9_000).unwrap();
         assert_eq!(first.accepted.len(), 1);
         assert_eq!(first.duplicates.len(), 0);
         assert_eq!(first.rejected.len(), 1);
         assert!(first.accepted[0].job_id.starts_with("legacy-41-"));
         assert_eq!(first.rejected[0].legacy_id, 42);
         assert_eq!(first.rejected[0].code, "SOURCE_MISSING");
+        assert_eq!(media.active_admission_count_for_test(), 0);
+        assert!(!jobs.registry_path.exists());
 
         fs::remove_file(&source).unwrap();
-        let replay = jobs.import_legacy(&media, payload, 9_001).unwrap();
+        let replay = jobs.import_legacy(payload, 9_001).unwrap();
         assert_eq!(replay.accepted.len(), 0);
         assert_eq!(replay.duplicates.len(), 1);
         assert_eq!(replay.duplicates[0].job_id, first.accepted[0].job_id);
@@ -1008,9 +1334,7 @@ mod tests {
                 .collect(),
         };
         assert_eq!(
-            jobs.import_legacy(&media, overflow, 9_002)
-                .unwrap_err()
-                .code,
+            jobs.import_legacy(overflow, 9_002).unwrap_err().code,
             "JOB_LIMIT_EXCEEDED"
         );
 
@@ -1019,13 +1343,37 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    fn create_reparse_point(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
     }
 
     #[cfg(windows)]
-    fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_file(target, link)
+    fn create_reparse_point(target: &Path, link: &Path) -> std::io::Result<()> {
+        let target_dir = target.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
+        })?;
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target_dir)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_reparse_point(link: &Path) -> std::io::Result<()> {
+        fs::remove_file(link)
+    }
+
+    #[cfg(windows)]
+    fn remove_reparse_point(link: &Path) -> std::io::Result<()> {
+        fs::remove_dir(link)
     }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {

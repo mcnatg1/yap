@@ -124,6 +124,10 @@ export async function cancelRecordingJob(jobId: string) {
   return invoke<RecordingJobView>("recording_job_cancel", { jobId });
 }
 
+export async function dismissRecordingJob(jobId: string) {
+  return invoke<RecordingJobView>("recording_job_dismiss", { jobId });
+}
+
 export async function retryRecordingJob(jobId: string) {
   return invoke<RecordingJobView>("recording_job_retry", { jobId });
 }
