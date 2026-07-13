@@ -35,6 +35,7 @@ import {
   type RecordingJobView,
   workspaceCopy,
 } from "@/lib/app-types";
+import { fireAndReport } from "@/lib/fire-and-report";
 import { cn } from "@/lib/utils";
 import {
   projectHistoryPlaybackAdmission,
@@ -42,6 +43,10 @@ import {
 } from "@/lib/playback-registry";
 
 const unavailableHistoryRetry = () => undefined;
+
+function reportRecordingAction(action: () => unknown, message: string) {
+  fireAndReport(action, (error) => toast.error(`${message}: ${error.message}`));
+}
 
 function withHistoryPlaybackAdmission(
   item: RecordingJobView | undefined,
@@ -281,9 +286,9 @@ export default function App() {
       {showQueue ? (
         <QueuePanel
           legacyDiscardAllowed={legacyDiscardAllowed}
-          onClear={clearQueue}
-          onDiscardLegacyQueue={discardLegacyQueue}
-          onRemove={removeItem}
+          onClear={() => reportRecordingAction(clearQueue, "Could not clear queue")}
+          onDiscardLegacyQueue={() => reportRecordingAction(discardLegacyQueue, "Could not discard old queue")}
+          onRemove={(id) => reportRecordingAction(() => removeItem(id), "Could not remove recording")}
           onReveal={(path) => void revealPath(path)}
           onRetryMigration={retryMigration}
           onSelect={selectQueueItem}
@@ -336,7 +341,7 @@ export default function App() {
         onCopy={copyTranscript}
         onOpen={(path) => void openAppPath(path)}
         onOpenHelp={() => openWorkspace("help")}
-        onRetry={(id) => void retryItem(id)}
+        onRetry={(id) => reportRecordingAction(() => retryItem(id), "Could not retry recording")}
         onReveal={(path) => void revealPath(path)}
         running={false}
         text={selectedItem?.outputPath ? transcriptText[selectedItem.outputPath] : undefined}
