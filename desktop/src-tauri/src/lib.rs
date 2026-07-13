@@ -4,6 +4,7 @@ mod authorization;
 mod commands;
 mod file_actions;
 mod install_identity;
+pub mod jobs;
 pub mod live;
 mod paths;
 pub mod runtime;
