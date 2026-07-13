@@ -37,6 +37,38 @@ function Get-CommandNames([string]$Path) {
   }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $null -ne $_ })
 }
 
+function Assert-FailClosedCatch {
+  param(
+    [Parameter(Mandatory)]
+    [Management.Automation.Language.CatchClauseAst]$CatchClause,
+    [Parameter(Mandatory)]
+    [string]$Context
+  )
+
+  $assignments = @($CatchClause.FindAll({
+    param($Node)
+    $Node -is [Management.Automation.Language.AssignmentStatementAst]
+  }, $true))
+  $authorizationAssignments = @($assignments | Where-Object {
+    $_.Left.Extent.Text -in @(
+      '$script:filesystemCleanupAuthorized',
+      '$evidence.cleanupAuthority.authorized'
+    )
+  })
+  Assert-True (
+    $authorizationAssignments.Count -eq 2 -and
+    @($authorizationAssignments | Where-Object { $_.Right.Extent.Text -cne '$false' }).Count -eq 0
+  ) "$Context must revoke both cleanup-authorization fields."
+  $retainedPathAssignments = @($assignments | Where-Object {
+    $_.Left.Extent.Text -ceq '$evidence.cleanupAuthority.retainedPaths'
+  })
+  Assert-True (
+    $retainedPathAssignments.Count -eq 1 -and
+    $retainedPathAssignments[0].Right.Extent.Text -match '\$footprintPaths\.Values' -and
+    $retainedPathAssignments[0].Right.Extent.Text -match '\$smokeRoot'
+  ) "$Context must retain every protected installer-owned path."
+}
+
 $module = Get-Module | Where-Object { $_.Path -ceq $modulePath } | Select-Object -First 1
 Assert-True ($null -ne $module) "NSIS helper module was not loaded."
 
@@ -122,28 +154,34 @@ $launchCatches = @($smokeLeaseFunctions[0].Body.FindAll({
   $Node -is [Management.Automation.Language.CatchClauseAst]
 }, $true))
 Assert-True ($launchCatches.Count -eq 1) "The smoke lease adapter must have exactly one fail-closed catch path."
-$catchAssignments = @($launchCatches[0].FindAll({
+Assert-FailClosedCatch -CatchClause $launchCatches[0] -Context "A caught launch exception"
+
+$cleanupFinalizerTries = @($smokeAst.FindAll({
   param($Node)
-  $Node -is [Management.Automation.Language.AssignmentStatementAst]
+  $Node -is [Management.Automation.Language.TryStatementAst] -and
+  $Node.Body.Extent.Text -match '-Phase\s+"cleanup uninstall"'
 }, $true))
-$authorizationAssignments = @($catchAssignments | Where-Object {
-  $_.Left.Extent.Text -in @(
-    '$script:filesystemCleanupAuthorized',
-    '$evidence.cleanupAuthority.authorized'
-  )
-})
-Assert-True (
-  $authorizationAssignments.Count -eq 2 -and
-  @($authorizationAssignments | Where-Object { $_.Right.Extent.Text -cne '$false' }).Count -eq 0
-) "A caught launch exception must never restore cleanup authorization."
-$retainedPathAssignments = @($catchAssignments | Where-Object {
-  $_.Left.Extent.Text -ceq '$evidence.cleanupAuthority.retainedPaths'
-})
-Assert-True (
-  $retainedPathAssignments.Count -eq 1 -and
-  $retainedPathAssignments[0].Right.Extent.Text -match '\$footprintPaths\.Values' -and
-  $retainedPathAssignments[0].Right.Extent.Text -match '\$smokeRoot'
-) "A caught launch exception must retain every protected installer-owned path."
+Assert-True ($cleanupFinalizerTries.Count -eq 1) "Smoke orchestration must have exactly one cleanup-uninstaller finalizer."
+Assert-True ($cleanupFinalizerTries[0].CatchClauses.Count -eq 1) "Cleanup-uninstaller finalizer must have one catch path."
+Assert-FailClosedCatch `
+  -CatchClause $cleanupFinalizerTries[0].CatchClauses[0] `
+  -Context "A failed reparse or cleanup-uninstaller finalizer"
+
+$residualAuditTries = @($smokeAst.FindAll({
+  param($Node)
+  if ($Node -isnot [Management.Automation.Language.TryStatementAst]) { return $false }
+  $commands = @($Node.Body.FindAll({
+    param($Child)
+    $Child -is [Management.Automation.Language.CommandAst] -and
+    $Child.GetCommandName() -ceq "Assert-NoProcessesUnderPath"
+  }, $true))
+  return $commands.Count -eq 1 -and $Node.Body.Statements.Count -eq 1
+}, $true))
+Assert-True ($residualAuditTries.Count -eq 1) "Smoke orchestration must have exactly one final residual-process audit."
+Assert-True ($residualAuditTries[0].CatchClauses.Count -eq 1) "Residual-process audit must have one catch path."
+Assert-FailClosedCatch `
+  -CatchClause $residualAuditTries[0].CatchClauses[0] `
+  -Context "A failed or positive residual-process audit"
 
 Assert-Throws {
   Assert-InstallerCleanupAuthorized -Authorized:$false -Operation "helper test mutation"

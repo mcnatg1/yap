@@ -68,6 +68,14 @@ try {
   $createMemberEnd = $createMember.Index + $createMember.Length + $nextMember.Index
   $createSource = $nativeSource.Substring($createMember.Index, $createMemberEnd - $createMember.Index)
   $regexOptions = [Text.RegularExpressions.RegexOptions]::Singleline
+  Assert-True ([regex]::IsMatch(
+    $createSource,
+    'Flags\s*=\s*NativeMethods\.StartfUseShowWindow\s*\|\s*NativeMethods\.StartfUseStdHandles'
+  )) "CreateProcessW startup flags no longer hide GUI smoke children."
+  Assert-True ([regex]::IsMatch(
+    $createSource,
+    'ShowWindow\s*=\s*NativeMethods\.SwHide'
+  )) "CreateProcessW startup state no longer requests SW_HIDE."
   $processPreallocation = [regex]::Match(
     $createSource,
     'SafeProcessHandle\s+(?<name>[A-Za-z_]\w*)\s*=\s*new\s+SafeProcessHandle\s*\(\s*\)\s*;',

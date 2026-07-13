@@ -847,7 +847,8 @@ namespace Yap.NsisSmoke
                 StartupInfo = new NativeMethods.StartupInfo
                 {
                     Size = Marshal.SizeOf<NativeMethods.StartupInfoEx>(),
-                    Flags = NativeMethods.StartfUseStdHandles,
+                    Flags = NativeMethods.StartfUseShowWindow | NativeMethods.StartfUseStdHandles,
+                    ShowWindow = NativeMethods.SwHide,
                     StandardInput = standardInput.NativeValue,
                     StandardOutput = standardOutput.NativeValue,
                     StandardError = standardError.NativeValue
@@ -1129,7 +1130,9 @@ namespace Yap.NsisSmoke
         internal const uint CreateUnicodeEnvironment = 0x00000400;
         internal const uint CreateNoWindow = 0x08000000;
         internal const uint ExtendedStartupInfoPresent = 0x00080000;
+        internal const uint StartfUseShowWindow = 0x00000001;
         internal const uint StartfUseStdHandles = 0x00000100;
+        internal const ushort SwHide = 0;
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct SecurityAttributes

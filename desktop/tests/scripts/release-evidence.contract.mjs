@@ -1664,7 +1664,12 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
   const releaseContract = await readRepoFile(
     "desktop/tests/scripts/release-evidence.contract.mjs",
   );
-  assert.match(releaseContract, /spawnSync\(\s*"pwsh\.exe"/);
+  const helperSuiteName = ["nsis-smoke-helpers", "test", "ps1"].join(".");
+  assert.doesNotMatch(
+    releaseContract,
+    new RegExp(`spawnSync\\([\\s\\S]{0,500}${helperSuiteName.replaceAll(".", "\\.")}`),
+    "the static release-policy contract must not execute the live NSIS helper suite",
+  );
   const liveOverlaySpec = await readRepoFile(
     "desktop/tests/wdio/live-overlay.spec.js",
   );
@@ -1779,20 +1784,4 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
     `${legacyResult.stdout}\n${legacyResult.stderr}`,
     /#requires[\s\S]*PowerShell 7\.4|PSEdition Core/i,
   );
-});
-
-test("NSIS helper behavior passes its focused PowerShell 7 suite", () => {
-  const result = spawnSync(
-    "pwsh.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      path.join(repoRoot, "desktop/tests/scripts/nsis-smoke-helpers.test.ps1"),
-    ],
-    { cwd: repoRoot, encoding: "utf8", timeout: 60_000 },
-  );
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });

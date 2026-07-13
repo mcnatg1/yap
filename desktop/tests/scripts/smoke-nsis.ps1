@@ -623,6 +623,10 @@ try {
         throw "Cleanup could not find the installed uninstaller."
       }
     } catch {
+      $script:filesystemCleanupAuthorized = $false
+      $evidence.cleanupAuthority.authorized = $false
+      $evidence.cleanupAuthority.failureStage = "cleanup finalizer"
+      $evidence.cleanupAuthority.retainedPaths = @($footprintPaths.Values) + @($smokeRoot)
       $cleanupErrors.Add([Exception]::new("NSIS cleanup failed: $($_.Exception.Message)", $_.Exception))
     }
   }
@@ -630,6 +634,10 @@ try {
   try {
     Assert-NoProcessesUnderPath -Root $installRoot
   } catch {
+    $script:filesystemCleanupAuthorized = $false
+    $evidence.cleanupAuthority.authorized = $false
+    $evidence.cleanupAuthority.failureStage = "residual process diagnostic"
+    $evidence.cleanupAuthority.retainedPaths = @($footprintPaths.Values) + @($smokeRoot)
     $cleanupErrors.Add([Exception]::new("Process-footprint verification failed: $($_.Exception.Message)", $_.Exception))
   }
 

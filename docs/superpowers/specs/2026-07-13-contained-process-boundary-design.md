@@ -412,7 +412,7 @@ The single lean local release gate completed on 2026-07-13:
 - `pwsh -NoLogo -NoProfile -NonInteractive -File .\desktop\tests\scripts\windows-contained-process.contract.test.ps1` — passed.
 - `pwsh -NoLogo -NoProfile -NonInteractive -File .\desktop\tests\scripts\windows-contained-process.integration.test.ps1` — passed all five real-Windows cases.
 - `pwsh -NoLogo -NoProfile -NonInteractive -File .\desktop\tests\scripts\nsis-smoke-helpers.test.ps1` — passed.
-- `corepack pnpm@11.7.0 --dir ./desktop test:release-contract` — 33/33 checks passed. The first run exposed two inventory/contract drifts; only those two focused checks were rerun after correction.
+- `corepack pnpm@11.7.0 --dir ./desktop test:release-contract` — 32/32 policy checks passed after removing a hidden second execution of the already-focused NSIS helper integration. The earlier 33-test run exposed and corrected two inventory/contract drifts, but its count included that duplicate live suite.
 - `corepack pnpm@11.7.0 --dir ./desktop build:nsis:test` — passed.
 - `corepack pnpm@11.7.0 --dir ./desktop test:nsis:local` — the first run exposed a PowerShell ETS environment-value boundary defect; a focused RED/GREEN contract fixed it, and the rerun passed. Its fail-closed path retained the test footprint until a lease-proven recovery cleanup completed.
 - `corepack pnpm@11.7.0 --dir ./desktop test:nsis:test-delete` — passed.
