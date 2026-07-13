@@ -49,6 +49,102 @@ try {
   $testingSource = Join-Path $PSScriptRoot "windows-contained-process.testing.cs"
   Add-Type -Path @($productionSource, $testingSource)
 
+  $productionText = [IO.File]::ReadAllText($productionSource)
+  $nativeClass = [regex]::Match(
+    $productionText,
+    'internal\s+sealed\s+class\s+NativeWindowsProcessApi\s*:\s*IWindowsProcessApi'
+  )
+  Assert-True $nativeClass.Success "The native process adapter was not found."
+  $nativeSource = $productionText.Substring($nativeClass.Index)
+  $createMember = [regex]::Match(
+    $nativeSource,
+    'public\s+NativeCallResult<CreatedProcessHandles>\s+CreateProcessSuspended\s*\('
+  )
+  $nextMember = [regex]::Match(
+    $nativeSource.Substring($createMember.Index + $createMember.Length),
+    'public\s+NativeCallResult<bool>\s+AssignProcessToJob\s*\('
+  )
+  Assert-True ($createMember.Success -and $nextMember.Success) "The native create-process member was not bounded."
+  $createMemberEnd = $createMember.Index + $createMember.Length + $nextMember.Index
+  $createSource = $nativeSource.Substring($createMember.Index, $createMemberEnd - $createMember.Index)
+  $regexOptions = [Text.RegularExpressions.RegexOptions]::Singleline
+  $processPreallocation = [regex]::Match(
+    $createSource,
+    'SafeProcessHandle\s+(?<name>[A-Za-z_]\w*)\s*=\s*new\s+SafeProcessHandle\s*\(\s*\)\s*;',
+    $regexOptions
+  )
+  $threadPreallocation = [regex]::Match(
+    $createSource,
+    'SafeThreadHandle\s+(?<name>[A-Za-z_]\w*)\s*=\s*new\s+SafeThreadHandle\s*\(\s*\)\s*;',
+    $regexOptions
+  )
+  Assert-True $processPreallocation.Success "The process SafeHandle was not preallocated before CreateProcessW."
+  Assert-True $threadPreallocation.Success "The thread SafeHandle was not preallocated before CreateProcessW."
+  $processName = $processPreallocation.Groups['name'].Value
+  $threadName = $threadPreallocation.Groups['name'].Value
+  $ownerPreallocation = [regex]::Match(
+    $createSource,
+    ('CreatedProcessHandles\s+(?<name>[A-Za-z_]\w*)\s*=\s*new\s+CreatedProcessHandles\s*\(\s*' +
+      [regex]::Escape($processName) + '\s*,\s*' + [regex]::Escape($threadName) + '\s*\)\s*;'),
+    $regexOptions
+  )
+  Assert-True $ownerPreallocation.Success "The created-process owner bundle was not preallocated."
+  $ownerName = $ownerPreallocation.Groups['name'].Value
+  $resultPreallocation = [regex]::Match(
+    $createSource,
+    ('NativeCallResult<CreatedProcessHandles>\s+(?<name>[A-Za-z_]\w*)\s*=\s*' +
+      'NativeCallResult<CreatedProcessHandles>\.Success\s*\(\s*' +
+      [regex]::Escape($ownerName) + '\s*\)\s*;'),
+    $regexOptions
+  )
+  Assert-True $resultPreallocation.Success "The immutable success result was not preallocated."
+  $resultName = $resultPreallocation.Groups['name'].Value
+  $createCall = [regex]::Match($createSource, 'NativeMethods\.CreateProcessW\s*\(')
+  Assert-True $createCall.Success "The native CreateProcessW call was not found."
+  foreach ($preallocation in @($processPreallocation, $threadPreallocation, $ownerPreallocation, $resultPreallocation)) {
+    Assert-True ($preallocation.Index -lt $createCall.Index) "Managed ownership was allocated after CreateProcessW."
+  }
+  $processAdoption = [regex]::Match(
+    $createSource,
+    ([regex]::Escape($processName) + '\.AdoptCreatedHandleOnce\s*\(\s*processInformation\.Process\s*\)\s*;')
+  )
+  $threadAdoption = [regex]::Match(
+    $createSource,
+    ([regex]::Escape($threadName) + '\.AdoptCreatedHandleOnce\s*\(\s*processInformation\.Thread\s*\)\s*;')
+  )
+  Assert-True ($processAdoption.Success -and $threadAdoption.Success) "CreateProcessW handles were not adopted in place."
+  Assert-True (
+    $processAdoption.Index -gt $createCall.Index -and $threadAdoption.Index -gt $createCall.Index
+  ) "Raw handles were adopted before CreateProcessW returned."
+  $firstAdoptionIndex = [Math]::Min($processAdoption.Index, $threadAdoption.Index)
+  $postCallPrefix = $createSource.Substring(
+    $createCall.Index + $createCall.Length,
+    $firstAdoptionIndex - ($createCall.Index + $createCall.Length)
+  )
+  Assert-True (-not [regex]::IsMatch($postCallPrefix, '\bnew\s+')) "Managed allocation remained between CreateProcessW and handle adoption."
+  Assert-True (-not [regex]::IsMatch(
+    $createSource,
+    'CleanupUntransferredCreatedProcess|TerminateProcessRaw|WaitForSingleObjectRaw|CloseHandle\s*\('
+  )) "Raw emergency cleanup remained in the native ownership handoff."
+  $returnSuccess = [regex]::Match(
+    $createSource,
+    ('return\s+' + [regex]::Escape($resultName) + '\s*;')
+  )
+  Assert-True (
+    $returnSuccess.Success -and
+    $returnSuccess.Index -gt $processAdoption.Index -and
+    $returnSuccess.Index -gt $threadAdoption.Index
+  ) "The native adapter did not return the prebuilt result after adoption."
+  $failureBranch = [regex]::Match(
+    $createSource,
+    ('if\s*\(\s*!succeeded\s*\)\s*\{\s*' +
+      'int\s+(?<error>[A-Za-z_]\w*)\s*=\s*Marshal\.GetLastWin32Error\s*\(\s*\)\s*;\s*' +
+      [regex]::Escape($ownerName) + '\.Dispose\s*\(\s*\)\s*;\s*' +
+      'return\s+NativeCallResult<CreatedProcessHandles>\.Failure\s*\(\s*\k<error>\s*\)\s*;\s*\}'),
+    $regexOptions
+  )
+  Assert-True $failureBranch.Success "CreateProcessW failure did not capture error before disposing invalid ownership."
+
   $runtime = [IO.Path]::GetFullPath([Environment]::ProcessPath)
   $nonce = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
   $root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) "yap-launch-request-$nonce"))
@@ -193,21 +289,6 @@ try {
   try { $failure.CleanupErrors.Add("caller mutation") } catch { $mutationThrew = $true }
   Assert-True $mutationThrew "CleanupErrors was mutable."
   Assert-True ($failure.CleanupErrors.Count -eq $cleanupErrorCount) "CleanupErrors changed after construction."
-
-  $postCreateHandoff = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
-  $postCreateHandoff.FailurePoint = [Yap.NsisSmoke.Testing.ScriptedFailurePoint]::PostCreateOwnershipHandoff
-  $postCreateLease = $null
-  $failure = $null
-  try {
-    $postCreateLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher(
-      $postCreateHandoff
-    ).Launch($failingRequest)
-  } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
-  Assert-True ($failure -is [Yap.NsisSmoke.ContainedProcessException]) "Post-create handoff failure was untyped."
-  Assert-True ($failure.Stage.ToString() -ceq "CreateProcess") "Post-create handoff failure reported the wrong stage."
-  Assert-True ($null -eq $postCreateLease) "Post-create handoff failure returned a lease."
-  Assert-True ($postCreateHandoff.LiveChildCount -eq 0) "Post-create handoff failure left a scripted child alive."
-  Assert-True ($postCreateHandoff.OpenHandleCount -eq 0) "Post-create handoff failure leaked a raw test handle."
 
   foreach ($releaseCase in @(
     @{ Point = "ReleaseParentStdin"; Stage = "Dispose" },

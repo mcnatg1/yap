@@ -29,7 +29,6 @@ namespace Yap.NsisSmoke.Testing
         UpdateAttributeList,
         CaptureEnvironment,
         CreateProcess,
-        PostCreateOwnershipHandoff,
         AssignJob,
         CaptureIdentity,
         ResumeThread,
@@ -61,7 +60,6 @@ namespace Yap.NsisSmoke.Testing
             new HashSet<ScriptedFailurePoint>();
         private int resumeThreadCallCount;
         private int jobTerminationCount;
-        private int liveChildCount;
         private IntPtr rootEvent;
         private bool rootSignaled;
         private uint activeProcessCount;
@@ -123,8 +121,6 @@ namespace Yap.NsisSmoke.Testing
         public int ResumeThreadCallCount => Volatile.Read(ref resumeThreadCallCount);
 
         public int JobTerminationCount => Volatile.Read(ref jobTerminationCount);
-
-        public int LiveChildCount => Volatile.Read(ref liveChildCount);
 
         public int ProcessReacquisitionCount => 0;
 
@@ -218,7 +214,6 @@ namespace Yap.NsisSmoke.Testing
             rootEvent = eventHandle;
             rootSignaled = RootInitiallyExited;
             activeProcessCount = RootInitiallyExited ? 0u : 1u;
-            Volatile.Write(ref liveChildCount, RootInitiallyExited ? 0 : 1);
         }
 
         internal void SignalTermination()
@@ -226,7 +221,6 @@ namespace Yap.NsisSmoke.Testing
             if (CleanupWaitSignals)
             {
                 rootSignaled = true;
-                Volatile.Write(ref liveChildCount, 0);
                 if (rootEvent != IntPtr.Zero)
                     ScriptedNativeMethods.SetEvent(rootEvent);
             }
@@ -244,31 +238,6 @@ namespace Yap.NsisSmoke.Testing
 
         internal void NoteJobTermination() => Interlocked.Increment(ref jobTerminationCount);
 
-        internal void CleanupUntransferredCreatedProcess(
-            IntPtr processEvent,
-            IntPtr threadEvent,
-            SafeProcessHandle ownedProcess,
-            SafeThreadHandle ownedThread)
-        {
-            Log("TerminatePostCreateRoot");
-            SignalTermination();
-            if (threadEvent != IntPtr.Zero)
-            {
-                CloseEventHandle(
-                    threadEvent,
-                    ScriptedFailurePoint.None,
-                    ownedThread == null ? (Action)(() => { }) : ownedThread.MarkClosed);
-                ownedThread?.Dispose();
-            }
-            if (processEvent != IntPtr.Zero)
-            {
-                CloseEventHandle(
-                    processEvent,
-                    ScriptedFailurePoint.None,
-                    ownedProcess == null ? (Action)(() => { }) : ownedProcess.MarkClosed);
-                ownedProcess?.Dispose();
-            }
-        }
     }
 
     public static class ContainedProcessTestFactory
@@ -427,37 +396,13 @@ namespace Yap.NsisSmoke.Testing
                 return NativeCallResult<CreatedProcessHandles>.Failure(1009);
 
             scenario.NoteRequestedExecutable(request.ExecutablePath);
-            IntPtr processEvent = IntPtr.Zero;
-            IntPtr threadEvent = IntPtr.Zero;
-            SafeProcessHandle ownedProcess = null;
-            SafeThreadHandle ownedThread = null;
-            bool transferred = false;
-            try
-            {
-                processEvent = scenario.CreateEventHandle("process", scenario.RootInitiallyExited);
-                scenario.NoteProcessCreated(processEvent);
-                threadEvent = scenario.CreateEventHandle("thread");
-                if (scenario.ShouldFail(ScriptedFailurePoint.PostCreateOwnershipHandoff))
-                    throw new InvalidOperationException("Scripted post-create ownership handoff failed.");
-                ownedProcess = new SafeProcessHandle(processEvent);
-                ownedThread = new SafeThreadHandle(threadEvent);
-                CreatedProcessHandles owners = new CreatedProcessHandles(ownedProcess, ownedThread);
-                NativeCallResult<CreatedProcessHandles> result =
-                    NativeCallResult<CreatedProcessHandles>.Success(owners);
-                transferred = true;
-                return result;
-            }
-            finally
-            {
-                if (processEvent != IntPtr.Zero && !transferred)
-                {
-                    scenario.CleanupUntransferredCreatedProcess(
-                        processEvent,
-                        threadEvent,
-                        ownedProcess,
-                        ownedThread);
-                }
-            }
+            IntPtr processEvent = scenario.CreateEventHandle("process", scenario.RootInitiallyExited);
+            scenario.NoteProcessCreated(processEvent);
+            IntPtr threadEvent = scenario.CreateEventHandle("thread");
+            return NativeCallResult<CreatedProcessHandles>.Success(
+                new CreatedProcessHandles(
+                    new SafeProcessHandle(processEvent),
+                    new SafeThreadHandle(threadEvent)));
         }
 
         public NativeCallResult<bool> AssignProcessToJob(

@@ -520,7 +520,7 @@ namespace Yap.NsisSmoke
         EnvironmentBlock
     }
 
-    internal sealed class CreatedProcessHandles
+    internal sealed class CreatedProcessHandles : IDisposable
     {
         internal CreatedProcessHandles(SafeProcessHandle processHandle, SafeThreadHandle threadHandle)
         {
@@ -531,6 +531,12 @@ namespace Yap.NsisSmoke
         internal SafeProcessHandle ProcessHandle { get; }
 
         internal SafeThreadHandle ThreadHandle { get; }
+
+        public void Dispose()
+        {
+            ThreadHandle.Dispose();
+            ProcessHandle.Dispose();
+        }
     }
 
     internal sealed class ProcessIdentity
@@ -551,12 +557,18 @@ namespace Yap.NsisSmoke
 
     internal sealed class SafeProcessHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
+        internal SafeProcessHandle() : base(true)
+        {
+        }
+
         internal SafeProcessHandle(IntPtr value) : base(true)
         {
             SetHandle(value);
         }
 
         internal IntPtr NativeValue => DangerousGetHandle();
+
+        internal void AdoptCreatedHandleOnce(IntPtr value) => SetHandle(value);
 
         internal void MarkClosed() => SetHandleAsInvalid();
 
@@ -565,12 +577,18 @@ namespace Yap.NsisSmoke
 
     internal sealed class SafeThreadHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
+        internal SafeThreadHandle() : base(true)
+        {
+        }
+
         internal SafeThreadHandle(IntPtr value) : base(true)
         {
             SetHandle(value);
         }
 
         internal IntPtr NativeValue => DangerousGetHandle();
+
+        internal void AdoptCreatedHandleOnce(IntPtr value) => SetHandle(value);
 
         internal void MarkClosed() => SetHandleAsInvalid();
 
@@ -836,76 +854,35 @@ namespace Yap.NsisSmoke
                 },
                 AttributeList = attributeList
             };
-            NativeMethods.ProcessInformation processInformation = default(NativeMethods.ProcessInformation);
-            SafeProcessHandle ownedProcess = null;
-            SafeThreadHandle ownedThread = null;
-            bool transferred = false;
-            try
+            SafeProcessHandle ownedProcess = new SafeProcessHandle();
+            SafeThreadHandle ownedThread = new SafeThreadHandle();
+            CreatedProcessHandles owners = new CreatedProcessHandles(ownedProcess, ownedThread);
+            NativeCallResult<CreatedProcessHandles> successResult =
+                NativeCallResult<CreatedProcessHandles>.Success(owners);
+            NativeMethods.ProcessInformation processInformation;
+            bool succeeded = NativeMethods.CreateProcessW(
+                request.ExecutablePath,
+                commandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                true,
+                NativeMethods.CreateSuspended |
+                    NativeMethods.CreateNoWindow |
+                    NativeMethods.ExtendedStartupInfoPresent |
+                    NativeMethods.CreateUnicodeEnvironment,
+                environment,
+                request.WorkingDirectory,
+                ref startup,
+                out processInformation);
+            if (!succeeded)
             {
-                bool succeeded = NativeMethods.CreateProcessW(
-                    request.ExecutablePath,
-                    commandLine,
-                    IntPtr.Zero,
-                    IntPtr.Zero,
-                    true,
-                    NativeMethods.CreateSuspended |
-                        NativeMethods.CreateNoWindow |
-                        NativeMethods.ExtendedStartupInfoPresent |
-                        NativeMethods.CreateUnicodeEnvironment,
-                    environment,
-                    request.WorkingDirectory,
-                    ref startup,
-                    out processInformation);
-                if (!succeeded)
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    return NativeCallResult<CreatedProcessHandles>.Failure(error);
-                }
-                ownedProcess = new SafeProcessHandle(processInformation.Process);
-                ownedThread = new SafeThreadHandle(processInformation.Thread);
-                CreatedProcessHandles owners = new CreatedProcessHandles(ownedProcess, ownedThread);
-                NativeCallResult<CreatedProcessHandles> result =
-                    NativeCallResult<CreatedProcessHandles>.Success(owners);
-                transferred = true;
-                return result;
+                int error = Marshal.GetLastWin32Error();
+                owners.Dispose();
+                return NativeCallResult<CreatedProcessHandles>.Failure(error);
             }
-            finally
-            {
-                if (processInformation.Process != IntPtr.Zero && !transferred)
-                {
-                    CleanupUntransferredCreatedProcess(
-                        processInformation,
-                        ownedProcess,
-                        ownedThread);
-                }
-                GC.KeepAlive(standardInput);
-                GC.KeepAlive(standardOutput);
-                GC.KeepAlive(standardError);
-            }
-        }
-
-        private static void CleanupUntransferredCreatedProcess(
-            NativeMethods.ProcessInformation processInformation,
-            SafeProcessHandle ownedProcess,
-            SafeThreadHandle ownedThread)
-        {
-            try
-            {
-                NativeMethods.TerminateProcessRaw(processInformation.Process, 0x59504150);
-                NativeMethods.WaitForSingleObjectRaw(processInformation.Process, 5000);
-            }
-            catch
-            {
-            }
-            finally
-            {
-                try { NativeMethods.CloseHandle(processInformation.Thread); } catch { }
-                try { ownedThread?.MarkClosed(); } catch { }
-                try { ownedThread?.Dispose(); } catch { }
-                try { NativeMethods.CloseHandle(processInformation.Process); } catch { }
-                try { ownedProcess?.MarkClosed(); } catch { }
-                try { ownedProcess?.Dispose(); } catch { }
-            }
+            ownedProcess.AdoptCreatedHandleOnce(processInformation.Process);
+            ownedThread.AdoptCreatedHandleOnce(processInformation.Thread);
+            return successResult;
         }
 
         public NativeCallResult<bool> AssignProcessToJob(
@@ -1359,13 +1336,6 @@ namespace Yap.NsisSmoke
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool TerminateProcess(SafeProcessHandle process, uint exitCode);
-
-        [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool TerminateProcessRaw(IntPtr process, uint exitCode);
-
-        [DllImport("kernel32.dll", EntryPoint = "WaitForSingleObject", SetLastError = true)]
-        internal static extern uint WaitForSingleObjectRaw(IntPtr handle, uint milliseconds);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
