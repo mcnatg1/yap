@@ -367,7 +367,11 @@ try {
     -StdoutPath (Join-Path $resultsRoot "app.stdout.log") `
     -StderrPath (Join-Path $resultsRoot "app.stderr.log")
   $appProcessId = $appProcess.Id
-  $appProcessIdentity = $appProcess.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+  $appStartTime = $appProcess.StartTime
+  if ($null -eq $appStartTime) {
+    throw "Installed app process $appProcessId did not expose its creation identity."
+  }
+  $appProcessIdentity = $appStartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
   Start-Sleep -Milliseconds 250
   foreach ($processId in Get-ProcessTreeIds -RootProcessId $appProcessId) {
     Add-TrackedProcess -ProcessId $processId

@@ -43,10 +43,29 @@ function Assert-FileUnlocked([string]$Path, [string]$Message) {
   }
 }
 
-function Get-TestProcessIdentity([System.Diagnostics.Process]$Process) {
-  return ([long][Math]::Floor(
-    $Process.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond
-  )).ToString([Globalization.CultureInfo]::InvariantCulture)
+function Get-TestProcessIdentity {
+  param(
+    [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
+    [scriptblock]$StartTimeProvider = {
+      param([System.Diagnostics.Process]$Candidate)
+      return $Candidate.StartTime
+    }
+  )
+
+  # Bind one OS handle before observing creation time so a retry cannot follow
+  # a recycled PID to an unrelated process.
+  [void]$Process.Handle
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $Process.Refresh()
+    $startTime = & $StartTimeProvider $Process
+    if ($startTime -is [DateTime]) {
+      return ([long][Math]::Floor(
+        $startTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond
+      )).ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+    Start-Sleep -Milliseconds 25
+  }
+  throw "Process $($Process.Id) did not expose its creation identity within 500 milliseconds."
 }
 
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
@@ -91,12 +110,48 @@ try {
   $currentProcess = Get-Process -Id $PID -ErrorAction Stop
   try {
     $currentIdentity = Get-TestProcessIdentity -Process $currentProcess
+    $script:identityProbeCount = 0
+    $transientIdentity = Get-TestProcessIdentity `
+      -Process $currentProcess `
+      -StartTimeProvider {
+        param([System.Diagnostics.Process]$Candidate)
+        $script:identityProbeCount += 1
+        if ($script:identityProbeCount -eq 1) { return $null }
+        return $Candidate.StartTime
+      }
+    Assert-True ($script:identityProbeCount -eq 2) "Process identity did not retry one transient missing start time."
+    Assert-True ($transientIdentity -ceq $currentIdentity) "Process identity changed while retrying one bound handle."
   } finally {
     $currentProcess.Dispose()
   }
   Assert-True (
     Test-ProcessIdentityAlive -ProcessId $PID -ExpectedIdentity $currentIdentity
   ) "The current process identity was not recognized as live."
+
+  $shortLivedProcess = Start-Process `
+    -FilePath $powerShellExecutable `
+    -ArgumentList @("-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 250") `
+    -PassThru `
+    -WindowStyle Hidden
+  try {
+    $liveShortIdentity = Get-TestProcessIdentity -Process $shortLivedProcess
+    $shortLivedProcess.WaitForExit()
+    $shortLivedProcess.Refresh()
+    $script:exitedIdentityProbeCount = 0
+    $exitedShortIdentity = Get-TestProcessIdentity `
+      -Process $shortLivedProcess `
+      -StartTimeProvider {
+        param([System.Diagnostics.Process]$Candidate)
+        $script:exitedIdentityProbeCount += 1
+        if ($script:exitedIdentityProbeCount -eq 1) { return $null }
+        return $Candidate.StartTime
+      }
+    Assert-True ($script:exitedIdentityProbeCount -eq 2) "Bound exited-process identity did not retry one transient missing start time."
+    Assert-True ($exitedShortIdentity -ceq $liveShortIdentity) "Bound exited-process identity changed after refresh."
+  } finally {
+    if (-not $shortLivedProcess.HasExited) { $shortLivedProcess.Kill($true) }
+    $shortLivedProcess.Dispose()
+  }
   Assert-True (-not (
     Test-ProcessIdentityAlive -ProcessId $PID -ExpectedIdentity "0"
   )) "A reused PID was mistaken for the original process identity."
@@ -365,7 +420,10 @@ Start-Sleep -Seconds 10
   $snapshotFailureErrPath = Join-Path $processRoot "snapshot-failure.err.log"
   $snapshotFailureScript = @"
 `$current = [Diagnostics.Process]::GetCurrentProcess()
-`$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
+[void]`$current.Handle
+`$startTime = `$current.StartTime
+if (`$null -eq `$startTime) { throw "Snapshot-failure process did not expose its creation identity." }
+`$identity = [long][Math]::Floor(`$startTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
 "`$PID|`$identity" | Set-Content -LiteralPath '$snapshotFailurePidPath' -Encoding ascii
 `$current.Dispose()
 Start-Sleep -Seconds 8
@@ -408,7 +466,10 @@ Start-Sleep -Seconds 8
   $fastChildErrPath = Join-Path $processRoot "fast-parent-child.err.log"
   $fastDescendantScript = @"
 `$current = [Diagnostics.Process]::GetCurrentProcess()
-`$identity = [long][Math]::Floor(`$current.StartTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
+[void]`$current.Handle
+`$startTime = `$current.StartTime
+if (`$null -eq `$startTime) { throw "Fast-parent child did not expose its creation identity." }
+`$identity = [long][Math]::Floor(`$startTime.ToUniversalTime().Ticks / [TimeSpan]::TicksPerMillisecond)
 "`$PID|`$identity" | Set-Content -LiteralPath '$fastChildPidPath' -Encoding ascii
 `$current.Dispose()
 Start-Sleep -Seconds 8
