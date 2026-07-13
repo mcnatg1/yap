@@ -18,6 +18,28 @@ function Assert-True {
   }
 }
 
+function Get-ContainedProcessTestFailure {
+  param(
+    [Parameter(Mandatory)]
+    [Exception]$Exception
+  )
+
+  $seen = [Collections.Generic.HashSet[object]]::new(
+    [Collections.Generic.ReferenceEqualityComparer]::Instance
+  )
+  $current = $Exception
+  for ($depth = 0; $null -ne $current -and $depth -lt 64; $depth++) {
+    if (-not $seen.Add($current)) {
+      break
+    }
+    if ($current -is [Yap.NsisSmoke.ContainedProcessException]) {
+      return $current
+    }
+    $current = $current.InnerException
+  }
+  return $null
+}
+
 $root = $null
 $nonce = $null
 $sentinel = $null
@@ -120,7 +142,222 @@ try {
     Assert-True $threw "Invalid launch input was accepted."
   }
 
-  Write-Output "Windows contained-process request contracts passed."
+  $failingRequest = [Yap.NsisSmoke.LaunchRequest]::Create(
+    $runtime,
+    [string[]]@("-NoProfile", "-NonInteractive", "-Command", "exit 0"),
+    (Join-Path $root "assign.stdout.log"),
+    (Join-Path $root "assign.stderr.log"),
+    $root,
+    [ordered]@{}
+  )
+
+  foreach ($case in @(
+    @{ Point = "OpenStdin"; Stage = "Redirect" },
+    @{ Point = "OpenStdout"; Stage = "Redirect" },
+    @{ Point = "OpenStderr"; Stage = "Redirect" },
+    @{ Point = "CreateJob"; Stage = "CreateJob" },
+    @{ Point = "ConfigureJob"; Stage = "CreateJob" },
+    @{ Point = "InitializeAttributeList"; Stage = "CreateProcess" },
+    @{ Point = "UpdateAttributeList"; Stage = "CreateProcess" },
+    @{ Point = "CaptureEnvironment"; Stage = "CreateProcess" },
+    @{ Point = "CreateProcess"; Stage = "CreateProcess" },
+    @{ Point = "AssignJob"; Stage = "AssignJob" },
+    @{ Point = "CaptureIdentity"; Stage = "CaptureIdentity" },
+    @{ Point = "ResumeThread"; Stage = "Resume" }
+  )) {
+    $scenario = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+    $scenario.FailurePoint = [Enum]::Parse(
+      [Yap.NsisSmoke.Testing.ScriptedFailurePoint],
+      [string]$case.Point
+    )
+    $candidate = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($scenario)
+    $failure = $null
+    try { $candidate.Launch($failingRequest) } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+    Assert-True ($failure -is [Yap.NsisSmoke.ContainedProcessException]) "Scripted failure was untyped."
+    Assert-True ($failure.Stage.ToString() -ceq $case.Stage) "Scripted failure reported the wrong stage."
+    Assert-True $failure.CleanupProven "Scripted failure did not prove cleanup."
+    Assert-True ($scenario.OpenHandleCount -eq 0) "Scripted failure leaked a test handle."
+  }
+
+  $cleanupFailure = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $cleanupFailure.FailurePoint = [Yap.NsisSmoke.Testing.ScriptedFailurePoint]::ResumeThread
+  $cleanupFailure.CleanupWaitSignals = $false
+  $failure = $null
+  try {
+    [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($cleanupFailure).Launch($failingRequest)
+  } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+  Assert-True (-not $failure.CleanupProven) "Failed cleanup was promoted to success."
+  Assert-True ($failure.CleanupErrors.Count -gt 0) "Failed cleanup lost its evidence."
+  $cleanupErrorCount = $failure.CleanupErrors.Count
+  $mutationThrew = $false
+  try { $failure.CleanupErrors.Add("caller mutation") } catch { $mutationThrew = $true }
+  Assert-True $mutationThrew "CleanupErrors was mutable."
+  Assert-True ($failure.CleanupErrors.Count -eq $cleanupErrorCount) "CleanupErrors changed after construction."
+
+  foreach ($releaseCase in @(
+    @{ Point = "ReleaseParentStdin"; Stage = "Dispose" },
+    @{ Point = "ReleaseParentStdout"; Stage = "Dispose" },
+    @{ Point = "ReleaseParentStderr"; Stage = "Dispose" },
+    @{ Point = "ReleaseThread"; Stage = "Resume" },
+    @{ Point = "ReleaseAttributeList"; Stage = "Dispose" },
+    @{ Point = "ReleaseInheritedHandleArray"; Stage = "Dispose" },
+    @{ Point = "ReleaseCommandBuffer"; Stage = "Dispose" },
+    @{ Point = "ReleaseEnvironmentBuffer"; Stage = "Dispose" }
+  )) {
+    $releaseFailure = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+    $releaseFailure.FailurePoint = [Enum]::Parse(
+      [Yap.NsisSmoke.Testing.ScriptedFailurePoint],
+      [string]$releaseCase.Point
+    )
+    $failure = $null
+    try {
+      [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($releaseFailure).Launch($failingRequest)
+    } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+    Assert-True ($failure.Stage.ToString() -ceq $releaseCase.Stage) "Launch-only release reported the wrong stage."
+    Assert-True (-not $failure.CleanupProven) "A launch-only release failure was promoted to proven cleanup."
+    Assert-True ($failure.CleanupErrors.Count -gt 0) "Launch-only release failure lost cleanup evidence."
+    Assert-True ($releaseFailure.LeaseConstructionCount -eq 0) "A lease escaped after launch-only release failed."
+    Assert-True ($releaseFailure.OpenHandleCount -eq 0) "Launch-only release failure leaked a test handle."
+  }
+
+  foreach ($resumeCase in @(
+    @{ Result = [uint32]0; NativeError = $null },
+    @{ Result = [uint32]2; NativeError = $null },
+    @{ Result = [uint32]::MaxValue; NativeError = 5 }
+  )) {
+    $resume = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+    $resume.ResumeThreadResult = [uint32]$resumeCase.Result
+    $resume.ResumeThreadLastError = 5
+    $failure = $null
+    try {
+      [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($resume).Launch($failingRequest)
+    } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+    Assert-True ($failure.Stage.ToString() -ceq "Resume") "Unexpected suspend count reported the wrong stage."
+    Assert-True ($failure.NativeErrorCode -eq $resumeCase.NativeError) "Resume failure retained an inapplicable/stale native error."
+    Assert-True $failure.CleanupProven "Resume failure cleanup was not proven."
+    Assert-True ($resume.ResumeThreadCallCount -eq 1) "ResumeThread was not called exactly once."
+  }
+
+  $concurrentScenarios = [Yap.NsisSmoke.Testing.ScriptedNativeScenario[]]::new(8)
+  for ($index = 0; $index -lt $concurrentScenarios.Length; $index++) {
+    $concurrentScenarios[$index] = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+    $concurrentScenarios[$index].ResumeThreadResult = [uint32]::MaxValue
+    $concurrentScenarios[$index].ResumeThreadLastError = 1200 + $index
+  }
+  $concurrentErrors = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CaptureConcurrentLaunchFailures(
+    $failingRequest,
+    $concurrentScenarios
+  )
+  Assert-True ($concurrentErrors.Count -eq $concurrentScenarios.Length) "Concurrent launch failures were lost."
+  for ($index = 0; $index -lt $concurrentScenarios.Length; $index++) {
+    Assert-True (
+      $concurrentErrors[$index].NativeErrorCode -eq $concurrentScenarios[$index].ResumeThreadLastError
+    ) "Concurrent launch failure consumed another call's native error."
+    Assert-True $concurrentErrors[$index].CleanupProven "Concurrent launch failure cleanup was not proven."
+  }
+
+  $identityMismatch = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $identityMismatch.CapturedExecutablePath = Join-Path $root "not-the-requested-image.exe"
+  $failure = $null
+  try {
+    [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($identityMismatch).Launch($failingRequest)
+  } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+  Assert-True ($failure.Stage.ToString() -ceq "CaptureIdentity") "Identity mismatch reported the wrong stage."
+  Assert-True ($identityMismatch.ResumeThreadCallCount -eq 0) "Identity mismatch resumed child code."
+  Assert-True $failure.CleanupProven "Identity mismatch cleanup was not proven."
+  Assert-True ($identityMismatch.LeaseConstructionCount -eq 0) "Identity mismatch returned a lease."
+
+  foreach ($operationCase in @(
+    @{ Property = "WaitForSingleObjectLastError"; Code = 2101; Stage = "Wait"; Operation = "Wait" },
+    @{ Property = "GetExitCodeProcessLastError"; Code = 2102; Stage = "Wait"; Operation = "ExitCode" },
+    @{ Property = "QueryInformationJobObjectLastError"; Code = 2103; Stage = "Wait"; Operation = "Query" },
+    @{ Property = "TerminateJobObjectLastError"; Code = 2104; Stage = "Terminate"; Operation = "Terminate" }
+  )) {
+    $operationFailure = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+    $operationFailure.($operationCase.Property) = $operationCase.Code
+    if ($operationCase.Operation -ceq "ExitCode") {
+      $operationFailure.RootInitiallyExited = $true
+    }
+    $operationLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($operationFailure).Launch($failingRequest)
+    $failure = $null
+    try {
+      switch ($operationCase.Operation) {
+        "Wait" { $operationLease.WaitForRootExit([TimeSpan]::FromSeconds(1)) | Out-Null }
+        "ExitCode" { $operationLease.WaitForRootExit([TimeSpan]::FromSeconds(1)) | Out-Null }
+        "Query" { $operationLease.WaitForQuiescence([TimeSpan]::FromSeconds(1)) | Out-Null }
+        "Terminate" { $operationLease.TerminateAndWait(0x59504150, [TimeSpan]::FromSeconds(1)) | Out-Null }
+      }
+    } catch { $failure = Get-ContainedProcessTestFailure $_.Exception }
+    Assert-True ($failure.Stage.ToString() -ceq $operationCase.Stage) "Lease failure reported the wrong stage."
+    Assert-True ($failure.NativeErrorCode -eq $operationCase.Code) "Lease failure retained the wrong native error."
+    Assert-True (-not $failure.CleanupProven) "A failed lease operation manufactured cleanup proof."
+    $operationLease.Dispose()
+  }
+
+  $rootTimeout = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $rootTimeout.RootWaitSignals = $false
+  $rootTimeoutLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($rootTimeout).Launch($failingRequest)
+  $rootTimeoutReport = $rootTimeoutLease.WaitForRootExit([TimeSpan]::FromMilliseconds(25))
+  Assert-True (-not $rootTimeoutReport.Exited) "A root wait timeout was reported as an exit."
+  Assert-True ($null -eq $rootTimeoutReport.ExitCode) "A root wait timeout manufactured an exit code."
+  $rootTimeoutLease.Dispose()
+
+  $jobTimeout = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $jobTimeout.JobRemainsActive = $true
+  $jobTimeoutLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($jobTimeout).Launch($failingRequest)
+  $failure = $null
+  try { $jobTimeoutLease.WaitForQuiescence([TimeSpan]::FromMilliseconds(25)) } catch {
+    $failure = Get-ContainedProcessTestFailure $_.Exception
+  }
+  Assert-True ($failure.Stage.ToString() -ceq "Wait") "Job quiescence timeout reported the wrong stage."
+  Assert-True (-not $failure.CleanupProven) "Job quiescence timeout manufactured cleanup proof."
+  $jobTimeoutLease.Dispose()
+
+  $highExit = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $highExit.RootInitiallyExited = $true
+  $highDwordExitCode = [Convert]::ToUInt32("F0000001", 16)
+  $highExit.RootExitCode = $highDwordExitCode
+  $highLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($highExit).Launch($failingRequest)
+  $highReport = $highLease.WaitForRootExit([TimeSpan]::FromSeconds(1))
+  Assert-True ($highReport.ExitCode -eq $highDwordExitCode) "A high DWORD exit code was narrowed."
+  $highLease.Dispose()
+
+  $recycled = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $recycled.RootInitiallyExited = $true
+  $recycledLease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($recycled).Launch($failingRequest)
+  $recycled.SimulateUnrelatedProcessWithSamePid()
+  $recycledLease.WaitForRootExit([TimeSpan]::FromSeconds(1)) | Out-Null
+  Assert-True ($recycled.ProcessReacquisitionCount -eq 0) "The lease reacquired ownership from a recycled PID."
+  $recycledLease.Dispose()
+
+  $success = [Yap.NsisSmoke.Testing.ScriptedNativeScenario]::new()
+  $lease = [Yap.NsisSmoke.Testing.ContainedProcessTestFactory]::CreateScriptedLauncher($success).Launch($failingRequest)
+  Assert-True ($lease.RootProcessId -gt 0) "The lease lost its retained root process ID."
+  Assert-True ($lease.RootCreationFileTime -gt 0) "The lease lost its retained creation FILETIME."
+  Assert-True (
+    [StringComparer]::OrdinalIgnoreCase.Equals($lease.RootExecutablePath, [IO.Path]::GetFullPath($runtime))
+  ) "The lease lost its canonical executable identity."
+  $requiredOrder = @("CreateProcessSuspended", "AssignJob", "VerifyJobMembership", "CaptureIdentity", "ResumeThread")
+  $observedOrder = @($success.OperationLog | Where-Object { $_ -in $requiredOrder })
+  Assert-True (($observedOrder -join "|") -ceq ($requiredOrder -join "|")) "Success-path assignment/identity/resume order changed."
+  Assert-True ($success.ResumeThreadCallCount -eq 1) "Success path did not resume exactly once."
+  $operationLogCount = $success.OperationLog.Count
+  $mutationThrew = $false
+  try { $success.OperationLog.Add("caller mutation") } catch { $mutationThrew = $true }
+  Assert-True $mutationThrew "Scripted operation log was mutable."
+  Assert-True ($success.OperationLog.Count -eq $operationLogCount) "Scripted operation log changed after construction."
+  $first = $lease.TerminateAndWait(0x59504150, [TimeSpan]::FromSeconds(1))
+  $second = $lease.TerminateAndWait(0x59504150, [TimeSpan]::FromSeconds(1))
+  Assert-True ([object]::ReferenceEquals($first, $second)) "Idempotent termination did not return its original proof."
+  Assert-True ($success.JobTerminationCount -eq 1) "Idempotent termination signaled the Job twice."
+  $lease.Dispose()
+  $lease.Dispose()
+  Assert-True ($success.OpenHandleCount -eq 0) "Idempotent disposal leaked a test handle."
+  $disposedThrew = $false
+  try { $lease.WaitForRootExit([TimeSpan]::FromSeconds(1)) } catch [ObjectDisposedException] { $disposedThrew = $true }
+  Assert-True $disposedThrew "A disposed lease remained operable."
+
+  Write-Output "Windows contained-process contracts passed."
 }
 finally {
   if ($null -ne $root -and [IO.Directory]::Exists($root)) {
