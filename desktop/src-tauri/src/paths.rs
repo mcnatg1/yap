@@ -3,13 +3,16 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
 
 const PRODUCTION_IDENTIFIER: &str = "com.mcnatg1.yap";
 const LEGACY_APP_NAME: &str = "Yap";
+const MIGRATION_STAGE_PREFIX: &str = ".legacy-migration-stage";
+const MIGRATION_RETIREMENT_PREFIX: &str = ".yap-runtime-migrated";
+const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyMigrationOutcome {
@@ -84,7 +87,9 @@ where
     F: FnOnce() -> R,
 {
     let initial_entries = discover_legacy_entries(legacy, canonical)?;
-    if initial_entries.is_empty() {
+    let initial_staging = migration_residue_directories(canonical, MIGRATION_STAGE_PREFIX)?;
+    let initial_retirement = migration_residue_directories(legacy, MIGRATION_RETIREMENT_PREFIX)?;
+    if initial_entries.is_empty() && initial_staging.is_empty() && initial_retirement.is_empty() {
         return Ok(LegacyMigrationOutcome::NotNeeded);
     }
 
@@ -118,7 +123,7 @@ where
         ));
     }
     ready();
-    lock_file.lock()?;
+    lock_with_timeout(&lock_file, MIGRATION_LOCK_TIMEOUT)?;
     migrate_legacy_entries_locked(legacy, canonical)
 }
 
@@ -126,6 +131,7 @@ fn migrate_legacy_entries_locked(
     legacy: &Path,
     canonical: &Path,
 ) -> io::Result<LegacyMigrationOutcome> {
+    recover_migration_residue(legacy, canonical)?;
     let entries = discover_legacy_entries(legacy, canonical)?;
     if entries.is_empty() {
         return Ok(LegacyMigrationOutcome::NotNeeded);
@@ -154,10 +160,7 @@ fn migrate_legacy_entries_locked(
     let staging = if unpublished.is_empty() {
         None
     } else {
-        Some(create_unique_directory(
-            canonical,
-            ".legacy-migration-stage",
-        )?)
+        Some(create_unique_directory(canonical, MIGRATION_STAGE_PREFIX)?)
     };
     if let Some(staging) = &staging {
         let stage_result = (|| {
@@ -173,8 +176,7 @@ fn migrate_legacy_entries_locked(
             Ok::<(), io::Error>(())
         })();
         if let Err(error) = stage_result {
-            let _ = fs::remove_dir_all(staging);
-            return Err(error);
+            return Err(cleanup_after_error(staging, error));
         }
 
         let publish_result = (|| {
@@ -204,8 +206,7 @@ fn migrate_legacy_entries_locked(
             Ok::<(), io::Error>(())
         })();
         if let Err(error) = publish_result {
-            let _ = fs::remove_dir_all(staging);
-            return Err(error);
+            return Err(cleanup_after_error(staging, error));
         }
     }
 
@@ -221,7 +222,7 @@ fn migrate_legacy_entries_locked(
         }
     }
 
-    let retirement = create_unique_directory(legacy, ".yap-runtime-migrated")?;
+    let retirement = create_unique_directory(legacy, MIGRATION_RETIREMENT_PREFIX)?;
     for (source, _) in &entries {
         let retired = retirement.join(source.file_name().expect("validated legacy entry name"));
         if let Err(error) = fs::rename(source, &retired) {
@@ -234,11 +235,226 @@ fn migrate_legacy_entries_locked(
             ));
         }
     }
-    let _ = fs::remove_dir_all(&retirement);
+    fs::remove_dir_all(&retirement)?;
 
     Ok(LegacyMigrationOutcome::Migrated {
         entries: entries.len(),
     })
+}
+
+fn lock_with_timeout(file: &File, timeout: Duration) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another Yap process is still migrating legacy app data",
+                    ));
+                }
+                std::thread::sleep(
+                    timeout
+                        .saturating_sub(elapsed)
+                        .min(Duration::from_millis(50)),
+                );
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
+fn recover_migration_residue(legacy: &Path, canonical: &Path) -> io::Result<()> {
+    recover_staging_residue(legacy, canonical)?;
+    recover_retirement_residue(legacy, canonical)
+}
+
+fn recover_staging_residue(legacy: &Path, canonical: &Path) -> io::Result<()> {
+    for residue in migration_residue_directories(canonical, MIGRATION_STAGE_PREFIX)? {
+        validate_regular_tree(&residue)?;
+        for staged in sorted_entries(&residue)? {
+            let name = staged.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("staging residue has no entry name: {}", staged.display()),
+                )
+            })?;
+            if !is_legacy_runtime_entry(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "staging residue contains an unrecognized entry: {}",
+                        staged.display()
+                    ),
+                ));
+            }
+            validate_regular_tree(&staged)?;
+            let source = legacy.join(name);
+            let destination = canonical.join(name);
+            let mut verified_copy = false;
+            for candidate in [&source, &destination] {
+                if metadata_if_present(candidate)?.is_some() {
+                    validate_regular_tree(candidate)?;
+                    if !trees_equal(&staged, candidate)? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "staging residue does not match {}: {}",
+                                candidate.display(),
+                                staged.display()
+                            ),
+                        ));
+                    }
+                    verified_copy = true;
+                }
+            }
+            if !verified_copy {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "staging residue is the only remaining copy and was preserved: {}",
+                        staged.display()
+                    ),
+                ));
+            }
+            remove_regular_tree(&staged)?;
+        }
+        fs::remove_dir(&residue)?;
+    }
+    Ok(())
+}
+
+fn recover_retirement_residue(legacy: &Path, canonical: &Path) -> io::Result<()> {
+    for residue in migration_residue_directories(legacy, MIGRATION_RETIREMENT_PREFIX)? {
+        validate_regular_tree(&residue)?;
+        for retired in sorted_entries(&residue)? {
+            let name = retired.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "retirement residue has no entry name: {}",
+                        retired.display()
+                    ),
+                )
+            })?;
+            if !is_legacy_runtime_entry(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "retirement residue contains an unrecognized entry: {}",
+                        retired.display()
+                    ),
+                ));
+            }
+            validate_regular_tree(&retired)?;
+            let source = legacy.join(name);
+            let destination = canonical.join(name);
+            let source_exists = metadata_if_present(&source)?.is_some();
+            let destination_exists = metadata_if_present(&destination)?.is_some();
+
+            if source_exists {
+                validate_regular_tree(&source)?;
+                if !trees_equal(&retired, &source)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "retirement residue conflicts with restored legacy data: {}",
+                            retired.display()
+                        ),
+                    ));
+                }
+            }
+            if destination_exists {
+                validate_regular_tree(&destination)?;
+                if !trees_equal(&retired, &destination)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "retirement residue conflicts with canonical app data: {}",
+                            retired.display()
+                        ),
+                    ));
+                }
+            }
+
+            match (source_exists, destination_exists) {
+                (false, false) => fs::rename(&retired, &source)?,
+                (true, _) | (false, true) => remove_regular_tree(&retired)?,
+            }
+        }
+        fs::remove_dir(&residue)?;
+    }
+    Ok(())
+}
+
+fn migration_residue_directories(parent: &Path, prefix: &str) -> io::Result<Vec<PathBuf>> {
+    let Some(metadata) = metadata_if_present(parent)? else {
+        return Ok(Vec::new());
+    };
+    if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "migration parent is not a normal directory: {}",
+                parent.display()
+            ),
+        ));
+    }
+    let mut residues = fs::read_dir(parent)?
+        .filter_map(|entry| match entry {
+            Ok(entry)
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(prefix)) =>
+            {
+                Some(Ok(entry.path()))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    residues.sort();
+    Ok(residues)
+}
+
+fn sorted_entries(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut entries = fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    Ok(entries)
+}
+
+fn remove_regular_tree(path: &Path) -> io::Result<()> {
+    validate_regular_tree(path)?;
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn cleanup_after_error(path: &Path, error: io::Error) -> io::Error {
+    cleanup_after_error_with(path, error, |path| fs::remove_dir_all(path))
+}
+
+fn cleanup_after_error_with<F>(path: &Path, error: io::Error, cleanup: F) -> io::Error
+where
+    F: FnOnce(&Path) -> io::Result<()>,
+{
+    match cleanup(path) {
+        Ok(()) => error,
+        Err(cleanup_error) => io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; migration residue cleanup also failed for {}: {cleanup_error}",
+                path.display()
+            ),
+        ),
+    }
 }
 
 fn discover_legacy_entries(legacy: &Path, canonical: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
@@ -800,6 +1016,127 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(fs::symlink_metadata(canonical.join("jobs.sqlite3")).is_ok());
         assert!(legacy.join("jobs.sqlite3").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_staging_is_verified_and_recovered_before_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            8
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let stale_stage = canonical.join(".legacy-migration-stage-interrupted");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&stale_stage).unwrap();
+        std::fs::write(legacy.join("jobs.sqlite3"), b"ledger").unwrap();
+        std::fs::write(stale_stage.join("jobs.sqlite3"), b"ledger").unwrap();
+
+        let outcome = migrate_legacy_entries(&legacy, &canonical).unwrap();
+
+        assert_eq!(outcome, LegacyMigrationOutcome::Migrated { entries: 1 });
+        assert_eq!(
+            std::fs::read(canonical.join("jobs.sqlite3")).unwrap(),
+            b"ledger"
+        );
+        assert!(!stale_stage.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partial_retirement_is_verified_and_removed_before_early_return() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            9
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let stale_retirement = legacy.join(".yap-runtime-migrated-interrupted");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&stale_retirement).unwrap();
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(stale_retirement.join("jobs.sqlite3"), b"ledger").unwrap();
+        std::fs::write(canonical.join("jobs.sqlite3"), b"ledger").unwrap();
+
+        let outcome = migrate_legacy_entries(&legacy, &canonical).unwrap();
+
+        assert_eq!(outcome, LegacyMigrationOutcome::NotNeeded);
+        assert!(!stale_retirement.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_lock_wait_is_bounded() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            10
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join("lock");
+        let first = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let second = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        first.lock().unwrap();
+
+        let error = lock_with_timeout(&second, std::time::Duration::from_millis(20)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(first);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_failure_is_propagated_with_the_original_error() {
+        let original = io::Error::new(io::ErrorKind::InvalidData, "copy verification failed");
+        let combined = cleanup_after_error_with(Path::new("stale-stage"), original, |_| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "in use"))
+        });
+
+        assert_eq!(combined.kind(), io::ErrorKind::InvalidData);
+        assert!(combined.to_string().contains("copy verification failed"));
+        assert!(combined.to_string().contains("cleanup also failed"));
+        assert!(combined.to_string().contains("in use"));
+    }
+
+    #[test]
+    fn unverifiable_staging_residue_is_preserved() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            11
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let stale_stage = canonical.join(".legacy-migration-stage-only-copy");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&stale_stage).unwrap();
+        std::fs::write(stale_stage.join("jobs.sqlite3"), b"only copy").unwrap();
+
+        let error = migrate_legacy_entries(&legacy, &canonical).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(stale_stage.join("jobs.sqlite3")).unwrap(),
+            b"only copy"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

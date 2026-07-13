@@ -40,10 +40,14 @@ install-location registry record; disposal of the Windows environment clears tha
 The workflow makes no automated delete-data claim and performs no script-owned recursive cleanup.
 
 The application performs the one-time storage transition before opening any runtime state. A
-cross-process file lock serializes starts. Yap recursively validates only recognized runtime entries
+cross-process file lock serializes starts; a second launch times out after ten seconds and uses the
+native startup-error path rather than waiting forever. Yap recursively validates only recognized runtime entries
 from the former `%LOCALAPPDATA%\Yap` tree, rejects links/reparse points and dangling destinations,
 copies into staging on the canonical volume, flushes and hash-verifies the full trees, publishes and
-re-verifies every destination, and only then retires legacy sources. Installer files stay in place,
+re-verifies every destination, and only then retires legacy sources. On restart, transaction-owned
+staging and retirement residue is reconciled under the lock; a duplicate is removed only after a
+byte-identical source or canonical copy is verified, an only copy is preserved, and cleanup failures
+are surfaced. Installer files stay in place,
 and redirected profiles with Local and Roaming AppData on different volumes are supported. A conflict
 or failure stops startup with a native error and a uniquely created temporary diagnostic rather than
 overwriting or silently abandoning either copy.

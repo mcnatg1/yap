@@ -1479,6 +1479,9 @@ test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", asyn
   assert.equal(config.bundle.windows?.nsis?.installerHooks, undefined);
   assert.equal(config.bundle.windows?.nsis?.installMode, "currentUser");
   assert.match(paths, /\.legacy-migration\.lock/);
+  assert.match(paths, /MIGRATION_LOCK_TIMEOUT/);
+  assert.match(paths, /try_lock\(\)/);
+  assert.match(paths, /recover_migration_residue/);
   assert.match(paths, /copy_tree_verified/);
   assert.match(paths, /output\.sync_all\(\)/);
   assert.match(paths, /trees_equal/);
