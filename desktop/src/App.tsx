@@ -222,6 +222,7 @@ export default function App() {
   }, [settings.setupPromptRequest, showDetails]);
 
   useEffect(() => {
+    if (!isTauri()) return;
     if (migrationError) setStatus(migrationError);
     else if (migrationState === "pending") setStatus("Restoring queued recordings");
   }, [migrationError, migrationState]);

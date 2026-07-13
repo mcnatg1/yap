@@ -330,6 +330,7 @@ test("history keeps committed review actions separate from recoverable capture a
               visibility: "enabled",
             };
           }
+          if (command === "recording_jobs_snapshot") return [];
           if (command === "list_input_devices" || command === "resolve_owned_live_transcript_paths") return [];
           if (command === "list_local_compute_targets") return [{ id: "auto", label: "Auto", selected: true }];
           if (command === "read_text_file" || command === "read_text_preview") return "";
