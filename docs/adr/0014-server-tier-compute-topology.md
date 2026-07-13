@@ -279,7 +279,7 @@ enum DeploymentProfile { Solo, TeamConfigured }
 enum ConnectorState { NotSet, Disabled, Connecting, Offline, SignInRequired, Retrying, Ready }
 ```
 
-The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured + Offline`; it does not silently become Solo. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is offline. `Ready` is accepted only after the version, auth state, and required advertised capabilities validate.
+The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured` and unavailable; it does not silently become Solo. Its observable connector state may be `Offline` and then `Retrying` when retry backoff arms. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is unavailable. `Ready` means a compatible, healthy service is reachable and its auth projection does not require sign-in; advertised capabilities may all be false. Batch and live routing additionally require the matching advertised capability.
 
 The implemented Phase 3 connector covers configured-origin validation, bounded health checks, capability and auth-required state projection, fail-closed retries, and settings-generation cancellation. It does not stream audio, upload or drain recording jobs, authenticate a user, or process a queued job.
 

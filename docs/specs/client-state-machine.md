@@ -38,10 +38,10 @@ The desktop bridge uses Rust-minted string IDs and a SQLite ledger. `yap.recordi
 |-------|---------|-------|
 | `not_set` | No server URL/profile is configured. | 1 |
 | `connecting` | Version, health, auth state, and capability checks are running. | 3 |
-| `ready` | Version and auth state are valid and the required route capabilities were advertised. | 3 |
-| `offline` | Server URL exists but health timed out or failed. | 3 |
+| `ready` | A compatible, healthy service is reachable and its auth projection does not require sign-in; advertised capabilities may all be false. Batch and live routing additionally require the matching advertised capability. | 3 |
+| `offline` | Server URL exists but health timed out or failed; server routing is unavailable. This state may be observed before retry backoff is armed. | 3 |
 | `sign_in_required` | Server is reachable but sign-in is required. | 7 |
-| `retrying` | Connector is retrying after network loss. | 3/5 |
+| `retrying` | Retry backoff is armed after a retryable health failure; server routing remains unavailable. | 3/5 |
 | `disabled` | User/org policy disabled server connection. | 3 |
 
 ### Runtime State

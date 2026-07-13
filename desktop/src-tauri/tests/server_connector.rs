@@ -185,6 +185,61 @@ fn disabling_connector_cancels_the_armed_retry() {
 }
 
 #[test]
+fn dropping_the_final_boundary_releases_the_connector_and_cancels_retry() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (second_request_tx, second_request_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        write_response(&mut first, "500 Internal Server Error", "failure").unwrap();
+        drop(first);
+
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(1_500);
+        let mut second_request = false;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    read_request(&mut stream);
+                    write_response(&mut stream, "200 OK", HEALTHY_BODY).unwrap();
+                    second_request = true;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("retry listener failed: {error}"),
+            }
+        }
+        second_request_tx.send(second_request).unwrap();
+    });
+    let connector = ServerConnectorBoundary::new();
+
+    configure(&connector, true, Some(url));
+    let failed = refresh(&connector);
+    assert_eq!(failed.state, ServerConnectorState::Retrying);
+    assert!(failed.retry_at_ms.is_some());
+
+    let owner = connector.downgrade();
+    drop(connector);
+    let owner_released = owner.upgrade().is_none();
+    let second_request = second_request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    server.join().unwrap();
+
+    assert!(
+        owner_released,
+        "retry task retained the final connector owner"
+    );
+    assert!(
+        !second_request,
+        "retry ran after its final boundary dropped"
+    );
+}
+
+#[test]
 fn python_health_process_matches_the_rust_connector_contract_when_provided() {
     let Ok(url) = std::env::var("YAP_TEST_SERVER_URL") else {
         return;

@@ -89,6 +89,12 @@ impl Default for ConnectorInner {
     }
 }
 
+impl Drop for ConnectorInner {
+    fn drop(&mut self) {
+        self.cancel_retry_task();
+    }
+}
+
 impl ConnectorInner {
     pub(crate) fn generation(&self) -> u64 {
         self.generation

@@ -3,7 +3,7 @@ pub mod config;
 mod state;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
@@ -52,6 +52,11 @@ impl ServerConnectorBoundary {
         self.connector.snapshot()
     }
 
+    #[doc(hidden)]
+    pub fn downgrade(&self) -> Weak<ServerConnector> {
+        Arc::downgrade(&self.connector)
+    }
+
     pub async fn refresh(&self) -> ServerConnectionSnapshot {
         let Some((generation, base_url)) = self.connector.begin_health_request_with(|_| {}) else {
             return self.snapshot();
@@ -63,7 +68,7 @@ impl ServerConnectorBoundary {
             allow_insecure_private_server(),
         )
         .await;
-        let retry_connector = Arc::clone(&self.connector);
+        let retry_connector = Arc::downgrade(&self.connector);
         self.connector.accept_health_result_with(
             generation,
             result,
@@ -328,13 +333,16 @@ async fn run_scheduled_retry<R: tauri::Runtime>(
 }
 
 fn spawn_boundary_retry(
-    connector: Arc<ServerConnector>,
+    connector: Weak<ServerConnector>,
     generation: u64,
     retry_token: u64,
     delay: Duration,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(delay).await;
+        let Some(connector) = connector.upgrade() else {
+            return;
+        };
         Box::pin(run_boundary_scheduled_retry(
             connector,
             generation,
@@ -359,7 +367,7 @@ async fn run_boundary_scheduled_retry(
         allow_insecure_private_server(),
     )
     .await;
-    let retry_connector = Arc::clone(&connector);
+    let retry_connector = Arc::downgrade(&connector);
     connector.accept_health_result_with(
         generation,
         result,
