@@ -349,11 +349,26 @@ class HealthServiceTests(unittest.TestCase):
 
     def test_client_disconnect_is_logged_without_default_traceback(self) -> None:
         host, port = self.server.server_address[:2]
-        attempts = 5
+        request_logged = threading.Event()
+        release_response = threading.Event()
+        barrier_timed_out = threading.Event()
+        real_info = self.logger.info
+
+        def log_then_wait_for_disconnect(message: str) -> None:
+            real_info(message)
+            request_logged.set()
+            if not release_response.wait(timeout=2):
+                barrier_timed_out.set()
+
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            for _ in range(attempts):
-                with socket.create_connection((host, port), timeout=2) as client:
+            client = socket.create_connection((host, port), timeout=2)
+            try:
+                with patch.object(
+                    self.logger,
+                    "info",
+                    side_effect=log_then_wait_for_disconnect,
+                ):
                     client.setsockopt(
                         socket.SOL_SOCKET,
                         socket.SO_LINGER,
@@ -362,23 +377,30 @@ class HealthServiceTests(unittest.TestCase):
                     client.sendall(
                         b"GET /v1/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
                     )
+                    self.assertTrue(
+                        request_logged.wait(timeout=2),
+                        "server did not reach the pre-write logging barrier",
+                    )
+                    client.close()
+            finally:
+                client.close()
+                release_response.set()
 
-            deadline = time.monotonic() + 2
-            while (
-                len(self.logger.messages) < attempts
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.01)
+            self.assertFalse(
+                barrier_timed_out.is_set(),
+                "server timed out waiting for the client disconnect",
+            )
+            self.assertEqual(len(self.logger.messages), 1)
+            disconnect_log = self.logger.messages[0]
+            self.assertLessEqual(len(disconnect_log), 1024)
+            self.assertEqual(json.loads(disconnect_log)["status"], 200)
+            self.assertEqual(stderr.getvalue(), "")
 
-        self.assertEqual(len(self.logger.messages), attempts)
+            status, _, _ = self._request("/v1/health")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(self.logger.messages), 2)
+
         self.assertEqual(stderr.getvalue(), "")
-        for line in self.logger.messages:
-            self.assertLessEqual(len(line), 1024)
-            self.assertEqual(json.loads(line)["status"], 200)
-
-        status, _, _ = self._request("/v1/health")
-        self.assertEqual(status, 200)
-        self.assertEqual(len(self.logger.messages), attempts + 1)
 
     def test_partial_headers_time_out_without_blocking_the_server(self) -> None:
         host, port = self.server.server_address[:2]
