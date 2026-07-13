@@ -982,7 +982,13 @@ mod tests {
         )
         .unwrap();
         let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes).unwrap();
+        if let Err(error) = stream.read_to_end(&mut bytes) {
+            // A deliberate `Connection: close` can surface as WSAECONNRESET on
+            // Windows after the complete response was delivered. Keep the
+            // received bytes; the strict header/body assertions below still
+            // reject an incomplete response.
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
         let split = bytes
             .windows(4)
             .position(|window| window == b"\r\n\r\n")

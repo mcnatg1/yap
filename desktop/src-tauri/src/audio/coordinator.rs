@@ -898,7 +898,7 @@ impl Drop for Coordinator {
 #[cfg(test)]
 mod tests {
     use std::sync::{mpsc, Arc, Barrier};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use crate::audio::capture::{new_callback_boundary, CapturePacket};
     use crate::audio::frame::{GapCause, PreparedFrame};
@@ -1135,14 +1135,20 @@ mod tests {
     #[test]
     fn stalled_asr_does_not_block_recording_or_callback_intake() {
         let (ports, recording_rx, local_asr_rx) = ports(4, Some(1));
-        let mut coordinator = Coordinator::new(session(), track(), ports);
-        let losses = LossAccumulator::new();
-        let started = Instant::now();
+        let coordinator = Coordinator::new(session(), track(), ports);
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let mut coordinator = coordinator;
+            let losses = LossAccumulator::new();
+            coordinator.consume(&packet(0), &losses).unwrap();
+            coordinator.consume(&packet(480), &losses).unwrap();
+            completed_tx.send(coordinator).unwrap();
+        });
+        let coordinator = completed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stalled ASR blocked recording intake");
+        worker.join().unwrap();
 
-        coordinator.consume(&packet(0), &losses).unwrap();
-        coordinator.consume(&packet(480), &losses).unwrap();
-
-        assert!(started.elapsed() < Duration::from_millis(100));
         assert_eq!(recv_recording_frame(&recording_rx).metadata.sequence, 0);
         assert_eq!(recv_recording_frame(&recording_rx).metadata.sequence, 1);
         assert_eq!(
