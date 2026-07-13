@@ -1589,6 +1589,9 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
     "desktop/tests/scripts/smoke-nsis-production-delete.ps1",
     "desktop/tests/scripts/smoke-nsis-test-delete.ps1",
     "desktop/tests/scripts/smoke-nsis.ps1",
+    "desktop/tests/scripts/windows-contained-process-fixture.ps1",
+    "desktop/tests/scripts/windows-contained-process.contract.test.ps1",
+    "desktop/tests/scripts/windows-contained-process.integration.test.ps1",
     "desktop/tests/wdio/native-window-recovery.psm1",
   ];
   const trackedPowerShellFiles = execFileSync(
@@ -1634,7 +1637,9 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
   const nsisHelpers = await readRepoFile(
     "desktop/tests/scripts/nsis-smoke-helpers.psm1",
   );
-  assert.match(nsisHelpers, /Environment = \$childEnvironment/);
+  assert.match(nsisHelpers, /\[Yap\.NsisSmoke\.LaunchRequest\]::Create\(/);
+  assert.match(nsisHelpers, /ConvertTo-ChildEnvironment/);
+  assert.match(nsisHelpers, /\$childEnvironment\r?\n\s*\)/);
   assert.doesNotMatch(nsisHelpers, /SetEnvironmentVariable/);
 
   const legacyWindowsPowerShell = ["power", "shell.exe"].join("");
@@ -1652,10 +1657,10 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
       `${relativePath} still selects legacy Windows PowerShell`,
     );
   }
-  const helperTest = await readRepoFile(
-    "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
+  const containedIntegration = await readRepoFile(
+    "desktop/tests/scripts/windows-contained-process.integration.test.ps1",
   );
-  assert.match(helperTest, /Join-Path \$PSHOME "pwsh\.exe"/);
+  assert.match(containedIntegration, /Join-Path \$PSHOME "pwsh\.exe"/);
   const releaseContract = await readRepoFile(
     "desktop/tests/scripts/release-evidence.contract.mjs",
   );

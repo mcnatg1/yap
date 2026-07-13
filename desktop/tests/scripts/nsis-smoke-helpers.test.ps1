@@ -42,7 +42,8 @@ Assert-True ($null -ne $module) "NSIS helper module was not loaded."
 
 foreach ($requiredExport in @(
   "Assert-InstallerCleanupAuthorized",
-  "Invoke-ContainedProcess"
+  "Invoke-ContainedProcess",
+  "Invoke-YapAuthorizedCleanupMutation"
 )) {
   Assert-True $module.ExportedCommands.ContainsKey($requiredExport) "Missing lease adapter export '$requiredExport'."
 }
@@ -62,6 +63,8 @@ $legacySmokeCommands = @(
   "Invoke-ProcessWithDeadline",
   "Start-ProcessWithEnvironment",
   "Stop-ProcessTreeBounded",
+  "Get-Process",
+  "Start-Process",
   "Stop-Process",
   "Wait-Process"
 )
@@ -78,10 +81,51 @@ Assert-True (
   @($smokeCommands | Where-Object { $_ -ceq "Assert-InstallerCleanupAuthorized" }).Count -ge 1
 ) "Installer-owned cleanup is not guarded by the fail-closed gateway."
 
+$smokeTokens = $null
+$smokeErrors = $null
+$smokeAst = [Management.Automation.Language.Parser]::ParseFile(
+  $smokePath,
+  [ref]$smokeTokens,
+  [ref]$smokeErrors
+)
+$gatewayCalls = @($smokeAst.FindAll({
+  param($Node)
+  $Node -is [Management.Automation.Language.CommandAst] -and
+  $Node.GetCommandName() -ceq "Invoke-YapAuthorizedCleanupMutation"
+}, $true))
+foreach ($gatewayCall in $gatewayCalls) {
+  $authorizationParameters = @($gatewayCall.CommandElements | Where-Object {
+    $_ -is [Management.Automation.Language.CommandParameterAst] -and
+    $_.ParameterName -ceq "CleanupAuthorized"
+  })
+  Assert-True ($authorizationParameters.Count -eq 1) "Cleanup gateway call omitted its single authorization binding."
+  $authorization = $authorizationParameters[0].Argument
+  Assert-True (
+    $authorization -is [Management.Automation.Language.VariableExpressionAst] -and
+    $authorization.VariablePath.UserPath -ceq "filesystemCleanupAuthorized"
+  ) "Cleanup gateway must bind the authoritative filesystemCleanupAuthorized variable directly."
+}
+$forbiddenMembers = @($smokeAst.FindAll({
+  param($Node)
+  $Node -is [Management.Automation.Language.InvokeMemberExpressionAst]
+}, $true) | ForEach-Object { $_.Member.Value } | Where-Object { $_ -in @("Kill", "WaitForExit") })
+Assert-True ($forbiddenMembers.Count -eq 0) "Smoke orchestration reacquired managed Process lifecycle control."
+
 Assert-Throws {
   Assert-InstallerCleanupAuthorized -Authorized:$false -Operation "helper test mutation"
 } "blocked|not proven"
 Assert-InstallerCleanupAuthorized -Authorized:$true -Operation "helper test mutation"
+$script:blockedMutationCount = 0
+$blockedMutation = Invoke-YapAuthorizedCleanupMutation `
+  -CleanupAuthorized:$false `
+  -Name "blocked helper mutation" `
+  -RetainedPaths @("C:\retained-install-root") `
+  -Action { $script:blockedMutationCount++ }
+Assert-True (-not $blockedMutation.Executed) "Unauthorized cleanup mutation reported execution."
+Assert-True ($script:blockedMutationCount -eq 0) "Unauthorized cleanup mutation action executed."
+Assert-True (
+  $blockedMutation.RetainedPaths -contains "C:\retained-install-root"
+) "Unauthorized cleanup mutation lost its retained path evidence."
 
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $testRoot = Get-ValidatedChildPath -Root $tempRoot -Token "yap-nsis-helper-test-$PID"
@@ -145,6 +189,34 @@ try {
   Assert-True ($quick.RootExecutablePath -ieq $env:ComSpec) "Lease adapter reported the wrong executable."
   Assert-True ([IO.File]::ReadAllText($quickStdout) -match "helper-stdout") "Lease adapter lost stdout."
   Assert-True ([IO.File]::ReadAllText($quickStderr) -match "helper-stderr") "Lease adapter lost stderr."
+
+  $powerShellExecutable = Join-Path $PSHOME "pwsh.exe"
+  $fixturePath = Join-Path $PSScriptRoot "windows-contained-process-fixture.ps1"
+  $environmentStdout = Join-Path $testRoot "environment.stdout.log"
+  $environmentStderr = Join-Path $testRoot "environment.stderr.log"
+  $derivedEnvironmentValue = Join-Path $testRoot "child-value"
+  [Environment]::SetEnvironmentVariable("YAP_CONTAINED_REMOVE", "parent-value", "Process")
+  try {
+    $environmentResult = Invoke-ContainedProcess `
+      -FilePath $powerShellExecutable `
+      -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-File", $fixturePath, "-Mode", "Io") `
+      -TimeoutSeconds 5 `
+      -StdoutPath $environmentStdout `
+      -StderrPath $environmentStderr `
+      -WorkingDirectory $testRoot `
+      -Environment ([ordered]@{
+        YAP_CONTAINED_OVERRIDE = $derivedEnvironmentValue
+        YAP_CONTAINED_REMOVE = $null
+      })
+    Assert-True $environmentResult.CleanupProven "Environment adapter call did not prove cleanup."
+    $environmentOutput = [IO.File]::ReadAllText($environmentStdout)
+    Assert-True (
+      $environmentOutput -match "(?m)^override=$([regex]::Escape($derivedEnvironmentValue))\r?$"
+    ) "Adapter lost a provider-derived string environment override."
+    Assert-True ($environmentOutput -match "(?m)^removed=\r?$") "Adapter lost an environment removal."
+  } finally {
+    [Environment]::SetEnvironmentVariable("YAP_CONTAINED_REMOVE", $null, "Process")
+  }
 
   $deleteRoot = Get-ValidatedChildPath -Root $testRoot -Token "delete-me"
   Initialize-ValidatedTree -Root $testRoot -Candidate $deleteRoot | Out-Null

@@ -91,9 +91,9 @@ Assert-PathIsNotReparsePoint -Path $tempRoot
 New-Item -ItemType Directory -Force $resultsRoot | Out-Null
 
 $events = [System.Collections.Generic.List[object]]::new()
-$trackedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+$filesystemCleanupAuthorized = $true
 $evidence = [ordered]@{
-  schemaVersion = 1
+  schemaVersion = 2
   mode = $Mode
   productName = $productName
   bundleId = $bundleId
@@ -127,7 +127,11 @@ $evidence = [ordered]@{
     reinstall = $null
     uninstall = $null
     cleanupUninstall = $null
-    cleanup = $null
+  }
+  cleanupAuthority = [ordered]@{
+    authorized = $true
+    failureStage = $null
+    retainedPaths = @()
   }
   uninstallFootprint = [ordered]@{
     expected = $footprintPaths
@@ -142,7 +146,6 @@ $evidence = [ordered]@{
     }
     residualAfterUninstall = @()
   }
-  trackedProcessIds = @()
   events = $events
   errors = @()
   startedAtUtc = [DateTime]::UtcNow.ToString("o")
@@ -167,8 +170,73 @@ function Set-EvidencePhase([string]$Phase, [string]$Message) {
   Write-Evidence
 }
 
-function Add-TrackedProcess([int]$ProcessId) {
-  if ($ProcessId -gt 0) { [void]$trackedProcessIds.Add($ProcessId) }
+function Get-ContainedProcessFailure([Exception]$Exception) {
+  $seen = [System.Collections.Generic.HashSet[Exception]]::new()
+  $current = $Exception
+  while ($null -ne $current -and $seen.Add($current)) {
+    if ($current -is [Yap.NsisSmoke.ContainedProcessException]) { return $current }
+    $current = $current.InnerException
+  }
+  return $null
+}
+
+function Invoke-SmokeContainedProcess {
+  param(
+    [Parameter(Mandatory)][string]$Phase,
+    [Parameter(Mandatory)][string]$FilePath,
+    [string[]]$ArgumentList = @(),
+    [Parameter(Mandatory)][double]$TimeoutSeconds,
+    [Parameter(Mandatory)][string]$StdoutPath,
+    [Parameter(Mandatory)][string]$StderrPath,
+    [string]$WorkingDirectory = $null,
+    [System.Collections.IDictionary]$Environment = ([ordered]@{}),
+    [string]$NsisInstallDirectory = $null
+  )
+
+  Assert-InstallerCleanupAuthorized `
+    -Authorized:$script:filesystemCleanupAuthorized `
+    -Operation "launch $Phase process"
+  $script:filesystemCleanupAuthorized = $false
+  $evidence.cleanupAuthority.authorized = $false
+  $evidence.cleanupAuthority.failureStage = $Phase
+  try {
+    $parameters = @{
+      FilePath = $FilePath
+      ArgumentList = $ArgumentList
+      TimeoutSeconds = $TimeoutSeconds
+      CleanupTimeoutSeconds = $cleanupTimeoutSeconds
+      StdoutPath = $StdoutPath
+      StderrPath = $StderrPath
+      WorkingDirectory = $WorkingDirectory
+      Environment = $Environment
+    }
+    if ($PSBoundParameters.ContainsKey("NsisInstallDirectory")) {
+      $parameters.NsisInstallDirectory = $NsisInstallDirectory
+    }
+    $result = Invoke-ContainedProcess @parameters
+    if (-not $result.CleanupProven) {
+      throw "Contained process returned without explicit root-exit and Job-quiescence proof."
+    }
+    $script:filesystemCleanupAuthorized = $true
+    $evidence.cleanupAuthority.authorized = $true
+    $evidence.cleanupAuthority.failureStage = $null
+    $evidence.cleanupAuthority.retainedPaths = @()
+    return $result
+  } catch {
+    $typedFailure = Get-ContainedProcessFailure -Exception $_.Exception
+    if ($null -ne $typedFailure -and $typedFailure.CleanupProven) {
+      $script:filesystemCleanupAuthorized = $true
+      $evidence.cleanupAuthority.authorized = $true
+      $evidence.cleanupAuthority.failureStage = [string]$typedFailure.Stage
+      $evidence.cleanupAuthority.retainedPaths = @()
+    } else {
+      $script:filesystemCleanupAuthorized = $false
+      $evidence.cleanupAuthority.authorized = $false
+      $evidence.cleanupAuthority.failureStage = if ($null -eq $typedFailure) { $Phase } else { [string]$typedFailure.Stage }
+      $evidence.cleanupAuthority.retainedPaths = @($footprintPaths.Values) + @($smokeRoot)
+    }
+    throw
+  }
 }
 
 function Get-PresentFootprint {
@@ -204,8 +272,6 @@ function Remove-OwnedDeleteQuarantine {
   Remove-ValidatedTree -Root $env:LOCALAPPDATA -Candidate $quarantinePath
 }
 
-$appProcessId = $null
-$appProcessIdentity = $null
 $installationStarted = $false
 $ownsTestDataFootprint = -not $usesProductionIdentity
 $primaryError = $null
@@ -248,18 +314,27 @@ try {
       [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "com.mcnatg1.yap")),
       [System.IO.Path]::GetFullPath((Join-Path $env:APPDATA "com.mcnatg1.yap"))
     )
-    foreach ($dataName in $dataFootprintNames) {
-      $dataPath = [System.IO.Path]::GetFullPath([string]$footprintPaths[$dataName])
-      if ($productionPaths -contains $dataPath) {
-        throw "Local-safe smoke resolved a production Yap data path: $dataPath"
+    $initialCleanup = Invoke-YapAuthorizedCleanupMutation `
+      -CleanupAuthorized:$filesystemCleanupAuthorized `
+      -Name "remove prior isolated test data" `
+      -RetainedPaths @($footprintPaths.Values) `
+      -Action {
+        foreach ($dataName in $dataFootprintNames) {
+          $dataPath = [System.IO.Path]::GetFullPath([string]$footprintPaths[$dataName])
+          if ($productionPaths -contains $dataPath) {
+            throw "Local-safe smoke resolved a production Yap data path: $dataPath"
+          }
+          if (Test-Path -LiteralPath $dataPath) {
+            Remove-ValidatedTree `
+              -Root ([System.IO.Path]::GetDirectoryName($dataPath)) `
+              -Candidate $dataPath
+          }
+        }
+        Remove-OwnedDeleteQuarantine -AllowPriorRunToken
       }
-      if (Test-Path -LiteralPath $dataPath) {
-        Remove-ValidatedTree `
-          -Root ([System.IO.Path]::GetDirectoryName($dataPath)) `
-          -Candidate $dataPath
-      }
+    if (-not $initialCleanup.Executed) {
+      throw "Initial isolated-data cleanup was blocked because process cleanup was not proven."
     }
-    Remove-OwnedDeleteQuarantine -AllowPriorRunToken
   }
 
   $preexistingFootprint = @(Get-PresentFootprint)
@@ -268,22 +343,34 @@ try {
     throw "NSIS smoke refuses to overwrite a preexisting Yap footprint: $($preexistingFootprint -join ', ')."
   }
   Set-EvidencePhase -Phase "preparing" -Message "Creating isolated custom install root."
-  if (Test-Path -LiteralPath $smokeRoot) {
-    Remove-ValidatedTree -Root $tempRoot -Candidate $smokeRoot
+  $prepareTree = Invoke-YapAuthorizedCleanupMutation `
+    -CleanupAuthorized:$filesystemCleanupAuthorized `
+    -Name "prepare isolated install tree" `
+    -RetainedPaths @($smokeRoot) `
+    -Action {
+      if (Test-Path -LiteralPath $smokeRoot) {
+        Remove-ValidatedTree -Root $tempRoot -Candidate $smokeRoot
+      }
+      Initialize-ValidatedTree -Root $tempRoot -Candidate $smokeRoot | Out-Null
+    }
+  if (-not $prepareTree.Executed) {
+    throw "Install-tree preparation was blocked because process cleanup was not proven."
   }
-  Initialize-ValidatedTree -Root $tempRoot -Candidate $smokeRoot | Out-Null
   Assert-NoReparsePoints -Path $smokeRoot
 
   Set-EvidencePhase -Phase "installing" -Message "Starting silent NSIS installation with a bounded deadline."
   $installationStarted = $true
-  $install = Invoke-ProcessWithDeadline `
+  $install = Invoke-SmokeContainedProcess `
+    -Phase "installer" `
     -FilePath $installer `
-    -ArgumentList @("/S", "/D=$installRoot") `
+    -ArgumentList @("/S") `
+    -NsisInstallDirectory $installRoot `
     -TimeoutSeconds $installTimeoutSeconds `
     -StdoutPath (Join-Path $resultsRoot "install.stdout.log") `
-    -StderrPath (Join-Path $resultsRoot "install.stderr.log")
-  foreach ($processId in $install.ProcessIds) { Add-TrackedProcess -ProcessId $processId }
+    -StderrPath (Join-Path $resultsRoot "install.stderr.log") `
+    -WorkingDirectory ([System.IO.Path]::GetDirectoryName($installer))
   $evidence.processes.install = $install
+  if ($install.TimedOut) { throw "NSIS installer exceeded the $installTimeoutSeconds second deadline." }
   if ($install.ExitCode -ne 0) { throw "NSIS installer exited with code $($install.ExitCode)." }
   Assert-NoReparsePoints -Path $smokeRoot
   $presentAfterInstall = @(Get-PresentFootprint)
@@ -326,30 +413,43 @@ try {
   $evidence.provenanceSha256 = $provenanceHash
 
   Set-EvidencePhase -Phase "preparing-data-policy" -Message "Preparing identity-scoped data markers before launch."
-  foreach ($dataName in $dataFootprintNames) {
-    $dataPath = [System.IO.Path]::GetFullPath([string]$footprintPaths[$dataName])
-    $dataParent = [System.IO.Path]::GetDirectoryName($dataPath)
-    if (-not (Test-StrictChildPath -Root $dataParent -Candidate $dataPath)) {
-      throw "Data footprint path is not a strict child of its known parent: $dataPath"
-    }
-    Assert-PathIsNotReparsePoint -Path $dataParent
-    if ($usesProductionIdentity) {
-      New-Item -ItemType Directory -Force $dataPath | Out-Null
-      Assert-NoReparsePoints -Path $dataPath
-    } else {
-      Initialize-ValidatedTree -Root $dataParent -Candidate $dataPath | Out-Null
-    }
-    $markerPath = Join-Path $dataPath "nsis-smoke-$runToken.txt"
-    Set-Content -LiteralPath $markerPath -Value $dataMarkerContents -Encoding ascii
-    $dataMarkerPaths[$dataName] = $markerPath
+  $destructiveSentinelPath = if ($deletesAppData) {
+    Join-Path ([string]$footprintPaths.yapLocalData) $destructiveSentinelName
+  } else {
+    $null
   }
-  if ($deletesAppData) {
-    $destructiveSentinelPath = Join-Path ([string]$footprintPaths.yapLocalData) $destructiveSentinelName
-    [System.IO.File]::WriteAllText(
-      $destructiveSentinelPath,
-      $destructiveSentinelContents,
-      [System.Text.Encoding]::ASCII
-    )
+  $prepareData = Invoke-YapAuthorizedCleanupMutation `
+    -CleanupAuthorized:$filesystemCleanupAuthorized `
+    -Name "prepare identity-scoped data markers" `
+    -RetainedPaths @($footprintPaths.Values) `
+    -Action {
+      foreach ($dataName in $dataFootprintNames) {
+        $dataPath = [System.IO.Path]::GetFullPath([string]$footprintPaths[$dataName])
+        $dataParent = [System.IO.Path]::GetDirectoryName($dataPath)
+        if (-not (Test-StrictChildPath -Root $dataParent -Candidate $dataPath)) {
+          throw "Data footprint path is not a strict child of its known parent: $dataPath"
+        }
+        Assert-PathIsNotReparsePoint -Path $dataParent
+        if ($usesProductionIdentity) {
+          New-Item -ItemType Directory -Force $dataPath | Out-Null
+          Assert-NoReparsePoints -Path $dataPath
+        } else {
+          Initialize-ValidatedTree -Root $dataParent -Candidate $dataPath | Out-Null
+        }
+        $markerPath = Join-Path $dataPath "nsis-smoke-$runToken.txt"
+        Set-Content -LiteralPath $markerPath -Value $dataMarkerContents -Encoding ascii
+        $dataMarkerPaths[$dataName] = $markerPath
+      }
+      if ($deletesAppData) {
+        [System.IO.File]::WriteAllText(
+          $destructiveSentinelPath,
+          $destructiveSentinelContents,
+          [System.Text.Encoding]::ASCII
+        )
+      }
+    }
+  if (-not $prepareData.Executed) {
+    throw "Data-policy preparation was blocked because process cleanup was not proven."
   }
 
   Set-EvidencePhase -Phase "launching" -Message "Launching the installed app for a bounded survival probe."
@@ -361,52 +461,36 @@ try {
       WEBVIEW2_USER_DATA_FOLDER = Join-Path ([string]$footprintPaths.legacyLocalData) "webview2"
     }
   }
-  $appProcess = Start-ProcessWithEnvironment `
+  $app = Invoke-SmokeContainedProcess `
+    -Phase "installed application" `
     -FilePath $appBinary `
     -Environment $appEnvironment `
+    -TimeoutSeconds $launchProbeSeconds `
     -StdoutPath (Join-Path $resultsRoot "app.stdout.log") `
-    -StderrPath (Join-Path $resultsRoot "app.stderr.log")
-  $appProcessId = $appProcess.Id
-  $appStartTime = $appProcess.StartTime
-  if ($null -eq $appStartTime) {
-    throw "Installed app process $appProcessId did not expose its creation identity."
+    -StderrPath (Join-Path $resultsRoot "app.stderr.log") `
+    -WorkingDirectory $installRoot
+  $evidence.processes.app = $app
+  if (-not $app.TimedOut) {
+    throw "Installed app exited before the $launchProbeSeconds second launch probe completed with code $($app.ExitCode)."
   }
-  $appProcessIdentity = $appStartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
-  Start-Sleep -Milliseconds 250
-  foreach ($processId in Get-ProcessTreeIds -RootProcessId $appProcessId) {
-    Add-TrackedProcess -ProcessId $processId
-  }
-  $evidence.processes.app = [ordered]@{
-    processId = $appProcessId
-    treeProcessIds = @($trackedProcessIds)
-    survivalProbeSeconds = $launchProbeSeconds
-  }
-  Assert-ProcessSurvives -ProcessId $appProcessId -DurationSeconds $launchProbeSeconds
   $evidence.launched = $true
-  $appCleanup = Stop-ProcessTreeBounded `
-    -RootProcessId $appProcessId `
-    -RootProcessIdentity $appProcessIdentity `
-    -TimeoutSeconds $cleanupTimeoutSeconds
-  foreach ($processId in $appCleanup.DiscoveredProcessIds) { Add-TrackedProcess -ProcessId $processId }
-  $evidence.processes.app.shutdown = $appCleanup
-  $appProcess.Dispose()
   Assert-NoProcessesUnderPath -Root $installRoot
-  $appProcessId = $null
-  $appProcessIdentity = $null
 
   $uninstaller = Join-Path $installRoot "uninstall.exe"
   if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
     throw "The NSIS installation did not create uninstall.exe."
   }
   Set-EvidencePhase -Phase "default-uninstalling" -Message "Verifying that default silent uninstall preserves user data."
-  $defaultUninstall = Invoke-ProcessWithDeadline `
+  $defaultUninstall = Invoke-SmokeContainedProcess `
+    -Phase "default uninstall" `
     -FilePath $uninstaller `
     -ArgumentList @("/S") `
     -TimeoutSeconds $uninstallTimeoutSeconds `
     -StdoutPath (Join-Path $resultsRoot "default-uninstall.stdout.log") `
-    -StderrPath (Join-Path $resultsRoot "default-uninstall.stderr.log")
-  foreach ($processId in $defaultUninstall.ProcessIds) { Add-TrackedProcess -ProcessId $processId }
+    -StderrPath (Join-Path $resultsRoot "default-uninstall.stderr.log") `
+    -WorkingDirectory $installRoot
   $evidence.processes.defaultUninstall = $defaultUninstall
+  if ($defaultUninstall.TimedOut) { throw "Default NSIS uninstaller exceeded the $uninstallTimeoutSeconds second deadline." }
   if ($defaultUninstall.ExitCode -ne 0) { throw "Default NSIS uninstaller exited with code $($defaultUninstall.ExitCode)." }
 
   Wait-PathAbsent -Path $installRoot -TimeoutSeconds $cleanupTimeoutSeconds
@@ -443,14 +527,17 @@ try {
     $verificationMessage = "Local-safe install, launch, and default uninstall preserved only the Yap.Test data namespace."
   } else {
     Set-EvidencePhase -Phase "reinstalling" -Message "Reinstalling the exact artifact to verify explicit data deletion."
-    $reinstall = Invoke-ProcessWithDeadline `
+    $reinstall = Invoke-SmokeContainedProcess `
+      -Phase "reinstall" `
       -FilePath $installer `
-      -ArgumentList @("/S", "/D=$installRoot") `
+      -ArgumentList @("/S") `
+      -NsisInstallDirectory $installRoot `
       -TimeoutSeconds $installTimeoutSeconds `
       -StdoutPath (Join-Path $resultsRoot "reinstall.stdout.log") `
-      -StderrPath (Join-Path $resultsRoot "reinstall.stderr.log")
-    foreach ($processId in $reinstall.ProcessIds) { Add-TrackedProcess -ProcessId $processId }
+      -StderrPath (Join-Path $resultsRoot "reinstall.stderr.log") `
+      -WorkingDirectory ([System.IO.Path]::GetDirectoryName($installer))
     $evidence.processes.reinstall = $reinstall
+    if ($reinstall.TimedOut) { throw "NSIS reinstall exceeded the $installTimeoutSeconds second deadline." }
     if ($reinstall.ExitCode -ne 0) { throw "NSIS reinstall exited with code $($reinstall.ExitCode)." }
 
     $uninstaller = Join-Path $installRoot "uninstall.exe"
@@ -472,14 +559,16 @@ try {
     $evidence.uninstallFootprint.explicitDeletion.requested = $true
     $deleteScope = if ($usesProductionIdentity) { "production data inside the approved disposable profile" } else { "sentinel-owned Yap.Test data" }
     Set-EvidencePhase -Phase "explicit-data-uninstalling" -Message "Verifying deletion of $deleteScope."
-    $uninstall = Invoke-ProcessWithDeadline `
+    $uninstall = Invoke-SmokeContainedProcess `
+      -Phase "explicit-data uninstall" `
       -FilePath $uninstaller `
       -ArgumentList @("/S", "/DELETEAPPDATA=$runToken") `
       -TimeoutSeconds $uninstallTimeoutSeconds `
       -StdoutPath (Join-Path $resultsRoot "uninstall.stdout.log") `
-      -StderrPath (Join-Path $resultsRoot "uninstall.stderr.log")
-    foreach ($processId in $uninstall.ProcessIds) { Add-TrackedProcess -ProcessId $processId }
+      -StderrPath (Join-Path $resultsRoot "uninstall.stderr.log") `
+      -WorkingDirectory $installRoot
     $evidence.processes.uninstall = $uninstall
+    if ($uninstall.TimedOut) { throw "Explicit-data NSIS uninstaller exceeded the $uninstallTimeoutSeconds second deadline." }
     if ($uninstall.ExitCode -ne 0) { throw "Explicit-data NSIS uninstaller exited with code $($uninstall.ExitCode)." }
 
     Wait-PathAbsent -Path $installRoot -TimeoutSeconds $cleanupTimeoutSeconds
@@ -516,32 +605,23 @@ try {
     $cleanupErrors.Add([Exception]::new("Failure evidence write failed: $($_.Exception.Message)", $_.Exception))
   }
 } finally {
-  if ($null -ne $appProcessId) {
-    try {
-      $appCleanup = Stop-ProcessTreeBounded `
-        -RootProcessId $appProcessId `
-        -RootProcessIdentity $appProcessIdentity `
-        -TimeoutSeconds $cleanupTimeoutSeconds
-      foreach ($processId in $appCleanup.DiscoveredProcessIds) { Add-TrackedProcess -ProcessId $processId }
-      $evidence.processes.cleanup = $appCleanup
-    } catch {
-      $cleanupErrors.Add([Exception]::new("App process cleanup failed: $($_.Exception.Message)", $_.Exception))
-    }
-  }
-
   if (Test-Path -LiteralPath $installRoot) {
     try {
       Assert-NoReparsePoints -Path $installRoot
       $uninstaller = Join-Path $installRoot "uninstall.exe"
       if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
-        $cleanupUninstall = Invoke-ProcessWithDeadline `
+        $cleanupUninstall = Invoke-SmokeContainedProcess `
+          -Phase "cleanup uninstall" `
           -FilePath $uninstaller `
           -ArgumentList @("/S") `
           -TimeoutSeconds $uninstallTimeoutSeconds `
           -StdoutPath (Join-Path $resultsRoot "cleanup-uninstall.stdout.log") `
-          -StderrPath (Join-Path $resultsRoot "cleanup-uninstall.stderr.log")
-        foreach ($processId in $cleanupUninstall.ProcessIds) { Add-TrackedProcess -ProcessId $processId }
+          -StderrPath (Join-Path $resultsRoot "cleanup-uninstall.stderr.log") `
+          -WorkingDirectory $installRoot
         $evidence.processes.cleanupUninstall = $cleanupUninstall
+        if ($cleanupUninstall.TimedOut) {
+          throw "Cleanup uninstaller exceeded the $uninstallTimeoutSeconds second deadline."
+        }
         if ($cleanupUninstall.ExitCode -ne 0) {
           throw "Cleanup uninstaller exited with code $($cleanupUninstall.ExitCode)."
         }
@@ -560,49 +640,57 @@ try {
     $cleanupErrors.Add([Exception]::new("Process-footprint verification failed: $($_.Exception.Message)", $_.Exception))
   }
 
-  if (Test-Path -LiteralPath ([string]$footprintPaths.deleteQuarantine)) {
-    try {
-      Remove-OwnedDeleteQuarantine
-    } catch {
-      $cleanupErrors.Add([Exception]::new("Delete-quarantine cleanup failed: $($_.Exception.Message)", $_.Exception))
-    }
-  }
-
-  if ($ownsTestDataFootprint) {
-    foreach ($dataName in $dataFootprintNames) {
-      $dataPath = [string]$footprintPaths[$dataName]
-      if (-not (Test-Path -LiteralPath $dataPath)) { continue }
-      try {
-        Remove-ValidatedTree `
-          -Root ([System.IO.Path]::GetDirectoryName($dataPath)) `
-          -Candidate $dataPath
-      } catch {
-        $cleanupErrors.Add([Exception]::new("Data-footprint cleanup failed for $dataName`: $($_.Exception.Message)", $_.Exception))
-      }
-    }
-    $expectedTestFootprint = [ordered]@{
-      installRegistry = "HKCU:\Software\mcnatg1\Yap.Test"
-      uninstallRegistry = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yap.Test"
-      startMenuShortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "Yap.Test.lnk"
-      desktopShortcut = Join-Path ([Environment]::GetFolderPath("DesktopDirectory")) "Yap.Test.lnk"
-    }
-    foreach ($entry in $expectedTestFootprint.GetEnumerator()) {
-      $actualPath = [string]$footprintPaths[$entry.Key]
-      if ($actualPath -cne [string]$entry.Value) {
-        $cleanupErrors.Add([Exception]::new("Test footprint cleanup resolved an unexpected $($entry.Key): $actualPath"))
-        continue
-      }
-      if (-not (Test-Path -LiteralPath $actualPath)) { continue }
-      try {
-        if ($entry.Key -like "*Registry") {
-          Remove-Item -LiteralPath $actualPath -Recurse -Force -ErrorAction Stop
-        } else {
-          Remove-Item -LiteralPath $actualPath -Force -ErrorAction Stop
+  $retainedPaths = @($footprintPaths.Values) + @($smokeRoot)
+  try {
+    $mutationCleanup = Invoke-YapAuthorizedCleanupMutation `
+      -CleanupAuthorized:$filesystemCleanupAuthorized `
+      -Name "remove installer-owned smoke footprint" `
+      -RetainedPaths $retainedPaths `
+      -Action {
+        if (Test-Path -LiteralPath ([string]$footprintPaths.deleteQuarantine)) {
+          Remove-OwnedDeleteQuarantine
         }
-      } catch {
-        $cleanupErrors.Add([Exception]::new("Test footprint cleanup failed for $($entry.Key): $($_.Exception.Message)", $_.Exception))
+
+        if ($ownsTestDataFootprint) {
+          foreach ($dataName in $dataFootprintNames) {
+            $dataPath = [string]$footprintPaths[$dataName]
+            if (-not (Test-Path -LiteralPath $dataPath)) { continue }
+            Remove-ValidatedTree `
+              -Root ([System.IO.Path]::GetDirectoryName($dataPath)) `
+              -Candidate $dataPath
+          }
+          $expectedTestFootprint = [ordered]@{
+            installRegistry = "HKCU:\Software\mcnatg1\Yap.Test"
+            uninstallRegistry = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yap.Test"
+            startMenuShortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "Yap.Test.lnk"
+            desktopShortcut = Join-Path ([Environment]::GetFolderPath("DesktopDirectory")) "Yap.Test.lnk"
+          }
+          foreach ($entry in $expectedTestFootprint.GetEnumerator()) {
+            $actualPath = [string]$footprintPaths[$entry.Key]
+            if ($actualPath -cne [string]$entry.Value) {
+              throw "Test footprint cleanup resolved an unexpected $($entry.Key): $actualPath"
+            }
+            if (-not (Test-Path -LiteralPath $actualPath)) { continue }
+            if ($entry.Key -like "*Registry") {
+              Remove-Item -LiteralPath $actualPath -Recurse -Force -ErrorAction Stop
+            } else {
+              Remove-Item -LiteralPath $actualPath -Force -ErrorAction Stop
+            }
+          }
+        }
+
+        if (Test-Path -LiteralPath $smokeRoot) {
+          Remove-ValidatedTree -Root $tempRoot -Candidate $smokeRoot
+        }
       }
+    if (-not $mutationCleanup.Executed) {
+      $evidence.cleanupAuthority.retainedPaths = @($mutationCleanup.RetainedPaths)
+      $cleanupErrors.Add([Exception]::new(
+        "Installer-owned cleanup was blocked because process cleanup was not proven. Retained: $($mutationCleanup.RetainedPaths -join ', ')."
+      ))
     }
+  } catch {
+    $cleanupErrors.Add([Exception]::new("Authorized installer-footprint cleanup failed: $($_.Exception.Message)", $_.Exception))
   }
 
   if ($installationStarted) {
@@ -612,14 +700,6 @@ try {
       $cleanupErrors.Add([Exception]::new(
         "Uninstall footprint remains after cleanup: $($residualFootprint -join ', ')."
       ))
-    }
-  }
-
-  if (Test-Path -LiteralPath $smokeRoot) {
-    try {
-      Remove-ValidatedTree -Root $tempRoot -Candidate $smokeRoot
-    } catch {
-      $cleanupErrors.Add([Exception]::new("Temporary-tree cleanup failed: $($_.Exception.Message)", $_.Exception))
     }
   }
 
@@ -636,7 +716,6 @@ try {
     $evidence.errors = @($evidence.errors) + $cleanupError.Message
   }
   $evidence.finishedAtUtc = [DateTime]::UtcNow.ToString("o")
-  $evidence.trackedProcessIds = @($trackedProcessIds | Sort-Object)
   $evidence.status = if ($null -eq $primaryError -and $cleanupErrors.Count -eq 0) { "passed" } else { "failed" }
   $evidence.phase = "finished"
   try {
