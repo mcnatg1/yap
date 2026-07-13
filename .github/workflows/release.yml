@@ -91,25 +91,32 @@ jobs:
           if ($PSVersionTable.PSEdition -cne "Core" -or $PSVersionTable.PSVersion -lt [version]"7.4") {
             throw "Release staging requires PowerShell Core 7.4 or newer."
           }
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 11.7.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24.14.0"
-          cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
+          package-manager-cache: false
+      - name: Restore pnpm dependency store
+        id: pnpm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~\AppData\Local\pnpm\store\v11
+          key: pnpm-store-v11-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/pnpm-lock.yaml') }}
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ env.RUST_TARGET }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore Cargo dependency downloads
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ env.RUST_TARGET }}-release-${{ needs.resolve-release.outputs.commit_sha }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/**', 'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/nsis-hooks.nsh') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
       - run: pnpm install --frozen-lockfile
       - name: Prepare immutable release context
         env:
@@ -198,7 +205,7 @@ jobs:
           --metadata-path ./tests/results/release/release-metadata.json
           --github-output "$env:GITHUB_OUTPUT"
       - name: Upload immutable release payload
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nsis-release-payload-${{ github.run_id }}-${{ needs.resolve-release.outputs.commit_sha }}
           path: |
@@ -207,7 +214,7 @@ jobs:
           if-no-files-found: error
           retention-days: 2
       - name: Upload release evidence
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: nsis-release-evidence-${{ github.run_id }}-${{ needs.resolve-release.outputs.commit_sha }}
