@@ -17,6 +17,11 @@ pub enum JobLedgerError {
         path: PathBuf,
     },
     InvalidRecord(&'static str),
+    PragmaNotApplied {
+        pragma: &'static str,
+        requested: &'static str,
+        actual: String,
+    },
     UnsupportedSchema(i64),
     NotFound(String),
     InvalidTransition {
@@ -50,6 +55,14 @@ impl fmt::Display for JobLedgerError {
                 )
             }
             Self::InvalidRecord(message) => formatter.write_str(message),
+            Self::PragmaNotApplied {
+                pragma,
+                requested,
+                actual,
+            } => write!(
+                formatter,
+                "job ledger requested {requested} for {pragma}, but SQLite applied {actual}"
+            ),
             Self::UnsupportedSchema(version) => {
                 write!(
                     formatter,
@@ -483,12 +496,15 @@ impl RecordingJobView {
                 .error_message
                 .clone()
                 .or_else(|| record.error_code.clone()),
-            pipeline: pipeline_for(record.status),
+            pipeline: pipeline_for(record.status, record.route),
         }
     }
 }
 
-fn pipeline_for(status: RecordingJobStatus) -> RecordingPipelineState {
+fn pipeline_for(
+    status: RecordingJobStatus,
+    route: Option<RecordingRoute>,
+) -> RecordingPipelineState {
     use PipelineStageStatus as P;
     use RecordingJobStatus as S;
     let mut pipeline = RecordingPipelineState {
@@ -500,37 +516,61 @@ fn pipeline_for(status: RecordingJobStatus) -> RecordingPipelineState {
         postprocessing: P::NotStarted,
     };
     match status {
-        S::Accepted => pipeline.intake = P::Queued,
-        S::Preflighting => pipeline.intake = P::Running,
-        S::Preprocessing | S::Uploading => pipeline.preprocessing = P::Running,
-        S::ServerProcessing | S::LocalTranscribing => {
+        S::QueuedLocalFallback => pipeline.preprocessing = P::Skipped,
+        S::Preprocessing => pipeline.preprocessing = P::Running,
+        S::Uploading => pipeline.preprocessing = P::Done,
+        S::ServerProcessing => {
             pipeline.preprocessing = P::Done;
             pipeline.transcription = P::Running;
         }
+        S::LocalTranscribing => {
+            pipeline.preprocessing = P::Skipped;
+            pipeline.transcription = P::Running;
+        }
         S::Saving => {
-            pipeline.preprocessing = P::Done;
+            pipeline.preprocessing = completed_preprocessing(route);
             pipeline.transcription = P::Done;
             pipeline.postprocessing = P::Running;
         }
-        S::DiarizationQueued => pipeline.diarization = P::Queued,
-        S::DiarizationRunning => pipeline.diarization = P::Running,
-        S::Complete => {
+        S::DiarizationQueued => {
             pipeline.preprocessing = P::Done;
             pipeline.transcription = P::Done;
             pipeline.alignment = P::Done;
-            pipeline.diarization = P::Done;
+            pipeline.diarization = P::Queued;
+        }
+        S::DiarizationRunning => {
+            pipeline.preprocessing = P::Done;
+            pipeline.transcription = P::Done;
+            pipeline.alignment = P::Done;
+            pipeline.diarization = P::Running;
+        }
+        S::Complete => {
+            pipeline.preprocessing = completed_preprocessing(route);
+            pipeline.transcription = P::Done;
             pipeline.postprocessing = P::Done;
         }
-        S::Partial => pipeline.postprocessing = P::Error,
-        S::Failed => pipeline.transcription = P::Error,
-        S::Cancelled => pipeline.postprocessing = P::Skipped,
-        S::BlockedSetupRequired
+        S::Partial => {
+            pipeline.preprocessing = completed_preprocessing(route);
+            pipeline.transcription = P::Done;
+        }
+        S::Failed => pipeline.preprocessing = completed_preprocessing(route),
+        S::Accepted
+        | S::Preflighting
+        | S::BlockedSetupRequired
         | S::BlockedServerUnavailable
         | S::BlockedSignInRequired
-        | S::QueuedLocalFallback
-        | S::QueuedServer => {}
+        | S::QueuedServer
+        | S::Cancelled => {}
     }
     pipeline
+}
+
+fn completed_preprocessing(route: Option<RecordingRoute>) -> PipelineStageStatus {
+    match route {
+        Some(RecordingRoute::LocalFallback) => PipelineStageStatus::Skipped,
+        Some(RecordingRoute::ServerBatch | RecordingRoute::ServerLive) => PipelineStageStatus::Done,
+        None => PipelineStageStatus::NotStarted,
+    }
 }
 
 #[cfg(test)]
@@ -634,6 +674,68 @@ mod tests {
         assert_eq!(value["route"], "serverBatch");
         assert!(value.get("job_id").is_none());
         assert!(value.get("attempt_count").is_none());
+    }
+
+    #[test]
+    fn every_durable_status_projects_only_proven_pipeline_progress() {
+        use PipelineStageStatus::{
+            Done as D, NotStarted as N, Queued as Q, Running as R, Skipped as S,
+        };
+        use RecordingJobStatus as J;
+        use RecordingRoute::{LocalFallback as Local, ServerBatch as Server};
+
+        let pipeline = |preprocessing, transcription, alignment, diarization, postprocessing| {
+            RecordingPipelineState {
+                intake: D,
+                preprocessing,
+                transcription,
+                alignment,
+                diarization,
+                postprocessing,
+            }
+        };
+        let cases = [
+            (J::Accepted, None, pipeline(N, N, N, N, N)),
+            (J::Preflighting, None, pipeline(N, N, N, N, N)),
+            (J::BlockedSetupRequired, None, pipeline(N, N, N, N, N)),
+            (
+                J::BlockedServerUnavailable,
+                Some(Server),
+                pipeline(N, N, N, N, N),
+            ),
+            (
+                J::BlockedSignInRequired,
+                Some(Server),
+                pipeline(N, N, N, N, N),
+            ),
+            (J::QueuedLocalFallback, Some(Local), pipeline(S, N, N, N, N)),
+            (J::QueuedServer, Some(Server), pipeline(N, N, N, N, N)),
+            (J::Preprocessing, Some(Server), pipeline(R, N, N, N, N)),
+            (J::Uploading, Some(Server), pipeline(D, N, N, N, N)),
+            (J::ServerProcessing, Some(Server), pipeline(D, R, N, N, N)),
+            (J::LocalTranscribing, Some(Local), pipeline(S, R, N, N, N)),
+            (J::Saving, Some(Server), pipeline(D, D, N, N, R)),
+            (J::DiarizationQueued, Some(Server), pipeline(D, D, D, Q, N)),
+            (J::DiarizationRunning, Some(Server), pipeline(D, D, D, R, N)),
+            (J::Complete, Some(Server), pipeline(D, D, N, N, D)),
+            (J::Partial, Some(Server), pipeline(D, D, N, N, N)),
+            (J::Failed, Some(Server), pipeline(D, N, N, N, N)),
+            (J::Cancelled, Some(Server), pipeline(N, N, N, N, N)),
+            (J::Saving, Some(Local), pipeline(S, D, N, N, R)),
+            (J::Complete, Some(Local), pipeline(S, D, N, N, D)),
+        ];
+
+        for (status, route, expected) in cases {
+            let mut record = fixture_record();
+            record.status = status;
+            record.route = route;
+
+            assert_eq!(
+                RecordingJobView::from_record(&record).pipeline,
+                expected,
+                "unexpected projection for {status:?} with {route:?}"
+            );
+        }
     }
 
     fn fixture_record() -> RecordingJobRecord {

@@ -184,35 +184,51 @@ impl JobLedger {
         updated_at_ms: u64,
     ) -> Result<RecordingJobRecord, JobLedgerError> {
         let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let raw = query_job(&transaction, job_id)?
-            .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?;
-        let current: RecordingJobRecord = raw.try_into()?;
-        if transition_policy(current.status, RecordingJobStatus::Preflighting)
-            != TransitionPolicy::Retry
-        {
-            return Err(JobLedgerError::InvalidTransition {
-                from: current.status,
-                to: RecordingJobStatus::Preflighting,
-            });
+        loop {
+            let mut connection = self.lock()?;
+            let raw = query_job(&connection, job_id)?
+                .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?;
+            let current: RecordingJobRecord = raw.try_into()?;
+            if transition_policy(current.status, RecordingJobStatus::Preflighting)
+                != TransitionPolicy::Retry
+            {
+                return Err(JobLedgerError::InvalidTransition {
+                    from: current.status,
+                    to: RecordingJobStatus::Preflighting,
+                });
+            }
+            let expected_attempt_count = sqlite_integer(current.attempt_count, "attempt_count")?;
+            let next_attempt_count =
+                current
+                    .attempt_count
+                    .checked_add(1)
+                    .ok_or(JobLedgerError::OutOfRange {
+                        field: "attempt_count",
+                        value: u64::MAX,
+                    })?;
+            let next_attempt_count = sqlite_integer(next_attempt_count, "attempt_count")?;
+
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let changed = transaction.execute(
+                "UPDATE recording_jobs SET status = 'preflighting', attempt_count = ?1, next_attempt_at_ms = NULL, updated_at_ms = ?2 WHERE job_id = ?3 AND status = ?4 AND attempt_count = ?5 AND attempt_count < ?6",
+                params![
+                    next_attempt_count,
+                    updated_at_ms,
+                    job_id,
+                    current.status.as_db(),
+                    expected_attempt_count,
+                    i64::MAX,
+                ],
+            )?;
+            if changed == 0 {
+                transaction.rollback()?;
+                continue;
+            }
+            let updated = query_job(&transaction, job_id)?.expect("retried job exists");
+            transaction.commit()?;
+            return updated.try_into();
         }
-        let attempt_count =
-            current
-                .attempt_count
-                .checked_add(1)
-                .ok_or(JobLedgerError::OutOfRange {
-                    field: "attempt_count",
-                    value: u64::MAX,
-                })?;
-        let attempt_count = sqlite_integer(attempt_count, "attempt_count")?;
-        transaction.execute(
-            "UPDATE recording_jobs SET status = 'preflighting', attempt_count = ?1, next_attempt_at_ms = NULL, updated_at_ms = ?2 WHERE job_id = ?3",
-            params![attempt_count, updated_at_ms, job_id],
-        )?;
-        let updated = query_job(&transaction, job_id)?.expect("retried job exists");
-        transaction.commit()?;
-        updated.try_into()
     }
 
     pub fn request_cancellation(
@@ -733,6 +749,97 @@ mod tests {
     }
 
     #[test]
+    fn retry_rejects_max_counter_before_waiting_for_a_writer_transaction() {
+        let dir = temp_dir("retry-max-before-transaction");
+        let path = dir.join("jobs.sqlite3");
+        let ledger = Arc::new(JobLedger::open(&path).unwrap());
+        let mut failed = imported_job("retry-max");
+        failed.status = RecordingJobStatus::Failed;
+        failed.attempt_count = i64::MAX as u64;
+        ledger.insert_job(&failed).unwrap();
+
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let retrying_ledger = Arc::clone(&ledger);
+        let retry = thread::spawn(move || {
+            result_tx
+                .send(retrying_ledger.retry("retry-max", 202))
+                .unwrap();
+        });
+
+        let early_result = result_rx.recv_timeout(std::time::Duration::from_millis(200));
+        let was_early = early_result.is_ok();
+        writer.execute_batch("ROLLBACK").unwrap();
+        let result = match early_result {
+            Ok(result) => result,
+            Err(_) => result_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+        };
+        retry.join().unwrap();
+        assert!(
+            was_early,
+            "retry opened a writer transaction before rejecting i64::MAX"
+        );
+        assert!(matches!(
+            result,
+            Err(JobLedgerError::OutOfRange {
+                field: "attempt_count",
+                value,
+            }) if value == i64::MAX as u64 + 1
+        ));
+
+        drop(writer);
+        drop(ledger);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_retry_connections_increment_once_without_a_stale_overwrite() {
+        let dir = temp_dir("concurrent-retry");
+        let path = dir.join("jobs.sqlite3");
+        let first = JobLedger::open(&path).unwrap();
+        let mut failed = imported_job("concurrent-retry");
+        failed.status = RecordingJobStatus::Failed;
+        failed.attempt_count = 7;
+        first.insert_job(&failed).unwrap();
+        let second = JobLedger::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let retries: Vec<_> = [first, second]
+            .into_iter()
+            .map(|ledger| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    ledger.retry("concurrent-retry", 203)
+                })
+            })
+            .collect();
+
+        barrier.wait();
+        let results: Vec<_> = retries
+            .into_iter()
+            .map(|retry| retry.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(JobLedgerError::InvalidTransition { .. })))
+                .count(),
+            1
+        );
+
+        let observer = JobLedger::open(&path).unwrap();
+        let record = observer.get_job("concurrent-retry").unwrap().unwrap();
+        assert_eq!(record.status, RecordingJobStatus::Preflighting);
+        assert_eq!(record.attempt_count, 8);
+        drop(observer);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn cancellation_updates_metadata_but_never_deletes_an_external_source() {
         let dir = temp_dir("external-cancel");
         let source = dir.join("user-owned.wav");
@@ -751,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_database_contains_metadata_only_across_every_table() {
+    fn restart_database_has_exact_metadata_surface_and_no_payload_content() {
         let dir = temp_dir("content-audit");
         let path = dir.join("jobs.sqlite3");
         let source = dir.join("source.wav");
@@ -759,8 +866,6 @@ mod tests {
         let artifact = dir.join("chunk.flac");
         let wav_bytes = b"RIFF\x00\x01YAP_PRIVATE_WAV_BYTES";
         let transcript = "YAP_PRIVATE_TRANSCRIPT_SENTENCE";
-        let credentials = "Bearer YAP_PRIVATE_CREDENTIAL";
-        let embedding = "[0.123456789,-0.987654321,0.314159265]";
         fs::write(&source, wav_bytes).unwrap();
         fs::write(&output, transcript).unwrap();
         fs::write(&artifact, b"encoded audio bytes").unwrap();
@@ -785,7 +890,68 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(table_names, ["job_chunks", "recording_jobs"]);
-        for table in table_names {
+        let expected_columns = [
+            (
+                "job_chunks",
+                &[
+                    ("job_id", "TEXT"),
+                    ("owner_namespace", "TEXT"),
+                    ("session_id", "TEXT"),
+                    ("track_id", "TEXT"),
+                    ("sequence_start", "INTEGER"),
+                    ("sequence_end", "INTEGER"),
+                    ("content_sha256", "TEXT"),
+                    ("artifact_path", "TEXT"),
+                    ("upload_offset", "INTEGER"),
+                    ("acknowledged_object_id", "TEXT"),
+                    ("acknowledged_at_ms", "INTEGER"),
+                ][..],
+            ),
+            (
+                "recording_jobs",
+                &[
+                    ("job_id", "TEXT"),
+                    ("session_mode", "TEXT"),
+                    ("session_origin", "TEXT"),
+                    ("source_path", "TEXT"),
+                    ("source_ownership", "TEXT"),
+                    ("output_path", "TEXT"),
+                    ("display_name", "TEXT"),
+                    ("status", "TEXT"),
+                    ("route", "TEXT"),
+                    ("attempt_count", "INTEGER"),
+                    ("next_attempt_at_ms", "INTEGER"),
+                    ("cancellation_requested", "INTEGER"),
+                    ("capture_commit_path", "TEXT"),
+                    ("capture_manifest_sha256", "TEXT"),
+                    ("error_code", "TEXT"),
+                    ("error_message", "TEXT"),
+                    ("created_at_ms", "INTEGER"),
+                    ("updated_at_ms", "INTEGER"),
+                    ("expires_at_ms", "INTEGER"),
+                ][..],
+            ),
+        ];
+        for (table, expected) in expected_columns {
+            let actual: Vec<(String, String)> = {
+                let mut statement = connection
+                    .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                    .unwrap();
+                statement
+                    .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap()
+            };
+            assert_eq!(
+                actual,
+                expected
+                    .iter()
+                    .map(|(name, kind)| ((*name).into(), (*kind).into()))
+                    .collect::<Vec<(String, String)>>(),
+                "{table} added an unapproved payload, credential, or embedding storage surface"
+            );
+
             let mut statement = connection
                 .prepare(&format!("SELECT * FROM \"{table}\""))
                 .unwrap();
@@ -800,8 +966,6 @@ mod tests {
                                 .any(|window| window == wav_bytes));
                             let text = String::from_utf8_lossy(value);
                             assert!(!text.contains(transcript));
-                            assert!(!text.contains(credentials));
-                            assert!(!text.contains(embedding));
                         }
                         ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => {}
                     }
