@@ -7,6 +7,7 @@ import { isRecordingCancellable, type RecordingJobView } from "@/lib/app-types";
 import {
   cancelRecordingJob,
   createRecordingImports,
+  discardLegacyRecordingQueue,
   dismissRecordingJob,
   migrateLegacyRecordingQueue,
   recordingJobsSnapshot,
@@ -27,8 +28,10 @@ export function useRecordingJobs(onClear: () => void) {
   const [queue, setQueue] = useState<RecordingJobView[]>([]);
   const [migrationState, setMigrationState] = useState<MigrationState>("pending");
   const [migrationError, setMigrationError] = useState<string>();
+  const [legacyDiscardAllowed, setLegacyDiscardAllowed] = useState(false);
   const [startupAttempt, setStartupAttempt] = useState(0);
   const migrationStateRef = useRef<MigrationState>("pending");
+  const legacyDiscardAllowedRef = useRef(false);
   const refreshCoordinatorRef = useRef<ReturnType<
     typeof createRecordingJobsRefreshCoordinator<RecordingJobView[]>
   > | undefined>(undefined);
@@ -42,19 +45,30 @@ export function useRecordingJobs(onClear: () => void) {
   const onClearRef = useRef(onClear);
   onClearRef.current = onClear;
 
-  const updateMigrationState = useCallback((state: MigrationState, error?: string) => {
+  const updateMigrationState = useCallback((
+    state: MigrationState,
+    error?: string,
+    allowLegacyDiscard = false,
+  ) => {
     migrationStateRef.current = state;
+    legacyDiscardAllowedRef.current = allowLegacyDiscard;
     setMigrationState(state);
     setMigrationError(error);
+    setLegacyDiscardAllowed(allowLegacyDiscard);
   }, []);
 
   useEffect(() => {
     updateMigrationState("pending");
     const lifecycle = startRecordingJobsLifecycle({
-      failed(error) {
-        const message = `Queued recording migration needs attention: ${error.message}`;
-        updateMigrationState("failed", message);
-        toast.error("Queued recordings could not be migrated. Retry to continue.");
+      failed(error, phase) {
+        const legacyMigrationFailed = phase === "migrate";
+        const message = legacyMigrationFailed
+          ? `Queued recording migration needs attention: ${error.message}`
+          : `Recording jobs could not start: ${error.message}`;
+        updateMigrationState("failed", message, legacyMigrationFailed);
+        toast.error(legacyMigrationFailed
+          ? "Queued recordings could not be migrated. Retry or discard the old queue to continue."
+          : "Recording jobs could not start. Retry to continue.");
       },
       migrate: async () => {
         if (isTauri()) await migrateLegacyRecordingQueue();
@@ -74,6 +88,15 @@ export function useRecordingJobs(onClear: () => void) {
   const ensureMigrationReady = useCallback(() => {
     if (migrationStateRef.current !== "ready") throw migrationBlockedError();
   }, []);
+
+  const discardLegacyQueue = useCallback(() => {
+    if (!legacyDiscardAllowedRef.current) {
+      throw new Error("Legacy queue discard is unavailable for this startup failure.");
+    }
+    discardLegacyRecordingQueue();
+    updateMigrationState("pending");
+    setStartupAttempt((attempt) => attempt + 1);
+  }, [updateMigrationState]);
 
   const addPaths = useCallback(async (paths: string[]) => {
     ensureMigrationReady();
@@ -118,6 +141,8 @@ export function useRecordingJobs(onClear: () => void) {
   return {
     addPaths,
     clearQueue,
+    discardLegacyQueue,
+    legacyDiscardAllowed,
     migrationError,
     migrationState,
     queue,

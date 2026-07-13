@@ -33,6 +33,7 @@ export type LegacyImportResult = {
 };
 
 type LegacyQueueStorage = Pick<Storage, "getItem" | "removeItem">;
+type LegacyQueueDiscardStorage = Pick<Storage, "removeItem">;
 type LegacyImporter = (payload: LegacyQueueImport) => Promise<LegacyImportResult>;
 
 function isLegacyQueueJob(value: unknown): value is LegacyQueueJob {
@@ -108,6 +109,12 @@ export async function migrateLegacyRecordingQueue(
   assertCompleteAcknowledgement(jobs, result);
   storage.removeItem(legacyRecordingQueueKey);
   return { acknowledged: jobs.length, migrated: true, result };
+}
+
+export function discardLegacyRecordingQueue(
+  storage: LegacyQueueDiscardStorage | undefined = globalThis.localStorage,
+) {
+  storage?.removeItem(legacyRecordingQueueKey);
 }
 
 export async function recordingJobsSnapshot() {

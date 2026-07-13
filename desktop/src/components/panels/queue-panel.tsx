@@ -27,7 +27,9 @@ import {
 import { type RecordingJobView } from "@/lib/app-types";
 
 export function QueuePanel({
+  legacyDiscardAllowed,
   onClear,
+  onDiscardLegacyQueue,
   onRemove,
   onReveal,
   onRetryMigration,
@@ -37,7 +39,9 @@ export function QueuePanel({
   migrationPending,
   selectedId,
 }: {
+  legacyDiscardAllowed: boolean;
   onClear: () => void | Promise<void>;
+  onDiscardLegacyQueue: () => void;
   onRemove: (id: string) => void | Promise<void>;
   onReveal: (path: string) => void;
   onRetryMigration: () => void | Promise<unknown>;
@@ -101,9 +105,37 @@ export function QueuePanel({
             <WarningCircle />
             <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
               <span>{migrationError}</span>
-              <Button onClick={() => void onRetryMigration()} size="sm" type="button" variant="outline">
-                Retry restore
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={() => void onRetryMigration()} size="sm" type="button" variant="outline">
+                  Retry restore
+                </Button>
+                {legacyDiscardAllowed ? (
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button size="sm" type="button" variant="destructive">
+                        Discard old queue
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Discard the old queue?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This permanently removes the legacy queue data Yap could not restore. Audio files and current native recording jobs stay untouched. This cannot be undone.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Keep old queue</AlertDialogCancel>
+                        <AlertDialogAction
+                          className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
+                          onClick={onDiscardLegacyQueue}
+                        >
+                          Discard old queue
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                ) : null}
+              </div>
             </AlertDescription>
           </Alert>
         ) : migrationPending ? (

@@ -35,7 +35,9 @@ describe("imported recording queue surface", () => {
       <TooltipProvider>
         <QueuePanel
           {...legacyExecutionProps}
+          legacyDiscardAllowed={false}
           onClear={vi.fn()}
+          onDiscardLegacyQueue={vi.fn()}
           onRemove={vi.fn()}
           onReveal={vi.fn()}
           onRetryMigration={vi.fn()}
@@ -63,5 +65,39 @@ describe("imported recording queue surface", () => {
     expect(source("../../src/App.tsx")).toContain("useRecordingJobs");
     expect(source("../../src/hooks/use-imported-recording-queue.ts"))
       .not.toMatch(/queued_local_fallback|local_transcribing/);
+  });
+
+  it("offers confirmed legacy discard only when a migration failure allows it", () => {
+    const renderFailure = (legacyDiscardAllowed: boolean) => renderToStaticMarkup(
+      <TooltipProvider>
+        <QueuePanel
+          legacyDiscardAllowed={legacyDiscardAllowed}
+          migrationError="Queued recording migration needs attention"
+          migrationPending={false}
+          onClear={vi.fn()}
+          onDiscardLegacyQueue={vi.fn()}
+          onRemove={vi.fn()}
+          onReveal={vi.fn()}
+          onRetryMigration={vi.fn()}
+          onSelect={vi.fn()}
+          queue={[]}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(renderFailure(false)).not.toContain("Discard old queue");
+    expect(renderFailure(true)).toContain("Discard old queue");
+
+    const panelSource = source("../../src/components/panels/queue-panel.tsx");
+    expect(panelSource).toContain("Discard the old queue?");
+    expect(panelSource).toContain("onClick={onDiscardLegacyQueue}");
+  });
+
+  it("wires the guarded discard owner from the recording jobs hook into the queue panel", () => {
+    const appSource = source("../../src/App.tsx");
+    expect(appSource).toContain("discardLegacyQueue,");
+    expect(appSource).toContain("legacyDiscardAllowed,");
+    expect(appSource).toContain("legacyDiscardAllowed={legacyDiscardAllowed}");
+    expect(appSource).toContain("onDiscardLegacyQueue={discardLegacyQueue}");
   });
 });

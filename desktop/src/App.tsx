@@ -72,6 +72,8 @@ export default function App() {
   const {
     addPaths: enqueueImportedPaths,
     clearQueue,
+    discardLegacyQueue,
+    legacyDiscardAllowed,
     migrationError,
     migrationState,
     queue,
@@ -278,7 +280,9 @@ export default function App() {
     <>
       {showQueue ? (
         <QueuePanel
+          legacyDiscardAllowed={legacyDiscardAllowed}
           onClear={clearQueue}
+          onDiscardLegacyQueue={discardLegacyQueue}
           onRemove={removeItem}
           onReveal={(path) => void revealPath(path)}
           onRetryMigration={retryMigration}

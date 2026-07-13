@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  discardLegacyRecordingQueue,
   legacyRecordingQueueKey,
   maxStoredQueueJobs,
   migrateLegacyRecordingQueue,
@@ -77,6 +78,37 @@ describe("recording queue migration", () => {
       throw new Error("database unavailable");
     })).rejects.toThrow("database unavailable");
     expect(failedStorage.removeItem).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["malformed JSON", "{"],
+    ["a non-array value", JSON.stringify({ id: 1, path: "C:/one.wav" })],
+  ])("retains the legacy key when it contains %s", async (_description, stored) => {
+    const storage = storageWith(stored);
+    const importLegacy = vi.fn();
+
+    await expect(migrateLegacyRecordingQueue(storage, importLegacy)).rejects.toThrow();
+
+    expect(importLegacy).not.toHaveBeenCalled();
+    expect(storage.removeItem).not.toHaveBeenCalled();
+    expect(storage.getItem(legacyRecordingQueueKey)).toBe(stored);
+  });
+
+  it("explicitly discards only the one-time legacy key", () => {
+    const values = new Map([
+      [legacyRecordingQueueKey, "malformed"],
+      ["yap.unrelated", "keep-me"],
+    ]);
+    const storage = {
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    };
+
+    discardLegacyRecordingQueue(storage);
+
+    expect(storage.removeItem).toHaveBeenCalledOnce();
+    expect(storage.removeItem).toHaveBeenCalledWith(legacyRecordingQueueKey);
+    expect(values.get(legacyRecordingQueueKey)).toBeUndefined();
+    expect(values.get("yap.unrelated")).toBe("keep-me");
   });
 
   it("does nothing when the one-time legacy key is absent", async () => {

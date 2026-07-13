@@ -45,6 +45,18 @@ describe("Rust recording job ownership", () => {
     expect(hookSource).toContain("retryMigration: () => setStartupAttempt");
   });
 
+  it("allows legacy discard only for a migration-phase startup failure", () => {
+    expect(hookSource).toContain('phase === "migrate"');
+    expect(hookSource).toContain("legacyDiscardAllowedRef.current");
+    expect(hookSource).toContain("discardLegacyRecordingQueue()");
+    expect(hookSource).toContain("discardLegacyQueue");
+    const discardOwner = hookSource.slice(
+      hookSource.indexOf("const discardLegacyQueue"),
+      hookSource.indexOf("const addPaths"),
+    );
+    expect(discardOwner).toContain("setStartupAttempt");
+  });
+
   it("routes create, remove, retry, and clear through Rust commands", () => {
     expect(hookSource).toContain("createRecordingImports(paths)");
     expect(hookSource).toContain("cancelRecordingJob(id)");
@@ -123,11 +135,44 @@ describe("Rust recording job ownership", () => {
 
     await lifecycle.settled;
 
-    expect(failed).toHaveBeenCalledWith(expect.objectContaining({
-      message: "listener unavailable",
-    }));
+    expect(failed).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "listener unavailable" }),
+      "subscribe",
+    );
     expect(migrate).not.toHaveBeenCalled();
     expect(ready).not.toHaveBeenCalled();
+  });
+
+  it("attributes migration and snapshot startup failures to their lifecycle phases", async () => {
+    const migrationFailed = vi.fn();
+    const migrationLifecycle = startRecordingJobsLifecycle({
+      failed: migrationFailed,
+      migrate: vi.fn().mockRejectedValue(new Error("legacy JSON is malformed")),
+      ready: vi.fn(),
+      refresh: vi.fn(),
+      refreshFailed: vi.fn(),
+      subscribe: vi.fn().mockResolvedValue(vi.fn()),
+    });
+    await migrationLifecycle.settled;
+    expect(migrationFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "legacy JSON is malformed" }),
+      "migrate",
+    );
+
+    const snapshotFailed = vi.fn();
+    const snapshotLifecycle = startRecordingJobsLifecycle({
+      failed: snapshotFailed,
+      migrate: vi.fn().mockResolvedValue(undefined),
+      ready: vi.fn(),
+      refresh: vi.fn().mockRejectedValue(new Error("snapshot unavailable")),
+      refreshFailed: vi.fn(),
+      subscribe: vi.fn().mockResolvedValue(vi.fn()),
+    });
+    await snapshotLifecycle.settled;
+    expect(snapshotFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "snapshot unavailable" }),
+      "refresh",
+    );
   });
 
   it("unlistens a listener that resolves after lifecycle disposal", async () => {
