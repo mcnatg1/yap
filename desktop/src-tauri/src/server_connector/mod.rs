@@ -188,7 +188,7 @@ async fn run_scheduled_retry(app: tauri::AppHandle, generation: u64, retry_token
     let base_url = {
         let mut inner = connector.inner.lock().expect("server connector poisoned");
         if connector.generation.load(Ordering::Acquire) != generation
-            || !inner.begin_scheduled_retry(generation, retry_token, now_ms())
+            || !inner.begin_scheduled_retry(generation, retry_token)
         {
             return;
         }

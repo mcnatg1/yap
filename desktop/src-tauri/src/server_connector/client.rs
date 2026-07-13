@@ -93,7 +93,7 @@ struct HealthEnvelope {
     status: String,
     api_version: String,
     auth: String,
-    capabilities: serde_json::Value,
+    capabilities: Option<serde_json::Value>,
 }
 
 fn project_health(body: &[u8]) -> HealthCheckResult {
@@ -105,9 +105,12 @@ fn project_health(body: &[u8]) -> HealthCheckResult {
     if envelope.api_version != SUPPORTED_API_VERSION {
         return offline(api_version, "INCOMPATIBLE_API_VERSION", false);
     }
-    let capabilities: ServerCapabilities = match serde_json::from_value(envelope.capabilities) {
+    let Some(capability_value) = envelope.capabilities else {
+        return offline(api_version, "INCOMPATIBLE_CAPABILITIES", false);
+    };
+    let capabilities: ServerCapabilities = match serde_json::from_value(capability_value) {
         Ok(capabilities) => capabilities,
-        Err(_) => return offline(api_version, "INCOMPATIBLE_API_VERSION", false),
+        Err(_) => return offline(api_version, "INCOMPATIBLE_CAPABILITIES", false),
     };
     if envelope.service != "yap-server" || envelope.status != "ok" {
         return offline(api_version, "MALFORMED_HEALTH_RESPONSE", true);
@@ -294,7 +297,48 @@ mod tests {
             check(&fixture.base_url()),
             HealthCheckResult::Offline {
                 api_version: Some("1".to_owned()),
-                error_code: "INCOMPATIBLE_API_VERSION",
+                error_code: "INCOMPATIBLE_CAPABILITIES",
+                retryable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn absent_capability_object_fails_closed_without_retry() {
+        let fixture = Fixture::response(
+            "200 OK",
+            br#"{"service":"yap-server","status":"ok","apiVersion":"1","auth":"not_configured"}"#
+                .to_vec(),
+            Duration::ZERO,
+        );
+
+        assert_eq!(
+            check(&fixture.base_url()),
+            HealthCheckResult::Offline {
+                api_version: Some("1".to_owned()),
+                error_code: "INCOMPATIBLE_CAPABILITIES",
+                retryable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_capability_field_fails_closed_without_retry() {
+        let fixture = Fixture::response(
+            "200 OK",
+            healthy_body(
+                "1",
+                "not_configured",
+                r#"{"batchJobs":true,"liveStreaming":true}"#,
+            ),
+            Duration::ZERO,
+        );
+
+        assert_eq!(
+            check(&fixture.base_url()),
+            HealthCheckResult::Offline {
+                api_version: Some("1".to_owned()),
+                error_code: "INCOMPATIBLE_CAPABILITIES",
                 retryable: false,
             }
         );

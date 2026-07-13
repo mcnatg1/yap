@@ -36,7 +36,12 @@ describe("Yap desktop shell", () => {
       "sign_in_required",
       "retrying",
       "disabled",
-    ]).toContain(commands.server);
+    ]).toContain(commands.server.state);
+    expect(typeof commands.server.capabilities.batchJobs).toBe("boolean");
+    expect(typeof commands.server.capabilities.liveStreaming).toBe("boolean");
+    expect(typeof commands.server.capabilities.jobStatus).toBe("boolean");
+    expect(commands.server.checkedAtMs === null || typeof commands.server.checkedAtMs === "number").toBe(true);
+    expect(commands.server.retryAtMs === null || typeof commands.server.retryAtMs === "number").toBe(true);
     expect(typeof commands.live.status).toBe("string");
     expect(typeof commands.live.visibility).toBe("string");
     expect(Array.isArray(commands.recordings.sessions)).toBe(true);

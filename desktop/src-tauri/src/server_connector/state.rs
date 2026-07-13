@@ -286,21 +286,12 @@ impl ConnectorInner {
         }
     }
 
-    pub(crate) fn begin_scheduled_retry(
-        &mut self,
-        generation: u64,
-        retry_token: u64,
-        now_ms: u64,
-    ) -> bool {
+    pub(crate) fn begin_scheduled_retry(&mut self, generation: u64, retry_token: u64) -> bool {
         if generation != self.generation
             || retry_token != self.retry_token
             || self.settings != SettingsDisposition::Enabled
             || !self.retry_pending
             || self.in_flight.is_some()
-            || self
-                .snapshot
-                .retry_at_ms
-                .is_some_and(|retry_at| retry_at > now_ms)
         {
             return false;
         }
@@ -455,8 +446,34 @@ mod tests {
         assert_eq!(inner.snapshot().state, ServerConnectorState::Retrying);
         assert_eq!(inner.snapshot().retry_at_ms, Some(1_200));
         let retry_token = inner.retry_token();
-        assert!(inner.begin_scheduled_retry(1, retry_token, 1_200));
+        assert!(inner.begin_scheduled_retry(1, retry_token));
         assert_eq!(inner.snapshot().state, ServerConnectorState::Connecting);
+    }
+
+    #[test]
+    fn physically_fired_retry_ignores_wall_clock_rollback() {
+        let mut inner = ConnectorInner::default();
+        enabled(&mut inner, 2);
+        assert!(inner.begin_health_request(2, 100));
+        let transition = inner
+            .finish_health_request(
+                2,
+                HealthCheckResult::Offline {
+                    api_version: None,
+                    error_code: "CONNECTION_FAILED",
+                    retryable: true,
+                },
+                200,
+                zero_jitter,
+            )
+            .unwrap();
+        assert_eq!(transition.retry_after, Some(Duration::from_secs(1)));
+        assert!(inner.arm_retry(2, 1_200));
+
+        let retry_token = inner.retry_token();
+        assert!(inner.begin_scheduled_retry(2, retry_token));
+        assert_eq!(inner.snapshot().state, ServerConnectorState::Connecting);
+        assert_eq!(inner.snapshot().retry_at_ms, None);
     }
 
     #[test]

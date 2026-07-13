@@ -64,7 +64,16 @@ async function installPlaybackBridge(
             modelsDir: "C:\\Yap\\models",
             status: "ready",
           };
-          if (command === "server_connection_status") return "ready";
+          if (command === "server_connection_status") {
+            return {
+              apiVersion: "1",
+              capabilities: { batchJobs: false, jobStatus: false, liveStreaming: false },
+              checkedAtMs: 1,
+              errorCode: null,
+              retryAtMs: null,
+              state: "ready",
+            };
+          }
           if (command === "live_status") return {
             captureMode: "pushToTalk",
             hotkey: "Ctrl+Shift+Space",

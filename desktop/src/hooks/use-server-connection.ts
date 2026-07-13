@@ -59,8 +59,12 @@ export function useServerConnection() {
       }
     }).catch(async () => {
       if (cancelled) return;
+      const versionBeforeLoad = eventVersionRef.current;
       try {
-        setServerSnapshot(await serverConnectionStatus());
+        const snapshot = await serverConnectionStatus();
+        if (!cancelled && eventVersionRef.current === versionBeforeLoad) {
+          setServerSnapshot(snapshot);
+        }
       } catch {
         // The settings refresh surface reports command errors.
       }
