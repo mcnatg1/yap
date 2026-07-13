@@ -1,6 +1,6 @@
 # Server Contract And Durable Connector Implementation Plan
 
-> **Implementation status (2026-07-13):** Landed canonical Phase 3 server-boundary record. Tasks 1-7 remain implemented. The stock-NSIS replacement and retained server boundary passed the one-time local/native/server/GB10 implementation gate on exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05`. Checked-head hosted CI and the disposable-Windows lifecycle remain required before merge. The unchecked boxes below preserve the original implementation recipe and are not backlog or status evidence.
+> **Implementation status (2026-07-13):** Landed canonical Phase 3 server-boundary record. Tasks 1-7 remain implemented. The stock-NSIS replacement and retained server boundary passed the one-time local/native/server/GB10 implementation gate on exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05`. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` then passed hosted CI run `29293287930` and disposable-Windows stock NSIS lifecycle run `29293291582`. The unchecked boxes below preserve the original implementation recipe and are not backlog or status evidence.
 
 > **Evidence boundary:** Phase 3 proves the machine-readable contract, health-only service, capability-aware connector, retry behavior, and Rust-owned durable ledger. It does not prove a persistent server service, same-process native UI transition, upload/drain, WSS, authentication, ASR, model pools, or external network exposure.
 
