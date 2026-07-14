@@ -68,7 +68,6 @@ pub(super) fn set_live_overlay_surface(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     surface: String,
-    error_message: Option<String>,
 ) -> Result<(), String> {
     authorization::ensure_main_or_overlay(&window)?;
     let snapshot = state.snapshot();
@@ -77,7 +76,7 @@ pub(super) fn set_live_overlay_surface(
     {
         return Ok(());
     }
-    live::overlay_window::ensure_surface(&app, &surface, error_message.as_deref())
+    live::overlay_window::ensure_surface(&app, &surface)
 }
 
 #[tauri::command]

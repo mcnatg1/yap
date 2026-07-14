@@ -1,7 +1,6 @@
 import type { OverlaySurface } from "@/components/live/live-overlay-state";
 
 type NativeSurfaceRequest = {
-  errorMessage?: string;
   surface: OverlaySurface;
 };
 

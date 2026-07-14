@@ -30,7 +30,7 @@
       "files": [
         {
           "path": "desktop/src/components/live/live-overlay.tsx",
-          "sha256": "5819280b2055c0066efb886fd01686db2377e72fa9bcc23b1e3825a0818ac20a"
+          "sha256": "facab7a3375d0c9286985c967a36f102d5fa16aed0dd0c95fff108eebd26bce4"
         },
         {
           "path": "desktop/src-tauri/src/audio/preprocess.rs",

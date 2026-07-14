@@ -59,12 +59,20 @@ export function clearLiveHotkey(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("clear_live_hotkey");
 }
 
+export function resetLiveHotkey(): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("reset_live_hotkey");
+}
+
 export function setLivePasteHotkey(hotkey: string): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("set_live_paste_hotkey", { hotkey });
 }
 
 export function clearLivePasteHotkey(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("clear_live_paste_hotkey");
+}
+
+export function resetLivePasteHotkey(): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("reset_live_paste_hotkey");
 }
 
 export function setLiveCaptureMode(captureMode: LiveCaptureMode): Promise<LiveSessionView> {

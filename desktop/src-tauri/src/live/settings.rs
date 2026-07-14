@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use super::state::{LiveCaptureMode, LiveOverlayVisibility, LiveSessionView};
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Shift+Space";
+pub const DEFAULT_PASTE_HOTKEY: &str = "Ctrl+Shift+Alt+V";
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,7 +20,7 @@ impl Default for LiveSettings {
         Self {
             overlay_enabled: true,
             hotkey: Some(DEFAULT_HOTKEY.into()),
-            paste_hotkey: None,
+            paste_hotkey: Some(DEFAULT_PASTE_HOTKEY.into()),
             capture_mode: LiveCaptureMode::PushToTalk,
             input_device_id: None,
         }
@@ -78,7 +79,7 @@ mod tests {
         let settings = LiveSettings::default();
 
         assert_eq!(settings.hotkey.as_deref(), Some(DEFAULT_HOTKEY));
-        assert_eq!(settings.paste_hotkey, None);
+        assert_eq!(settings.paste_hotkey.as_deref(), Some(DEFAULT_PASTE_HOTKEY));
         assert_eq!(settings.capture_mode, LiveCaptureMode::PushToTalk);
         assert!(settings.overlay_enabled);
     }

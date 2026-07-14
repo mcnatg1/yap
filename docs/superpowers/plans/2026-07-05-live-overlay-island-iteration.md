@@ -1,6 +1,6 @@
 # Live Overlay Island Iteration Implementation Plan
 
-> **Implementation status (2026-07-12):** Historical UI implementation record. The overlay baseline landed, but its separate hover/geometry ownership assumptions are not the next design authority. Current direction is one continuously reused tray-owned island window with native bounds matching the visible collapsed/expanded surface.
+> **Implementation status (2026-07-13):** Historical UI implementation record, superseded in execution. The convergence slice now reuses one tray-owned `live-overlay`; React requests semantic surfaces and Rust alone owns exact native bounds, top-center positioning, and the rounded Windows region. The old invisible-sensor, fixed-frame, frontend-geometry tasks below describe the retired baseline and are not remaining work. Current evidence and defaults are recorded in [Live dictation client UX](../../specs/live-dictation-client-ux.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

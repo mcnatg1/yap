@@ -27,33 +27,33 @@ describe("native overlay surface sync", () => {
       if (calls.length === 1) await first.promise;
     });
 
-    sync({ surface: "sensor" });
-    sync({ surface: "peek" });
+    sync({ surface: "collapsed" });
+    sync({ surface: "expanded" });
     sync({ surface: "recording" });
     await tick();
 
-    expect(calls).toEqual(["sensor"]);
+    expect(calls).toEqual(["collapsed"]);
 
     first.resolve();
     await tick();
     await tick();
 
-    expect(calls).toEqual(["sensor", "recording"]);
+    expect(calls).toEqual(["collapsed", "recording"]);
   });
 
   it("keeps draining after a native resize failure", async () => {
     const calls: string[] = [];
     const sync = createNativeSurfaceSync(async ({ surface }) => {
       calls.push(surface);
-      if (surface === "sensor") throw new Error("resize failed");
+      if (surface === "collapsed") throw new Error("resize failed");
     });
 
-    sync({ surface: "sensor" });
-    sync({ surface: "peek" });
+    sync({ surface: "collapsed" });
+    sync({ surface: "expanded" });
     await tick();
     await tick();
 
-    expect(calls).toEqual(["sensor", "peek"]);
+    expect(calls).toEqual(["collapsed", "expanded"]);
   });
 
   it("retries the latest failed native resize", async () => {
@@ -67,13 +67,13 @@ describe("native overlay surface sync", () => {
       { maxRetries: 1, retryDelayMs: 25 },
     );
 
-    sync({ surface: "sensor" });
+    sync({ surface: "collapsed" });
     await tick();
-    expect(calls).toEqual(["sensor"]);
+    expect(calls).toEqual(["collapsed"]);
 
     await vi.advanceTimersByTimeAsync(25);
     await tick();
 
-    expect(calls).toEqual(["sensor", "sensor"]);
+    expect(calls).toEqual(["collapsed", "collapsed"]);
   });
 });

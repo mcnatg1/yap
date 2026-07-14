@@ -475,6 +475,19 @@ export function attachWdioRunIsolation(env = process.env) {
   return isolation;
 }
 
+async function removeOwnedRunRoot(isolation, removeDirectory) {
+  const { runRoot } = assertSafeIsolationRoot(isolation);
+  const children = readdirSync(runRoot)
+    .filter((name) => name !== runOwnerMarkerName);
+
+  for (const child of children) {
+    await removeDirectory(path.join(runRoot, child), { force: true, recursive: true });
+  }
+
+  // Keep the ownership proof until all potentially locked children are gone.
+  await removeDirectory(runRoot, { force: true, recursive: true });
+}
+
 async function safeRemovePrivateDirectory(isolation, targetName, options = {}) {
   const maxAttempts = options.maxAttempts ?? 150;
   const retryDelayMs = options.retryDelayMs ?? 100;
@@ -495,7 +508,11 @@ async function safeRemovePrivateDirectory(isolation, targetName, options = {}) {
     if (!existsSync(target)) return;
 
     try {
-      await removeDirectory(target, { force: true, recursive: true });
+      if (targetName === "runRoot") {
+        await removeOwnedRunRoot(isolation, removeDirectory);
+      } else {
+        await removeDirectory(target, { force: true, recursive: true });
+      }
       if (!existsSync(target)) return;
       lastError = new Error("recursive removal returned while the target still existed");
     } catch (error) {

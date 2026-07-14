@@ -20,7 +20,7 @@ const previewEventName = "yap-live-overlay-preview";
 const previewLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
   hotkey: "Ctrl+Shift+Space",
-  pasteHotkey: "",
+  pasteHotkey: "Ctrl+Shift+Alt+V",
   route: "none",
   status: "idle",
   visibility: "enabled",

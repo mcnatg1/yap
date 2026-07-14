@@ -25,24 +25,7 @@ function powerShellLiteral(value) {
 }
 
 async function showMainWindowNatively() {
-  const webdriverPort = Number(browser.options.port ?? 4445);
-  if (!Number.isInteger(webdriverPort)) {
-    throw new Error(`Cannot identify the WDIO app from WebDriver port ${browser.options.port}.`);
-  }
-  // Resolve the isolated app by its WebDriver listener before touching any HWND.
-  const { stdout } = await execFileAsync(
-    "netstat.exe",
-    ["-ano", "-p", "tcp"],
-    { timeout: 5_000, windowsHide: true },
-  );
-  const listenerPattern = new RegExp(
-    `^\\s*TCP\\s+\\S+:${webdriverPort}\\s+\\S+\\s+LISTENING\\s+(\\d+)\\s*$`,
-    "mi",
-  );
-  const appPid = Number(stdout.match(listenerPattern)?.[1]);
-  if (!Number.isInteger(appPid) || appPid <= 0) {
-    throw new Error(`No WDIO app is listening on port ${webdriverPort}.`);
-  }
+  const appPid = await resolveWdioAppPid();
   const script = `
 $ErrorActionPreference = "Stop"
 Import-Module -Name ${powerShellLiteral(nativeWindowRecoveryModule)} -Force
@@ -135,8 +118,101 @@ $null = Wait-WdioUniqueWindowCandidate -Probe {
   );
 }
 
-async function restoreMainWindowNatively() {
-  await showMainWindowNatively();
+async function resolveWdioAppPid() {
+  const webdriverPort = Number(browser.options.port ?? 4445);
+  if (!Number.isInteger(webdriverPort)) {
+    throw new Error(`Cannot identify the WDIO app from WebDriver port ${browser.options.port}.`);
+  }
+  // Resolve the isolated app by its WebDriver listener before touching any HWND.
+  const { stdout } = await execFileAsync(
+    "netstat.exe",
+    ["-ano", "-p", "tcp"],
+    { timeout: 5_000, windowsHide: true },
+  );
+  const listenerPattern = new RegExp(
+    `^\\s*TCP\\s+\\S+:${webdriverPort}\\s+\\S+\\s+LISTENING\\s+(\\d+)\\s*$`,
+    "mi",
+  );
+  const appPid = Number(stdout.match(listenerPattern)?.[1]);
+  if (!Number.isInteger(appPid) || appPid <= 0) {
+    throw new Error(`No WDIO app is listening on port ${webdriverPort}.`);
+  }
+  return appPid;
+}
+
+async function sampleWdioProcessTree() {
+  const appPid = await resolveWdioAppPid();
+  const script = `
+$ErrorActionPreference = "Stop"
+$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+$ids = @([uint32]${appPid})
+do {
+  $children = @($all | Where-Object {
+    $ids -contains [uint32]$_.ParentProcessId -and $ids -notcontains [uint32]$_.ProcessId
+  } | ForEach-Object { [uint32]$_.ProcessId })
+  if ($children.Count -eq 0) { break }
+  $ids += $children
+} while ($true)
+$processes = @(Get-Process -Id ($ids | Sort-Object -Unique) -ErrorAction SilentlyContinue)
+[pscustomobject]@{
+  cpuSeconds = [double](($processes | Measure-Object -Property CPU -Sum).Sum)
+  processCount = [int]$processes.Count
+  workingSetBytes = [int64](($processes | Measure-Object -Property WorkingSet64 -Sum).Sum)
+} | ConvertTo-Json -Compress
+`;
+  const { stdout } = await execFileAsync(
+    "pwsh.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { timeout: 15_000, windowsHide: true },
+  );
+  return JSON.parse(stdout.trim());
+}
+
+async function restoreMainWindow() {
+  let mainVisible = false;
+  let tauriRecoveryError;
+
+  try {
+    const windows = await browser.tauri.listWindows();
+    if (!windows.includes("main")) {
+      throw new Error("the main Tauri window no longer exists");
+    }
+
+    try {
+      await browser.tauri.switchWindow("main");
+      mainVisible = await browser.tauri.execute(({ core }) =>
+        core.invoke("plugin:window|is_visible", { label: "main" }));
+    } catch {
+      mainVisible = false;
+    }
+
+    if (!mainVisible) {
+      await browser.tauri.switchWindow("live-overlay");
+      await browser.tauri.execute(({ core }) =>
+        core.invoke("show_main_workspace", { workspace: "home" }));
+      await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
+        core.invoke("plugin:window|is_visible", { label: "main" })), {
+        interval: 50,
+        timeout: 5_000,
+        timeoutMsg: "Tauri cleanup did not restore the main window",
+      });
+      mainVisible = true;
+    }
+  } catch (error) {
+    tauriRecoveryError = error;
+  }
+
+  if (!mainVisible) {
+    try {
+      await showMainWindowNatively();
+    } catch (nativeRecoveryError) {
+      throw new AggregateError(
+        [tauriRecoveryError, nativeRecoveryError].filter(Boolean),
+        "Tauri and native main-window recovery both failed",
+      );
+    }
+  }
+
   await browser.tauri.switchWindow("main");
   await browser.tauri.execute(({ core }) =>
     core.invoke("show_main_workspace", { workspace: "home" }));
@@ -158,7 +234,7 @@ async function withMainWindowRestored(probe) {
     throw error;
   } finally {
     try {
-      await restoreMainWindowNatively();
+      await restoreMainWindow();
     } catch (cleanupError) {
       if (!probeFailed) throw cleanupError;
       console.error(
@@ -194,6 +270,32 @@ async function showIdleOverlay() {
   }
   await browser.tauri.execute(({ core }) => core.invoke("show_live_overlay"));
   await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+}
+
+async function cycleIdleOverlay() {
+  await browser.tauri.execute(() => {
+    const root = document.querySelector('[data-overlay-surface="collapsed"]');
+    root.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+  });
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface") === "expanded"), {
+    interval: 20,
+    timeout: 2_000,
+    timeoutMsg: "overlay did not expand during repeated stability sampling",
+  });
+  await browser.tauri.execute(() => {
+    const root = document.querySelector('[data-overlay-surface="expanded"]');
+    root.dispatchEvent(new PointerEvent("pointerout", {
+      bubbles: true,
+      relatedTarget: document.body,
+    }));
+  });
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface") === "collapsed"), {
+    interval: 20,
+    timeout: 2_000,
+    timeoutMsg: "overlay did not collapse during repeated stability sampling",
+  });
 }
 
 describe("Yap live overlay window", () => {
@@ -239,7 +341,7 @@ describe("Yap live overlay window", () => {
   });
 
   // Tauri does not expose a cross-platform skip-taskbar/Alt-Tab readback command here.
-  // These probes cover the enforceable surface: compact size, unfocused/non-closable state,
+  // These probes cover the enforceable surface: exact visible size, unfocused/non-closable state,
   // close-request survival, and command denial from the overlay webview.
   it("opens as a compact system overlay and refuses direct close", async () => {
     await showIdleOverlay();
@@ -268,11 +370,147 @@ describe("Yap live overlay window", () => {
     expect(overlay.visible).toBe(true);
     expect(overlay.focused).toBe(false);
     expect(overlay.closable).toBe(false);
-    expect(logicalInner.width).toBeLessThanOrEqual(260);
-    expect(logicalInner.height).toBeLessThanOrEqual(60);
-    expect(logicalOuter.width).toBeLessThanOrEqual(300);
-    expect(logicalOuter.height).toBeLessThanOrEqual(80);
+    expect(logicalInner.width).toBeCloseTo(104, 1);
+    expect(logicalInner.height).toBeCloseTo(40, 1);
+    expect(logicalOuter.width).toBeCloseTo(104, 1);
+    expect(logicalOuter.height).toBeCloseTo(40, 1);
     expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
+  });
+
+  it("reuses one native window whose bounds equal each visible island surface", async () => {
+    await showIdleOverlay();
+    await browser.tauri.switchWindow("live-overlay");
+
+    const labelsBefore = await browser.tauri.listWindows();
+    expect(labelsBefore.filter((label) => label === "live-overlay")).toHaveLength(1);
+    await browser.tauri.execute(() => {
+      const root = document.querySelector('[data-overlay-surface="collapsed"]');
+      root.dispatchEvent(new PointerEvent("pointerover", {
+        bubbles: true,
+        clientX: 52,
+        clientY: 20,
+      }));
+    });
+    await browser.waitUntil(async () => browser.tauri.execute(() => {
+      const root = document.querySelector('[data-overlay-surface="expanded"]');
+      const island = document.querySelector('[data-testid="live-overlay-island"]');
+      if (!root || !island) return false;
+      const rootBox = root.getBoundingClientRect();
+      const islandBox = island.getBoundingClientRect();
+      return rootBox.width === islandBox.width
+        && rootBox.height === islandBox.height;
+    }), {
+      interval: 25,
+      timeout: 5_000,
+      timeoutMsg: "expanded webview did not converge to the visible island",
+    });
+    await browser.tauri.switchWindow("main");
+    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }) => {
+      const scale = await core.invoke("plugin:window|scale_factor", { label: "live-overlay" });
+      const inner = await core.invoke("plugin:window|inner_size", { label: "live-overlay" });
+      return Math.abs(inner.width / scale - 180) <= 0.5
+        && Math.abs(inner.height / scale - 88) <= 0.5;
+    }), {
+      interval: 25,
+      timeout: 5_000,
+      timeoutMsg: "expanded native bounds did not converge to 180 by 88",
+    });
+    expect(await browser.tauri.execute(({ core }) =>
+      core.invoke("plugin:window|is_focused", { label: "live-overlay" }))).toBe(false);
+    expect((await browser.tauri.listWindows()).filter((label) => label === "live-overlay")).toHaveLength(1);
+
+    await browser.tauri.switchWindow("live-overlay");
+    await browser.tauri.execute(() => {
+      const root = document.querySelector('[data-overlay-surface="expanded"]');
+      root.dispatchEvent(new PointerEvent("pointerout", {
+        bubbles: true,
+        relatedTarget: document.body,
+      }));
+    });
+    await browser.waitUntil(async () => browser.tauri.execute(() => {
+      const root = document.querySelector('[data-overlay-surface="collapsed"]');
+      const island = document.querySelector('[data-testid="live-overlay-island"]');
+      if (!root || !island) return false;
+      const rootBox = root.getBoundingClientRect();
+      const islandBox = island.getBoundingClientRect();
+      return rootBox.width === islandBox.width
+        && rootBox.height === islandBox.height;
+    }), {
+      interval: 25,
+      timeout: 5_000,
+      timeoutMsg: "collapsed webview did not converge after the grace period",
+    });
+    await browser.tauri.switchWindow("main");
+    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }) => {
+      const scale = await core.invoke("plugin:window|scale_factor", { label: "live-overlay" });
+      const inner = await core.invoke("plugin:window|inner_size", { label: "live-overlay" });
+      return Math.abs(inner.width / scale - 104) <= 0.5
+        && Math.abs(inner.height / scale - 40) <= 0.5;
+    }), {
+      interval: 25,
+      timeout: 5_000,
+      timeoutMsg: "collapsed native bounds did not converge to 104 by 40",
+    });
+    expect(await browser.tauri.execute(({ core }) =>
+      core.invoke("plugin:window|is_focused", { label: "live-overlay" }))).toBe(false);
+    expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
+  });
+
+  it("keeps repeated expand-collapse resource growth bounded", async () => {
+    await showIdleOverlay();
+    await browser.tauri.switchWindow("live-overlay");
+    await cycleIdleOverlay();
+    await cycleIdleOverlay();
+    const before = await sampleWdioProcessTree();
+
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      await cycleIdleOverlay();
+    }
+    await browser.pause(500);
+    const after = await sampleWdioProcessTree();
+
+    expect(after.processCount).toBeLessThanOrEqual(before.processCount + 2);
+    expect(after.workingSetBytes - before.workingSetBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
+    expect(after.cpuSeconds - before.cpuSeconds).toBeLessThanOrEqual(10);
+    expect((await browser.tauri.listWindows()).filter((label) => label === "live-overlay")).toHaveLength(1);
+    expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
+  });
+
+  it("registers a normalized safe shortcut and rejects reserved replacements", async () => {
+    await browser.tauri.switchWindow("main");
+    const original = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+
+    try {
+      const changed = await browser.tauri.execute(({ core }) =>
+        core.invoke("set_live_hotkey", { hotkey: " alt + control + shift + f11 " }));
+      expect(changed.hotkey).toBe("Ctrl+Shift+Alt+F11");
+
+      const reserved = await browser.tauri.execute(async ({ core }) => {
+        try {
+          await core.invoke("set_live_hotkey", { hotkey: "Ctrl+Meta+7" });
+          return { message: "", ok: true };
+        } catch (error) {
+          return { message: String(error), ok: false };
+        }
+      });
+      expect(reserved.ok).toBe(false);
+      expect(reserved.message).toContain("reserved by Windows");
+
+      const unchanged = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+      expect(unchanged.hotkey).toBe("Ctrl+Shift+Alt+F11");
+
+      const reset = await browser.tauri.execute(({ core }) => core.invoke("reset_live_hotkey"));
+      expect(reset.hotkey).toBe("Ctrl+Shift+Space");
+    } finally {
+      if (original.hotkey) {
+        await browser.tauri.execute(
+          ({ core }, hotkey) => core.invoke("set_live_hotkey", { hotkey }),
+          original.hotkey,
+        );
+      } else {
+        await browser.tauri.execute(({ core }) => core.invoke("clear_live_hotkey"));
+      }
+    }
   });
 
   it("allows live status, rejects privileged commands, and survives close attempts", async () => {

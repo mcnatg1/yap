@@ -3,13 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { LiveSessionView } from "@/lib/app-types";
 
 import {
-  hoverSensorHeight,
-  idleSensorWidth,
+  collapseGraceMs,
   modelFromLiveView,
-  overlayFrame,
-  overlayIslandWidth,
   overlaySurface,
-  peekHeight,
+  previewOverlayFrame,
 } from "@/components/live/live-overlay-state";
 
 const baseView: LiveSessionView = {
@@ -22,15 +19,14 @@ const baseView: LiveSessionView = {
 };
 
 describe("live overlay state projection", () => {
-  it("keeps idle invisible until hover opens the peek island", () => {
+  it("keeps a visible collapsed island and expands the same surface downward", () => {
     const model = modelFromLiveView(baseView);
 
-    expect(overlaySurface(model, false, false, false)).toBe("sensor");
-    expect(hoverSensorHeight).toBe(8);
-    expect(overlayFrame("sensor", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
-    expect(overlaySurface(model, true, false, false)).toBe("peek");
-    expect(overlayFrame("peek", model)).toEqual({ height: peekHeight, width: idleSensorWidth });
-    expect(overlayIslandWidth("peek", model)).toBe(150);
+    expect(overlaySurface(model, false, false)).toBe("collapsed");
+    expect(previewOverlayFrame("collapsed")).toEqual({ height: 40, width: 104 });
+    expect(overlaySurface(model, true, false)).toBe("expanded");
+    expect(previewOverlayFrame("expanded")).toEqual({ height: 88, width: 180 });
+    expect(collapseGraceMs).toBe(200);
   });
 
   it("shows armed as initializing before capture is installed", () => {
@@ -47,15 +43,14 @@ describe("live overlay state projection", () => {
     const model = modelFromLiveView({ ...baseView, status: "listening", visibility: "hidden" });
 
     expect(model.phase).toBe("recording");
-    expect(overlaySurface(model, false, false, false)).toBe("recording");
+    expect(overlaySurface(model, false, false)).toBe("recording");
   });
 
   it("reserves the hands-free finish island width", () => {
     const model = modelFromLiveView({ ...baseView, captureMode: "toggle", status: "listening" });
 
     expect(model.recordingTriggerMode).toBe("toggle");
-    expect(overlayFrame("recording", model)).toEqual({ height: 40, width: idleSensorWidth });
-    expect(overlayIslandWidth("recording", model)).toBe(112);
+    expect(previewOverlayFrame("recording")).toEqual({ height: 40, width: 112 });
   });
 
   it("uses the active gesture mode over the saved setting", () => {
@@ -73,11 +68,9 @@ describe("live overlay state projection", () => {
     });
 
     expect(held.recordingTriggerMode).toBe("hold");
-    expect(overlayFrame("recording", held)).toEqual({ height: 40, width: idleSensorWidth });
-    expect(overlayIslandWidth("recording", held)).toBe(112);
+    expect(previewOverlayFrame("recording")).toEqual({ height: 40, width: 112 });
     expect(handsFree.recordingTriggerMode).toBe("toggle");
-    expect(overlayFrame("recording", handsFree)).toEqual({ height: 40, width: idleSensorWidth });
-    expect(overlayIslandWidth("recording", handsFree)).toBe(112);
+    expect(previewOverlayFrame("recording")).toEqual({ height: 40, width: 112 });
   });
 
   it("keeps settling and saving in the compact processing surface", () => {
@@ -85,8 +78,7 @@ describe("live overlay state projection", () => {
       const model = modelFromLiveView({ ...baseView, status });
 
       expect(model.phase).toBe("processing");
-      expect(overlayFrame("processing", model)).toEqual({ height: 40, width: idleSensorWidth });
-      expect(overlayIslandWidth("processing", model)).toBe(112);
+      expect(previewOverlayFrame("processing")).toEqual({ height: 40, width: 112 });
     }
   });
 
@@ -94,11 +86,10 @@ describe("live overlay state projection", () => {
     const idleWithText = modelFromLiveView({ ...baseView, finalText: "done" });
     const blocked = modelFromLiveView({ ...baseView, error: "Mic denied", route: "blocked", status: "blocked" });
 
-    expect(overlaySurface(idleWithText, false, false, true)).toBe("success");
-    expect(overlayFrame("success", idleWithText)).toEqual({ height: 40, width: idleSensorWidth });
-    expect(overlayIslandWidth("success", idleWithText)).toBe(168);
-    expect(overlaySurface(blocked, false, false, false)).toBe("feedback");
-    expect(overlayFrame("feedback", blocked).width).toBeGreaterThanOrEqual(180);
+    expect(overlaySurface(idleWithText, false, true)).toBe("success");
+    expect(previewOverlayFrame("success")).toEqual({ height: 40, width: 168 });
+    expect(overlaySurface(blocked, false, false)).toBe("feedback");
+    expect(previewOverlayFrame("feedback")).toEqual({ height: 40, width: 252 });
   });
 
   it("surfaces idle injection fallback instead of reporting success", () => {
@@ -110,6 +101,6 @@ describe("live overlay state projection", () => {
 
     expect(fallback.phase).toBe("feedback");
     expect(fallback.errorMessage).toContain("Transcript copied");
-    expect(overlaySurface(fallback, false, false, true)).toBe("feedback");
+    expect(overlaySurface(fallback, false, true)).toBe("feedback");
   });
 });

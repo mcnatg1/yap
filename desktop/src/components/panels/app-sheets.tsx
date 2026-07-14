@@ -11,6 +11,7 @@ import type { ComponentType, ReactNode } from "react";
 import { useEffect, useId, useState } from "react";
 
 import { StatusRow } from "@/components/app/status-row";
+import { ShortcutRecorder } from "@/components/settings/shortcut-recorder";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -270,13 +271,12 @@ export function SettingsSheet({
   liveView,
   localComputeTargets,
   onCancelFallbackInstall,
-  onClearLiveHotkey,
-  onClearLivePasteHotkey,
   onOpenChange,
   onInstallFallback,
   onOpenFallbackFolder,
   onPreflightLiveInput,
   onResetLiveHotkey,
+  onResetLivePasteHotkey,
   onRemoveFallback,
   onSetInputDevice,
   onSetFallbackEnabled,
@@ -303,13 +303,12 @@ export function SettingsSheet({
   liveView: LiveSessionView;
   localComputeTargets: LocalComputeTargetView[];
   onCancelFallbackInstall: () => void;
-  onClearLiveHotkey: () => void;
-  onClearLivePasteHotkey: () => void;
   onOpenChange: (open: boolean) => void;
   onInstallFallback: (options?: { force?: boolean }) => void;
   onOpenFallbackFolder: () => void;
   onPreflightLiveInput: () => void;
   onResetLiveHotkey: () => void;
+  onResetLivePasteHotkey: () => void;
   onRemoveFallback: () => void;
   onSetInputDevice: (deviceId?: string) => void;
   onSetFallbackEnabled: (enabled: boolean) => void;
@@ -334,8 +333,6 @@ export function SettingsSheet({
   const modeLabelId = useId();
   const [section, setSection] = useState<SettingsSection>(fallbackModel && fallbackModel.status !== "ready" ? "system" : "general");
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
-  const [hotkeyDraft, setHotkeyDraft] = useState(liveView.hotkey);
-  const [pasteHotkeyDraft, setPasteHotkeyDraft] = useState(liveView.pasteHotkey);
   const [serverUrlDraft, setServerUrlDraft] = useState("");
   const [serverEnabled, setServerEnabled] = useState(false);
   const [serverSettingsPending, setServerSettingsPending] = useState(false);
@@ -346,14 +343,6 @@ export function SettingsSheet({
     commandPending: fallbackActionPending,
     liveStatus: liveView.status,
   });
-
-  useEffect(() => {
-    setHotkeyDraft(liveView.hotkey);
-  }, [liveView.hotkey]);
-
-  useEffect(() => {
-    setPasteHotkeyDraft(liveView.pasteHotkey);
-  }, [liveView.pasteHotkey]);
 
   useEffect(() => {
     if (open && fallbackModel && fallbackModel.status !== "ready") {
@@ -498,51 +487,30 @@ export function SettingsSheet({
                 {section === "general" ? (
                   <SettingsGroup>
                     <SettingsRow
-                      action={
-                        <Button disabled={liveBusy || liveActive || hotkeyDraft === liveView.hotkey} onClick={() => onSetLiveHotkey(hotkeyDraft)} type="button" variant="secondary">
-                          Apply
-                        </Button>
-                      }
-                      detail={liveActive ? "Stop live first." : "Used to start dictation."}
-                      label="Shortcut"
+                      detail={liveActive ? "Stop live first." : "Hold for push-to-talk or double-tap for hands-free."}
+                      label="Dictation shortcut"
                       value={liveView.hotkey || "Off"}
                     >
-                      <Input
-                        className="max-w-[260px]"
+                      <ShortcutRecorder
+                        current={liveView.hotkey}
                         disabled={liveBusy || liveActive}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") onSetLiveHotkey(hotkeyDraft);
-                        }}
-                        placeholder="Ctrl+Shift+Space"
-                        value={hotkeyDraft}
-                        onChange={(event) => setHotkeyDraft(event.currentTarget.value)}
+                        label="Dictation"
+                        onChange={onSetLiveHotkey}
+                        onReset={onResetLiveHotkey}
                       />
                     </SettingsRow>
                     <SettingsRow
-                      action={
-                        <Button disabled={liveBusy || liveActive || pasteHotkeyDraft === liveView.pasteHotkey} onClick={() => onSetLivePasteHotkey(pasteHotkeyDraft)} type="button" variant="secondary">
-                          Apply
-                        </Button>
-                      }
                       detail={liveActive ? "Stop live first." : "Inserts the last transcript into the focused field."}
-                      label="Paste last"
+                      label="Paste-last shortcut"
                       value={liveView.pasteHotkey || "Off"}
                     >
-                      <div className="flex max-w-[360px] gap-2">
-                        <Input
-                          className="min-w-0 flex-1"
-                          disabled={liveBusy || liveActive}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") onSetLivePasteHotkey(pasteHotkeyDraft);
-                          }}
-                          placeholder="Ctrl+Shift+V"
-                          value={pasteHotkeyDraft}
-                          onChange={(event) => setPasteHotkeyDraft(event.currentTarget.value)}
-                        />
-                        <Button disabled={liveBusy || liveActive || !liveView.pasteHotkey} onClick={onClearLivePasteHotkey} type="button" variant="ghost">
-                          Clear
-                        </Button>
-                      </div>
+                      <ShortcutRecorder
+                        current={liveView.pasteHotkey}
+                        disabled={liveBusy || liveActive}
+                        label="Paste last"
+                        onChange={onSetLivePasteHotkey}
+                        onReset={onResetLivePasteHotkey}
+                      />
                     </SettingsRow>
                     <SettingsRow
                       action={
@@ -610,12 +578,6 @@ export function SettingsSheet({
                       <div className="flex flex-wrap gap-2">
                         <Button disabled={liveBusy || liveActive} onClick={() => onSetLiveOverlayEnabled(liveView.visibility === "hidden")} type="button" variant="secondary">
                           {liveView.visibility === "hidden" ? "Show" : "Hide"}
-                        </Button>
-                        <Button disabled={liveBusy || liveActive} onClick={onResetLiveHotkey} type="button" variant="ghost">
-                          Reset shortcut
-                        </Button>
-                        <Button disabled={liveBusy || liveActive || !liveView.hotkey} onClick={onClearLiveHotkey} type="button" variant="ghost">
-                          Clear shortcut
                         </Button>
                       </div>
                     </SettingsRow>

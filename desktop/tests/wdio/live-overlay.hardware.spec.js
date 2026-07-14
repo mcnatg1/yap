@@ -206,15 +206,15 @@ describe("Yap live overlay hardware capture", () => {
 
       expect(await browser.getWindowHandle()).toBe("live-overlay");
       await browser.tauri.execute(() => {
-        const sensor = document.querySelector('[data-overlay-surface="sensor"]');
-        sensor.dispatchEvent(new MouseEvent("mouseover", {
+        const island = document.querySelector('[data-overlay-surface="collapsed"]');
+        island.dispatchEvent(new PointerEvent("pointerover", {
           bubbles: true,
-          clientX: 130,
-          clientY: 3,
+          clientX: 52,
+          clientY: 20,
         }));
       });
       await browser.waitUntil(async () => browser.tauri.execute(() =>
-        document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface") === "peek"));
+        document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface") === "expanded"));
       const startButton = await browser.$('[aria-label="Start dictating"]');
       await startButton.waitForDisplayed();
       runStartedAtMs = Date.now();
@@ -263,19 +263,18 @@ describe("Yap live overlay hardware capture", () => {
       await browser.pause(2_750);
       const surface = await browser.tauri.execute(() =>
         document.querySelector("[data-overlay-surface]")?.getAttribute("data-overlay-surface"));
-      expect(surface).toBe("sensor");
+      expect(surface).toBe("collapsed");
       const compact = await browser.tauri.execute(() => {
-        const root = document.querySelector('[data-overlay-surface="sensor"]').getBoundingClientRect();
-        const sensor = document.querySelector('[data-testid="live-overlay-sensor"]').getBoundingClientRect();
+        const root = document.querySelector('[data-overlay-surface="collapsed"]').getBoundingClientRect();
+        const island = document.querySelector('[data-testid="live-overlay-island"]').getBoundingClientRect();
         return {
+          island: { height: island.height, width: island.width },
           root: { height: root.height, width: root.width },
-          sensor: { height: sensor.height, width: sensor.width },
         };
       });
-      expect(compact.root.width).toBeLessThanOrEqual(260);
+      expect(compact.root.width).toBe(104);
       expect(compact.root.height).toBe(40);
-      expect(compact.sensor.width).toBeLessThanOrEqual(260);
-      expect(compact.sensor.height).toBe(8);
+      expect(compact.island).toEqual(compact.root);
       expect(await browser.tauri.execute(() =>
         globalThis.__yapTask8bLifecycle.saved.length)).toBe(1);
     } catch (error) {
