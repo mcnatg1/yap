@@ -5,6 +5,7 @@ mod setup;
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     let builder = builder
         .manage(media_protocol::MediaOwner::new())
+        .manage(crate::live::hotkey_commands::HotkeyEnrollmentGate::default())
         .manage(
             crate::jobs::commands::RecordingJobs::open_default()
                 .expect("recording job ledger must open before commands are registered"),
@@ -17,8 +18,7 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::server_connector::server_settings,
         crate::server_connector::set_server_settings,
         crate::jobs::commands::recording_jobs_snapshot,
-        crate::jobs::commands::recording_jobs_create_imports,
-        crate::jobs::commands::recording_jobs_import_legacy,
+        crate::jobs::commands::recording_jobs_pick_imports,
         crate::jobs::commands::recording_job_cancel,
         crate::jobs::commands::recording_job_dismiss,
         crate::jobs::commands::recording_job_retry,
@@ -32,14 +32,15 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         setup::list_local_compute_targets,
         setup::set_local_compute_target,
         live::live_status,
+        live::live_overlay_status,
         live::show_live_overlay,
         live::hide_live_overlay,
         live::set_live_overlay_surface,
         live::set_live_overlay_enabled,
-        crate::live::hotkey_commands::set_live_hotkey,
+        crate::live::hotkey_commands::record_live_hotkey,
         crate::live::hotkey_commands::clear_live_hotkey,
         crate::live::hotkey_commands::reset_live_hotkey,
-        crate::live::hotkey_commands::set_live_paste_hotkey,
+        crate::live::hotkey_commands::record_live_paste_hotkey,
         crate::live::hotkey_commands::clear_live_paste_hotkey,
         crate::live::hotkey_commands::reset_live_paste_hotkey,
         live::set_live_capture_mode,
@@ -47,7 +48,9 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         live::set_input_device,
         live::preflight_input_device,
         live::start_live_session,
+        live::start_live_overlay_session,
         live::stop_live_session,
+        live::stop_live_overlay_session,
         live::list_saved_live_sessions,
         live::list_recoverable_live_sessions,
         live::recover_live_session,
@@ -55,7 +58,6 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         live::delete_saved_live_session,
         live::show_main_workspace,
         setup::polish_num_gpu,
-        crate::file_actions::allow_recording_playback_path,
         crate::file_actions::restore_recording_playback_path,
         crate::file_actions::release_recording_playback,
         crate::file_actions::resolve_owned_live_transcript_paths,

@@ -35,7 +35,8 @@ impl ShortcutInputNormalizer {
 #[derive(Clone)]
 struct LiveShortcutDispatcher {
     events: mpsc::Sender<ShortcutDispatchEvent>,
-    normalizer: Arc<ShortcutInputNormalizer>,
+    dictation_normalizer: Arc<ShortcutInputNormalizer>,
+    paste_normalizer: Arc<ShortcutInputNormalizer>,
 }
 
 enum ShortcutDispatchEvent {
@@ -50,7 +51,7 @@ enum ShortcutDispatchEvent {
 
 impl LiveShortcutDispatcher {
     fn input(&self, state: ShortcutState, projected_mode: Option<live::state::LiveCaptureMode>) {
-        if !self.normalizer.accept(state) {
+        if !self.dictation_normalizer.accept(state) {
             return;
         }
         let _ = self.events.send(ShortcutDispatchEvent::Input {
@@ -60,8 +61,13 @@ impl LiveShortcutDispatcher {
         });
     }
 
+    fn accept_paste(&self, state: ShortcutState) -> bool {
+        self.paste_normalizer.accept(state)
+    }
+
     fn reset(&self) {
-        self.normalizer.reset();
+        self.dictation_normalizer.reset();
+        self.paste_normalizer.reset();
         let _ = self.events.send(ShortcutDispatchEvent::Reset);
     }
 }
@@ -98,7 +104,14 @@ pub(crate) fn prepare(settings: &live::settings::LiveSettings) -> StartupShortcu
         registrations.push(LiveShortcutRegistration {
             hotkey: hotkey.to_string(),
             is_paste,
-            shortcut: live::hotkeys::parse_hotkey(hotkey),
+            shortcut: live::hotkeys::parse_hotkey_for(
+                hotkey,
+                if is_paste {
+                    live::hotkeys::HotkeyPurpose::PasteLast
+                } else {
+                    live::hotkeys::HotkeyPurpose::Dictation
+                },
+            ),
         });
     }
     StartupShortcutPlan { registrations }
@@ -111,6 +124,13 @@ pub(crate) fn install(app: &mut tauri::App, plan: StartupShortcutPlan) -> tauri:
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
+                if app
+                    .state::<live::hotkey_commands::HotkeyEnrollmentGate>()
+                    .is_active()
+                {
+                    handler_dispatcher.reset();
+                    return;
+                }
                 let snapshot = {
                     let live = app.state::<live::LiveSessionState>();
                     live.snapshot()
@@ -119,9 +139,14 @@ pub(crate) fn install(app: &mut tauri::App, plan: StartupShortcutPlan) -> tauri:
                     &snapshot.paste_hotkey,
                     shortcut,
                 ) {
-                    if event.state() == ShortcutState::Released
-                        && !live::state::is_live_session_started(snapshot.status)
-                    {
+                    if live::state::is_live_session_started(snapshot.status) {
+                        handler_dispatcher.paste_normalizer.reset();
+                        return;
+                    }
+                    if !handler_dispatcher.accept_paste(event.state()) {
+                        return;
+                    }
+                    if event.state() == ShortcutState::Released {
                         let target = live::injection::capture_target();
                         let app = app.clone();
                         std::thread::spawn(move || {
@@ -164,7 +189,8 @@ pub(crate) fn reset(app: &tauri::AppHandle) {
 fn spawn_shortcut_dispatcher(app: tauri::AppHandle) -> LiveShortcutDispatcher {
     let (events, event_rx) = mpsc::channel();
     let (actions, action_rx) = mpsc::channel();
-    let normalizer = Arc::new(ShortcutInputNormalizer::default());
+    let dictation_normalizer = Arc::new(ShortcutInputNormalizer::default());
+    let paste_normalizer = Arc::new(ShortcutInputNormalizer::default());
     let action_events = events.clone();
     let action_app = app.clone();
     std::thread::Builder::new()
@@ -175,7 +201,11 @@ fn spawn_shortcut_dispatcher(app: tauri::AppHandle) -> LiveShortcutDispatcher {
         .name("live-shortcut-input".into())
         .spawn(move || run_shortcut_input(app, event_rx, actions))
         .expect("live shortcut input worker must start");
-    LiveShortcutDispatcher { events, normalizer }
+    LiveShortcutDispatcher {
+        events,
+        dictation_normalizer,
+        paste_normalizer,
+    }
 }
 
 fn run_shortcut_input(
@@ -344,7 +374,7 @@ mod tests {
         let settings = live::settings::LiveSettings {
             overlay_enabled: true,
             hotkey: Some("Ctrl+Shift+Space".into()),
-            paste_hotkey: Some("Ctrl+Shift+V".into()),
+            paste_hotkey: Some(live::settings::DEFAULT_PASTE_HOTKEY.into()),
             capture_mode: live::state::LiveCaptureMode::PushToTalk,
             input_device_id: None,
         };
@@ -357,7 +387,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("Ctrl+Shift+Space".to_string(), false),
-                ("Ctrl+Shift+V".to_string(), true),
+                (live::settings::DEFAULT_PASTE_HOTKEY.to_string(), true),
             ]
         );
     }
@@ -409,7 +439,7 @@ mod tests {
 
         let mut paste =
             live::state::LiveSessionView::from_settings(&live::settings::LiveSettings {
-                paste_hotkey: Some("Ctrl+Shift+V".into()),
+                paste_hotkey: Some(live::settings::DEFAULT_PASTE_HOTKEY.into()),
                 ..Default::default()
             });
         apply_startup_shortcut_failure(&mut paste, true);

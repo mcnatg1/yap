@@ -316,7 +316,7 @@ On `Connected` loss, live dictation may switch to local fallback with a visible 
 
 - [x] `server/` staging area, machine-readable Phase 3 contract, and loopback capability-health process in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
 - [x] Client capability-health connector: validated settings, bounded HTTP checks, fail-closed state/capability projection, generation safety, and retry cancellation
-- [x] Rust-owned SQLite imported-job ledger with restart recovery and idempotent legacy migration
+- [x] Rust-owned SQLite imported-job ledger with restart recovery, bounded terminal history, and native picker/drop source admission; historical localStorage path rows are not migrated automatically
 - [x] Reference workload router: bounded per-owner queues, bounded live
   priority, round-robin fairness, backpressure, and pool dispatch
 - [ ] Production workload router: auth-derived ownership, durable queues,

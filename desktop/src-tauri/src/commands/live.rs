@@ -7,7 +7,7 @@ pub(super) fn live_status(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, live::LiveSessionState>,
 ) -> Result<live::state::LiveSessionView, String> {
-    authorization::ensure_main_or_overlay(&window)?;
+    authorization::ensure_main(&window)?;
     Ok(state.update(|view| {
         let requested_id = view.input_device_id.clone();
         let resolved = live::devices::resolve_input_device(requested_id.as_deref());
@@ -19,6 +19,15 @@ pub(super) fn live_status(
             view.error = Some("Selected microphone unavailable. Using default.".into());
         }
     }))
+}
+
+#[tauri::command]
+pub(super) fn live_overlay_status(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<live::state::LiveOverlayView, String> {
+    authorization::ensure_live_overlay(&window)?;
+    Ok(live::state::LiveOverlayView::from(&state.snapshot()))
 }
 
 #[tauri::command]
@@ -69,14 +78,40 @@ pub(super) fn set_live_overlay_surface(
     state: tauri::State<'_, live::LiveSessionState>,
     surface: String,
 ) -> Result<(), String> {
-    authorization::ensure_main_or_overlay(&window)?;
+    authorization::ensure_live_overlay(&window)?;
     let snapshot = state.snapshot();
     if snapshot.visibility == live::state::LiveOverlayVisibility::Hidden
         && !live::state::is_live_session_started(snapshot.status)
     {
         return Ok(());
     }
+    if !live_overlay_surface_matches_state(&snapshot, &surface) {
+        return Err("Live overlay surface does not match native session state.".into());
+    }
     live::overlay_window::ensure_surface(&app, &surface)
+}
+
+fn live_overlay_surface_matches_state(view: &live::state::LiveSessionView, surface: &str) -> bool {
+    use live::state::LiveSessionStatus;
+
+    match view.status {
+        LiveSessionStatus::Idle => match surface {
+            "collapsed" | "expanded" => view.error.is_none(),
+            "success" => {
+                view.error.is_none()
+                    && view
+                        .final_text
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty())
+            }
+            "feedback" => view.error.is_some(),
+            _ => false,
+        },
+        LiveSessionStatus::Armed => surface == "initializing",
+        LiveSessionStatus::Listening | LiveSessionStatus::Speaking => surface == "recording",
+        LiveSessionStatus::Settling | LiveSessionStatus::Saving => surface == "processing",
+        LiveSessionStatus::Blocked => surface == "feedback",
+    }
 }
 
 #[tauri::command]
@@ -190,7 +225,7 @@ pub(super) fn start_live_session(
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     active_capture_mode: Option<live::state::LiveCaptureMode>,
 ) -> Result<live::state::LiveSessionView, String> {
-    authorization::ensure_main_or_overlay(&window)?;
+    authorization::ensure_main(&window)?;
     live::actions::warm_on_intent(&app, &live_runtime);
     let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
     Ok(live::actions::start_live_runtime(
@@ -204,6 +239,30 @@ pub(super) fn start_live_session(
 }
 
 #[tauri::command]
+pub(super) fn start_live_overlay_session(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
+    stt_state: tauri::State<'_, stt::dispatch::SttState>,
+    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
+    active_capture_mode: Option<live::state::LiveCaptureMode>,
+) -> Result<live::state::LiveOverlayView, String> {
+    authorization::ensure_live_overlay(&window)?;
+    live::actions::warm_on_intent(&app, &live_runtime);
+    let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
+    let view = live::actions::start_live_runtime(
+        app,
+        &state,
+        &live_runtime,
+        &stt_state,
+        &runtime_state,
+        capture_mode,
+    );
+    Ok(live::state::LiveOverlayView::from(&view))
+}
+
+#[tauri::command]
 pub(super) fn stop_live_session(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -211,13 +270,26 @@ pub(super) fn stop_live_session(
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> Result<live::state::LiveSessionView, String> {
-    authorization::ensure_main_or_overlay(&window)?;
+    authorization::ensure_main(&window)?;
     Ok(live::actions::stop_live_runtime(
         app,
         &state,
         &live_runtime,
         &runtime_state,
     ))
+}
+
+#[tauri::command]
+pub(super) fn stop_live_overlay_session(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
+    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
+) -> Result<live::state::LiveOverlayView, String> {
+    authorization::ensure_live_overlay(&window)?;
+    let view = live::actions::stop_live_runtime(app, &state, &live_runtime, &runtime_state);
+    Ok(live::state::LiveOverlayView::from(&view))
 }
 
 #[tauri::command]
@@ -281,9 +353,76 @@ pub(super) fn show_main_workspace(
     match workspace.as_str() {
         "home" | "transcribe" | "polish" => {
             live::actions::show_main_window(&app);
-            let _ = app.emit("open-workspace", workspace);
+            let _ = app.emit_to(
+                authorization::MAIN_WINDOW_LABEL,
+                "open-workspace",
+                workspace,
+            );
             Ok(())
         }
         _ => Err("Unsupported workspace.".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(status: live::state::LiveSessionStatus) -> live::state::LiveSessionView {
+        let mut view = live::state::LiveSessionView::from_settings(&live::settings::LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: Some("Ctrl+Shift+Alt+V".into()),
+            capture_mode: live::state::LiveCaptureMode::PushToTalk,
+            input_device_id: None,
+        });
+        view.status = status;
+        view
+    }
+
+    #[test]
+    fn active_native_sessions_reject_hidden_or_idle_surfaces() {
+        use live::state::LiveSessionStatus;
+
+        for (status, allowed) in [
+            (LiveSessionStatus::Armed, "initializing"),
+            (LiveSessionStatus::Listening, "recording"),
+            (LiveSessionStatus::Speaking, "recording"),
+            (LiveSessionStatus::Settling, "processing"),
+            (LiveSessionStatus::Saving, "processing"),
+        ] {
+            let view = view(status);
+            assert!(live_overlay_surface_matches_state(&view, allowed));
+            for forbidden in ["collapsed", "expanded", "success", "feedback"] {
+                assert!(
+                    !live_overlay_surface_matches_state(&view, forbidden),
+                    "{status:?} accepted {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn idle_and_blocked_surfaces_remain_bound_to_native_state() {
+        use live::state::LiveSessionStatus;
+
+        let idle = view(LiveSessionStatus::Idle);
+        assert!(live_overlay_surface_matches_state(&idle, "collapsed"));
+        assert!(live_overlay_surface_matches_state(&idle, "expanded"));
+        assert!(!live_overlay_surface_matches_state(&idle, "success"));
+        assert!(!live_overlay_surface_matches_state(&idle, "feedback"));
+
+        let mut success = idle.clone();
+        success.final_text = Some("saved".into());
+        assert!(live_overlay_surface_matches_state(&success, "success"));
+
+        let mut feedback = idle;
+        feedback.error = Some("microphone unavailable".into());
+        assert!(live_overlay_surface_matches_state(&feedback, "feedback"));
+        assert!(!live_overlay_surface_matches_state(&feedback, "collapsed"));
+
+        let blocked = view(LiveSessionStatus::Blocked);
+        assert!(live_overlay_surface_matches_state(&blocked, "feedback"));
+        assert!(!live_overlay_surface_matches_state(&blocked, "collapsed"));
     }
 }

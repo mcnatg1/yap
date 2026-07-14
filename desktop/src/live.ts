@@ -1,7 +1,13 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionStatus, LiveSessionView, WorkspaceView } from "@/lib/app-types";
+import type {
+  LiveCaptureMode,
+  LiveInputDeviceView,
+  LiveOverlayView,
+  LiveSessionView,
+  WorkspaceView,
+} from "@/lib/app-types";
 
 export type SavedLiveSession = {
   captureCommitPath?: string | null;
@@ -36,11 +42,14 @@ export type RecoverableLiveSession = {
 
 export type LiveLevelView = {
   level?: number | null;
-  status: LiveSessionStatus;
 };
 
 export function liveStatus(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("live_status");
+}
+
+export function liveOverlayStatus(): Promise<LiveOverlayView> {
+  return invoke<LiveOverlayView>("live_overlay_status");
 }
 
 export function showLiveOverlay(): Promise<LiveSessionView> {
@@ -51,8 +60,8 @@ export function setLiveOverlayEnabled(enabled: boolean): Promise<LiveSessionView
   return invoke<LiveSessionView>("set_live_overlay_enabled", { enabled });
 }
 
-export function setLiveHotkey(hotkey: string): Promise<LiveSessionView> {
-  return invoke<LiveSessionView>("set_live_hotkey", { hotkey });
+export function recordLiveHotkey(): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("record_live_hotkey");
 }
 
 export function clearLiveHotkey(): Promise<LiveSessionView> {
@@ -63,8 +72,8 @@ export function resetLiveHotkey(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("reset_live_hotkey");
 }
 
-export function setLivePasteHotkey(hotkey: string): Promise<LiveSessionView> {
-  return invoke<LiveSessionView>("set_live_paste_hotkey", { hotkey });
+export function recordLivePasteHotkey(): Promise<LiveSessionView> {
+  return invoke<LiveSessionView>("record_live_paste_hotkey");
 }
 
 export function clearLivePasteHotkey(): Promise<LiveSessionView> {
@@ -97,6 +106,14 @@ export function startLiveSession(activeCaptureMode?: LiveCaptureMode): Promise<L
 
 export function stopLiveSession(): Promise<LiveSessionView> {
   return invoke<LiveSessionView>("stop_live_session");
+}
+
+export function startLiveOverlaySession(activeCaptureMode?: LiveCaptureMode): Promise<LiveOverlayView> {
+  return invoke<LiveOverlayView>("start_live_overlay_session", { activeCaptureMode });
+}
+
+export function stopLiveOverlaySession(): Promise<LiveOverlayView> {
+  return invoke<LiveOverlayView>("stop_live_overlay_session");
 }
 
 export function listSavedLiveSessions(): Promise<SavedLiveSessionCatalog> {
@@ -149,6 +166,13 @@ export function showMainWorkspace(workspace: WorkspaceView): Promise<void> {
 export async function listenLiveSession(onUpdate: (view: LiveSessionView) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<LiveSessionView>("live-session", (event) => onUpdate(event.payload));
+}
+
+export async function listenLiveOverlaySession(
+  onInvalidate: () => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<LiveOverlayView>("live-overlay-session", () => onInvalidate());
 }
 
 export async function listenLiveLevel(onUpdate: (view: LiveLevelView) => void): Promise<UnlistenFn> {

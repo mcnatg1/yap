@@ -277,7 +277,11 @@ impl FallbackProgressEmitter {
             return;
         }
         if self.throttle.should_emit(&view, Instant::now()) {
-            if let Err(error) = self.app.emit(FALLBACK_MODEL_PROGRESS_EVENT, &view) {
+            if let Err(error) = self.app.emit_to(
+                crate::authorization::MAIN_WINDOW_LABEL,
+                FALLBACK_MODEL_PROGRESS_EVENT,
+                &view,
+            ) {
                 self.fail_publication(model_operation_error(
                     "MODEL_PROGRESS_PUBLISH_FAILED",
                     &format!("Could not publish model progress: {error}"),
@@ -522,13 +526,17 @@ fn emit_fallback_status(
             "Model status belongs to an inactive operation.",
         ));
     }
-    app.emit(FALLBACK_MODEL_STATUS_EVENT, &view)
-        .map_err(|error| {
-            model_operation_error(
-                "MODEL_STATUS_PUBLISH_FAILED",
-                &format!("Could not publish model status: {error}"),
-            )
-        })
+    app.emit_to(
+        crate::authorization::MAIN_WINDOW_LABEL,
+        FALLBACK_MODEL_STATUS_EVENT,
+        &view,
+    )
+    .map_err(|error| {
+        model_operation_error(
+            "MODEL_STATUS_PUBLISH_FAILED",
+            &format!("Could not publish model status: {error}"),
+        )
+    })
 }
 
 fn emit_fallback_progress(
@@ -544,26 +552,34 @@ fn emit_fallback_progress(
             "Model progress belongs to an inactive operation.",
         ));
     }
-    app.emit(FALLBACK_MODEL_PROGRESS_EVENT, &view)
-        .map_err(|error| {
-            model_operation_error(
-                "MODEL_PROGRESS_PUBLISH_FAILED",
-                &format!("Could not publish model progress: {error}"),
-            )
-        })
+    app.emit_to(
+        crate::authorization::MAIN_WINDOW_LABEL,
+        FALLBACK_MODEL_PROGRESS_EVENT,
+        &view,
+    )
+    .map_err(|error| {
+        model_operation_error(
+            "MODEL_PROGRESS_PUBLISH_FAILED",
+            &format!("Could not publish model progress: {error}"),
+        )
+    })
 }
 
 fn emit_terminal_status(
     app: &AppHandle,
     view: &nemotron::FallbackModelView,
 ) -> Result<(), SttCommandError> {
-    app.emit(FALLBACK_MODEL_STATUS_EVENT, view)
-        .map_err(|error| {
-            model_operation_error(
-                "MODEL_STATUS_PUBLISH_FAILED",
-                &format!("Could not publish terminal model status: {error}"),
-            )
-        })
+    app.emit_to(
+        crate::authorization::MAIN_WINDOW_LABEL,
+        FALLBACK_MODEL_STATUS_EVENT,
+        view,
+    )
+    .map_err(|error| {
+        model_operation_error(
+            "MODEL_STATUS_PUBLISH_FAILED",
+            &format!("Could not publish terminal model status: {error}"),
+        )
+    })
 }
 
 fn sanitize_fallback_model_view(

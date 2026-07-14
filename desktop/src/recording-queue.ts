@@ -10,31 +10,8 @@ export type LegacyQueueJob = {
   path: string;
 };
 
-export type LegacyQueueImport = {
-  schemaVersion: 1;
-  jobs: LegacyQueueJob[];
-};
-
-export type LegacyImportAcknowledgement = {
-  legacyId: number;
-  jobId: string;
-};
-
-export type LegacyImportRejection = {
-  legacyId: number;
-  code: string;
-  message: string;
-};
-
-export type LegacyImportResult = {
-  accepted: LegacyImportAcknowledgement[];
-  duplicates: LegacyImportAcknowledgement[];
-  rejected: LegacyImportRejection[];
-};
-
-type LegacyQueueStorage = Pick<Storage, "getItem" | "removeItem">;
+type LegacyQueueStorage = Pick<Storage, "getItem">;
 type LegacyQueueDiscardStorage = Pick<Storage, "removeItem">;
-type LegacyImporter = (payload: LegacyQueueImport) => Promise<LegacyImportResult>;
 
 function isLegacyQueueJob(value: unknown): value is LegacyQueueJob {
   if (!value || typeof value !== "object") return false;
@@ -62,53 +39,17 @@ export function parseLegacyRecordingQueue(value: unknown): LegacyQueueJob[] {
     .map(({ id, path }) => ({ id, path }));
 }
 
-function acknowledgementIds(result: LegacyImportResult) {
-  return [
-    ...result.accepted.map(({ legacyId }) => legacyId),
-    ...result.duplicates.map(({ legacyId }) => legacyId),
-    ...result.rejected.map(({ legacyId }) => legacyId),
-  ].sort((left, right) => left - right);
-}
-
-function assertCompleteAcknowledgement(
-  jobs: LegacyQueueJob[],
-  result: LegacyImportResult,
-) {
-  if (
-    !result ||
-    !Array.isArray(result.accepted) ||
-    !Array.isArray(result.duplicates) ||
-    !Array.isArray(result.rejected)
-  ) {
-    throw new Error("Rust returned an invalid legacy queue acknowledgement.");
-  }
-  const expected = jobs.map(({ id }) => id).sort((left, right) => left - right);
-  const acknowledged = acknowledgementIds(result);
-  if (
-    expected.length !== acknowledged.length ||
-    expected.some((id, index) => id !== acknowledged[index])
-  ) {
-    throw new Error("Rust did not acknowledge every legacy recording queue row.");
-  }
-}
-
-async function invokeLegacyImport(payload: LegacyQueueImport) {
-  return invoke<LegacyImportResult>("recording_jobs_import_legacy", { payload });
-}
-
 export async function migrateLegacyRecordingQueue(
   storage: LegacyQueueStorage | undefined = globalThis.localStorage,
-  importLegacy: LegacyImporter = invokeLegacyImport,
 ) {
   if (!storage) return { acknowledged: 0, migrated: false };
   const stored = storage.getItem(legacyRecordingQueueKey);
   if (stored === null) return { acknowledged: 0, migrated: false };
 
   const jobs = parseLegacyRecordingQueue(JSON.parse(stored));
-  const result = await importLegacy({ schemaVersion: 1, jobs });
-  assertCompleteAcknowledgement(jobs, result);
-  storage.removeItem(legacyRecordingQueueKey);
-  return { acknowledged: jobs.length, migrated: true, result };
+  throw new Error(
+    `Yap found ${jobs.length} recording${jobs.length === 1 ? "" : "s"} in its old browser queue. Automatic pathname migration is disabled. Keep the old queue for reference, or discard it and re-add recordings through Choose recordings.`,
+  );
 }
 
 export function discardLegacyRecordingQueue(
@@ -122,9 +63,9 @@ export async function recordingJobsSnapshot() {
   return invoke<RecordingJobView[]>("recording_jobs_snapshot");
 }
 
-export async function createRecordingImports(paths: string[]) {
+export async function pickRecordingImports() {
   if (!isTauri()) return [];
-  return invoke<RecordingJobView[]>("recording_jobs_create_imports", { paths });
+  return invoke<RecordingJobView[]>("recording_jobs_pick_imports");
 }
 
 export async function cancelRecordingJob(jobId: string) {

@@ -60,7 +60,7 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
     |-- src/                          React app.
     |   |-- App.tsx                   Main app state and screen composition.
     |   |-- live.ts                   Tauri live-session event/invoke client.
-    |   |-- recording-queue.ts        Durable recording-job invoke/projection client and one-time legacy migration.
+    |   |-- recording-queue.ts        Durable recording-job projection client and legacy recovery notice.
     |   |-- settings.ts               Tauri fallback/setup event/invoke client.
     |   |-- history.ts                localStorage transcript history.
     |   |-- polish.ts                 Text polish client.
@@ -74,7 +74,7 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
         |-- tauri.conf.json           Window and stock bundle config.
         |-- examples/nemotron_profile.rs Local live runtime profiler.
         |-- tests/parity.rs           Mock verbose-json parity contract.
-        |-- tests/job_ledger.rs       File-backed restart and idempotent legacy migration proof.
+        |-- tests/job_ledger.rs       File-backed restart, bounds, and transition proof.
         |-- tests/server_connector.rs Health/failure/retry and Python contract integration proof.
         `-- src/
             |-- app.rs                App/tray/window lifecycle.
@@ -107,7 +107,17 @@ work, plus setup/install/remove controls for the pinned sherpa model artifacts.
    remain queued until Phase 5 connects them to the isolated server batch pool,
    instead of silently producing official-looking local transcripts.
 
-Imported recording jobs use Rust-minted string IDs and a SQLite ledger as authority. React renders typed snapshots/events. The old `yap.recordingQueue.v1` localStorage value is read only by the one-time legacy importer and is deleted only after Rust acknowledges every row; it is never execution authority. The Phase 3 connector validates configured server origins and capability health, but it does not upload, drain, or transcribe queued imports. The Phase 4 worker is server-internal and does not change those advertised capabilities.
+Imported recording jobs use Rust-minted string IDs and a SQLite ledger as
+authority. React renders typed snapshots/events, while the native picker and
+native OS-drop path establish source authority without accepting renderer raw
+pathnames. The old `yap.recordingQueue.v1` localStorage value is never migrated
+or executed automatically; it remains visible only as a recovery reference
+until the user explicitly discards it and re-adds trusted files through the
+native picker. The Phase 3 connector validates configured server origins and
+capability health, and native code requires explicit approval of the exact
+origin before opening health sockets or retries. It does not upload, drain, or
+transcribe queued imports. The Phase 4 worker is server-internal and does not
+change those advertised capabilities.
 
 ## Development
 

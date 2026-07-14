@@ -3,37 +3,34 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { emitLiveOverlayLevel, LiveOverlay } from "@/components/live/live-overlay";
 import {
   listenLiveLevel,
-  listenLiveSession,
-  liveStatus,
+  listenLiveOverlaySession,
+  liveOverlayStatus,
   showMainWorkspace,
-  startLiveSession,
-  stopLiveSession,
+  startLiveOverlaySession,
+  stopLiveOverlaySession,
 } from "@/live";
-import type { LiveSessionView } from "@/lib/app-types";
+import type { LiveOverlayView } from "@/lib/app-types";
 
 const liveStatuses = ["idle", "armed", "listening", "speaking", "settling", "blocked", "saving"] as const;
 const liveCaptureModes = ["pushToTalk", "toggle"] as const;
-const liveRoutes = ["serverLive", "localFallback", "blocked", "none"] as const;
 const liveVisibilities = ["enabled", "hidden"] as const;
 const previewEventName = "yap-live-overlay-preview";
 
-const previewLiveView: LiveSessionView = {
+const previewLiveView: LiveOverlayView = {
   captureMode: "pushToTalk",
-  hotkey: "Ctrl+Shift+Space",
-  pasteHotkey: "Ctrl+Shift+Alt+V",
-  route: "none",
+  hasFinalText: false,
   status: "idle",
   visibility: "enabled",
 };
 
 export function LiveOverlayHost() {
   const previewMode = isPreviewMode();
-  const [view, setView] = useState<LiveSessionView>(() => previewMode ? previewLiveViewFromSearch() : previewLiveView);
+  const [view, setView] = useState<LiveOverlayView>(() => previewMode ? previewLiveViewFromSearch() : previewLiveView);
 
   useEffect(() => {
     if (previewMode) {
       const handlePreviewEvent = (event: Event) => {
-        const detail = (event as CustomEvent<Partial<LiveSessionView>>).detail ?? {};
+        const detail = (event as CustomEvent<Partial<LiveOverlayView>>).detail ?? {};
         setView((current) => ({ ...current, ...detail }));
       };
 
@@ -42,21 +39,29 @@ export function LiveOverlayHost() {
     }
 
     let cancelled = false;
+    let refreshEpoch = 0;
     let unlistenLevel: (() => void) | undefined;
     let unlisten: (() => void) | undefined;
-    void liveStatus().then(setView).catch(() => undefined);
-    void listenLiveSession(setView).then((stop) => {
+    const refreshFromNative = () => {
+      const epoch = ++refreshEpoch;
+      void liveOverlayStatus().then((nativeView) => {
+        if (!cancelled && epoch === refreshEpoch) setView(nativeView);
+      }).catch(() => undefined);
+    };
+    // Install the invalidation listener before the first read so a native
+    // transition cannot land between an initial snapshot and subscription.
+    void listenLiveOverlaySession(refreshFromNative).then((stop) => {
       if (cancelled) {
         stop();
         return;
       }
       unlisten = stop;
+      refreshFromNative();
+    }).catch(() => {
+      if (!cancelled) refreshFromNative();
     });
     void listenLiveLevel((level) => {
       emitLiveOverlayLevel(level.level ?? 0);
-      setView((current) => current.status === level.status
-        ? current
-        : { ...current, level: level.level, status: level.status });
     }).then((stop) => {
       if (cancelled) {
         stop();
@@ -85,45 +90,38 @@ export function LiveOverlayHost() {
           setView((current) => ({ ...current, activeCaptureMode: undefined, level: 0, status: "saving" }));
           return;
         }
-        void stopLiveSession().then(setView);
+        void stopLiveOverlaySession().then(setView);
       }}
       view={view}
     />
   );
 }
 
-function startToggleSession(previewMode: boolean, setView: Dispatch<SetStateAction<LiveSessionView>>) {
+function startToggleSession(previewMode: boolean, setView: Dispatch<SetStateAction<LiveOverlayView>>) {
   if (previewMode) {
     setView((current) => ({
       ...current,
       activeCaptureMode: "toggle",
       level: 0.56,
-      route: "localFallback",
       status: "listening",
     }));
     return;
   }
-  void startLiveSession("toggle").then(setView);
+  void startLiveOverlaySession("toggle").then(setView);
 }
 
 function isPreviewMode() {
   return import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "live-overlay";
 }
 
-function previewLiveViewFromSearch(): LiveSessionView {
+function previewLiveViewFromSearch(): LiveOverlayView {
   const params = new URLSearchParams(window.location.search);
   return {
     captureMode: oneOf(params.get("captureMode"), liveCaptureModes) ?? previewLiveView.captureMode,
     activeCaptureMode: oneOf(params.get("activeCaptureMode"), liveCaptureModes),
     error: params.get("error") ?? undefined,
-    finalText: params.get("finalText") ?? undefined,
-    hotkey: params.get("hotkey") ?? previewLiveView.hotkey,
-    pasteHotkey: params.get("pasteHotkey") ?? previewLiveView.pasteHotkey,
-    inputDeviceId: params.get("inputDeviceId") ?? undefined,
-    inputDeviceLabel: params.get("inputDeviceLabel") ?? undefined,
+    hasFinalText: params.get("hasFinalText") === "true",
     level: numberParam(params.get("level")),
-    partialText: params.get("partialText") ?? undefined,
-    route: oneOf(params.get("route"), liveRoutes) ?? previewLiveView.route,
     status: oneOf(params.get("status"), liveStatuses) ?? previewLiveView.status,
     visibility: oneOf(params.get("visibility"), liveVisibilities) ?? previewLiveView.visibility,
   };

@@ -15,9 +15,13 @@ import { fileURLToPath } from "node:url";
 
 export const MICROPHONE_PERMISSION_DENIED_PREFIX = "Microphone permission denied:";
 
-export async function registerTask8bLifecycleListeners() {
+export async function registerTask8bLifecycleListeners(_tauri, options = {}) {
   const event = globalThis.__TAURI__?.event;
-  if (!event?.listen) throw new Error("Tauri event API is unavailable in the overlay WebView.");
+  if (!event?.listen) throw new Error("Tauri event API is unavailable in the current WebView.");
+  const target = options.target ?? "overlay";
+  if (target !== "main" && target !== "overlay") {
+    throw new Error("Lifecycle listener target must be main or overlay.");
+  }
 
   const state = {
     levels: [],
@@ -49,15 +53,18 @@ export async function registerTask8bLifecycleListeners() {
   };
 
   try {
-    state.unlisteners.push(
-      await event.listen("live-session", ({ payload }) => state.sessions.push(payload)),
-    );
-    state.unlisteners.push(
-      await event.listen("live-level", ({ payload }) => state.levels.push(payload)),
-    );
-    state.unlisteners.push(
-      await event.listen("live-session-saved", ({ payload }) => state.saved.push(payload)),
-    );
+    if (target === "overlay") {
+      state.unlisteners.push(
+        await event.listen("live-overlay-session", ({ payload }) => state.sessions.push(payload)),
+      );
+      state.unlisteners.push(
+        await event.listen("live-level", ({ payload }) => state.levels.push(payload)),
+      );
+    } else {
+      state.unlisteners.push(
+        await event.listen("live-session-saved", ({ payload }) => state.saved.push(payload)),
+      );
+    }
     return state.unlisteners.length;
   } catch (registrationError) {
     try {

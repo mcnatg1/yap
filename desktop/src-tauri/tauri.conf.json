@@ -23,8 +23,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob: http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http://127.0.0.1:*; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob: http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http://127.0.0.1:*; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob: http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http://127.0.0.1:*; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob: http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http://127.0.0.1:*; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
@@ -42,6 +42,10 @@
       "../../THIRD_PARTY_PROVENANCE.json": "THIRD_PARTY_PROVENANCE.json"
     },
     "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
       "nsis": {
         "installMode": "currentUser"
       }

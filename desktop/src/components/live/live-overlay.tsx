@@ -20,7 +20,7 @@ import {
   type OverlayModel,
 } from "@/components/live/live-overlay-state";
 import { createNativeSurfaceSync } from "@/components/live/native-surface-sync";
-import { type LiveSessionView } from "@/lib/app-types";
+import { type LiveOverlayView } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 
 type LiveOverlayProps = {
@@ -29,7 +29,7 @@ type LiveOverlayProps = {
   onRetry?: () => void;
   onStart?: () => void;
   onStop?: () => void;
-  view: LiveSessionView;
+  view: LiveOverlayView;
 };
 
 export function LiveOverlay({
@@ -49,7 +49,7 @@ export function LiveOverlay({
   const previousStatusRef = useRef(view.status);
   const collapseTimerRef = useRef<number | undefined>(undefined);
   const successTimerRef = useRef<number | undefined>(undefined);
-  const hasCopyableFinal = Boolean(model.finalText?.trim());
+  const hasCopyableFinal = model.hasFinalText;
   const surface = overlaySurface(model, expanded, successVisible && hasCopyableFinal);
   const previewFrame = native ? undefined : previewOverlayFrame(surface);
   const rootFrameStyle: CSSProperties | undefined = previewFrame;

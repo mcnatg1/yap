@@ -27,7 +27,7 @@ function requiredIsolationPath(name) {
   return value;
 }
 
-function restartSessionCapabilities(port, appDataRoot, liveRoot, modelsRoot, webviewRoot) {
+function restartSessionCapabilities(port, appDataRoot, liveRoot, modelsRoot, webviewRoot, pickerPath) {
   const capabilities = createTauriCapabilities(appBinaryPath, {
     driverProvider: "embedded",
     logLevel: "info",
@@ -45,6 +45,7 @@ function restartSessionCapabilities(port, appDataRoot, liveRoot, modelsRoot, web
       YAP_APP_DATA_DIR: appDataRoot,
       YAP_LIVE_RECORDINGS_DIR: liveRoot,
       YAP_MODELS_DIR: modelsRoot,
+      YAP_WDIO_PICKER_PATH: pickerPath,
       YAP_WDIO_RUN_ROOT: requiredIsolationPath("YAP_WDIO_RUN_ROOT"),
     },
     startTimeout: 60_000,
@@ -235,16 +236,12 @@ describe("Yap desktop shell", () => {
     let secondProcessId;
     try {
       firstSession = await startWdioSession(
-        restartSessionCapabilities(firstPort, appDataRoot, liveRoot, modelsRoot, firstWebviewRoot),
+        restartSessionCapabilities(firstPort, appDataRoot, liveRoot, modelsRoot, firstWebviewRoot, sourcePath),
       );
       await firstSession.tauri.switchWindow("main");
       firstProcessId = await findProcessIdListeningOn(firstPort);
-      const created = await firstSession.tauri.execute(
-        ({ core }, recordingPath) => core.invoke("recording_jobs_create_imports", {
-          paths: [recordingPath],
-        }),
-        sourcePath,
-      );
+      const created = await firstSession.tauri.execute(({ core }) =>
+        core.invoke("recording_jobs_pick_imports"));
       expect(created).toHaveLength(1);
       expect(created[0].status).toBe("queued_server");
       expect(typeof created[0].id).toBe("string");
@@ -259,7 +256,7 @@ describe("Yap desktop shell", () => {
       firstSession = undefined;
 
       secondSession = await startWdioSession(
-        restartSessionCapabilities(secondPort, appDataRoot, liveRoot, modelsRoot, secondWebviewRoot),
+        restartSessionCapabilities(secondPort, appDataRoot, liveRoot, modelsRoot, secondWebviewRoot, sourcePath),
       );
       await secondSession.tauri.switchWindow("main");
       secondProcessId = await findProcessIdListeningOn(secondPort);

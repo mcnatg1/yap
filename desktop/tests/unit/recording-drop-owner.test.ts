@@ -7,11 +7,10 @@ const hookSource = readFileSync(
 );
 
 describe("recording drop ownership", () => {
-  it("reports a rejected native recording drop without changing browser preview behavior", () => {
-    expect(hookSource).toContain("fireAndReport(");
-    expect(hookSource).toContain("const { paths } = event.payload");
-    expect(hookSource).toContain("onDropPathsRef.current(paths)");
-    expect(hookSource).toMatch(/toast\.error\([^)]*Could not add recordings/);
+  it("keeps dropped paths native while preserving visual and error feedback", () => {
+    expect(hookSource).not.toMatch(/event\.payload\.paths|\{ paths \}/);
+    expect(hookSource).toContain('listen<string>("recording-jobs-import-error"');
+    expect(hookSource).toMatch(/toast\.error\(`Could not add recordings:/);
     expect(hookSource).toContain('if (!isTauri()) toast.info("Preview only")');
   });
 });

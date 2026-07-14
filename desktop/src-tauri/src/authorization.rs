@@ -5,8 +5,12 @@ pub(crate) fn is_main_window(label: &str) -> bool {
     label == MAIN_WINDOW_LABEL
 }
 
+fn is_live_overlay_window(label: &str) -> bool {
+    label == LIVE_OVERLAY_WINDOW_LABEL
+}
+
 fn is_main_or_overlay_window(label: &str) -> bool {
-    is_main_window(label) || label == LIVE_OVERLAY_WINDOW_LABEL
+    is_main_window(label) || is_live_overlay_window(label)
 }
 
 fn forbidden_command_window_message() -> String {
@@ -21,6 +25,12 @@ pub(crate) fn ensure_main(window: &tauri::WebviewWindow) -> Result<(), String> {
 
 pub(crate) fn ensure_main_or_overlay(window: &tauri::WebviewWindow) -> Result<(), String> {
     is_main_or_overlay_window(window.label())
+        .then_some(())
+        .ok_or_else(forbidden_command_window_message)
+}
+
+pub(crate) fn ensure_live_overlay(window: &tauri::WebviewWindow) -> Result<(), String> {
+    is_live_overlay_window(window.label())
         .then_some(())
         .ok_or_else(forbidden_command_window_message)
 }
@@ -53,6 +63,10 @@ mod tests {
         assert!(is_main_or_overlay_window(MAIN_WINDOW_LABEL));
         assert!(is_main_or_overlay_window(LIVE_OVERLAY_WINDOW_LABEL));
         assert!(!is_main_or_overlay_window("settings"));
+
+        assert!(!is_live_overlay_window(MAIN_WINDOW_LABEL));
+        assert!(is_live_overlay_window(LIVE_OVERLAY_WINDOW_LABEL));
+        assert!(!is_live_overlay_window("settings"));
     }
 
     #[test]

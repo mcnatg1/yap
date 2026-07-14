@@ -66,7 +66,7 @@ Every implementation plan must list its applied ADRs, superseded details it inte
 | [0010](0010-okf-conversation-schema.md) | OKF conversation schema | Accepted Markdown/YAML and raw-preservation principles; canonical Phase 9 format superseded by [0022](0022-google-okf-permission-safe-projections.md) |
 | [0011](0011-vector-rag-retrieval.md) | Vector index + RAG retrieval (L6–L7) | Accepted principles; team storage/projection amended by [0017](0017-knowledge-base-compiler.md) and [0022](0022-google-okf-permission-safe-projections.md) |
 | [0012](0012-mcp-server-surface.md) | MCP server surface | Accepted surface; team hosting amended by [0017](0017-knowledge-base-compiler.md) |
-| [0013](0013-global-hotkey-injection.md) | Global hotkey + cross-app injection (L1) | Accepted (Windows active; cross-platform follow-on) |
+| [0013](0013-global-hotkey-injection.md) | Global hotkey + safe cross-app delivery (L1) | Accepted as amended 2026-07-14 (Windows clipboard delivery active; cross-platform follow-on) |
 | [0014](0014-server-tier-compute-topology.md) | Server-tier compute topology — thin client + GB-class workload router | Accepted (canonical Phases 3–5) |
 | [0015](0015-two-pass-diarization-speaker-identity.md) | Two-pass diarization and speaker identity (ECAPA-TDNN + VBx) | Superseded by [0020](0020-meeting-capture-diarization-authority.md) |
 | [0016](0016-auth-identity-bridge.md) | Authentication and voice identity bridge (Entra ID + MSAL) | Accepted (canonical Phase 7) |

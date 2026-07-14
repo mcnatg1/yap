@@ -30,7 +30,7 @@ Yap has two product modes with different critical paths:
 | **Dictation** | Microphone | None | Local or server ASR result according to route policy |
 | **Meeting** | Microphone; optional system loopback later | Local anonymous evidence when available; server reconciliation when connected | Server result is authoritative when present |
 
-Diarization never blocks microphone capture, local dictation ASR, text injection, or recording persistence.
+Diarization never blocks microphone capture, local dictation ASR, safe transcript delivery, or recording persistence.
 
 Product mode is independent from session origin. `SessionOrigin` is `LiveCapture` or `ImportedFile`; an imported file may contain unknown or mixed physical provenance and must not be mislabeled as microphone or system loopback.
 

@@ -52,13 +52,15 @@ describe("Rust recording job ownership", () => {
     expect(hookSource).toContain("discardLegacyQueue");
     const discardOwner = hookSource.slice(
       hookSource.indexOf("const discardLegacyQueue"),
-      hookSource.indexOf("const addPaths"),
+      hookSource.indexOf("const addRecordings"),
     );
     expect(discardOwner).toContain("setStartupAttempt");
   });
 
-  it("routes create, remove, retry, and clear through Rust commands", () => {
-    expect(hookSource).toContain("createRecordingImports(paths)");
+  it("routes native picker create, remove, retry, and clear through Rust commands", () => {
+    expect(hookSource).toContain("pickRecordingImports()");
+    expect(bridgeSource).toContain('invoke<RecordingJobView[]>("recording_jobs_pick_imports")');
+    expect(bridgeSource).not.toMatch(/recording_jobs_create_imports|recording_jobs_import_legacy/);
     expect(hookSource).toContain("cancelRecordingJob(id)");
     expect(hookSource).toContain("dismissRecordingJob(id)");
     expect(hookSource).toContain("retryRecordingJob(id)");

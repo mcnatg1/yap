@@ -1,4 +1,4 @@
-import type { LiveCaptureMode, LiveSessionView } from "@/lib/app-types";
+import type { LiveCaptureMode, LiveOverlayView } from "@/lib/app-types";
 
 type OverlayPhase = "idle" | "initializing" | "recording" | "processing" | "feedback";
 export type OverlaySurface = "collapsed" | "expanded" | Exclude<OverlayPhase, "idle"> | "success";
@@ -6,10 +6,7 @@ export type OverlaySurface = "collapsed" | "expanded" | Exclude<OverlayPhase, "i
 export type OverlayModel = {
   audioLevel: number;
   errorMessage?: string;
-  finalText?: string;
-  hotkey: string;
-  inputDeviceLabel?: string;
-  partialText?: string;
+  hasFinalText: boolean;
   phase: OverlayPhase;
   recordingTriggerMode: "hold" | "toggle";
 };
@@ -28,13 +25,10 @@ const previewSurfaceFrames: Record<OverlaySurface, { height: number; width: numb
   success: { height: 40, width: 168 },
 };
 
-export function modelFromLiveView(view: LiveSessionView): OverlayModel {
+export function modelFromLiveView(view: LiveOverlayView): OverlayModel {
   const triggerMode = triggerModeFromCaptureMode(view.activeCaptureMode ?? view.captureMode);
   const base = {
-    finalText: view.finalText ?? undefined,
-    hotkey: view.hotkey,
-    inputDeviceLabel: view.inputDeviceLabel ?? undefined,
-    partialText: view.partialText ?? undefined,
+    hasFinalText: view.hasFinalText,
   };
   if (view.status === "idle") {
     if (view.error) {

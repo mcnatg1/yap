@@ -1,7 +1,7 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-13)
-**Authority:** Decisions are normative according to status in [ADR 0001–0022](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
+**Status:** Living document (2026-07-14)
+**Authority:** Decisions are normative according to status in [ADR 0001–0023](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 For implementation truth rather than decision intent, use the living [ADR implementation status audit](ADR-IMPLEMENTATION-STATUS.md). An accepted ADR or a documented flowchart node is not proof that its code exists.
 
@@ -35,7 +35,7 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | **Scope creep** | Ship desktop history/playback → local live fallback → server STT → preprocessing → diarization → L3 OKF in that order. |
 | **Target local runtimes** | Today only the in-process sherpa live recognizer exists. If the deferred solo LLM and evidence workers ship, keep their lifecycle bounded and release them by measured idle/resource policy. |
 | **Local ASR dependency** | Pin artifacts; verify hashes; profile chunk/latency; CI smoke tests. |
-| **Wispr comparison on v1** | Keep hotkey + focused-field injection client-owned and regression-tested; never make insertion depend on the server. |
+| **Wispr comparison on v1** | Keep hotkeys and safe cross-app delivery client-owned and regression-tested; use clipboard delivery today, and require proof of exact-field authority before any future direct insertion. |
 | **OKF/agents before core STT** | Transcripts history first; OKF Phase 9. |
 
 ### Verdict
@@ -229,7 +229,7 @@ Full Voice OS target flowchart reconciled for Yap — **live + batch**, orchestr
 ```mermaid
 flowchart TB
     User["User"]
-    Hotkey["Global hotkey / foreground text field"]
+    Hotkey["Global hotkey / clipboard delivery"]
 
     subgraph UI["Yap UI — Tauri + React"]
         Transcribe["Transcribe / queue panel"]
@@ -262,7 +262,7 @@ flowchart TB
         MS["Nemotron INT8 · sherpa-onnx · English"]
         ScribeL["DEFERRED Scribe · llama-server<br/>≤ 400 ms · dual-track raw+polished"]
         Ghost["Ghost / in-app preview · v1"]
-        Injector["Windows focused-field inject<br/>clipboard fallback"]
+        Injector["Windows clipboard delivery<br/>visible paste guidance"]
     end
 
     subgraph L2Batch["L2 batch — server path · Yap recording quality"]
@@ -371,7 +371,7 @@ Everything from the original 7-layer flowchart and master spec is represented be
 
 | Original flowchart node | Decision documented? | Where | Yap decision (if changed) |
 |-------------------------|-------------|-------|---------------------------|
-| **L1** Global OS listeners | ✅ | ADR 0013 | Tauri hotkeys + Windows target-validated injection are active; other platforms follow |
+| **L1** Global OS listeners | ✅ | ADR 0013 | Tauri hotkeys, bounded native physical-chord enrollment, and Windows clipboard delivery are active; other platforms follow |
 | **L1** Pre-warm (llama.cpp KV, mic, Silero) | ✅ | ADR 0002, 0005, 0019 | Warm **Nemotron recognizer** is implemented; llama-server and Silero are deferred |
 | **L2** Mic, WebRTC/AGC clean | ✅ | § L2 | Capture foundation is implemented; AGC and Silero are deferred |
 | **L2** VAD | ✅ Reconciled | Local audio spec, ADR 0020 | Advisory boundaries and endpointing; false negatives never erase source audio |
@@ -379,7 +379,7 @@ Everything from the original 7-layer flowchart and master spec is represented be
 | **L2** ASR | ✅ Reconciled | ADR 0001–0002/0014/0019 | **Nemotron local fallback**; **server router** for official recordings/live |
 | **L2** Post-LLM (Llama 3 8B) | ✅ Reconciled | ADR 0005 | Deferred **llama-server** target; current development Polish uses Ollama |
 | **L2** Ghost preview | ✅ | § L2 | In-app panel v1 |
-| **L2** Cross-app injector | ✅ | ADR 0013 + `live/injection.rs` | Revalidate stop-time target; Unicode input; visible clipboard fallback |
+| **L2** Cross-app delivery | ✅ | ADR 0013 + `live/injection.rs` | Copy the completed transcript with a Yap-owned Windows clipboard operation and show visible paste guidance; synthesized input is disabled |
 | **L2** Bounded track handoff | ✅ Reconciled | Local audio spec, ADR 0020 | Independent sinks, content identity, and explicit gaps |
 | **L3** Handoff audio + raw text | ✅ Reconciled | ADR 0020 | Versioned source tracks and immutable raw artifacts |
 | **L3** Forced alignment | ✅ Reconciled | ADR 0007, ADR 0020 | Align raw text only; server result is authoritative |
@@ -402,7 +402,7 @@ Everything from the original 7-layer flowchart and master spec is represented be
 | **16 GB RAM budget** | ✅ Reconciled | ADR 0020 | No diarization model is promoted without measured CPU, RSS, and latency evidence |
 | **Recordings / file drop (Yap)** | ✅ | ADR 0001, 0003, 0014 | Server batch only; queue/block during disconnects; never use local Nemotron |
 
-Rows marked as future remain architecture-only. The Windows hotkey/injection path, local live fallback, Nemotron-gated source-aware microphone capture, bounded recording/local-ASR fan-out, and durable recording/recovery path are implemented client behavior. Bounded evidence and transport ports exist, but their production consumers are not wired.
+Rows marked as future remain architecture-only. The Windows hotkey/clipboard-delivery path, local live fallback, Nemotron-gated source-aware microphone capture, bounded recording/local-ASR fan-out, native recording-file admission, and durable recording/recovery path are implemented client behavior. Bounded evidence and transport ports exist, but their production consumers are not wired.
 
 ---
 
@@ -410,8 +410,8 @@ Rows marked as future remain architecture-only. The Windows hotkey/injection pat
 
 | Layer | Name | Yap phase | Role |
 |-------|------|-----------|------|
-| **L1** | OS listeners + pre-warm | Current client | Hotkey, foreground-field injection, warm recognizer/mic |
-| **L2** | Real-time critical path | Current + follow-on | Nemotron → UI/inject now; optional Scribe later |
+| **L1** | OS listeners + pre-warm | Current client | Hotkeys, clipboard delivery, warm recognizer/mic |
+| **L2** | Real-time critical path | Current + follow-on | Nemotron → UI/copy now; optional Scribe later |
 | **L3** | Async background | 8–9 | Align, diarize, stitch, OKF |
 | **L4** | Google OKF knowledge base | 9 | Markdown/YAML concepts, typed Yap relationships, Git history, permission-safe projections |
 | **L5** | Agentic feedback | 9 | Student, Curator, Auditor |
@@ -426,8 +426,8 @@ Rows marked as future remain architecture-only. The Windows hotkey/injection pat
 Nemotron INT8 startup (required before current production capture)
 Mic → bounded capture/preprocess → Nemotron INT8 (sherpa-onnx)
   → partial/final state → overlay
-  → stop-time target revalidation → Windows Unicode injection
-  → clipboard fallback when target/input validation fails
+  → Windows clipboard delivery with Yap HWND ownership
+  → visible manual-paste status; no synthesized input
   → track-aware prepared frames + exact gaps
       → independent bounded recording + local-ASR consumers
       → bounded evidence + transport ports (production consumers not wired)
@@ -443,7 +443,7 @@ The following includes deferred components. Today the production coordinator wir
 Mic → optional AGC → Silero VAD                         [deferred]
   → Nemotron INT8 (sherpa-onnx, English)       ← live tokens
   → llama-server polish (Scribe) if <400ms budget   [deferred]
-  → ghost UI + focused-field injection (Windows)   ← clipboard fallback if blocked
+  → ghost UI + clipboard delivery (Windows)        ← direct field insertion deferred
 
 Parallel (never blocks above):
   prepared microphone frames + explicit gaps
@@ -595,7 +595,7 @@ Idle ↔ ServerQueued ↔ ServerUploading   (GB-class server Cohere)
 
 These rules prevent the repeated UI and runtime churn we have been seeing. They are part of the architecture contract, not polish notes.
 
-**Current implementation:** the convergence client now keeps one continuously reused `live-overlay`. React projects semantic surfaces and never receives native resize/position permissions; Rust is the sole production bounds owner, top-centers `104×40` collapsed and `180×88` expanded frames, sizes compact status surfaces exactly, and applies a rounded Windows hit region. The 200 ms collapse grace keeps the visible target present. Shortcut settings use an explicitly armed physical-code recorder with normalized persistence, reserved/conflict validation, Cancel, per-action Reset, and transactional rollback. Dictation defaults to `Ctrl+Shift+Space`; paste-last defaults to the deliberately less collision-prone `Ctrl+Shift+Alt+V`. Remaining client gaps are macOS/Linux injection adapters, broader real-application/elevation evidence, and optional real-model/hardware lifecycle proof.
+**Current implementation:** the convergence client now keeps one continuously reused `live-overlay`. React projects semantic surfaces and never receives native resize/position permissions; Rust is the sole production bounds owner, top-centers `104×40` collapsed and `180×88` expanded frames, sizes compact status surfaces exactly, and applies a rounded Windows hit region. The 200 ms collapse grace keeps the visible target present. Shortcut changes require native confirmation and one bounded 15-second Rust/Windows physical-chord epoch; the recorder waits for neutral/chord/release, ignores ordinary typing without the required modifiers, persists only a normalized chord, and retains reserved/conflict validation, Cancel, per-action Reset, and transactional rollback. Dictation defaults to `Ctrl+Shift+Space`; paste-last defaults to the deliberately less collision-prone `Ctrl+Shift+Alt+V`. Completed transcripts use clipboard-only delivery with visible paste guidance; Yap does not synthesize focused-field input. Remaining client gaps are macOS/Linux hotkey/clipboard adapters, broader real-application clipboard evidence, and optional real-model/hardware lifecycle proof.
 
 | Surface | Do | Do not |
 |---------|----|--------|
@@ -863,7 +863,7 @@ Current implementation ownership and completeness for all decisions: [ADR implem
 | OKF conversation schema | [0010](adr/0010-okf-conversation-schema.md) |
 | Vector index + RAG retrieval | [0011](adr/0011-vector-rag-retrieval.md) |
 | MCP server surface | [0012](adr/0012-mcp-server-surface.md) |
-| Global hotkey + injection (L1) | [0013](adr/0013-global-hotkey-injection.md) |
+| Global hotkey + safe cross-app delivery (L1) | [0013](adr/0013-global-hotkey-injection.md) |
 | Server tier topology + thin client + workload router + two profiles | [0014](adr/0014-server-tier-compute-topology.md) |
 | Superseded server-only diarization decision | [0015](adr/0015-two-pass-diarization-speaker-identity.md) |
 | Auth + identity bridge (Entra ID / MSAL, `(tid, oid)`, biometric purpose authorization) | [0016](adr/0016-auth-identity-bridge.md) |

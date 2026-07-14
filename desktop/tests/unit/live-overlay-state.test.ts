@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { LiveSessionView } from "@/lib/app-types";
+import type { LiveOverlayView } from "@/lib/app-types";
 
 import {
   collapseGraceMs,
@@ -9,11 +9,9 @@ import {
   previewOverlayFrame,
 } from "@/components/live/live-overlay-state";
 
-const baseView: LiveSessionView = {
+const baseView: LiveOverlayView = {
   captureMode: "pushToTalk",
-  hotkey: "Control+Win",
-  pasteHotkey: "",
-  route: "localFallback",
+  hasFinalText: false,
   status: "idle",
   visibility: "enabled",
 };
@@ -83,8 +81,8 @@ describe("live overlay state projection", () => {
   });
 
   it("derives success and failure affordance surfaces from current state", () => {
-    const idleWithText = modelFromLiveView({ ...baseView, finalText: "done" });
-    const blocked = modelFromLiveView({ ...baseView, error: "Mic denied", route: "blocked", status: "blocked" });
+    const idleWithText = modelFromLiveView({ ...baseView, hasFinalText: true });
+    const blocked = modelFromLiveView({ ...baseView, error: "Mic denied", status: "blocked" });
 
     expect(overlaySurface(idleWithText, false, true)).toBe("success");
     expect(previewOverlayFrame("success")).toEqual({ height: 40, width: 168 });
@@ -96,7 +94,7 @@ describe("live overlay state projection", () => {
     const fallback = modelFromLiveView({
       ...baseView,
       error: "Couldn't insert text here. Transcript copied; press Ctrl+V.",
-      finalText: "done",
+      hasFinalText: true,
     });
 
     expect(fallback.phase).toBe("feedback");

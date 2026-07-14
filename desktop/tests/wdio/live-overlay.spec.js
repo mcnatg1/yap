@@ -476,49 +476,41 @@ describe("Yap live overlay window", () => {
     expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
   });
 
-  it("registers a normalized safe shortcut and rejects reserved replacements", async () => {
+  it("does not expose raw renderer shortcut mutation commands", async () => {
     await browser.tauri.switchWindow("main");
     const original = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
 
-    try {
-      const changed = await browser.tauri.execute(({ core }) =>
-        core.invoke("set_live_hotkey", { hotkey: " alt + control + shift + f11 " }));
-      expect(changed.hotkey).toBe("Ctrl+Shift+Alt+F11");
-
-      const reserved = await browser.tauri.execute(async ({ core }) => {
+    for (const command of ["set_live_hotkey", "set_live_paste_hotkey"]) {
+      const result = await browser.tauri.execute(async ({ core }, unavailableCommand) => {
         try {
-          await core.invoke("set_live_hotkey", { hotkey: "Ctrl+Meta+7" });
+          await core.invoke(unavailableCommand, { hotkey: "Ctrl+Shift+Alt+F11" });
           return { message: "", ok: true };
         } catch (error) {
           return { message: String(error), ok: false };
         }
-      });
-      expect(reserved.ok).toBe(false);
-      expect(reserved.message).toContain("reserved by Windows");
-
-      const unchanged = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
-      expect(unchanged.hotkey).toBe("Ctrl+Shift+Alt+F11");
-
-      const reset = await browser.tauri.execute(({ core }) => core.invoke("reset_live_hotkey"));
-      expect(reset.hotkey).toBe("Ctrl+Shift+Space");
-    } finally {
-      if (original.hotkey) {
-        await browser.tauri.execute(
-          ({ core }, hotkey) => core.invoke("set_live_hotkey", { hotkey }),
-          original.hotkey,
-        );
-      } else {
-        await browser.tauri.execute(({ core }) => core.invoke("clear_live_hotkey"));
-      }
+      }, command);
+      expect(result.ok).toBe(false);
+      expect(result.message.toLowerCase()).toContain("not found");
     }
+
+    const unchanged = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+    expect(unchanged.hotkey).toBe(original.hotkey);
+    expect(unchanged.pasteHotkey).toBe(original.pasteHotkey);
   });
 
-  it("allows live status, rejects privileged commands, and survives close attempts", async () => {
+  it("allows only minimized overlay status, rejects privileged commands, and survives close attempts", async () => {
     await showIdleOverlay();
     await browser.tauri.switchWindow("live-overlay");
 
     const authorization = await browser.tauri.execute(async ({ core }) => {
-      const live = await core.invoke("live_status");
+      const live = await core.invoke("live_overlay_status");
+      let fullLive;
+      try {
+        await core.invoke("live_status");
+        fullLive = { ok: true, message: "" };
+      } catch (error) {
+        fullLive = { ok: false, message: String(error) };
+      }
       let setup;
       try {
         await core.invoke("setup_status");
@@ -533,9 +525,16 @@ describe("Yap live overlay window", () => {
       } catch (error) {
         file = { ok: false, message: String(error) };
       }
-      return { file, live, setup };
+      return { file, fullLive, live, setup };
     });
     expect(typeof authorization.live.status).toBe("string");
+    expect(authorization.live.hasFinalText).toBe(false);
+    expect(authorization.live).not.toHaveProperty("partialText");
+    expect(authorization.live).not.toHaveProperty("finalText");
+    expect(authorization.live).not.toHaveProperty("inputDeviceId");
+    expect(authorization.live).not.toHaveProperty("inputDeviceLabel");
+    expect(authorization.fullLive.ok).toBe(false);
+    expect(authorization.fullLive.message).toContain("Command is not available from this window.");
     expect(authorization.setup.ok).toBe(false);
     expect(authorization.setup.message).toContain("Command is not available from this window.");
     expect(authorization.file.ok).toBe(false);

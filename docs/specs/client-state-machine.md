@@ -17,7 +17,13 @@ This is the build contract for the client workflow. It replaces the cosmetic rea
 
 Imported recording-job authority belongs in Tauri Rust. `RecordingJobs`, the SQLite `JobLedger`, and the connector/runtime state own durable identity and lifecycle mutations; React projects typed snapshots/events.
 
-The desktop bridge uses Rust-minted string IDs and a SQLite ledger. `yap.recordingQueue.v1` is supported only as an idempotent one-time migration source: React deletes it after Rust acknowledges every legacy row, and replay after an interrupted acknowledgement cannot create duplicate rows. Do not add a second readiness or queue owner in React or localStorage.
+The desktop bridge uses Rust-minted string IDs and a SQLite ledger. New imports
+enter only through the native picker or native OS-drop admission path; renderer
+code never supplies a raw pathname. The historical `yap.recordingQueue.v1`
+value is retained only as a visible recovery reference and is not migrated or
+deleted automatically. Users explicitly discard it and re-add trusted files
+through the native picker. Do not add a second readiness or queue owner in
+React or localStorage.
 
 ## State Axes
 
@@ -186,16 +192,15 @@ flowchart LR
 
 ### Implemented recording-job command boundary
 
-The main WebView can call six Rust commands:
+The main WebView can call five recording-job commands:
 
 - `recording_jobs_snapshot`
-- `recording_jobs_create_imports`
-- `recording_jobs_import_legacy`
+- `recording_jobs_pick_imports`
 - `recording_job_cancel`
 - `recording_job_retry`
 - `recording_job_dismiss`
 
-The sixth command is deliberate. Failed rows would otherwise consume the bounded 200-job recoverable capacity forever. `recording_job_dismiss` applies the centrally classified `Dismiss` policy for `failed -> cancelled`; generic transition and cancellation paths reject that archival edge. Dismissal sets `cancellation_requested`, preserves source/error provenance and external source bytes, and releases Yap's playback authority.
+The fifth command is deliberate. Failed rows would otherwise consume the bounded 200-job recoverable capacity forever. `recording_job_dismiss` applies the centrally classified `Dismiss` policy for `failed -> cancelled`; generic transition and cancellation paths reject that archival edge. Dismissal sets `cancellation_requested`, preserves source/error provenance and external source bytes, and releases Yap's playback authority. Native OS drops enter through the Tauri event boundary rather than a renderer pathname command.
 
 ## Implementation Boundary
 
@@ -207,19 +212,24 @@ Client cleanup changes should touch existing state owners before adding runtime 
 - `desktop/src/components/panels/queue-panel.tsx` renders queue controls and progress.
 - `desktop/src/components/panels/app-sheets.tsx` renders setup/server labels.
 - `desktop/src/lib/history-utils.ts` maps history into `complete` recording views.
-- `desktop/src-tauri/src/jobs/` owns the SQLite ledger, source validation, lifecycle policy, playback authority, and six-command boundary.
+- `desktop/src-tauri/src/jobs/` owns the SQLite ledger, native source admission, lifecycle policy, playback authority, and five-command boundary.
 - `desktop/src-tauri/src/runtime/` owns the current `RuntimeOrchestrator` projection.
 - `desktop/src-tauri/src/server_connector/` owns validated settings, bounded capability-health requests, generation safety, and retry cancellation.
 - `desktop/src-tauri/src/stt/dispatch.rs` now holds only shared busy/error projection state. Live transcription is owned by `live/runtime.rs` and `live/stream.rs`.
 
-Phase 3 adds only bounded health HTTP calls. It does not add job upload/drain, WSS transport, server processing/ASR, authentication, model pools, diarization inference, or a local Cohere fallback. The source-aware capture/preprocessing foundation landed separately under `desktop/src-tauri/src/audio/`.
+Phase 3 adds only bounded health HTTP calls. It does not add job upload/drain,
+WSS transport, authenticated server processing, or a local Cohere fallback.
+Phase 4 adds an isolated, unconnected Cohere batch reference worker and bounded
+reference pool/router without widening the client-facing connector. The
+source-aware capture/preprocessing foundation landed separately under
+`desktop/src-tauri/src/audio/`.
 
 ## Acceptance
 
 - No standalone readiness helper module exists.
 - Queue state uses recording-job/workflow types, not component-owned upload types.
 - Rust-minted IDs, statuses, attempts, and cancellation intent survive native process restart in SQLite.
-- Legacy localStorage migration is acknowledged and idempotent across native restart; localStorage is not queue authority.
+- Legacy localStorage rows are never executed or migrated automatically; the key remains visible until explicit discard, and trusted files must be re-added through native admission.
 - Jobs can be blocked, queued, local-fallback running, server queued, uploading, server processing, saving, complete, partial, failed, or cancelled.
 - Pipeline fields exist for preprocessing, alignment, and diarization before those phases ship.
 - Setup/server labels are typed projections from app/runtime state.

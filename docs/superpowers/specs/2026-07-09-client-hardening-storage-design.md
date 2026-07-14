@@ -1,5 +1,13 @@
 # Client Hardening And Storage Design
 
+> **Historical record — current authority (2026-07-14):** This document
+> preserves the design context for the landed work. Renderer raw-path import
+> commands, automatic legacy-path migration, and synthesized `SendInput`
+> delivery described below are retired. Current behavior is native picker/drop
+> admission plus clipboard-only delivery; use
+> [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
+> [client state-machine spec](../../specs/client-state-machine.md) as authority.
+
 **Status:** Reviewed design; scoped implementation landed on the hardening branch
 **Date:** 2026-07-09
 **Scope:** Remaining desktop maintainability, storage, and native trust-boundary hardening on `hardening/yap-maintainability`.

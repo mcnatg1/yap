@@ -323,21 +323,12 @@ async function invokeRelease(playbackPath: string) {
   await invoke("release_recording_playback", { playbackPath });
 }
 
-async function admittedPlaybackPath(command: string, path: string) {
+async function restoreRecordingPlaybackPath(path: string) {
   const admission = validatePlaybackAdmission(
-    await invoke<unknown>(command, { path }),
+    await invoke<unknown>("restore_recording_playback_path", { path }),
   );
   runtimeAdmissionTracker.track(admission.playbackPath);
   return admission;
-}
-
-export async function allowRecordingPlaybackPath(path: string) {
-  if (!isTauri()) return { byteLength: 0, playbackPath: path };
-  return admittedPlaybackPath("allow_recording_playback_path", path);
-}
-
-async function restoreRecordingPlaybackPath(path: string) {
-  return admittedPlaybackPath("restore_recording_playback_path", path);
 }
 
 export async function releaseRecordingPlaybackPath(playbackPath: string) {

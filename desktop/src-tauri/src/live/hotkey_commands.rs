@@ -1,3 +1,11 @@
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_global_shortcut::Shortcut;
 
@@ -5,8 +13,10 @@ use crate::{authorization, live};
 
 pub(crate) const DICTATION_UNAVAILABLE_ERROR: &str = "Live shortcut is unavailable.";
 pub(crate) const PASTE_UNAVAILABLE_ERROR: &str = "Paste shortcut is unavailable.";
+const HOTKEY_ENROLLMENT_WINDOW: Duration = Duration::from_secs(15);
+const HOTKEY_POLL_INTERVAL: Duration = Duration::from_millis(8);
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiveHotkeyKind {
     Dictation,
     PasteLast,
@@ -51,6 +61,291 @@ impl LiveHotkeyKind {
     fn is_paste(self) -> bool {
         matches!(self, Self::PasteLast)
     }
+
+    fn purpose(self) -> live::hotkeys::HotkeyPurpose {
+        match self {
+            Self::Dictation => live::hotkeys::HotkeyPurpose::Dictation,
+            Self::PasteLast => live::hotkeys::HotkeyPurpose::PasteLast,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dictation => "dictation",
+            Self::PasteLast => "paste-last",
+        }
+    }
+
+    fn required_modifier_count(self) -> u32 {
+        match self {
+            Self::Dictation => 2,
+            Self::PasteLast => 3,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct HotkeyEnrollmentGate {
+    active: Arc<AtomicBool>,
+}
+
+impl HotkeyEnrollmentGate {
+    fn try_begin(&self) -> Result<HotkeyEnrollmentLease, String> {
+        self.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Shortcut recording is already active.".to_string())?;
+        Ok(HotkeyEnrollmentLease {
+            active: Arc::clone(&self.active),
+        })
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+struct HotkeyEnrollmentLease {
+    active: Arc<AtomicBool>,
+}
+
+impl Drop for HotkeyEnrollmentLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PhysicalChordSnapshot {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+    keys: Vec<String>,
+}
+
+impl PhysicalChordSnapshot {
+    fn is_neutral(&self) -> bool {
+        !self.ctrl && !self.shift && !self.alt && !self.meta && self.keys.is_empty()
+    }
+
+    fn modifier_count(&self) -> u32 {
+        [self.ctrl, self.shift, self.alt, self.meta]
+            .into_iter()
+            .filter(|pressed| *pressed)
+            .count() as u32
+    }
+
+    fn normalized_chord(&self, purpose: live::hotkeys::HotkeyPurpose) -> Result<String, String> {
+        if self.keys.len() != 1 {
+            return Err("Press exactly one shortcut key.".into());
+        }
+        let mut parts = Vec::with_capacity(5);
+        if self.ctrl {
+            parts.push("Ctrl".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.meta {
+            parts.push("Meta".to_string());
+        }
+        parts.push(self.keys[0].clone());
+        live::hotkeys::normalize_hotkey_for(&parts.join("+"), purpose)
+    }
+
+    fn contains_input_outside(&self, candidate: &Self) -> bool {
+        (self.ctrl && !candidate.ctrl)
+            || (self.shift && !candidate.shift)
+            || (self.alt && !candidate.alt)
+            || (self.meta && !candidate.meta)
+            || self.keys.iter().any(|key| {
+                !candidate
+                    .keys
+                    .iter()
+                    .any(|candidate_key| candidate_key == key)
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum HotkeyEnrollmentPhase {
+    AwaitingNeutral,
+    AwaitingChord,
+    AwaitingRelease {
+        candidate: PhysicalChordSnapshot,
+        normalized: String,
+    },
+    Finished,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HotkeyEnrollmentObservation {
+    Pending,
+    Complete(String),
+    Cancelled,
+}
+
+struct HotkeyEnrollmentEpoch {
+    kind: LiveHotkeyKind,
+    expires_at: Instant,
+    phase: HotkeyEnrollmentPhase,
+}
+
+impl HotkeyEnrollmentEpoch {
+    fn arm(confirmed: bool, kind: LiveHotkeyKind, now: Instant) -> Option<Self> {
+        confirmed.then_some(Self {
+            kind,
+            expires_at: now + HOTKEY_ENROLLMENT_WINDOW,
+            phase: HotkeyEnrollmentPhase::AwaitingNeutral,
+        })
+    }
+
+    fn observe(
+        &mut self,
+        now: Instant,
+        snapshot: PhysicalChordSnapshot,
+    ) -> Result<HotkeyEnrollmentObservation, String> {
+        if matches!(self.phase, HotkeyEnrollmentPhase::Finished) {
+            return Err("Shortcut recording epoch was already consumed.".into());
+        }
+        if now >= self.expires_at {
+            self.phase = HotkeyEnrollmentPhase::Finished;
+            return Err("Shortcut recording expired before a chord was completed.".into());
+        }
+
+        match self.phase.clone() {
+            HotkeyEnrollmentPhase::AwaitingNeutral => {
+                if snapshot.is_neutral() {
+                    self.phase = HotkeyEnrollmentPhase::AwaitingChord;
+                }
+                Ok(HotkeyEnrollmentObservation::Pending)
+            }
+            HotkeyEnrollmentPhase::AwaitingChord => {
+                if snapshot.keys.as_slice() == ["Escape"] && snapshot.modifier_count() == 0 {
+                    self.phase = HotkeyEnrollmentPhase::Finished;
+                    return Ok(HotkeyEnrollmentObservation::Cancelled);
+                }
+                if snapshot.modifier_count() < self.kind.required_modifier_count()
+                    || snapshot.keys.is_empty()
+                {
+                    return Ok(HotkeyEnrollmentObservation::Pending);
+                }
+                let normalized = snapshot.normalized_chord(self.kind.purpose())?;
+                self.phase = HotkeyEnrollmentPhase::AwaitingRelease {
+                    candidate: snapshot,
+                    normalized,
+                };
+                Ok(HotkeyEnrollmentObservation::Pending)
+            }
+            HotkeyEnrollmentPhase::AwaitingRelease {
+                candidate,
+                normalized,
+            } => {
+                if snapshot.contains_input_outside(&candidate) {
+                    self.phase = HotkeyEnrollmentPhase::Finished;
+                    return Err("Shortcut changed before the recorded chord was released.".into());
+                }
+                if snapshot.is_neutral() {
+                    self.phase = HotkeyEnrollmentPhase::Finished;
+                    return Ok(HotkeyEnrollmentObservation::Complete(normalized));
+                }
+                Ok(HotkeyEnrollmentObservation::Pending)
+            }
+            HotkeyEnrollmentPhase::Finished => unreachable!(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn physical_chord_snapshot() -> PhysicalChordSnapshot {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+    fn pressed(virtual_key: i32) -> bool {
+        unsafe { GetAsyncKeyState(virtual_key) < 0 }
+    }
+
+    let mut keys = Vec::new();
+    for virtual_key in b'A'..=b'Z' {
+        if pressed(i32::from(virtual_key)) {
+            keys.push(char::from(virtual_key).to_string());
+        }
+    }
+    for virtual_key in b'0'..=b'9' {
+        if pressed(i32::from(virtual_key)) {
+            keys.push(char::from(virtual_key).to_string());
+        }
+    }
+    for offset in 0..12_i32 {
+        if pressed(0x70 + offset) {
+            keys.push(format!("F{}", offset + 1));
+        }
+    }
+    for (virtual_key, name) in [
+        (0x08, "Backspace"),
+        (0x09, "Tab"),
+        (0x0d, "Enter"),
+        (0x1b, "Escape"),
+        (0x20, "Space"),
+    ] {
+        if pressed(virtual_key) {
+            keys.push(name.to_string());
+        }
+    }
+
+    PhysicalChordSnapshot {
+        ctrl: pressed(0x11),
+        shift: pressed(0x10),
+        alt: pressed(0x12),
+        meta: pressed(0x5b) || pressed(0x5c),
+        keys,
+    }
+}
+
+#[cfg(windows)]
+fn capture_physical_hotkey(mut epoch: HotkeyEnrollmentEpoch) -> Result<Option<String>, String> {
+    loop {
+        match epoch.observe(Instant::now(), physical_chord_snapshot())? {
+            HotkeyEnrollmentObservation::Pending => {
+                std::thread::sleep(HOTKEY_POLL_INTERVAL);
+            }
+            HotkeyEnrollmentObservation::Complete(hotkey) => return Ok(Some(hotkey)),
+            HotkeyEnrollmentObservation::Cancelled => return Ok(None),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn capture_physical_hotkey(_: HotkeyEnrollmentEpoch) -> Result<Option<String>, String> {
+    Err("Physical shortcut recording is currently supported only on Windows.".into())
+}
+
+async fn confirm_hotkey_enrollment(
+    app: tauri::AppHandle,
+    kind: LiveHotkeyKind,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let label = kind.label();
+    let modifier_count = kind.required_modifier_count();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(format!(
+                "Record a new {label} shortcut?\n\nAfter choosing Record, hold at least {modifier_count} modifier keys plus one key, then release the entire chord. Yap listens for only this one physical chord for 15 seconds. Press Escape to cancel."
+            ))
+            .title("Record physical shortcut")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Record".into(),
+                "Cancel".into(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|error| format!("Could not show shortcut confirmation: {error}"))
 }
 
 fn apply_successful_hotkey_change(
@@ -74,13 +369,13 @@ fn apply_successful_hotkey_change(
 }
 
 #[tauri::command]
-pub(crate) fn set_live_hotkey(
+pub(crate) async fn record_live_hotkey(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
-    hotkey: String,
+    gate: tauri::State<'_, HotkeyEnrollmentGate>,
 ) -> Result<live::state::LiveSessionView, String> {
-    change_live_hotkey(window, app, state, LiveHotkeyKind::Dictation, Some(hotkey))
+    record_live_hotkey_for(window, app, state, gate, LiveHotkeyKind::Dictation).await
 }
 
 #[tauri::command]
@@ -108,13 +403,36 @@ pub(crate) fn reset_live_hotkey(
 }
 
 #[tauri::command]
-pub(crate) fn set_live_paste_hotkey(
+pub(crate) async fn record_live_paste_hotkey(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
-    hotkey: String,
+    gate: tauri::State<'_, HotkeyEnrollmentGate>,
 ) -> Result<live::state::LiveSessionView, String> {
-    change_live_hotkey(window, app, state, LiveHotkeyKind::PasteLast, Some(hotkey))
+    record_live_hotkey_for(window, app, state, gate, LiveHotkeyKind::PasteLast).await
+}
+
+async fn record_live_hotkey_for(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+    gate: tauri::State<'_, HotkeyEnrollmentGate>,
+    kind: LiveHotkeyKind,
+) -> Result<live::state::LiveSessionView, String> {
+    authorization::ensure_main(&window)?;
+    ensure_live_hotkey_idle(state.snapshot().status)?;
+    let _lease = gate.try_begin()?;
+    let confirmed = confirm_hotkey_enrollment(app.clone(), kind).await?;
+    let Some(epoch) = HotkeyEnrollmentEpoch::arm(confirmed, kind, Instant::now()) else {
+        return Ok(state.snapshot());
+    };
+    let captured = tauri::async_runtime::spawn_blocking(move || capture_physical_hotkey(epoch))
+        .await
+        .map_err(|error| format!("Shortcut recording worker failed: {error}"))??;
+    let Some(hotkey) = captured else {
+        return Ok(state.snapshot());
+    };
+    change_live_hotkey(window, app, state, kind, Some(hotkey))
 }
 
 #[tauri::command]
@@ -158,8 +476,8 @@ fn change_live_hotkey(
     let (next_value, next) = if requested_value.is_empty() {
         (String::new(), None)
     } else {
-        let normalized = live::hotkeys::normalize_hotkey(&requested_value)?;
-        let shortcut = live::hotkeys::parse_hotkey(&normalized)?;
+        let normalized = live::hotkeys::normalize_hotkey_for(&requested_value, kind.purpose())?;
+        let shortcut = live::hotkeys::parse_hotkey_for(&normalized, kind.purpose())?;
         (normalized, Some(shortcut))
     };
     if live::hotkeys::configured_hotkeys_match(kind.conflicting(&snapshot), &next_value) {
@@ -169,7 +487,7 @@ fn change_live_hotkey(
         return Ok(snapshot);
     }
 
-    let previous = live::hotkeys::parse_hotkey(kind.current(&snapshot)).ok();
+    let previous = live::hotkeys::parse_hotkey_for(kind.current(&snapshot), kind.purpose()).ok();
     let mut prospective = snapshot.clone();
     kind.update(&mut prospective, next_value.clone());
     replace_hotkey_registration(
@@ -258,17 +576,143 @@ pub(crate) fn replace_hotkey_registration(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
 
     use super::{
         apply_successful_hotkey_change, ensure_live_hotkey_idle, replace_hotkey_registration,
-        LiveHotkeyKind, DICTATION_UNAVAILABLE_ERROR,
+        HotkeyEnrollmentEpoch, HotkeyEnrollmentGate, HotkeyEnrollmentObservation, LiveHotkeyKind,
+        PhysicalChordSnapshot, DICTATION_UNAVAILABLE_ERROR, HOTKEY_ENROLLMENT_WINDOW,
     };
     use crate::live::{
         hotkeys::parse_hotkey,
         settings::LiveSettings,
         state::{LiveRoute, LiveSessionStatus, LiveSessionView},
     };
+
+    fn physical(ctrl: bool, shift: bool, alt: bool, keys: &[&str]) -> PhysicalChordSnapshot {
+        PhysicalChordSnapshot {
+            ctrl,
+            shift,
+            alt,
+            meta: false,
+            keys: keys.iter().map(|key| (*key).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn physical_enrollment_cannot_arm_without_native_confirmation() {
+        let now = Instant::now();
+        assert!(HotkeyEnrollmentEpoch::arm(false, LiveHotkeyKind::Dictation, now).is_none());
+        assert!(HotkeyEnrollmentEpoch::arm(true, LiveHotkeyKind::Dictation, now).is_some());
+    }
+
+    #[test]
+    fn expired_physical_enrollment_cannot_commit() {
+        let now = Instant::now();
+        let mut epoch = HotkeyEnrollmentEpoch::arm(true, LiveHotkeyKind::Dictation, now).unwrap();
+        assert_eq!(
+            epoch.observe(now, PhysicalChordSnapshot::default()),
+            Ok(HotkeyEnrollmentObservation::Pending)
+        );
+        let error = epoch
+            .observe(
+                now + HOTKEY_ENROLLMENT_WINDOW,
+                physical(true, true, false, &["D"]),
+            )
+            .unwrap_err();
+        assert!(error.contains("expired"));
+    }
+
+    #[test]
+    fn substituted_physical_chord_invalidates_the_epoch() {
+        let now = Instant::now();
+        let mut epoch = HotkeyEnrollmentEpoch::arm(true, LiveHotkeyKind::Dictation, now).unwrap();
+        epoch
+            .observe(now, PhysicalChordSnapshot::default())
+            .unwrap();
+        assert_eq!(
+            epoch.observe(
+                now + Duration::from_millis(1),
+                physical(true, true, false, &["D"]),
+            ),
+            Ok(HotkeyEnrollmentObservation::Pending)
+        );
+        let error = epoch
+            .observe(
+                now + Duration::from_millis(2),
+                physical(true, true, false, &["E"]),
+            )
+            .unwrap_err();
+        assert!(error.contains("changed"));
+    }
+
+    #[test]
+    fn completed_physical_enrollment_requires_release_and_cannot_be_replayed() {
+        let now = Instant::now();
+        let mut epoch = HotkeyEnrollmentEpoch::arm(true, LiveHotkeyKind::PasteLast, now).unwrap();
+        epoch
+            .observe(now, PhysicalChordSnapshot::default())
+            .unwrap();
+        epoch
+            .observe(
+                now + Duration::from_millis(1),
+                physical(true, true, true, &["P"]),
+            )
+            .unwrap();
+        assert_eq!(
+            epoch.observe(
+                now + Duration::from_millis(2),
+                PhysicalChordSnapshot::default(),
+            ),
+            Ok(HotkeyEnrollmentObservation::Complete(
+                "Ctrl+Shift+Alt+P".into()
+            ))
+        );
+        let error = epoch
+            .observe(
+                now + Duration::from_millis(3),
+                PhysicalChordSnapshot::default(),
+            )
+            .unwrap_err();
+        assert!(error.contains("already consumed"));
+    }
+
+    #[test]
+    fn ordinary_typing_is_ignored_during_the_bounded_physical_epoch() {
+        let now = Instant::now();
+        let mut epoch = HotkeyEnrollmentEpoch::arm(true, LiveHotkeyKind::Dictation, now).unwrap();
+        epoch
+            .observe(now, PhysicalChordSnapshot::default())
+            .unwrap();
+        assert_eq!(
+            epoch.observe(
+                now + Duration::from_millis(1),
+                physical(false, false, false, &["D"]),
+            ),
+            Ok(HotkeyEnrollmentObservation::Pending)
+        );
+        assert_eq!(
+            epoch.observe(
+                now + Duration::from_millis(2),
+                PhysicalChordSnapshot::default(),
+            ),
+            Ok(HotkeyEnrollmentObservation::Pending)
+        );
+    }
+
+    #[test]
+    fn only_one_native_enrollment_gate_can_be_active() {
+        let gate = HotkeyEnrollmentGate::default();
+        let lease = gate.try_begin().unwrap();
+        assert!(gate.is_active());
+        assert!(gate.try_begin().unwrap_err().contains("already active"));
+        drop(lease);
+        assert!(!gate.is_active());
+        assert!(gate.try_begin().is_ok());
+    }
 
     #[test]
     fn successful_replacement_clears_matching_startup_failure() {

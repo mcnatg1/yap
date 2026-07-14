@@ -3,7 +3,7 @@
 **Date:** 2026-06-30
 **Status:** Accepted architectural principles; phase numbering is superseded by the canonical Voice OS roadmap
 **Builds on:** [ADR 0001](0001-dual-stt-backends.md) (dual-model split), [ADR 0002](0002-crispasr-unified-stt-runtime.md) (CrispASR sidecar, English-only live v1)
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) — the "local-first" layer architecture (L1–L7) described here is reframed as the **solo/local-first deployment profile**. In the **team profile**, the STT inference (streaming + batch), LLM pool, and L3 background worker all relocate to the `yap-server` tier on a GB-class server node. The node is on-prem org-owned hardware and is **not** a cloud service; this is consistent with the "no cloud STT" principle. Client layers (L1 hotkey, L2 mic/VAD/UI, ghost preview) remain client-side in both profiles.
+**Amended by:** [ADR 0013](0013-global-hotkey-injection.md) resolves the hotkey process and safe-delivery boundary; [ADR 0014](0014-server-tier-compute-topology.md) reframes the "local-first" layer architecture (L1–L7) described here as the **solo/local-first deployment profile**. In the **team profile**, the STT inference (streaming + batch), LLM pool, and L3 background worker all relocate to the `yap-server` tier on a GB-class server node. The node is on-prem org-owned hardware and is **not** a cloud service; this is consistent with the "no cloud STT" principle. Client layers (L1 hotkey, L2 mic/VAD/UI, ghost preview) remain client-side in both profiles.
 
 ## Context
 
@@ -216,7 +216,7 @@ Phases 4–7 require separate release planning; this ADR does **not** commit shi
 - [ ] Which SpeechBrain LID checkpoint and expected RAM/CPU?
 - [ ] Minimum probe duration for batch LID (15 s vs 30 s vs adaptive)?
 - [ ] Bundle SpeechBrain in installer vs download on first “Detect language” use?
-- [ ] Does global hotkey/injector share the Yap Tauri process or a second tray app?
+- [x] Resolved by ADR 0013: the global hotkey and safe clipboard-delivery path share the Yap Tauri process and tray; there is no second app.
 - [ ] OKF bundle layout — adopt verbatim from diagram or simplify for v1 history export?
 
 ## Alternatives considered

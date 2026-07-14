@@ -9,10 +9,7 @@ async function installPlaybackBridge(
   durationSeconds = mediaDuration,
 ) {
   await page.addInitScript(({ mediaDuration, paths, restoreDelayMs }) => {
-    localStorage.setItem(
-      "yap.recordingQueue.v1",
-      JSON.stringify(paths.map((path, index) => ({ id: index + 1, path }))),
-    );
+    localStorage.removeItem("yap.recordingQueue.v1");
     Object.defineProperty(globalThis, "isTauri", { value: true });
 
     const currentTimes = new WeakMap<HTMLMediaElement, number>();
@@ -26,13 +23,37 @@ async function installPlaybackBridge(
       get() { return mediaDuration; },
     });
 
+    const tokens = new Map<string, string>();
+    const jobs = paths.map((recordingPath, index) => {
+      const token = (index + 1).toString(16).padStart(64, "0");
+      const playbackPath = `http://127.0.0.1:43123/media/${token}`;
+      tokens.set(recordingPath, playbackPath);
+      return {
+        id: `job-native-${index + 1}-${token.slice(-16)}`,
+        name: recordingPath.split("\\").pop() ?? recordingPath,
+        pipeline: {
+          alignment: "notStarted",
+          diarization: "notStarted",
+          intake: "done",
+          postprocessing: "notStarted",
+          preprocessing: "notStarted",
+          transcription: "notStarted",
+        },
+        playbackPath,
+        route: "serverBatch",
+        sessionMode: "meeting",
+        sessionOrigin: "importedFile",
+        sourcePath: recordingPath,
+        status: "queued_server",
+      };
+    });
     const state = {
       activeRestores: 0,
       highWaterMark: 0,
       released: [] as string[],
       restoreCalls: 0,
-      jobs: [] as Array<Record<string, unknown>>,
-      tokens: new Map<string, string>(),
+      jobs: jobs as Array<Record<string, unknown>>,
+      tokens,
     };
     Object.assign(globalThis, { __playbackTest: state });
     let callbackId = 0;
@@ -86,34 +107,6 @@ async function installPlaybackBridge(
           if (command === "list_saved_live_sessions") return { maintenanceWarnings: [], sessions: [] };
           if (command === "resolve_owned_live_transcript_paths") return [];
           if (command === "read_text_file" || command === "read_text_preview") return "";
-          if (command === "recording_jobs_import_legacy") {
-            const payload = args.payload as { jobs: Array<{ id: number; path: string }> };
-            const accepted = payload.jobs.map((job, index) => {
-              const token = (index + 1).toString(16).padStart(64, "0");
-              const playbackPath = `http://127.0.0.1:43123/media/${token}`;
-              state.tokens.set(job.path, playbackPath);
-              state.jobs.push({
-                id: `legacy-${job.id}-${token.slice(0, 16)}`,
-                name: job.path.split("\\").pop() ?? job.path,
-                pipeline: {
-                  alignment: "notStarted",
-                  diarization: "notStarted",
-                  intake: "done",
-                  postprocessing: "notStarted",
-                  preprocessing: "notStarted",
-                  transcription: "notStarted",
-                },
-                playbackPath,
-                route: "serverBatch",
-                sessionMode: "meeting",
-                sessionOrigin: "importedFile",
-                sourcePath: job.path,
-                status: "queued_server",
-              });
-              return { legacyId: job.id, jobId: `legacy-${job.id}-${token.slice(0, 16)}` };
-            });
-            return { accepted, duplicates: [], rejected: [] };
-          }
           if (command === "recording_jobs_snapshot") return structuredClone(state.jobs);
           if (command === "recording_job_cancel") {
             const index = state.jobs.findIndex((job) => job.id === args.jobId);
@@ -213,7 +206,7 @@ test("lightweight seeking uses visible bounds, exact endpoints, ARIA, and releas
   await expect(page.getByRole("button", { name: "Select large.wav" })).toHaveCount(0);
 });
 
-test("legacy queue imports once and uses only ledger-projected playback", async ({ page }) => {
+test("native ledger projection uses only pre-authorized playback", async ({ page }) => {
   await installPlaybackBridge(
     page,
     Array.from({ length: 20 }, (_, index) => `C:\\large-${index}.wav`),

@@ -8,10 +8,6 @@ pub(crate) fn current_setup_status() -> SetupStatus {
     );
     let (setup_state, engine_ready, engine_status) =
         compose_engine_status(stt::nemotron::local_fallback_start_paths().map(|_| ()));
-    stt::log_yap(&format!(
-        "setup_status engine_ready={engine_ready} fallback_enabled={fallback_enabled} model=nemotron"
-    ));
-
     SetupStatus {
         model: stt::nemotron::MODEL_LABEL.into(),
         root: stt::nemotron::root_dir().display().to_string(),

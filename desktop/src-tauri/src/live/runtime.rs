@@ -6,7 +6,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 use crate::audio::capture::{CaptureAdapter, CapturePacket, CapturePorts};
 use crate::audio::coordinator::{
@@ -783,7 +783,7 @@ impl LiveRuntime {
             let _ = self.finalize_recording();
             return Ok(None);
         };
-        let _ = app.emit("live-session", &view);
+        super::events::emit_session(&app, &view);
         Ok(Some(LocalCaptureStart { session }))
     }
 
@@ -1200,7 +1200,7 @@ impl LiveRuntimeInner {
                 }
                 let view = state.update_level(value);
                 let level = LiveLevelView::from(&view);
-                let _ = app.emit("live-level", &level);
+                super::events::emit_level(&app, &level);
                 std::thread::sleep(LEVEL_TICK);
             }
         });
@@ -1729,7 +1729,7 @@ fn run_capture_worker(
                             {
                                 let state = packet_app.state::<LiveSessionState>();
                                 let view = state.mark_transcription_backpressure();
-                                let _ = packet_app.emit("live-session", &view);
+                                super::events::emit_session(&packet_app, &view);
                             }
                             publish_level(&level_tx, level);
                             false
@@ -2267,7 +2267,7 @@ fn emit_stream_partial(app: &tauri::AppHandle, session: u64, text: &str) {
     }
     let state = app.state::<LiveSessionState>();
     let view = state.update_partial(text);
-    let _ = app.emit("live-session", &view);
+    super::events::emit_session(app, &view);
 }
 
 fn emit_stream_final(app: &tauri::AppHandle, session: u64, text: &str) {
@@ -2281,10 +2281,10 @@ fn emit_stream_final(app: &tauri::AppHandle, session: u64, text: &str) {
     }
     let state = app.state::<LiveSessionState>();
     let view = state.update_final(text);
-    let _ = app.emit("live-session", &view);
+    super::events::emit_session(app, &view);
     std::thread::sleep(Duration::from_millis(180));
     let view = state.return_to_listening();
-    let _ = app.emit("live-session", &view);
+    super::events::emit_session(app, &view);
 }
 
 #[derive(Default)]

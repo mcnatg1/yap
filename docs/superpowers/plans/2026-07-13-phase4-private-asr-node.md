@@ -48,6 +48,27 @@ clean checked-head local/native/server/GB10 matrix and
 isolated batch worker plus an unconnected reference router. The Phase 5 and
 enterprise decisions listed at the end of this record remain deferred.
 
+## Security And Client-Boundary Closure
+
+The Phase 4 review also closed pre-existing client and host-boundary findings
+that affected the safety of the branch as a whole without connecting the Phase
+4 worker:
+
+- recording imports now enter through the native picker or native OS-drop path;
+  renderer raw-path commands and automatic legacy-path migration are retired;
+- shortcut changes require native confirmation and one bounded physical-chord
+  epoch, while completed text uses clipboard-only delivery with visible paste
+  guidance and no synthesized input;
+- the client approves the exact configured server origin natively before health
+  sockets or retries begin, overlay state/events expose only the owning
+  WebView's minimum projection, and setup/runtime logs are bounded;
+- the installer remains Tauri's stock offline-WebView2 NSIS path; and
+- server-node setup validates effective SSH file ownership, root/password and
+  authorized-key policy, forwarding restrictions, and `GatewayPorts no`.
+
+The private security-review artifacts remain local and are not committed,
+pushed, attached to the PR, or otherwise published.
+
 ## Selected Runtime And Model
 
 | Concern | Locked choice |
@@ -160,6 +181,8 @@ phase gate remains pending:
 
 - Focused local checks: 40 model-pool tests and 17 runtime/router tests passed;
   compilation and `git diff --check` passed.
+- Server-node/SSH policy checks passed 19/19, and focused overlay/bridge checks
+  passed 16/16 after the client-boundary remediation.
 - An earlier pre-hardening focused subset passed on the GB10 under Python 3.12;
   the final exact-head matrix and transient inference gate remain pending and
   will supersede that development evidence.
@@ -180,8 +203,8 @@ benchmark.
 
 Before the PR is eligible to merge:
 
-1. Finish code, notices, runbook, ADR, architecture, and status reconciliation.
-2. Review the complete diff and resolve correctness/security findings.
+1. [x] Finish code, notices, runbook, ADR, architecture, and status reconciliation.
+2. [x] Review the complete diff and resolve correctness/security findings.
 3. Commit a clean implementation candidate.
 4. Run `infra/yap-server-node/phase4-asr-gate.sh` exactly once on that exact
    clean SHA in the disposable GB10 candidate checkout.

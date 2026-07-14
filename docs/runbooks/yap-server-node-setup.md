@@ -158,6 +158,7 @@ env \
   YAP_PRIVATE_IFACE=enP7s7 \
   YAP_PRIVATE_ADDR=192.168.50.1/24 \
   YAP_PRIVATE_SSH_FROM=192.168.50.63 \
+  YAP_SSH_POLICY_TEST_ADDR=192.168.50.63 \
   YAP_LAN_SSH_CIDR= \
   YAP_VALIDATE_ONLY=1 \
   bash infra/yap-server-node/setup-server.sh
@@ -172,6 +173,7 @@ sudo env \
   YAP_PRIVATE_IFACE=enP7s7 \
   YAP_PRIVATE_ADDR=192.168.50.1/24 \
   YAP_PRIVATE_SSH_FROM=192.168.50.63 \
+  YAP_SSH_POLICY_TEST_ADDR=192.168.50.63 \
   YAP_LAN_SSH_CIDR= \
   YAP_HARDWARE_PROFILE=dgx-spark-gb10 \
   YAP_FIREWALL_RESET=0 \
@@ -184,6 +186,13 @@ port. Because reset is disabled, existing UFW rules remain and must be
 inspected separately. Before running it remotely, prove that a second terminal
 can connect with `ssh dgx-spark-eth`. Missing `nmcli`, failed profile
 activation, or a missing private address now stops setup before UFW changes.
+Before SSH is reloaded, the script also evaluates `sshd -T -C` for the
+representative `YAP_SSH_POLICY_TEST_ADDR` and refuses the reload unless the
+effective owner, authentication, root-login, X11, agent, tunnel, environment,
+and forwarding policy exactly matches the documented baseline. The supplied
+address must be one client IP inside a configured management source, not a
+CIDR; setup also derives and evaluates a representative address from every
+configured management source.
 
 `YAP_DISABLE_NOISE_SERVICES=1` stops desktop/peripheral services. Use it only on
 a dedicated node. If incompatible existing UFW rules truly require a reset,
@@ -225,6 +234,7 @@ sudo env \
   YAP_CONFIGURE_PRIVATE_ETHERNET=0 \
   YAP_PRIVATE_SSH_FROM= \
   YAP_LAN_SSH_CIDR='<corp-admin-cidr>' \
+  YAP_SSH_POLICY_TEST_ADDR='<approved-admin-host-ip>' \
   YAP_FIREWALL_RESET=0 \
   YAP_DISABLE_NOISE_SERVICES=0 \
   bash infra/yap-server-node/setup-server.sh
@@ -235,6 +245,7 @@ Only set `YAP_APP_PORT` after `yap-server` exists and has TLS/auth in front of i
 ```bash
 sudo env \
   YAP_LAN_SSH_CIDR='<corp-admin-cidr>' \
+  YAP_SSH_POLICY_TEST_ADDR='<approved-admin-host-ip>' \
   YAP_APP_PORT=443 \
   YAP_APP_CIDR='<corp-client-or-vpn-cidr>' \
   YAP_FIREWALL_RESET=0 \
@@ -265,6 +276,7 @@ example as a firewall change by substituting laptop Wi-Fi addresses.
 sudo env \
   YAP_LAN_SSH_CIDR='<admin-cidr-or-empty>' \
   YAP_ZSCALER_SSH_CIDR='<zpa-admin-cidr>' \
+  YAP_SSH_POLICY_TEST_ADDR='<approved-zpa-admin-host-ip>' \
   YAP_APP_PORT=443 \
   YAP_APP_CIDR= \
   YAP_ZSCALER_APP_CIDR='<zpa-app-cidr>' \

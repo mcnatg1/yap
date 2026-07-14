@@ -175,7 +175,7 @@ describe("Task 8b transactional lifecycle listeners", () => {
 
     try {
       await expect(registerTask8bLifecycleListeners()).rejects.toThrow("registration failed");
-      expect(calls).toEqual(["live-session", "live-level", "unlisten-live-session"]);
+      expect(calls).toEqual(["live-overlay-session", "live-level", "unlisten-live-session"]);
     } finally {
       globalThis.__TAURI__ = priorTauri;
       delete globalThis.__yapTask8bLifecycle;
@@ -194,10 +194,35 @@ describe("Task 8b transactional lifecycle listeners", () => {
     };
 
     try {
-      await expect(registerTask8bLifecycleListeners()).resolves.toBe(3);
-      await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(3);
+      await expect(registerTask8bLifecycleListeners()).resolves.toBe(2);
+      await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(2);
       await expect(globalThis.__yapTask8bLifecycle.cleanup()).resolves.toBe(0);
-      expect(unlistened).toEqual(["live-session", "live-level", "live-session-saved"]);
+      expect(unlistened).toEqual(["live-overlay-session", "live-level"]);
+    } finally {
+      globalThis.__TAURI__ = priorTauri;
+      delete globalThis.__yapTask8bLifecycle;
+    }
+  });
+
+  it("keeps saved artifact events on a separate main-window listener", async () => {
+    const priorTauri = globalThis.__TAURI__;
+    let handler;
+    globalThis.__TAURI__ = {
+      event: {
+        async listen(name, callback) {
+          expect(name).toBe("live-session-saved");
+          handler = callback;
+          return () => undefined;
+        },
+      },
+    };
+
+    try {
+      await expect(registerTask8bLifecycleListeners({}, { target: "main" })).resolves.toBe(1);
+      handler({ payload: { name: "live-s-1-2-3" } });
+      expect(globalThis.__yapTask8bLifecycle.saved).toEqual([{ name: "live-s-1-2-3" }]);
+      expect(globalThis.__yapTask8bLifecycle.sessions).toEqual([]);
+      expect(globalThis.__yapTask8bLifecycle.levels).toEqual([]);
     } finally {
       globalThis.__TAURI__ = priorTauri;
       delete globalThis.__yapTask8bLifecycle;
@@ -210,7 +235,7 @@ describe("Task 8b transactional lifecycle listeners", () => {
     globalThis.__TAURI__ = {
       event: {
         async listen(name) {
-          if (name !== "live-session") return () => undefined;
+          if (name !== "live-overlay-session") return () => undefined;
           return async () => {
             rejectOnceAttempts += 1;
             if (rejectOnceAttempts === 1) throw new Error("unlisten retry required");

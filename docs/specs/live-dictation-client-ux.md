@@ -1,16 +1,18 @@
 # Spec: Live Dictation Client UX + Audio Thread
 
 **Status:** Implemented baseline; native interaction, latency, and resilience hardening continue
-**Implements:** [ADR 0006](../adr/0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [ADR 0013](../adr/0013-global-hotkey-injection.md) (hotkeys/injection), [ADR 0019](../adr/0019-local-streaming-model-selection.md) (Nemotron local live fallback)
+**Implements:** [ADR 0006](../adr/0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [ADR 0013](../adr/0013-global-hotkey-injection.md) (hotkeys/safe delivery), [ADR 0019](../adr/0019-local-streaming-model-selection.md) (Nemotron local live fallback)
 **Scope:** Define the **English-only client live path** as an implemented local baseline plus explicitly separate follow-on server/audio features.
 
 > **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).
 
 > **2026-07-08 implemented local-fallback baseline:** The local live-transcription path uses one local model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. It keeps native punctuation, uses 1120 ms chunks until smaller chunks profile under real-time, and saves local live WAV/TXT output into Home history. Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work.
 
-> **2026-07-09 injection amendment:** Windows live completion captures and revalidates the stop-time external foreground/focused control, then inserts cleaned transcript text with Unicode `SendInput`. The overlay remains non-focusable, paste-last repeats only the dedicated last-completed transcript, and a visible clipboard fallback handles focus changes, held modifiers, or OS blocks. ADR 0013 owns this behavior.
+> **2026-07-09 historical injection amendment (superseded 2026-07-14):** This revision allowed Windows live completion to capture a stop-time external target and use Unicode `SendInput`, with a clipboard fallback. It remains recorded as implementation history but is not current authority.
 
-> **2026-07-13 convergence implementation:** The client now reuses one `live-overlay` window and sends only semantic surfaces to Rust. Rust owns the production native bounds (`104×40` collapsed, `180×88` expanded, and exact compact status widths), anchors the top edge, and applies a rounded Windows region so transparent corner pixels are not interactive. Settings no longer accept typed chord strings: an explicitly armed physical-code recorder ignores repeats, rejects unsupported/bare/reserved chords, supports Cancel and per-action Reset, and relies on the existing transactional Rust registration rollback. Shipped defaults are `Ctrl+Shift+Space` for dictation and `Ctrl+Shift+Alt+V` for paste-last.
+> **2026-07-13 convergence implementation:** The client now reuses one `live-overlay` window and sends only semantic surfaces to Rust. Rust owns the production native bounds (`104×40` collapsed, `180×88` expanded, and exact compact status widths), anchors the top edge, and applies a rounded Windows region so transparent corner pixels are not interactive. Settings no longer accept typed chord strings. Shipped defaults are `Ctrl+Shift+Space` for dictation and `Ctrl+Shift+Alt+V` for paste-last.
+
+> **2026-07-14 security amendment:** Shortcut changes require native confirmation and a bounded 15-second Rust/Windows physical-chord epoch that waits for neutral/chord/release, ignores ordinary typing without the required modifiers, and persists only the validated normalized chord. Completed transcripts use clipboard-only delivery with visible manual-paste guidance. Synthesized focused-field input is retired until an adapter can prove and revalidate authority over the exact destination field. ADR 0013 owns this behavior.
 
 ---
 
@@ -19,10 +21,10 @@
 ### Implemented baseline
 - Mic permission + device selection.
 - Top-positioned live overlay foundation and typed live session state.
-- Transactional dictation and paste-last shortcut commands with safe defaults, explicit physical-chord recording, Cancel, and per-action Reset.
+- Transactional dictation and paste-last shortcut commands with safe defaults, native-confirmed bounded physical-chord recording, Cancel, and per-action Reset.
 - CPAL capture → bounded channels → mono conversion/linear resampling → warm in-process sherpa Nemotron recognizer.
 - 1120 ms local chunks with partial/final state updates.
-- Windows stop-time target revalidation, Unicode insertion, and visible clipboard fallback.
+- Windows clipboard-only delivery with a Yap HWND owner and visible manual-paste guidance.
 - Local WAV/TXT save into Home history.
 - Orchestrator states wired to UI.
 
@@ -34,7 +36,7 @@
 - Server diarization and later enrichment phases.
 
 ### Out of scope
-- macOS/Linux injection adapters and deeper accessibility/permission recovery ([ADR 0013](../adr/0013-global-hotkey-injection.md)).
+- macOS/Linux global-hotkey and clipboard adapters; any future direct-insertion adapter requires separate exact-field authority and permission design ([ADR 0013](../adr/0013-global-hotkey-injection.md)).
 - L3 enrichment/OKF and server diarization (canonical phases 8-9).
 - Multilingual live (future ADR).
 - LID on live (canonical Phase 6 remains batch-only).
@@ -53,7 +55,7 @@ cpal input callback
   → 1120 ms chunks into in-process Nemotron LiveStreamEngine
   → partial/final live state
   → stop-tail drain
-  → target-validated Windows injection
+  → Windows clipboard delivery + visible paste guidance
   → WAV/TXT persistence
 ```
 
@@ -115,7 +117,7 @@ When Silero lands, it is owned by **Rust on the audio path** ([ADR 0006](../adr/
 ## 5. Ghost preview behavior
 
 - **Partials**: dimmed/italic, replaced in place as Nemotron revises.
-- **Finals**: committed to normal weight and retained as the completed transcript used by automatic injection and paste-last.
+- **Finals**: committed to normal weight, copied automatically for manual paste, and retained as the dedicated completed transcript used by paste-last.
 - Follow-on Scribe may add a dual-track polished form without replacing the raw source.
 - Current “Save session” writes WAV + raw text. Future server phases may reprocess the recording and Phase 8 diarization consumes server-ready manifests.
 
@@ -142,8 +144,8 @@ When Silero lands, it is owned by **Rust on the audio path** ([ADR 0006](../adr/
 - [ ] First partial occurs within one 1120 ms audio chunk plus measured decode overhead; record p50/p95 on reference Windows hardware.
 - [ ] At most one client-local Nemotron session runs. Server live streams and server batch jobs are independently scheduled by the server router and may coexist; imported files never become local fallback jobs.
 - [ ] “Save session” produces a playable WAV + raw text and Home can recover canonical live sessions after restart.
-- [ ] Stop-time Windows target remains foreground through final decoding before Unicode input; otherwise the full transcript is copied and manual-paste status is visible.
-- [ ] Paste-last repeats only the dedicated last completed transcript and never an active partial.
+- [x] A completed Windows transcript is copied with Yap clipboard ownership and visible manual-paste status; no synthesized input is sent.
+- [x] Paste-last recopies only the dedicated last completed transcript and never an active partial.
 - [ ] Mic-denied path is recoverable (no dead end).
 - [ ] `prefers-reduced-motion` honored.
 
@@ -152,10 +154,10 @@ When Silero lands, it is owned by **Rust on the audio path** ([ADR 0006](../adr/
 - [x] Collapsed and expanded native bounds match the visible island; hover expands the same tray-owned window downward without activating the app.
 - [x] Only visible island pixels are interactive, with a 200 ms collapse grace period that preserves the pointer target.
 - [x] Dictation and paste-last work immediately from documented defaults: `Ctrl+Shift+Space` and `Ctrl+Shift+Alt+V`.
-- [x] Shortcut recording starts only after an explicit user action, stores only the final normalized chord, never logs raw events, and supports Cancel and per-action Reset.
+- [x] Shortcut recording starts only after native confirmation, lasts at most 15 seconds, requires neutral/chord/release, stores only the final normalized chord, never logs raw events, and supports Cancel and per-action Reset.
 - [x] Invalid, reserved, conflicting, or failed registrations leave the previous working shortcut active.
 
-Focused evidence covers pure physical-code normalization and reserved-chord tests, transactional Rust registration tests, Playwright visual/state/reduced-motion tests, a 20-sample hover p95 at or below 220 ms, and native WDIO proof that one unfocused `live-overlay` changes from `104×40` to `180×88` and back while its webview root equals the visible island. The optional real-microphone/model lifecycle remains explicitly skipped when the verified Nemotron model is absent; that skip does not weaken the geometry or shortcut evidence.
+Focused evidence covers Rust physical-enrollment neutral/chord/release and modifier-policy tests, normalized/reserved-chord tests, transactional registration tests, clipboard-only delivery tests, overlay listener-order/state tests, Playwright visual/state/reduced-motion tests, a 20-sample hover p95 at or below 220 ms, and native WDIO proof that one unfocused `live-overlay` changes from `104×40` to `180×88` and back while its webview root equals the visible island. The optional real-microphone/model lifecycle remains explicitly skipped when the verified Nemotron model is absent; that skip does not weaken the geometry, shortcut, or delivery evidence.
 
 ### Follow-on preprocessing/server path
 

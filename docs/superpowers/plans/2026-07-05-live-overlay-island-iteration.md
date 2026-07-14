@@ -1,5 +1,12 @@
 # Live Overlay Island Iteration Implementation Plan
 
+> **Historical record — current authority (2026-07-14):** This plan preserves a
+> retired UI iteration. Any synthesized `SendInput` delivery described below is
+> retired; completed transcripts now use clipboard-only delivery after
+> native-confirmed bounded shortcut enrollment. Use
+> [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
+> [live client spec](../../specs/live-dictation-client-ux.md) as authority.
+
 > **Implementation status (2026-07-13):** Historical UI implementation record, superseded in execution. The convergence slice now reuses one tray-owned `live-overlay`; React requests semantic surfaces and Rust alone owns exact native bounds, top-center positioning, and the rounded Windows region. The old invisible-sensor, fixed-frame, frontend-geometry tasks below describe the retired baseline and are not remaining work. Current evidence and defaults are recorded in [Live dictation client UX](../../specs/live-dictation-client-ux.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

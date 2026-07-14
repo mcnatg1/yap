@@ -69,17 +69,42 @@ pub struct LiveSessionView {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LiveOverlayView {
+    pub visibility: LiveOverlayVisibility,
+    pub status: LiveSessionStatus,
+    pub capture_mode: LiveCaptureMode,
+    pub active_capture_mode: Option<LiveCaptureMode>,
+    pub level: Option<f32>,
+    pub has_final_text: bool,
+    pub error: Option<String>,
+}
+
+impl From<&LiveSessionView> for LiveOverlayView {
+    fn from(view: &LiveSessionView) -> Self {
+        Self {
+            visibility: view.visibility,
+            status: view.status,
+            capture_mode: view.capture_mode,
+            active_capture_mode: view.active_capture_mode,
+            level: view.level,
+            has_final_text: view
+                .final_text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty()),
+            error: view.error.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LiveLevelView {
     pub level: Option<f32>,
-    pub status: LiveSessionStatus,
 }
 
 impl From<&LiveSessionView> for LiveLevelView {
     fn from(view: &LiveSessionView) -> Self {
-        Self {
-            level: view.level,
-            status: view.status,
-        }
+        Self { level: view.level }
     }
 }
 
@@ -878,12 +903,52 @@ mod tests {
             payload.get("level").and_then(serde_json::Value::as_f64),
             Some(0.5)
         );
-        assert_eq!(
-            payload.get("status").and_then(serde_json::Value::as_str),
-            Some("speaking")
-        );
+        assert!(payload.get("status").is_none());
         assert!(payload.get("partialText").is_none());
         assert!(payload.get("finalText").is_none());
+    }
+
+    #[test]
+    fn overlay_view_exposes_only_rendering_state() {
+        let mut view = LiveSessionView::from_settings(&LiveSettings {
+            overlay_enabled: true,
+            hotkey: Some("Ctrl+Shift+Space".into()),
+            paste_hotkey: Some("Ctrl+Shift+Alt+V".into()),
+            capture_mode: LiveCaptureMode::Toggle,
+            input_device_id: Some("private-device-id".into()),
+        });
+        view.partial_text = Some("private partial transcript".into());
+        view.final_text = Some("private final transcript".into());
+        view.input_device_label = Some("Private microphone".into());
+        view.status = LiveSessionStatus::Speaking;
+
+        let payload = serde_json::to_value(LiveOverlayView::from(&view)).unwrap();
+
+        assert_eq!(
+            payload.get("hasFinalText"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            payload
+                .get("captureMode")
+                .and_then(serde_json::Value::as_str),
+            Some("toggle")
+        );
+        for forbidden in [
+            "partialText",
+            "finalText",
+            "hotkey",
+            "pasteHotkey",
+            "inputDeviceId",
+            "inputDeviceLabel",
+            "route",
+            "transcriptionDegraded",
+        ] {
+            assert!(
+                payload.get(forbidden).is_none(),
+                "unexpected overlay field: {forbidden}"
+            );
+        }
     }
 
     #[test]

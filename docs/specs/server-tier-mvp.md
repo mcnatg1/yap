@@ -53,7 +53,7 @@ pool interface; persistent deployment topology remains deferred.
 - `server/openapi/openapi.json` and `server/openapi/live-events.schema.json` define machine-readable health, future job/upload, and future live-event contracts.
 - `python -m yap_server` implements bounded loopback `GET /v1/health`; advertised batch/live/job-status capabilities remain `false`.
 - The Rust desktop connector validates configured origins, performs bounded health checks, fails closed on incompatible responses, rejects stale generations, and cancels retries when settings change.
-- The desktop SQLite ledger owns imported-job IDs, status, attempts, source provenance, cancellation intent, restart recovery, and idempotent legacy migration.
+- The desktop SQLite ledger owns imported-job IDs, status, attempts, source provenance, cancellation intent, restart recovery, and bounded terminal history. New sources enter only through native picker/drop admission; historical localStorage path rows are not migrated automatically.
 - React renders Rust snapshots/events. It does not own queue execution through localStorage.
 
 This boundary intentionally does not implement job/chunk handlers, automatic

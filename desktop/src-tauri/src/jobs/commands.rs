@@ -19,7 +19,8 @@ use std::{
         Mutex,
     },
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 const PENDING_JOB_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_RECORDING_JOBS: usize = 200;
@@ -30,43 +31,6 @@ static NEXT_JOB_NONCE: AtomicU64 = AtomicU64::new(0);
 pub struct JobCommandError {
     pub code: String,
     pub message: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LegacyQueueImport {
-    pub schema_version: u32,
-    pub jobs: Vec<LegacyQueueJob>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LegacyQueueJob {
-    pub id: u64,
-    pub path: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyImportAcknowledgement {
-    pub legacy_id: u64,
-    pub job_id: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyImportRejection {
-    pub legacy_id: u64,
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyImportResult {
-    pub accepted: Vec<LegacyImportAcknowledgement>,
-    pub duplicates: Vec<LegacyImportAcknowledgement>,
-    pub rejected: Vec<LegacyImportRejection>,
 }
 
 impl From<JobLedgerError> for JobCommandError {
@@ -87,6 +51,7 @@ pub struct RecordingJobs {
     projection_failures: Mutex<VecDeque<JobCommandError>>,
     owned_dir: PathBuf,
     registry_path: PathBuf,
+    selection_registry_path: PathBuf,
 }
 
 struct CachedPlayback {
@@ -105,32 +70,70 @@ pub(crate) fn recording_jobs_snapshot(
 }
 
 #[tauri::command]
-pub(crate) fn recording_jobs_create_imports(
+pub(crate) async fn recording_jobs_pick_imports(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
-    jobs: tauri::State<'_, RecordingJobs>,
-    media: tauri::State<'_, MediaOwner>,
-    paths: Vec<String>,
 ) -> Result<Vec<RecordingJobView>, JobCommandError> {
     ensure_main(&window)?;
-    mutate_then_notify(
-        || jobs.create_imports(&media, paths, now_ms()?),
-        || emit_jobs_changed(&app),
-    )
+    #[cfg(feature = "wdio")]
+    if let Some(paths) = wdio_picker_override()? {
+        return import_native_paths(&app, paths);
+    }
+    let picker_app = app.clone();
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        picker_app
+            .dialog()
+            .file()
+            .set_title("Choose recordings")
+            .add_filter(
+                "Audio and video",
+                crate::file_actions::RECORDING_MEDIA_EXTENSIONS,
+            )
+            .blocking_pick_files()
+    })
+    .await
+    .map_err(|error| command_error("PICKER_UNAVAILABLE", error.to_string()))?;
+    let Some(selected) = selected else {
+        return Ok(Vec::new());
+    };
+    let paths = selected
+        .into_iter()
+        .map(|path| {
+            path.into_path().map_err(|error| {
+                command_error(
+                    "PICKER_PATH_UNAVAILABLE",
+                    format!("The selected recording path is unavailable: {error}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    import_native_paths(&app, paths)
 }
 
-#[tauri::command]
-pub(crate) fn recording_jobs_import_legacy(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    jobs: tauri::State<'_, RecordingJobs>,
-    payload: LegacyQueueImport,
-) -> Result<LegacyImportResult, JobCommandError> {
-    ensure_main(&window)?;
-    mutate_then_notify(
-        || jobs.import_legacy(payload, now_ms()?),
-        || emit_jobs_changed(&app),
-    )
+#[cfg(feature = "wdio")]
+fn wdio_picker_override() -> Result<Option<Vec<PathBuf>>, JobCommandError> {
+    let Some(path) = std::env::var_os("YAP_WDIO_PICKER_PATH") else {
+        return Ok(None);
+    };
+    let run_root = std::env::var_os("YAP_WDIO_RUN_ROOT").ok_or_else(|| {
+        command_error(
+            "WDIO_PICKER_SCOPE_MISSING",
+            "The WDIO picker override requires an isolated run root.",
+        )
+    })?;
+    let run_root = PathBuf::from(run_root)
+        .canonicalize()
+        .map_err(|error| command_error("WDIO_PICKER_SCOPE_INVALID", error.to_string()))?;
+    let path = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|error| command_error("WDIO_PICKER_PATH_INVALID", error.to_string()))?;
+    if !path.starts_with(&run_root) {
+        return Err(command_error(
+            "WDIO_PICKER_PATH_OUTSIDE_RUN",
+            "The WDIO picker path is outside the isolated run root.",
+        ));
+    }
+    Ok(Some(vec![path]))
 }
 
 #[tauri::command]
@@ -189,11 +192,35 @@ fn now_ms() -> Result<u64, JobCommandError> {
 }
 
 fn emit_jobs_changed(app: &tauri::AppHandle) {
-    if let Err(error) = app.emit("recording-jobs-changed", ()) {
+    if let Err(error) = app.emit_to(
+        crate::authorization::MAIN_WINDOW_LABEL,
+        "recording-jobs-changed",
+        (),
+    ) {
         crate::stt::log_yap(&format!(
             "recording jobs event failed after commit: {error}"
         ));
     }
+}
+
+pub(crate) fn import_native_paths(
+    app: &tauri::AppHandle,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<RecordingJobView>, JobCommandError> {
+    let jobs = app.state::<RecordingJobs>();
+    let media = app.state::<MediaOwner>();
+    mutate_then_notify(
+        || jobs.create_imports(&media, paths, now_ms()?),
+        || emit_jobs_changed(app),
+    )
+}
+
+pub(crate) fn emit_native_import_error(app: &tauri::AppHandle, error: &JobCommandError) {
+    let _ = app.emit_to(
+        crate::authorization::MAIN_WINDOW_LABEL,
+        "recording-jobs-import-error",
+        &error.message,
+    );
 }
 
 impl RecordingJobs {
@@ -202,6 +229,7 @@ impl RecordingJobs {
             JobLedger::open_default()?,
             crate::live::recordings::recordings_dir(),
             crate::file_actions::recording_job_playback_registry_path(),
+            crate::file_actions::recording_job_selection_registry_path(),
         ))
     }
 
@@ -211,14 +239,25 @@ impl RecordingJobs {
         owned_dir: impl Into<PathBuf>,
         registry_path: impl Into<PathBuf>,
     ) -> Result<Self, JobCommandError> {
+        let registry_path = registry_path.into();
+        let selection_registry_path = registry_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("recording-native-selection-registry.json");
         Ok(Self::from_storage(
             JobLedger::open(ledger_path)?,
             owned_dir.into(),
-            registry_path.into(),
+            registry_path,
+            selection_registry_path,
         ))
     }
 
-    fn from_storage(ledger: JobLedger, owned_dir: PathBuf, registry_path: PathBuf) -> Self {
+    fn from_storage(
+        ledger: JobLedger,
+        owned_dir: PathBuf,
+        registry_path: PathBuf,
+        selection_registry_path: PathBuf,
+    ) -> Self {
         Self {
             ledger,
             mutation: Mutex::new(()),
@@ -227,6 +266,7 @@ impl RecordingJobs {
             projection_failures: Mutex::new(VecDeque::new()),
             owned_dir,
             registry_path,
+            selection_registry_path,
         }
     }
 
@@ -238,13 +278,14 @@ impl RecordingJobs {
             ledger,
             owned_dir,
             authority_dir.join("recording-job-playback-registry.json"),
+            authority_dir.join("recording-native-selection-registry.json"),
         )
     }
 
-    fn create_imports(
+    fn create_imports<P: AsRef<Path>>(
         &self,
         media: &MediaOwner,
-        paths: Vec<String>,
+        paths: Vec<P>,
         now_ms: u64,
     ) -> Result<Vec<RecordingJobView>, JobCommandError> {
         let _mutation = self.mutation.lock().map_err(|_| {
@@ -261,7 +302,7 @@ impl RecordingJobs {
         }
         let sources = paths
             .iter()
-            .map(|path| self.validate_source(Path::new(path)))
+            .map(|path| self.validate_source(path.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         let mut new_sources = HashSet::new();
         for source in &sources {
@@ -279,6 +320,15 @@ impl RecordingJobs {
                 "JOB_LIMIT_EXCEEDED",
                 format!("Yap accepts at most {MAX_RECORDING_JOBS} recording jobs."),
             ));
+        }
+
+        for source in &sources {
+            crate::file_actions::register_native_selected_recording_job_source_at(
+                source,
+                &self.selection_registry_path,
+                &self.owned_dir,
+            )
+            .map_err(source_error)?;
         }
 
         let mut records_by_source = HashMap::new();
@@ -363,8 +413,12 @@ impl RecordingJobs {
         let mut views = Vec::new();
         let mut recoverable_ids = HashSet::new();
         let mut authorized_paths = Vec::new();
+        let mut recoverable_paths = Vec::new();
         for record in self.ledger.list_recoverable_jobs()? {
             recoverable_ids.insert(record.job_id.clone());
+            if let Some(source_path) = record.source_path.clone() {
+                recoverable_paths.push(source_path);
+            }
             match self.project_with_playback(record.clone(), media) {
                 Ok(view) => {
                     if view.playback_path.is_some() {
@@ -390,6 +444,12 @@ impl RecordingJobs {
         ) {
             log_registry_cleanup_failure("snapshot reconciliation", &error);
         }
+        if let Err(error) = crate::file_actions::reconcile_recording_job_playback_paths_at(
+            &recoverable_paths,
+            &self.selection_registry_path,
+        ) {
+            log_registry_cleanup_failure("native selection reconciliation", &error);
+        }
         Ok(views)
     }
 
@@ -408,7 +468,7 @@ impl RecordingJobs {
         })?;
         let record = self.ledger.request_cancellation(job_id, now_ms)?;
         self.release_playback(job_id, media);
-        self.remove_job_authority_best_effort(record.source_path.as_deref(), "cancellation");
+        self.remove_all_job_authority_best_effort(record.source_path.as_deref(), "cancellation");
         let view = RecordingJobView::from_record(&record);
         drop(mutation);
         notify();
@@ -492,122 +552,11 @@ impl RecordingJobs {
         })?;
         let record = self.ledger.dismiss_failed(job_id, now_ms)?;
         self.release_playback(job_id, media);
-        self.remove_job_authority_best_effort(record.source_path.as_deref(), "dismissal");
+        self.remove_all_job_authority_best_effort(record.source_path.as_deref(), "dismissal");
         let view = RecordingJobView::from_record(&record);
         drop(mutation);
         notify();
         Ok(view)
-    }
-
-    #[doc(hidden)]
-    pub fn import_legacy(
-        &self,
-        payload: LegacyQueueImport,
-        now_ms: u64,
-    ) -> Result<LegacyImportResult, JobCommandError> {
-        if payload.schema_version != 1 {
-            return Err(command_error(
-                "LEGACY_SCHEMA_UNSUPPORTED",
-                format!(
-                    "Legacy recording queue schema {} is not supported.",
-                    payload.schema_version
-                ),
-            ));
-        }
-        if payload.jobs.len() > MAX_RECORDING_JOBS {
-            return Err(command_error(
-                "JOB_LIMIT_EXCEEDED",
-                format!("Legacy import accepts at most {MAX_RECORDING_JOBS} rows."),
-            ));
-        }
-
-        let _mutation = self.mutation.lock().map_err(|_| {
-            command_error(
-                "JOB_STATE_UNAVAILABLE",
-                "Recording job state is unavailable.",
-            )
-        })?;
-        let mut result = LegacyImportResult {
-            accepted: Vec::new(),
-            duplicates: Vec::new(),
-            rejected: Vec::new(),
-        };
-        let mut recoverable_count = self.ledger.list_recoverable_jobs()?.len();
-
-        for (index, legacy) in payload.jobs.into_iter().enumerate() {
-            let job_id = legacy_job_id(legacy.id, &legacy.path);
-            if let Some(existing) = self.ledger.get_job(&job_id)? {
-                result.duplicates.push(LegacyImportAcknowledgement {
-                    legacy_id: legacy.id,
-                    job_id: existing.job_id,
-                });
-                continue;
-            }
-            let source = match self.validate_source(Path::new(&legacy.path)) {
-                Ok(source) => source,
-                Err(error) => {
-                    result.rejected.push(LegacyImportRejection {
-                        legacy_id: legacy.id,
-                        code: error.code,
-                        message: error.message,
-                    });
-                    continue;
-                }
-            };
-            if let Some(existing) = self
-                .ledger
-                .find_recoverable_imported_job_by_source(&source.canonical_path)?
-            {
-                result.duplicates.push(LegacyImportAcknowledgement {
-                    legacy_id: legacy.id,
-                    job_id: existing.job_id,
-                });
-                continue;
-            }
-            if recoverable_count >= MAX_RECORDING_JOBS {
-                result.rejected.push(LegacyImportRejection {
-                    legacy_id: legacy.id,
-                    code: "JOB_LIMIT_EXCEEDED".into(),
-                    message: format!("Yap accepts at most {MAX_RECORDING_JOBS} recording jobs."),
-                });
-                continue;
-            }
-
-            let row_now = now_ms.saturating_add(index as u64);
-            let record = self.ledger.insert_job(&NewRecordingJob {
-                job_id: job_id.clone(),
-                session_mode: SessionMode::Meeting,
-                session_origin: SessionOrigin::ImportedFile,
-                source_path: Some(source.canonical_path.clone()),
-                source_ownership: SourceOwnership::External,
-                output_path: None,
-                display_name: source
-                    .canonical_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Recording")
-                    .to_owned(),
-                status: RecordingJobStatus::QueuedServer,
-                route: Some(RecordingRoute::ServerBatch),
-                attempt_count: 0,
-                next_attempt_at_ms: None,
-                cancellation_requested: false,
-                capture_commit_path: None,
-                capture_manifest_sha256: None,
-                error_code: None,
-                error_message: None,
-                created_at_ms: row_now,
-                updated_at_ms: row_now,
-                expires_at_ms: row_now.checked_add(PENDING_JOB_LIFETIME_MS),
-            })?;
-            recoverable_count += 1;
-            result.accepted.push(LegacyImportAcknowledgement {
-                legacy_id: legacy.id,
-                job_id: record.job_id,
-            });
-        }
-
-        Ok(result)
     }
 
     fn validate_source(&self, path: &Path) -> Result<ValidatedRecordingJobSource, JobCommandError> {
@@ -663,9 +612,10 @@ impl RecordingJobs {
         if let Some(stale) = playback.remove(&record.job_id) {
             media.release(&stale.playback_path);
         }
-        let admission = crate::file_actions::authorize_validated_recording_job_source_at(
+        let admission = crate::file_actions::authorize_registered_recording_job_source_at(
             &source,
             media,
+            &self.selection_registry_path,
             &self.registry_path,
             &self.owned_dir,
         )
@@ -708,7 +658,10 @@ impl RecordingJobs {
     ) -> RecordingJobView {
         debug_assert_eq!(record.status, RecordingJobStatus::Failed);
         self.release_playback(&record.job_id, media);
-        self.remove_job_authority_best_effort(record.source_path.as_deref(), "failed projection");
+        self.remove_active_job_authority_best_effort(
+            record.source_path.as_deref(),
+            "failed projection",
+        );
         let mut view = RecordingJobView::from_record(record);
         view.source_path = None;
         view.playback_path = None;
@@ -734,7 +687,7 @@ impl RecordingJobs {
         }
     }
 
-    fn remove_job_authority_best_effort(&self, path: Option<&Path>, action: &str) {
+    fn remove_active_job_authority_best_effort(&self, path: Option<&Path>, action: &str) {
         let Some(path) = path else {
             return;
         };
@@ -742,6 +695,19 @@ impl RecordingJobs {
             crate::file_actions::remove_recording_job_playback_path_at(path, &self.registry_path)
         {
             log_registry_cleanup_failure(action, &error);
+        }
+    }
+
+    fn remove_all_job_authority_best_effort(&self, path: Option<&Path>, action: &str) {
+        self.remove_active_job_authority_best_effort(path, action);
+        let Some(path) = path else {
+            return;
+        };
+        if let Err(error) = crate::file_actions::remove_recording_job_playback_path_at(
+            path,
+            &self.selection_registry_path,
+        ) {
+            log_registry_cleanup_failure(&format!("{action} native selection"), &error);
         }
     }
 
@@ -802,17 +768,6 @@ fn mint_job_id(path: &Path, now_ms: u64) -> String {
     hash.update(now_ms.to_le_bytes());
     hash.update(nonce.to_le_bytes());
     format!("job-{}", hex_prefix(&hash.finalize(), 24))
-}
-
-fn legacy_job_id(legacy_id: u64, path: &str) -> String {
-    let normalized = if cfg!(windows) {
-        path.replace('\\', "/").to_lowercase()
-    } else {
-        path.replace('\\', "/")
-    };
-    let mut hash = Sha256::new();
-    hash.update(normalized.as_bytes());
-    format!("legacy-{legacy_id}-{}", hex_prefix(&hash.finalize(), 16))
 }
 
 fn hex_prefix(bytes: &[u8], digits: usize) -> String {
@@ -1027,6 +982,57 @@ mod tests {
         );
         assert_eq!(fs::read(&source).unwrap(), source_bytes);
 
+        drop(media);
+        drop(jobs);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pre_native_picker_ledger_and_registry_cannot_reauthorize_on_restart() {
+        let dir = temp_dir("pre-native-picker-restart");
+        let database = dir.join("jobs.sqlite3");
+        let source = dir.join("legacy-renderer-path.wav");
+        fs::write(&source, b"RIFF-pre-native-picker-fixture").unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+        let job_id;
+        let active_registry;
+        let selection_registry;
+        {
+            let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+            let media = MediaOwner::new();
+            job_id = jobs
+                .create_imports(&media, vec![source.clone()], 1_600)
+                .unwrap()[0]
+                .id
+                .clone();
+            active_registry = jobs.registry_path.clone();
+            selection_registry = jobs.selection_registry_path.clone();
+        }
+        fs::remove_file(&selection_registry).unwrap();
+        fs::write(
+            &active_registry,
+            format!(
+                r#"{{"version":1,"paths":[{}]}}"#,
+                serde_json::to_string(&canonical_source.display().to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
+        let media = MediaOwner::new();
+        let snapshot = jobs.snapshot(&media, 1_601).unwrap();
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, job_id);
+        assert!(capability_free_failed(&snapshot[0]));
+        assert_eq!(media.active_admission_count_for_test(), 0);
+        assert!(crate::file_actions::openable_app_path_from_registries(
+            source.display().to_string(),
+            &dir.join("recording-playback-registry.json"),
+            &jobs.registry_path,
+            &jobs.owned_dir,
+        )
+        .is_err());
         drop(media);
         drop(jobs);
         fs::remove_dir_all(dir).unwrap();
@@ -1280,32 +1286,6 @@ mod tests {
         assert_eq!(
             media.active_admission_count_for_test(),
             admissions_before_overflow
-        );
-
-        let legacy_overflow = dir.join("legacy-overflow.wav");
-        fs::write(&legacy_overflow, b"RIFF-legacy-overflow-fixture").unwrap();
-        let legacy_admissions_before = media.active_admission_count_for_test();
-        let legacy_registry_before = fs::read(&jobs.registry_path).unwrap();
-        let legacy = jobs
-            .import_legacy(
-                LegacyQueueImport {
-                    schema_version: 1,
-                    jobs: vec![LegacyQueueJob {
-                        id: 999,
-                        path: legacy_overflow.display().to_string(),
-                    }],
-                },
-                4_003,
-            )
-            .unwrap();
-        assert_eq!(legacy.rejected[0].code, "JOB_LIMIT_EXCEEDED");
-        assert_eq!(
-            media.active_admission_count_for_test(),
-            legacy_admissions_before
-        );
-        assert_eq!(
-            fs::read(&jobs.registry_path).unwrap(),
-            legacy_registry_before
         );
 
         drop(media);
@@ -1746,6 +1726,13 @@ mod tests {
         fs::write(&source, b"RIFF-accepted-fixture").unwrap();
         let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
         let media = MediaOwner::new();
+        let selected_source = jobs.validate_source(&source).unwrap();
+        crate::file_actions::register_native_selected_recording_job_source_at(
+            &selected_source,
+            &jobs.selection_registry_path,
+            &jobs.owned_dir,
+        )
+        .unwrap();
         jobs.ledger
             .insert_job(&NewRecordingJob {
                 job_id: "job-accepted".into(),
@@ -1908,64 +1895,6 @@ mod tests {
 
         drop(media);
         drop(jobs);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn legacy_import_is_bounded_acknowledged_and_idempotent_with_deterministic_ids() {
-        let dir = temp_dir("legacy-import");
-        let source = dir.join("legacy.wav");
-        let missing = dir.join("missing.wav");
-        fs::write(&source, b"RIFF-legacy-fixture").unwrap();
-        let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
-        let media = MediaOwner::new();
-        let payload = LegacyQueueImport {
-            schema_version: 1,
-            jobs: vec![
-                LegacyQueueJob {
-                    id: 41,
-                    path: source.display().to_string(),
-                },
-                LegacyQueueJob {
-                    id: 42,
-                    path: missing.display().to_string(),
-                },
-            ],
-        };
-
-        let first = jobs.import_legacy(payload.clone(), 9_000).unwrap();
-        assert_eq!(first.accepted.len(), 1);
-        assert_eq!(first.duplicates.len(), 0);
-        assert_eq!(first.rejected.len(), 1);
-        assert!(first.accepted[0].job_id.starts_with("legacy-41-"));
-        assert_eq!(first.rejected[0].legacy_id, 42);
-        assert_eq!(first.rejected[0].code, "SOURCE_MISSING");
-        assert_eq!(media.active_admission_count_for_test(), 0);
-        assert!(!jobs.registry_path.exists());
-
-        fs::remove_file(&source).unwrap();
-        let replay = jobs.import_legacy(payload, 9_001).unwrap();
-        assert_eq!(replay.accepted.len(), 0);
-        assert_eq!(replay.duplicates.len(), 1);
-        assert_eq!(replay.duplicates[0].job_id, first.accepted[0].job_id);
-        assert_eq!(replay.rejected.len(), 1);
-        assert_eq!(jobs.ledger.list_jobs().unwrap().len(), 1);
-
-        let overflow = LegacyQueueImport {
-            schema_version: 1,
-            jobs: (0..=MAX_RECORDING_JOBS)
-                .map(|id| LegacyQueueJob {
-                    id: id as u64 + 1,
-                    path: format!("C:/legacy-{id}.wav"),
-                })
-                .collect(),
-        };
-        assert_eq!(
-            jobs.import_legacy(overflow, 9_002).unwrap_err().code,
-            "JOB_LIMIT_EXCEEDED"
-        );
-
-        drop(media);
         fs::remove_dir_all(dir).unwrap();
     }
 

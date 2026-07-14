@@ -10,13 +10,13 @@ import {
   listenLiveSession,
   liveStatus,
   preflightInputDevice,
+  recordLiveHotkey,
+  recordLivePasteHotkey,
   resetLiveHotkey as resetLiveHotkeyToDefault,
   resetLivePasteHotkey as resetLivePasteHotkeyToDefault,
   setInputDevice,
   setLiveCaptureMode,
-  setLiveHotkey,
   setLiveOverlayEnabled,
-  setLivePasteHotkey,
   startLiveSession,
   stopLiveSession,
 } from "@/live";
@@ -94,10 +94,7 @@ export function useLiveControl() {
   );
 
   const updateLiveHotkey = useCallback(
-    (hotkey: string) => {
-      const next = hotkey.trim();
-      void updateLive(next ? () => setLiveHotkey(next) : clearLiveHotkey, next ? "Live shortcut updated" : "Live shortcut cleared");
-    },
+    () => updateLive(recordLiveHotkey, "Live shortcut updated"),
     [updateLive],
   );
 
@@ -110,13 +107,7 @@ export function useLiveControl() {
   }, [updateLive]);
 
   const updateLivePasteHotkey = useCallback(
-    (hotkey: string) => {
-      const next = hotkey.trim();
-      void updateLive(
-        next ? () => setLivePasteHotkey(next) : clearLivePasteHotkey,
-        next ? "Paste shortcut updated" : "Paste shortcut cleared",
-      );
-    },
+    () => updateLive(recordLivePasteHotkey, "Paste shortcut updated"),
     [updateLive],
   );
 
