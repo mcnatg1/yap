@@ -4,11 +4,13 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmdirSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rm as removeAsync } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -584,6 +586,51 @@ describe("Task 8b WDIO run isolation", () => {
         mkdirSync(isolation.recordingRoot);
       }
     }
+  });
+
+  it("preserves the ownership marker while a private child is locked", async () => {
+    const isolation = privateIsolation("locked-child-marker");
+    const ownerMarker = path.join(isolation.runRoot, ".yap-wdio-run-owner");
+    let blockedWebviewOnce = false;
+    let observedRetry = false;
+
+    try {
+      await removePrivateRunRootWhenReleased(isolation, {
+        maxAttempts: 3,
+        onRetry() {
+          observedRetry = true;
+          expect(existsSync(ownerMarker)).toBe(true);
+        },
+        removeDirectory: async (target, options) => {
+          if (target === isolation.runRoot) {
+            const nonMarkerChildren = readdirSync(target)
+              .filter((name) => name !== ".yap-wdio-run-owner");
+            if (nonMarkerChildren.length > 0) {
+              unlinkSync(ownerMarker);
+              const error = new Error("recursive removal deleted the marker before a child released");
+              error.code = "EBUSY";
+              throw error;
+            }
+          }
+          if (target === isolation.webviewRoot && !blockedWebviewOnce) {
+            blockedWebviewOnce = true;
+            const error = new Error("WebView directory busy");
+            error.code = "EBUSY";
+            throw error;
+          }
+          await removeAsync(target, options);
+        },
+        retryDelayMs: 0,
+      });
+    } finally {
+      if (existsSync(isolation.runRoot) && !existsSync(ownerMarker)) {
+        writeFileSync(ownerMarker, `${isolation.token}\n`, { flag: "wx" });
+      }
+    }
+
+    expect(blockedWebviewOnce).toBe(true);
+    expect(observedRetry).toBe(true);
+    expect(existsSync(isolation.runRoot)).toBe(false);
   });
 
   it("sets exact absolute roots below the module-derived fixed temp parent", async () => {

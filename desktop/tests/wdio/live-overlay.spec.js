@@ -168,8 +168,51 @@ $processes = @(Get-Process -Id ($ids | Sort-Object -Unique) -ErrorAction Silentl
   return JSON.parse(stdout.trim());
 }
 
-async function restoreMainWindowNatively() {
-  await showMainWindowNatively();
+async function restoreMainWindow() {
+  let mainVisible = false;
+  let tauriRecoveryError;
+
+  try {
+    const windows = await browser.tauri.listWindows();
+    if (!windows.includes("main")) {
+      throw new Error("the main Tauri window no longer exists");
+    }
+
+    try {
+      await browser.tauri.switchWindow("main");
+      mainVisible = await browser.tauri.execute(({ core }) =>
+        core.invoke("plugin:window|is_visible", { label: "main" }));
+    } catch {
+      mainVisible = false;
+    }
+
+    if (!mainVisible) {
+      await browser.tauri.switchWindow("live-overlay");
+      await browser.tauri.execute(({ core }) =>
+        core.invoke("show_main_workspace", { workspace: "home" }));
+      await browser.waitUntil(async () => browser.tauri.execute(({ core }) =>
+        core.invoke("plugin:window|is_visible", { label: "main" })), {
+        interval: 50,
+        timeout: 5_000,
+        timeoutMsg: "Tauri cleanup did not restore the main window",
+      });
+      mainVisible = true;
+    }
+  } catch (error) {
+    tauriRecoveryError = error;
+  }
+
+  if (!mainVisible) {
+    try {
+      await showMainWindowNatively();
+    } catch (nativeRecoveryError) {
+      throw new AggregateError(
+        [tauriRecoveryError, nativeRecoveryError].filter(Boolean),
+        "Tauri and native main-window recovery both failed",
+      );
+    }
+  }
+
   await browser.tauri.switchWindow("main");
   await browser.tauri.execute(({ core }) =>
     core.invoke("show_main_workspace", { workspace: "home" }));
@@ -191,7 +234,7 @@ async function withMainWindowRestored(probe) {
     throw error;
   } finally {
     try {
-      await restoreMainWindowNatively();
+      await restoreMainWindow();
     } catch (cleanupError) {
       if (!probeFailed) throw cleanupError;
       console.error(
