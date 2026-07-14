@@ -976,11 +976,10 @@ mod tests {
         let range = range
             .map(|value| format!("Range: {value}\r\n"))
             .unwrap_or_default();
-        write!(
-            stream,
+        let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {authority}\r\n{range}Connection: close\r\n\r\n"
-        )
-        .unwrap();
+        );
+        stream.write_all(request.as_bytes()).unwrap();
         let mut bytes = Vec::new();
         if let Err(error) = stream.read_to_end(&mut bytes) {
             // A deliberate `Connection: close` can surface as WSAECONNRESET on
