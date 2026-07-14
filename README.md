@@ -2,7 +2,13 @@
 
 Yap is a staged monorepo for the MVP: one desktop app, one staged server tier, and the docs that keep the architecture honest.
 
-The desktop is a Tauri app with a local Nemotron live fallback. Larger recording transcription belongs on the GB-class server path once the staged `yap-server` skeleton becomes a deployable private service with real workers. The long-term split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but staying in this repo through MVP avoids cross-repo churn while the server contract is still moving.
+The desktop is a Tauri app with a local Nemotron live fallback. Larger
+recording transcription belongs on the GB-class server path. Phase 4 now has a
+real isolated Cohere reference worker on that node; the desktop upload/drain and
+persistent private service that connect it remain later gates. The long-term
+split is still `yap-desktop`, `yap-server`, and `yap-knowledge` (ADR 0018), but
+staying in this repo through MVP avoids cross-repo churn while the server
+contract is still moving.
 
 ## Current Posture
 
@@ -11,16 +17,21 @@ The desktop is a Tauri app with a local Nemotron live fallback. Larger recording
   layouts; support normal and narrow desktop windows.
 - Local fallback install: explicit setup/settings action; runtime never silently downloads models.
 - Client workflow: Rust-owned durable imported-job state, typed React projections, connector health/retry state, and reserved future preprocessing/diarization stages.
-- Batch/large recordings: future GB-class server Cohere path.
+- Batch/large recordings: locked GB10 Cohere reference pool exists; authorized
+  desktop upload/drain and production service integration remain pending.
 - Offline without a suitable server/GPU path: queue or block instead of producing low-confidence
   official-looking transcripts.
 - Nemotron native punctuation stays enabled; no extra local punctuation model is installed.
 - Editor-specific config is not tracked. Use whichever editor you want.
 - MVP repo posture: staged monorepo, no Nx/Turborepo, no separate `yap-contracts` yet.
 
-Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects `pwsh.exe` explicitly, and verifies that floor in every Windows CI job. A hash-pinned PowerShell 7.4.17 compatibility lane parses every tracked script at the supported minor-version floor. Yap stores runtime data in Tauri's canonical app-data directory (`%APPDATA%\com.mcnatg1.yap` on Windows), serializes and hash-verifies a staged transition of recognized runtime entries from the former `%LOCALAPPDATA%\Yap` location without moving installer files or overwriting conflicts, uses Tauri's stock NSIS behavior, and confines installer lifecycle execution to disposable Windows environments. The canonical Phase 3 server boundary remains implemented: machine-readable contracts, loopback capability health, connector state/retry, and the durable desktop job ledger. Upload drain, WSS, server ASR, authentication, and model pools remain later product work.
+Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects `pwsh.exe` explicitly, and verifies that floor in every Windows CI job. A hash-pinned PowerShell 7.4.17 compatibility lane parses every tracked script at the supported minor-version floor. Yap stores runtime data in Tauri's canonical app-data directory (`%APPDATA%\com.mcnatg1.yap` on Windows), serializes and hash-verifies a staged transition of recognized runtime entries from the former `%LOCALAPPDATA%\Yap` location without moving installer files or overwriting conflicts, uses Tauri's stock NSIS behavior, and confines installer lifecycle execution to disposable Windows environments. The canonical Phase 3 server boundary remains implemented: machine-readable contracts, loopback capability health, connector state/retry, and the durable desktop job ledger. Phase 4 adds a separate bounded router/pool and transient isolated Cohere GPU worker. Upload drain, WSS, authenticated server sessions, persistent deployment, and client-connected server processing remain later product work.
 
 The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668165d54b64d1af61e41adad05`: the GB10 ARM64/Python 3.12 server suite passed 50/50, transient loopback health reached the command-line production connector as `Ready`, a separate refused-tunnel run projected `Retrying`, and teardown left no Yap process or port-18765 listener. The deployment archive SHA-256 is `be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` then passed hosted CI run `29293287930`, including the checksum-pinned RustSec audit, and stock NSIS lifecycle run `29293291582` on a disposable `windows-2025` runner. No persistent service, external application bind, or firewall change was introduced.
+
+The Phase 4 executable tree is pinned to exact candidate `309a2d427707e3483b2649f13940bd48dfaee836`. Its one-time local/native/server/GB10 gate passed: the transient ARM64 image `sha256:8b98372d980b3d3ae3cb8bb5cc1498141d161d15157cbd6114339e7a31b8ddff` ran the locked Cohere revision on an NVIDIA GB10 with Python 3.12.3, NVIDIA Torch `2.13.0a0+8145d630e8.nv26.06`, CUDA 13.3, BF16, and WER `0.0` against the `0.12` ceiling. Result SHA-256 `1a2850ad767489e00f6a496a46f95384d0d14b4a609d537a27a1304b80cfbbf0` is bound by evidence SHA-256 `3157efc6845d3c03e05e22a5ad5d0a2e216de5ae26ae990501586a2dfa45312b`; before/after listener, firewall-policy, and service observations matched, and teardown left no Phase 4 container or worker. This proves the isolated reference slice, not the deferred upload/drain, authenticated service, long-recording capacity, or production deployment.
+
+Evidence-only PR head `7c7970ffb959209ba283918a4a200cc16c35fb1f` then passed hosted CI run `29363957581` and CodeQL run `29363955498`. Stock NSIS run `29364138311` passed once on the same head in a disposable `windows-2025` environment; installer SHA-256 `8908b394f9fe9e9fe5a6b393c9b7ed7d44f360103b3e9624323d8b6b3e613627` installed and launched against `%APPDATA%\com.mcnatg1.yap`, and silent uninstall preserved app data and the stock product registry record as designed. The everyday Windows profile was not used for installer lifecycle testing.
 
 ## Repository Layout
 
@@ -38,7 +49,7 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
 |-- infra/
 |   `-- yap-server-node/              GB-class node setup script and env example.
 |-- server/
-|   `-- README.md                     MVP staging area for future yap-server work.
+|   `-- README.md                     MVP staging plus the private Phase 4 ASR reference runtime.
 `-- desktop/
     |-- README.md                     Desktop-only quick commands.
     |-- package.json                  pnpm scripts and frontend deps.
@@ -53,7 +64,7 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
     |-- src/                          React app.
     |   |-- App.tsx                   Main app state and screen composition.
     |   |-- live.ts                   Tauri live-session event/invoke client.
-    |   |-- recording-queue.ts        Durable recording-job invoke/projection client and one-time legacy migration.
+    |   |-- recording-queue.ts        Durable recording-job projection client and legacy recovery notice.
     |   |-- settings.ts               Tauri fallback/setup event/invoke client.
     |   |-- history.ts                localStorage transcript history.
     |   |-- polish.ts                 Text polish client.
@@ -67,7 +78,7 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
         |-- tauri.conf.json           Window and stock bundle config.
         |-- examples/nemotron_profile.rs Local live runtime profiler.
         |-- tests/parity.rs           Mock verbose-json parity contract.
-        |-- tests/job_ledger.rs       File-backed restart and idempotent legacy migration proof.
+        |-- tests/job_ledger.rs       File-backed restart, bounds, and transition proof.
         |-- tests/server_connector.rs Health/failure/retry and Python contract integration proof.
         `-- src/
             |-- app.rs                App/tray/window lifecycle.
@@ -89,16 +100,28 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
 
 ## Current Local Fallback Flow
 
-Official large recordings use or wait for the future `serverBatch` path. The
+Official large recordings use or wait for the `serverBatch` contract path. The
 local path in this branch is the explicit Nemotron INT8 fallback for live/offline
 work, plus setup/install/remove controls for the pinned sherpa model artifacts.
 
 1. The React UI calls live/setup commands through `desktop/src/live.ts` and `desktop/src/settings.ts`.
 2. Tauri owns mic capture, hotkey state, the live overlay window, and the local fallback runtime.
 3. `stt::nemotron` resolves/downloads the pinned Nemotron INT8 artifact set; the live worker keeps one in-process sherpa recognizer warm.
-4. Larger recording jobs are committed to the Rust-owned SQLite ledger and remain queued for future server execution instead of silently producing official-looking local batch transcripts.
+4. Larger recording jobs are committed to the Rust-owned SQLite ledger and
+   remain queued until Phase 5 connects them to the isolated server batch pool,
+   instead of silently producing official-looking local transcripts.
 
-Imported recording jobs use Rust-minted string IDs and a SQLite ledger as authority. React renders typed snapshots/events. The old `yap.recordingQueue.v1` localStorage value is read only by the one-time legacy importer and is deleted only after Rust acknowledges every row; it is never execution authority. The Phase 3 connector validates configured server origins and capability health, but it does not upload, drain, or transcribe queued imports.
+Imported recording jobs use Rust-minted string IDs and a SQLite ledger as
+authority. React renders typed snapshots/events, while the native picker and
+native OS-drop path establish source authority without accepting renderer raw
+pathnames. The old `yap.recordingQueue.v1` localStorage value is never migrated
+or executed automatically; it remains visible only as a recovery reference
+until the user explicitly discards it and re-adds trusted files through the
+native picker. The Phase 3 connector validates configured server origins and
+capability health, and native code requires explicit approval of the exact
+origin before opening health sockets or retries. It does not upload, drain, or
+transcribe queued imports. The Phase 4 worker is server-internal and does not
+change those advertised capabilities.
 
 ## Development
 
@@ -177,4 +200,8 @@ These are intentionally local and ignored:
 - No runtime STT model/backend selector.
 - No command palette or generated UI drawer.
 - No editor-specific project config.
-- No production upload drain, WSS transport, authenticated server session, model pool, or server inference path yet; the implemented connector is limited to validated settings and capability-health state/retry.
+- No production upload drain, WSS transport, authenticated server session,
+  persistent model service, or client-connected server inference path yet; the
+  implemented connector is limited to validated settings and
+  capability-health state/retry, while the isolated Phase 4 pool is gated
+  separately on the private node.

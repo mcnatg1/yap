@@ -12,9 +12,13 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 import {
   deleteRecoverableLiveSession,
   deleteSavedLiveSession,
+  listenLiveOverlaySession,
   listenLiveSessionSaved,
+  liveOverlayStatus,
   recoverLiveSession,
   resolveOwnedLiveTranscriptPaths,
+  startLiveOverlaySession,
+  stopLiveOverlaySession,
 } from "@/live";
 
 describe("live native bridge", () => {
@@ -94,5 +98,34 @@ describe("live native bridge", () => {
 
     expect(tauri.listen).not.toHaveBeenCalled();
     expect(unlisten()).toBeUndefined();
+  });
+
+  it("uses the minimized overlay command and event contracts", async () => {
+    const stop = vi.fn();
+    const onUpdate = vi.fn();
+    const overlay = {
+      captureMode: "pushToTalk",
+      hasFinalText: false,
+      status: "idle",
+      visibility: "enabled",
+    };
+    tauri.invoke.mockResolvedValue(overlay);
+    tauri.listen.mockResolvedValue(stop);
+
+    await expect(liveOverlayStatus()).resolves.toEqual(overlay);
+    await expect(startLiveOverlaySession("toggle")).resolves.toEqual(overlay);
+    await expect(stopLiveOverlaySession()).resolves.toEqual(overlay);
+    const unlisten = await listenLiveOverlaySession(onUpdate);
+    const handler = tauri.listen.mock.calls[0]?.[1];
+    handler?.({ payload: overlay });
+
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["live_overlay_status"],
+      ["start_live_overlay_session", { activeCaptureMode: "toggle" }],
+      ["stop_live_overlay_session"],
+    ]);
+    expect(tauri.listen.mock.calls[0]?.[0]).toBe("live-overlay-session");
+    expect(onUpdate).toHaveBeenCalledWith();
+    expect(unlisten).toBe(stop);
   });
 });

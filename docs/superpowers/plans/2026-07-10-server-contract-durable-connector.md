@@ -1,5 +1,13 @@
 # Server Contract And Durable Connector Implementation Plan
 
+> **Historical record — current authority (2026-07-14):** The server-boundary
+> implementation remains valid, but renderer raw-path import commands,
+> automatic legacy-path migration, and synthesized `SendInput` delivery
+> described in historical tasks are retired. Current client behavior is native
+> picker/drop admission plus clipboard-only delivery; use
+> [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
+> [client state-machine spec](../../specs/client-state-machine.md) as authority.
+
 > **Implementation status (2026-07-13):** Landed canonical Phase 3 server-boundary record. Tasks 1-7 remain implemented. The stock-NSIS replacement and retained server boundary passed the one-time local/native/server/GB10 implementation gate on exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05`. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` then passed hosted CI run `29293287930` and disposable-Windows stock NSIS lifecycle run `29293291582`. The unchecked boxes below preserve the original implementation recipe and are not backlog or status evidence.
 
 > **Evidence boundary:** Phase 3 proves the machine-readable contract, health-only service, capability-aware connector, retry behavior, and Rust-owned durable ledger. It does not prove a persistent server service, same-process native UI transition, upload/drain, WSS, authentication, ASR, model pools, or external network exposure.

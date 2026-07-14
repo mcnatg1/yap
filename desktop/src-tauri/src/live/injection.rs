@@ -1,16 +1,8 @@
 use tauri::Manager;
 
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, VIRTUAL_KEY,
-};
-
 const CF_UNICODETEXT: u32 = 13;
 const CLIPBOARD_OPEN_ATTEMPTS: usize = 6;
 const CLIPBOARD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
-const MODIFIER_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
-const MODIFIER_POLL_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
-const UNICODE_INPUT_CHUNK: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InjectionOutcome {
@@ -20,20 +12,21 @@ pub enum InjectionOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InjectionTarget {
-    focused_control: Option<isize>,
-    window: isize,
-    process_id: u32,
-}
+pub struct InjectionTarget;
 
 pub fn inject_text(
     app: &tauri::AppHandle,
-    target: Option<InjectionTarget>,
+    _target: Option<InjectionTarget>,
     text: &str,
 ) -> Result<InjectionOutcome, String> {
     inject_text_with(
         text,
-        |text| inject_into_target(target, text),
+        |_| {
+            Err(
+                "Automatic insertion is disabled because the exact focused field cannot be revalidated."
+                    .into(),
+            )
+        },
         |text| write_clipboard(app, text),
     )
 }
@@ -71,141 +64,20 @@ pub(crate) fn should_synthesize_paste(
 
 #[cfg(target_os = "windows")]
 pub fn capture_target() -> Option<InjectionTarget> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     let window = unsafe { GetForegroundWindow() };
     if window.0.is_null() {
         return None;
     }
     let mut process_id = 0;
-    let thread_id = unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
-    let mut gui = GUITHREADINFO {
-        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-        ..Default::default()
-    };
-    let focused_control = unsafe { GetGUIThreadInfo(thread_id, &mut gui) }
-        .ok()
-        .and_then(|_| (!gui.hwndFocus.0.is_null()).then_some(gui.hwndFocus.0 as isize));
-    should_synthesize_paste(Some(process_id), std::process::id()).then_some(InjectionTarget {
-        focused_control,
-        window: window.0 as isize,
-        process_id,
-    })
+    unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    should_synthesize_paste(Some(process_id), std::process::id()).then_some(InjectionTarget)
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn capture_target() -> Option<InjectionTarget> {
     None
-}
-
-#[cfg(target_os = "windows")]
-fn inject_into_target(target: Option<InjectionTarget>, text: &str) -> Result<(), String> {
-    let target = target.ok_or_else(|| "No external text target was focused.".to_string())?;
-    if !target_is_foreground(target) {
-        return Err("Focus changed before the transcript was ready.".into());
-    }
-    wait_for_modifiers_released()?;
-    if !target_is_foreground(target) {
-        return Err("Focus changed before the transcript was ready.".into());
-    }
-    send_unicode_text(target, text)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn inject_into_target(_target: Option<InjectionTarget>, _text: &str) -> Result<(), String> {
-    Err("Focused-field injection is currently available only on Windows.".into())
-}
-
-#[cfg(target_os = "windows")]
-fn target_is_foreground(target: InjectionTarget) -> bool {
-    use windows::Win32::{
-        Foundation::HWND,
-        UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
-        },
-    };
-
-    let expected = HWND(target.window as *mut std::ffi::c_void);
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground != expected {
-        return false;
-    }
-    let mut process_id = 0;
-    let thread_id = unsafe { GetWindowThreadProcessId(foreground, Some(&mut process_id)) };
-    if process_id != target.process_id {
-        return false;
-    }
-    let Some(expected_focus) = target.focused_control else {
-        return true;
-    };
-    let mut gui = GUITHREADINFO {
-        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-        ..Default::default()
-    };
-    unsafe { GetGUIThreadInfo(thread_id, &mut gui) }.is_ok()
-        && gui.hwndFocus.0 as isize == expected_focus
-}
-
-#[cfg(target_os = "windows")]
-fn wait_for_modifiers_released() -> Result<(), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
-    };
-
-    let deadline = std::time::Instant::now() + MODIFIER_RELEASE_TIMEOUT;
-    loop {
-        let any_pressed = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
-            .into_iter()
-            .any(|key| unsafe { GetAsyncKeyState(key.0 as i32) } < 0);
-        if !any_pressed {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err("Shortcut modifiers were still pressed.".into());
-        }
-        std::thread::sleep(MODIFIER_POLL_DELAY);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn send_unicode_text(target: InjectionTarget, text: &str) -> Result<(), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    };
-
-    let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
-    for unit in text.encode_utf16() {
-        inputs.push(unicode_input(unit, KEYEVENTF_UNICODE));
-        inputs.push(unicode_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-    }
-    for chunk in inputs.chunks(UNICODE_INPUT_CHUNK) {
-        if !target_is_foreground(target) {
-            return Err("Focus changed during text insertion.".into());
-        }
-        let sent = unsafe { SendInput(chunk, std::mem::size_of::<INPUT>() as i32) };
-        if sent != chunk.len() as u32 {
-            return Err("Windows blocked text insertion.".into());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn unicode_input(unit: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
-                wScan: unit,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
 }
 
 #[cfg(target_os = "windows")]

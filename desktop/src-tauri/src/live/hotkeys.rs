@@ -7,13 +7,27 @@ use super::{settings::DEFAULT_HOTKEY, state::LiveCaptureMode};
 pub const SHORTCUT_DOUBLE_TAP_MS: u64 = 320;
 pub const SHORTCUT_HOLD_MS: u64 = 160;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyPurpose {
+    Dictation,
+    PasteLast,
+}
+
 pub fn parse_hotkey(input: &str) -> Result<Shortcut, String> {
-    let (modifiers, key) = parse_hotkey_parts(input)?;
+    parse_hotkey_for(input, HotkeyPurpose::Dictation)
+}
+
+pub fn parse_hotkey_for(input: &str, purpose: HotkeyPurpose) -> Result<Shortcut, String> {
+    let (modifiers, key) = parse_hotkey_parts(input, purpose)?;
     Ok(Shortcut::new(Some(modifiers), key))
 }
 
 pub fn normalize_hotkey(input: &str) -> Result<String, String> {
-    let (modifiers, key) = parse_hotkey_parts(input)?;
+    normalize_hotkey_for(input, HotkeyPurpose::Dictation)
+}
+
+pub fn normalize_hotkey_for(input: &str, purpose: HotkeyPurpose) -> Result<String, String> {
+    let (modifiers, key) = parse_hotkey_parts(input, purpose)?;
     let mut parts = Vec::with_capacity(5);
     if modifiers.contains(Modifiers::CONTROL) {
         parts.push("Ctrl");
@@ -31,7 +45,7 @@ pub fn normalize_hotkey(input: &str) -> Result<String, String> {
     Ok(parts.join("+"))
 }
 
-fn parse_hotkey_parts(input: &str) -> Result<(Modifiers, Code), String> {
+fn parse_hotkey_parts(input: &str, purpose: HotkeyPurpose) -> Result<(Modifiers, Code), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("Shortcut cannot be empty.".into());
@@ -57,11 +71,23 @@ fn parse_hotkey_parts(input: &str) -> Result<(Modifiers, Code), String> {
     }
 
     let key = key.ok_or_else(|| "Shortcut must contain a key.".to_string())?;
-    if modifiers.is_empty() {
-        return Err("Shortcut needs at least one modifier.".into());
-    }
     if is_windows_reserved(modifiers, key) {
         return Err("Shortcut is reserved by Windows.".into());
+    }
+    let modifier_count = modifiers.bits().count_ones();
+    let required_modifiers = match purpose {
+        HotkeyPurpose::Dictation => 2,
+        HotkeyPurpose::PasteLast => 3,
+    };
+    if modifier_count < required_modifiers {
+        return Err(match purpose {
+            HotkeyPurpose::Dictation => {
+                "Dictation shortcut needs at least two modifier keys.".into()
+            }
+            HotkeyPurpose::PasteLast => {
+                "Paste-last shortcut needs at least three modifier keys.".into()
+            }
+        });
     }
     Ok((modifiers, key))
 }
@@ -401,6 +427,33 @@ mod tests {
     fn rejects_empty_or_modifier_only_hotkeys() {
         assert!(parse_hotkey("").is_err());
         assert!(parse_hotkey("Ctrl+Shift").is_err());
+    }
+
+    #[test]
+    fn rejects_ordinary_single_modifier_dictation_chords() {
+        for hotkey in ["Ctrl+C", "Ctrl+V", "Ctrl+S", "Alt+Enter"] {
+            assert_eq!(
+                parse_hotkey_for(hotkey, HotkeyPurpose::Dictation),
+                Err("Dictation shortcut needs at least two modifier keys.".into()),
+                "{hotkey}"
+            );
+        }
+        assert!(parse_hotkey_for(DEFAULT_HOTKEY, HotkeyPurpose::Dictation).is_ok());
+    }
+
+    #[test]
+    fn paste_last_requires_a_three_modifier_deliberate_chord() {
+        for hotkey in ["Ctrl+V", "Ctrl+Shift+V", "Alt+Shift+V"] {
+            assert!(
+                parse_hotkey_for(hotkey, HotkeyPurpose::PasteLast).is_err(),
+                "{hotkey}"
+            );
+        }
+        assert!(parse_hotkey_for(
+            super::super::settings::DEFAULT_PASTE_HOTKEY,
+            HotkeyPurpose::PasteLast
+        )
+        .is_ok());
     }
 
     #[test]

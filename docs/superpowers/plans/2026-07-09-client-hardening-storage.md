@@ -1,5 +1,12 @@
 # Client Hardening And Storage Implementation Plan
 
+> **Historical record — current authority (2026-07-14):** Renderer raw-path
+> import commands, automatic legacy-path migration, and synthesized `SendInput`
+> delivery described in this plan are retired. Current behavior is native
+> picker/drop admission plus clipboard-only delivery; use
+> [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
+> [client state-machine spec](../../specs/client-state-machine.md) as authority.
+
 > **Implementation status (2026-07-13):** Scoped client hardening is present. The historical test-identity installer gate referenced below was retired by the approved lean Tauri closure; current installer truth is stock NSIS plus a disposable-Windows lifecycle gate. Treat the boxes as historical work notes, not current status evidence.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

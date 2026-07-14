@@ -9,12 +9,14 @@ use tokio::{sync::Semaphore, time::timeout_at};
 
 const MAX_DECODED_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
+#[cfg(test)]
 const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
 const MAX_RECORDING_JOB_PLAYBACK_PATHS: usize = 200;
 const MAX_HIDDEN_PRUNE_CANDIDATES: usize = 200;
 const MAX_CONCURRENT_TRANSCRIPT_READS: usize = 4;
 const TRANSCRIPT_READ_TIMEOUT: Duration = Duration::from_secs(8);
 const TRANSCRIPT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+const NATIVE_SELECTION_REGISTRY_VERSION: u32 = 2;
 
 #[derive(Deserialize, Serialize)]
 struct RecordingPlaybackRegistry {
@@ -48,6 +50,9 @@ pub(crate) struct ValidatedRecordingJobSource {
     pub(crate) canonical_path: std::path::PathBuf,
     pub(crate) fingerprint: crate::commands::media_protocol::MediaSourceFingerprint,
 }
+
+pub(crate) const RECORDING_MEDIA_EXTENSIONS: &[&str] =
+    &["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"];
 
 #[derive(Debug)]
 pub(crate) enum RecordingJobSourceError {
@@ -96,32 +101,73 @@ pub(crate) fn validate_recording_job_source_at(
     })
 }
 
-pub(crate) fn authorize_validated_recording_job_source_at(
+pub(crate) fn register_native_selected_recording_job_source_at(
     source: &ValidatedRecordingJobSource,
-    owner: &crate::commands::media_protocol::MediaOwner,
     registry_path: &std::path::Path,
     owned_dir: &std::path::Path,
+) -> Result<(), RecordingJobSourceError> {
+    let canonical_path = register_recording_job_playback_path_at_from_owned_dir(
+        source.canonical_path.display().to_string(),
+        registry_path,
+        owned_dir,
+    )
+    .map_err(RecordingJobSourceError::Unsafe)?;
+    if canonical_path != source.canonical_path {
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source changed while playback was being authorized.".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn authorize_registered_recording_job_source_at(
+    source: &ValidatedRecordingJobSource,
+    owner: &crate::commands::media_protocol::MediaOwner,
+    selection_registry_path: &std::path::Path,
+    playback_registry_path: &std::path::Path,
+    owned_dir: &std::path::Path,
 ) -> Result<RecordingJobSourceAdmission, RecordingJobSourceError> {
+    let canonical_path =
+        if canonical_path_is_inside_owned_live_directory(&source.canonical_path, owned_dir) {
+            crate::live::recordings::canonical_committed_live_path_from_dir(
+                &source.canonical_path,
+                owned_dir,
+                false,
+            )
+            .map_err(RecordingJobSourceError::Unsafe)?
+        } else {
+            registered_canonical_recording_path_at_with_limit(
+                &source.canonical_path,
+                selection_registry_path,
+                MAX_RECORDING_JOB_PLAYBACK_PATHS,
+            )
+            .map_err(RecordingJobSourceError::Unsafe)?
+        };
+    if canonical_path != source.canonical_path {
+        return Err(RecordingJobSourceError::Unsafe(
+            "Recording source changed while playback authority was being restored.".into(),
+        ));
+    }
     let admission = owner
         .admit_unchanged(
-            &source.canonical_path,
+            &canonical_path,
             &source.fingerprint,
             MAX_DECODED_WAVEFORM_BYTES,
         )
         .map_err(RecordingJobSourceError::Unsafe)?;
-    let canonical_path = register_recording_job_playback_path_at_from_owned_dir(
-        source.canonical_path.display().to_string(),
-        registry_path,
+    let active_path = register_recording_job_playback_path_at_from_owned_dir(
+        canonical_path.display().to_string(),
+        playback_registry_path,
         owned_dir,
     )
     .map_err(|error| {
         owner.release(&admission.url);
         RecordingJobSourceError::Unsafe(error)
     })?;
-    if canonical_path != source.canonical_path {
+    if active_path != canonical_path {
         owner.release(&admission.url);
         return Err(RecordingJobSourceError::Unsafe(
-            "Recording source changed while playback was being authorized.".into(),
+            "Recording source changed while active playback authority was being restored.".into(),
         ));
     }
     Ok(RecordingJobSourceAdmission {
@@ -148,18 +194,6 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[tauri::command]
-pub fn allow_recording_playback_path(
-    window: tauri::WebviewWindow,
-    owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
-    path: String,
-) -> Result<RecordingPlaybackAdmission, String> {
-    ensure_main_window(&window)?;
-    let path = register_playback_path_at(path, &recording_playback_registry_path())?;
-    revalidate_owned_playback_path(&path)?;
-    mint_playback_admission(&path, &owner)
-}
-
-#[tauri::command]
 pub fn restore_recording_playback_path(
     window: tauri::WebviewWindow,
     owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
@@ -168,7 +202,7 @@ pub fn restore_recording_playback_path(
     ensure_main_window(&window)?;
     let path = restore_playback_path_at(
         path,
-        &recording_playback_registry_path(),
+        &recording_job_playback_registry_path(),
         &crate::live::recordings::recordings_dir(),
     )?;
     mint_playback_admission(&path, &owner)
@@ -463,14 +497,17 @@ pub fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(),
 }
 
 fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
-    openable_app_path_from_registries(
+    openable_app_path_from_registry_paths_with_limits(
         path,
-        &recording_playback_registry_path(),
-        &recording_job_playback_registry_path(),
+        &[(
+            &recording_job_playback_registry_path(),
+            MAX_RECORDING_JOB_PLAYBACK_PATHS,
+        )],
         &crate::live::recordings::recordings_dir(),
     )
 }
 
+#[cfg(test)]
 pub(crate) fn openable_app_path_from_registries(
     path: String,
     general_registry_path: &std::path::Path,
@@ -540,6 +577,7 @@ fn playable_recording_path(path: String) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(test)]
 fn register_playback_path_at(
     path: String,
     registry_path: &std::path::Path,
@@ -551,6 +589,7 @@ fn register_playback_path_at(
     )
 }
 
+#[cfg(test)]
 fn register_playback_path_at_from_owned_dir(
     path: String,
     registry_path: &std::path::Path,
@@ -657,7 +696,11 @@ where
     if canonical_path_is_inside_owned_live_directory(&path, owned_dir) {
         return authorize_owned(&path, owned_dir, false);
     }
-    registered_canonical_recording_path_at(&path, registry_path)
+    registered_canonical_recording_path_at_with_limit(
+        &path,
+        registry_path,
+        MAX_RECORDING_JOB_PLAYBACK_PATHS,
+    )
 }
 
 fn mint_playback_admission(
@@ -672,6 +715,7 @@ fn mint_playback_admission(
     })
 }
 
+#[cfg(test)]
 fn registered_canonical_recording_path_at(
     path: &std::path::Path,
     registry_path: &std::path::Path,
@@ -697,12 +741,12 @@ fn registered_canonical_recording_path_at_with_limit(
     Err("Recording file is not registered for playback.".into())
 }
 
-fn recording_playback_registry_path() -> std::path::PathBuf {
-    crate::paths::app_data_dir().join("recording-playback-registry.json")
-}
-
 pub(crate) fn recording_job_playback_registry_path() -> std::path::PathBuf {
     crate::paths::app_data_dir().join("recording-job-playback-registry.json")
+}
+
+pub(crate) fn recording_job_selection_registry_path() -> std::path::PathBuf {
+    crate::paths::app_data_dir().join("recording-native-selection-registry.json")
 }
 
 #[cfg(test)]
@@ -724,7 +768,10 @@ fn read_registered_playback_paths_with_limit(
     let Ok(registry) = serde_json::from_str::<RecordingPlaybackRegistry>(&text) else {
         return Ok(Vec::new());
     };
-    if registry.version != 1 {
+    if registry.version == 1 {
+        return Ok(Vec::new());
+    }
+    if registry.version != NATIVE_SELECTION_REGISTRY_VERSION {
         return Err(format!(
             "Unsupported playback registry version {}.",
             registry.version
@@ -764,9 +811,17 @@ pub(crate) fn reconcile_recording_job_playback_paths_at(
     let _guard = playback_registry_lock()
         .lock()
         .map_err(|_| "Playback registry lock is unavailable.".to_string())?;
+    let registered =
+        read_registered_playback_paths_with_limit(registry_path, MAX_RECORDING_JOB_PLAYBACK_PATHS)?;
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     for path in recoverable_paths {
         if !path.is_absolute() || !is_recording_media_path(path) {
+            continue;
+        }
+        if !registered
+            .iter()
+            .any(|registered| same_registry_path(registered, path))
+        {
             continue;
         }
         if paths
@@ -793,7 +848,7 @@ fn write_registered_playback_paths(
     }
 
     let registry = RecordingPlaybackRegistry {
-        version: 1,
+        version: NATIVE_SELECTION_REGISTRY_VERSION,
         paths: paths
             .iter()
             .map(|path| path.display().to_string())
@@ -856,20 +911,6 @@ fn owned_live_transcript_file_from_dir(
         .map_err(|_| format!("Only Yap-owned canonical live transcripts can be {action}."))
 }
 
-fn revalidate_owned_playback_path(path: &std::path::Path) -> Result<(), String> {
-    revalidate_owned_playback_path_from_dir(path, &crate::live::recordings::recordings_dir())
-}
-
-fn revalidate_owned_playback_path_from_dir(
-    path: &std::path::Path,
-    owned_dir: &std::path::Path,
-) -> Result<(), String> {
-    if canonical_path_is_inside_owned_live_directory(path, owned_dir) {
-        crate::live::recordings::canonical_committed_live_path_from_dir(path, owned_dir, false)?;
-    }
-    Ok(())
-}
-
 fn canonical_path_is_inside_owned_live_directory(
     path: &std::path::Path,
     owned_dir: &std::path::Path,
@@ -912,7 +953,7 @@ fn is_yap_media_or_transcript_path(path: &std::path::Path) -> bool {
 }
 
 fn is_recording_media_path(path: &std::path::Path) -> bool {
-    has_extension(path, &["mp3", "m4a", "wav", "mp4", "flac", "ogg", "webm"])
+    has_extension(path, RECORDING_MEDIA_EXTENSIONS)
 }
 
 fn has_extension(path: &std::path::Path, allowed: &[&str]) -> bool {
@@ -1488,6 +1529,43 @@ mod tests {
     }
 
     #[test]
+    fn playback_restore_ignores_pre_picker_general_registry_authority() {
+        let dir = temp_test_dir("playback-pre-picker-authority");
+        let legacy_registry = dir.join("recording-playback-registry.json");
+        let native_job_registry = dir.join("recording-job-playback-registry.json");
+        let owned = dir.join("owned");
+        let media = dir.join("meeting.wav");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::write(&media, b"RIFF").unwrap();
+        register_playback_path_at_from_owned_dir(
+            media.display().to_string(),
+            &legacy_registry,
+            &owned,
+        )
+        .unwrap();
+
+        assert!(restore_playback_path_at(
+            media.display().to_string(),
+            &native_job_registry,
+            &owned,
+        )
+        .is_err());
+
+        register_recording_job_playback_path_at_from_owned_dir(
+            media.display().to_string(),
+            &native_job_registry,
+            &owned,
+        )
+        .unwrap();
+        assert_eq!(
+            restore_playback_path_at(media.display().to_string(), &native_job_registry, &owned,)
+                .unwrap(),
+            media.canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn owned_playback_restore_keeps_one_canonical_path_during_catalog_validation() {
         let dir = temp_test_dir("owned-playback-stable-canonical-path");
         let registry = dir.join("registry.json");
@@ -1553,12 +1631,38 @@ mod tests {
         let dir = temp_test_dir("playback-registry-version");
         let registry = dir.join("registry.json");
         let media = dir.join("meeting.wav");
-        std::fs::write(&registry, r#"{"version":2,"paths":[]}"#).unwrap();
+        std::fs::write(&registry, r#"{"version":99,"paths":[]}"#).unwrap();
         std::fs::write(&media, b"RIFF").unwrap();
 
         let error = register_playback_path_at(media.display().to_string(), &registry).unwrap_err();
 
         assert!(error.contains("Unsupported playback registry version"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pre_native_picker_registry_cannot_restore_playback_authority() {
+        let dir = temp_test_dir("playback-registry-pre-native-picker");
+        let registry = dir.join("registry.json");
+        let media = dir.join("meeting.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+        std::fs::write(
+            &registry,
+            format!(
+                r#"{{"version":1,"paths":[{}]}}"#,
+                serde_json::to_string(&media.display().to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let error =
+            registered_playback_path_at(media.display().to_string(), &registry).unwrap_err();
+        assert_eq!(error, "Recording file is not registered for playback.");
+
+        register_playback_path_at(media.display().to_string(), &registry).unwrap();
+        let rewritten: RecordingPlaybackRegistry =
+            serde_json::from_str(&std::fs::read_to_string(&registry).unwrap()).unwrap();
+        assert_eq!(rewritten.version, NATIVE_SELECTION_REGISTRY_VERSION);
         std::fs::remove_dir_all(dir).ok();
     }
 

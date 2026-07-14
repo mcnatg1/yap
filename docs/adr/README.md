@@ -36,6 +36,7 @@ Keep ADRs focused on one decision (or one tightly related cluster). Prefer updat
 ADRs 0001–0013 cover the original **solo / local-first profile**. ADRs 0014–0018 introduce the **team / server profile**. ADR 0019 amends the local streaming model choice. ADR 0020 reconciles meeting capture, local anonymous speaker evidence, server-authoritative diarization, and identity privacy across both profiles. Later ADRs supersede conflicting details in earlier records.
 ADR 0021 makes HTTP/3 the gated long-term client-facing transport target while preserving the bounded loopback service and TCP fallback.
 ADR 0022 adopts pinned Google OKF v0.1 for Phase 9, requires a Postgres/pgvector plus typed-relationship baseline, and defines permission-safe projection gates for an optional Neo4j challenger without making any database the knowledge or authorization source-of-truth.
+ADR 0023 amends ADR 0014's absolute live-priority rule with bounded live preference so an always-ready interactive queue cannot starve accepted batch work.
 
 ## Applicability and precedence
 
@@ -43,7 +44,7 @@ Use ADRs in this order:
 
 1. A `Superseded` decision is historical and never authorizes implementation.
 2. A later explicit `Amends` or `Supersedes` clause wins over an earlier conflicting detail.
-3. ADRs 0014–0022 define the canonical client/server architecture and phase map. Earlier ADRs remain authoritative only for the principles or deployment profile their status names.
+3. ADRs 0014–0023 define the canonical client/server architecture and phase map. Earlier ADRs remain authoritative only for the principles or deployment profile their status names.
 4. [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md) is the readable roadmap and status synthesis; it cannot silently override an ADR.
 5. Build specs describe implementation. A `Draft` spec is not permission to ship a model, dependency, protocol, data-retention rule, or external surface absent an accepted ADR.
 
@@ -65,7 +66,7 @@ Every implementation plan must list its applied ADRs, superseded details it inte
 | [0010](0010-okf-conversation-schema.md) | OKF conversation schema | Accepted Markdown/YAML and raw-preservation principles; canonical Phase 9 format superseded by [0022](0022-google-okf-permission-safe-projections.md) |
 | [0011](0011-vector-rag-retrieval.md) | Vector index + RAG retrieval (L6–L7) | Accepted principles; team storage/projection amended by [0017](0017-knowledge-base-compiler.md) and [0022](0022-google-okf-permission-safe-projections.md) |
 | [0012](0012-mcp-server-surface.md) | MCP server surface | Accepted surface; team hosting amended by [0017](0017-knowledge-base-compiler.md) |
-| [0013](0013-global-hotkey-injection.md) | Global hotkey + cross-app injection (L1) | Accepted (Windows active; cross-platform follow-on) |
+| [0013](0013-global-hotkey-injection.md) | Global hotkey + safe cross-app delivery (L1) | Accepted as amended 2026-07-14 (Windows clipboard delivery active; cross-platform follow-on) |
 | [0014](0014-server-tier-compute-topology.md) | Server-tier compute topology — thin client + GB-class workload router | Accepted (canonical Phases 3–5) |
 | [0015](0015-two-pass-diarization-speaker-identity.md) | Two-pass diarization and speaker identity (ECAPA-TDNN + VBx) | Superseded by [0020](0020-meeting-capture-diarization-authority.md) |
 | [0016](0016-auth-identity-bridge.md) | Authentication and voice identity bridge (Entra ID + MSAL) | Accepted (canonical Phase 7) |
@@ -75,6 +76,7 @@ Every implementation plan must list its applied ADRs, superseded details it inte
 | [0020](0020-meeting-capture-diarization-authority.md) | Meeting capture and diarization authority | Accepted (canonical Phase 8) |
 | [0021](0021-http3-secure-edge-transport.md) | HTTP/3 transport evolution at the secure edge | Accepted (roadmap - gated after the Phase 5 remote transport and Phase 7 authentication baselines) |
 | [0022](0022-google-okf-permission-safe-projections.md) | Google OKF and permission-safe knowledge projections | Accepted (canonical Phase 9 knowledge format and projection boundary) |
+| [0023](0023-bounded-live-priority.md) | Bounded live priority in the server workload router | Accepted (amends ADR 0014 priority rule) |
 
 **Build specs** (how, not why): [docs/specs/](../specs/) — STT sidecar, LLM sidecar, live UX, testing.
 

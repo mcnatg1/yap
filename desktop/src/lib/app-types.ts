@@ -133,6 +133,16 @@ export type LiveSessionView = {
   error?: string | null;
 };
 
+export type LiveOverlayView = {
+  visibility: LiveOverlayVisibility;
+  status: LiveSessionStatus;
+  captureMode: LiveCaptureMode;
+  activeCaptureMode?: LiveCaptureMode | null;
+  level?: number | null;
+  hasFinalText: boolean;
+  error?: string | null;
+};
+
 export type RecordingPipelineState = {
   intake: PipelineStageStatus;
   preprocessing: PipelineStageStatus;

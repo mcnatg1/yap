@@ -134,8 +134,36 @@ describe("product surface contracts", () => {
     expect(cspSources(config.app.security.csp, "media-src")).toContain(
       "http://127.0.0.1:*",
     );
+    expect(cspSources(config.app.security.csp, "form-action")).toEqual(["'none'"]);
+    expect(cspSources(config.app.security.devCsp ?? "", "form-action")).toEqual(["'none'"]);
     expect(config.app.security.assetProtocol).toBeUndefined();
     expect(config.bundle.resources["../../THIRD_PARTY_NOTICES.md"])
       .toBe("THIRD_PARTY_NOTICES.md");
+  });
+
+  it("keeps renderer event authority listen-only in both application windows", () => {
+    const readCapability = (name: string) => JSON.parse(readFileSync(
+      new URL(`../../src-tauri/capabilities/${name}.json`, import.meta.url),
+      "utf8",
+    )) as { permissions: string[]; windows: string[] };
+    const main = readCapability("default");
+    const overlay = readCapability("live-overlay");
+
+    expect(main.windows).toEqual(["main"]);
+    expect(main.permissions).toEqual([
+      "core:event:allow-listen",
+      "core:event:allow-unlisten",
+      "core:window:allow-close",
+      "core:window:allow-minimize",
+      "core:window:allow-start-dragging",
+      "core:window:allow-toggle-maximize",
+    ]);
+    expect(overlay.windows).toEqual(["live-overlay"]);
+    expect(overlay.permissions).toEqual([
+      "core:event:allow-listen",
+      "core:event:allow-unlisten",
+    ]);
+    expect([...main.permissions, ...overlay.permissions].some((permission) =>
+      permission.includes("allow-emit") || permission.endsWith(":default"))).toBe(false);
   });
 });

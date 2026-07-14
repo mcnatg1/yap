@@ -83,14 +83,14 @@ async function installQueuedServerBridge(
             schemaVersion: 1,
           };
           if (command === "live_status") return liveSnapshot;
-          if (command === "set_live_hotkey") {
+          if (command === "record_live_hotkey") {
             shortcutCalls.push({ args, command });
-            liveSnapshot = { ...liveSnapshot, hotkey: String((args as { hotkey?: unknown })?.hotkey ?? "") };
+            liveSnapshot = { ...liveSnapshot, hotkey: "Ctrl+Shift+D" };
             return liveSnapshot;
           }
-          if (command === "set_live_paste_hotkey") {
+          if (command === "record_live_paste_hotkey") {
             shortcutCalls.push({ args, command });
-            liveSnapshot = { ...liveSnapshot, pasteHotkey: String((args as { hotkey?: unknown })?.hotkey ?? "") };
+            liveSnapshot = { ...liveSnapshot, pasteHotkey: "Ctrl+Shift+Alt+P" };
             return liveSnapshot;
           }
           if (command === "reset_live_hotkey") {
@@ -157,7 +157,7 @@ for (const scenario of [
   });
 }
 
-test("shortcut settings capture only deliberate physical chords and expose per-action reset", async ({ page }) => {
+test("shortcut settings delegate physical recording to native commands and expose per-action reset", async ({ page }) => {
   await installQueuedServerBridge(page, "not_set");
   await page.goto("/");
   await page.getByRole("button", { name: "Open settings" }).click();
@@ -170,42 +170,26 @@ test("shortcut settings capture only deliberate physical chords and expose per-a
   await expect(dictationRow.getByRole("textbox")).toHaveCount(0);
   await expect(pasteRow.getByRole("textbox")).toHaveCount(0);
 
-  await dictationRow.getByRole("button", { name: "Change shortcut" }).click();
-  const dictationCapture = dictationRow.getByRole("button", { name: "Press shortcut for Dictation" });
-  await expect(dictationCapture).toBeFocused();
-  await page.keyboard.press("D");
-  await expect(dictationRow.getByText("Add Ctrl, Shift, or Alt.")).toBeVisible();
-  await dictationRow.getByRole("button", { name: "Cancel" }).click();
-  await expect(dictationRow).toContainText("Ctrl+Shift+Space");
-
   await page.keyboard.press("A");
   expect(await shortcutCalls(page)).toEqual([]);
 
-  await dictationRow.getByRole("button", { name: "Change shortcut" }).click();
-  await page.keyboard.press("Control+Shift+D");
+  await dictationRow.getByRole("button", { name: "Record shortcut" }).click();
   await expect(dictationRow).toContainText("Ctrl+Shift+D");
 
-  await pasteRow.getByRole("button", { name: "Change shortcut" }).click();
-  const pasteCapture = pasteRow.getByRole("button", { name: "Press shortcut for Paste last" });
-  await pasteCapture.dispatchEvent("keydown", {
-    altKey: true,
-    bubbles: true,
-    code: "KeyP",
-    ctrlKey: true,
-    repeat: true,
-    shiftKey: true,
-  });
-  await expect(pasteCapture).toBeVisible();
-  await page.keyboard.press("Control+Shift+Alt+P");
+  await pasteRow.getByRole("button", { name: "Record shortcut" }).click();
   await expect(pasteRow).toContainText("Ctrl+Shift+Alt+P");
 
   await pasteRow.getByRole("button", { name: "Reset" }).click();
   await expect(pasteRow).toContainText("Ctrl+Shift+Alt+V");
-  expect((await shortcutCalls(page)).map(({ command }) => command)).toEqual([
-    "set_live_hotkey",
-    "set_live_paste_hotkey",
+  const calls = await shortcutCalls(page);
+  expect(calls.map(({ command }) => command)).toEqual([
+    "record_live_hotkey",
+    "record_live_paste_hotkey",
     "reset_live_paste_hotkey",
   ]);
+  expect(calls.slice(0, 2).every(({ args }) =>
+    !args || !("hotkey" in (args as Record<string, unknown>))
+  )).toBe(true);
 });
 
 test("main app renders the home surface", async ({ page }) => {

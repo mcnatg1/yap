@@ -117,7 +117,6 @@ test("reduced motion keeps every native-frame projection complete", async ({ pag
     activeCaptureMode: "pushToTalk",
     captureMode: "pushToTalk",
     level: 0,
-    route: "localFallback",
     status: "armed",
   });
   await expect(root).toHaveAttribute("data-overlay-surface", "initializing");
@@ -129,7 +128,6 @@ test("reduced motion keeps every native-frame projection complete", async ({ pag
     activeCaptureMode: "pushToTalk",
     captureMode: "pushToTalk",
     level: 0.12,
-    route: "localFallback",
     status: "speaking",
   });
   const waveform = page.getByTestId("live-waveform");
@@ -152,7 +150,6 @@ test("live state transitions keep the reused window equal to visible content", a
     activeCaptureMode: "pushToTalk",
     captureMode: "pushToTalk",
     level: 0.72,
-    route: "localFallback",
     status: "speaking",
   });
   await expect(root).toHaveAttribute("data-overlay-surface", "recording");
@@ -165,7 +162,6 @@ test("live state transitions keep the reused window equal to visible content", a
     activeCaptureMode: "toggle",
     captureMode: "pushToTalk",
     level: 0.84,
-    route: "localFallback",
     status: "speaking",
   });
   await expect(root).toHaveAttribute("data-overlay-surface", "recording");
@@ -179,7 +175,6 @@ test("live state transitions keep the reused window equal to visible content", a
     activeCaptureMode: "toggle",
     captureMode: "pushToTalk",
     level: 0,
-    route: "localFallback",
     status: "saving",
   });
   await expect(root).toHaveAttribute("data-overlay-surface", "processing");
@@ -189,9 +184,8 @@ test("live state transitions keep the reused window equal to visible content", a
   await setLiveView(page, {
     activeCaptureMode: undefined,
     captureMode: "toggle",
-    finalText: "Saved dictation",
+    hasFinalText: true,
     level: 0,
-    route: "none",
     status: "idle",
   });
   await expect(root).toHaveAttribute("data-overlay-surface", "success");
@@ -201,9 +195,8 @@ test("live state transitions keep the reused window equal to visible content", a
 
   await setLiveView(page, {
     error: "Mic denied",
-    finalText: undefined,
+    hasFinalText: false,
     level: 0,
-    route: "blocked",
     status: "blocked",
   });
   await expect(root).toHaveAttribute("data-overlay-surface", "feedback");
@@ -227,12 +220,12 @@ test("rapid hover and state reversals settle to the latest exact surface", async
   }
 
   await dispatchPreviewSequence(page, [
-    { activeCaptureMode: "pushToTalk", level: 0, route: "localFallback", status: "armed" },
-    { activeCaptureMode: "pushToTalk", level: 0.7, route: "localFallback", status: "speaking" },
-    { activeCaptureMode: "pushToTalk", level: 0, route: "localFallback", status: "saving" },
-    { activeCaptureMode: "toggle", level: 0.85, route: "localFallback", status: "speaking" },
-    { activeCaptureMode: "toggle", error: "Transient", level: 0, route: "blocked", status: "blocked" },
-    { activeCaptureMode: "toggle", error: undefined, level: 0.92, route: "localFallback", status: "speaking" },
+    { activeCaptureMode: "pushToTalk", level: 0, status: "armed" },
+    { activeCaptureMode: "pushToTalk", level: 0.7, status: "speaking" },
+    { activeCaptureMode: "pushToTalk", level: 0, status: "saving" },
+    { activeCaptureMode: "toggle", level: 0.85, status: "speaking" },
+    { activeCaptureMode: "toggle", error: "Transient", level: 0, status: "blocked" },
+    { activeCaptureMode: "toggle", error: undefined, level: 0.92, status: "speaking" },
   ]);
 
   await expect(root).toHaveAttribute("data-overlay-surface", "recording");

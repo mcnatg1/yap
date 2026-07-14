@@ -2,7 +2,7 @@
 name = "yap-server"
 version = "0.1.0"
 description = "Yap server-tier staging package."
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 
 [project.scripts]
 yap-server = "yap_server.__main__:main"

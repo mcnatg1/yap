@@ -5,7 +5,7 @@
 **Scope:** Make live dictation real through one local fallback: Nemotron 3.5 ASR Streaming 0.6B INT8 via in-process `sherpa-onnx`. The client captures mic audio, streams it to the warm recognizer, saves live WAV/TXT output into Home history, and stays explicit that larger official recordings belong to the server path.
 **Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0019-local-streaming-model-selection.md](../../adr/0019-local-streaming-model-selection.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
 
-> **Current truth (2026-07-12):** The in-process Nemotron path, live WAV/TXT history, and Windows text injection are implemented. Remaining gates are model-artifact licensing, licensed speech/WER evidence, hosted real-model/native CI, measured performance, and cross-platform proof. The scope language below records the implementation slice rather than current backlog.
+> **Current truth (2026-07-14):** The in-process Nemotron path, live WAV/TXT history, native-confirmed bounded shortcut enrollment, and Windows clipboard-only delivery are implemented. Synthesized input is retired under ADR 0013. Remaining gates are client-model artifact licensing, local licensed speech/WER evidence, hosted real-model/native CI, measured performance, and cross-platform proof. The scope language below records the implementation slice rather than current backlog.
 
 ## Problem
 
@@ -15,7 +15,7 @@ The live overlay and hotkey are product-critical, but the client must not become
 - Runs under real time on CPU.
 - Saves transcript and audio artifacts in the same history surface.
 - Blocks or queues larger recordings when the server is unavailable.
-- Left server WSS, Opus, Silero chunk manifests, Scribe, diarization, and text injection as separate phases; Windows text injection has since landed.
+- Left server WSS, Opus, Silero chunk manifests, Scribe, diarization, and cross-app delivery as separate phases; safe Windows clipboard delivery has since landed.
 
 ## Decision
 
@@ -86,5 +86,5 @@ LiveRuntime
 - Rust Silero ONNX inference and emitted `vad_segments` manifests.
 - Scribe polish.
 - Diarization and speaker labels.
-- Cross-app text injection.
+- Cross-app delivery (outside this historical slice; Windows clipboard delivery has since landed).
 - Client-side model fusion or GPU model routing.

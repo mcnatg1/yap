@@ -314,9 +314,9 @@ export function SettingsSheet({
   onSetFallbackEnabled: (enabled: boolean) => void;
   onVerifyFallback: () => void;
   onSetLiveCaptureMode: (captureMode: LiveCaptureMode) => void;
-  onSetLiveHotkey: (hotkey: string) => void;
+  onSetLiveHotkey: () => void;
   onSetLiveOverlayEnabled: (enabled: boolean) => void;
-  onSetLivePasteHotkey: (hotkey: string) => void;
+  onSetLivePasteHotkey: () => void;
   onSetLocalComputeTarget: (targetId: string) => void;
   onSkipSetup: () => void;
   onStartLive: () => void;
@@ -492,23 +492,19 @@ export function SettingsSheet({
                       value={liveView.hotkey || "Off"}
                     >
                       <ShortcutRecorder
-                        current={liveView.hotkey}
                         disabled={liveBusy || liveActive}
-                        label="Dictation"
-                        onChange={onSetLiveHotkey}
+                        onRecord={onSetLiveHotkey}
                         onReset={onResetLiveHotkey}
                       />
                     </SettingsRow>
                     <SettingsRow
-                      detail={liveActive ? "Stop live first." : "Inserts the last transcript into the focused field."}
+                      detail={liveActive ? "Stop live first." : "Copies the last transcript after a deliberate shortcut chord."}
                       label="Paste-last shortcut"
                       value={liveView.pasteHotkey || "Off"}
                     >
                       <ShortcutRecorder
-                        current={liveView.pasteHotkey}
                         disabled={liveBusy || liveActive}
-                        label="Paste last"
-                        onChange={onSetLivePasteHotkey}
+                        onRecord={onSetLivePasteHotkey}
                         onReset={onResetLivePasteHotkey}
                       />
                     </SettingsRow>

@@ -189,8 +189,13 @@ impl ServerConnector {
             return self.snapshot();
         };
 
-        let result =
-            client::check_health(&self.client, &base_url, allow_insecure_private_server()).await;
+        let result = check_health_for_approved_origin(
+            &self.client,
+            &base_url,
+            allow_insecure_private_server(),
+            config::origin_is_approved,
+        )
+        .await;
         let retry_app = app.clone();
         self.accept_health_result_with(
             generation,
@@ -283,9 +288,32 @@ fn project_transition<R: tauri::Runtime>(
     runtime_state.with(|orchestrator| {
         orchestrator.set_server(snapshot.state, snapshot.capabilities);
     });
-    if let Err(error) = app.emit("server-connection", snapshot.clone()) {
+    if let Err(error) = app.emit_to(
+        crate::authorization::MAIN_WINDOW_LABEL,
+        "server-connection",
+        snapshot.clone(),
+    ) {
         crate::stt::log_yap(&format!("server connection event failed: {error}"));
     }
+}
+
+async fn check_health_for_approved_origin<Authorize>(
+    client: &reqwest::Client,
+    base_url: &str,
+    allow_insecure_private: bool,
+    authorize: Authorize,
+) -> client::HealthCheckResult
+where
+    Authorize: FnOnce(&str) -> Result<bool, config::ConfigError>,
+{
+    if !authorize(base_url).unwrap_or(false) {
+        return client::HealthCheckResult::Offline {
+            api_version: None,
+            error_code: "UNAPPROVED_SERVER_ORIGIN",
+            retryable: false,
+        };
+    }
+    client::check_health(client, base_url, allow_insecure_private).await
 }
 
 fn spawn_retry<R: tauri::Runtime>(
@@ -315,10 +343,11 @@ async fn run_scheduled_retry<R: tauri::Runtime>(
         return;
     };
 
-    let result = client::check_health(
+    let result = check_health_for_approved_origin(
         &connector.client,
         &base_url,
         allow_insecure_private_server(),
+        config::origin_is_approved,
     )
     .await;
     let retry_app = app.clone();
@@ -430,7 +459,7 @@ pub(crate) fn server_settings(
 }
 
 #[tauri::command]
-pub(crate) fn set_server_settings(
+pub(crate) async fn set_server_settings(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     connector: tauri::State<'_, ServerConnector>,
@@ -438,9 +467,32 @@ pub(crate) fn set_server_settings(
     settings: config::ServerSettings,
 ) -> Result<config::ServerSettings, String> {
     crate::authorization::ensure_main(&window)?;
+    let normalized = config::normalize_settings(&settings, allow_insecure_private_server())
+        .map_err(|error| error.to_string())?;
+    let current = config::load().map_err(|error| error.to_string())?;
+    let origin_is_approved = normalized
+        .base_url
+        .as_deref()
+        .is_some_and(|origin| config::origin_is_approved(origin).unwrap_or(false));
+    if requires_server_origin_confirmation(&current, &normalized, origin_is_approved) {
+        let origin = normalized
+            .base_url
+            .clone()
+            .expect("enabled normalized server settings have an origin");
+        if !confirm_server_origin(app.clone(), origin).await? {
+            return Err("Server connection change was cancelled.".into());
+        }
+        config::approve_origin(
+            normalized
+                .base_url
+                .as_deref()
+                .expect("enabled normalized server settings have an origin"),
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let mut inner = connector.inner.lock().expect("server connector poisoned");
     let generation_before = connector.generation.load(Ordering::Acquire);
-    let result = finish_settings_save_locked(&connector, &mut inner, config::save(&settings));
+    let result = finish_settings_save_locked(&connector, &mut inner, config::save(&normalized));
     if connector.generation.load(Ordering::Acquire) != generation_before {
         let current = result
             .as_ref()
@@ -454,6 +506,37 @@ pub(crate) fn set_server_settings(
         project_transition(&runtime_state, &app, &inner.snapshot());
     }
     result
+}
+
+fn requires_server_origin_confirmation(
+    current: &config::ServerSettings,
+    candidate: &config::ServerSettings,
+    origin_is_approved: bool,
+) -> bool {
+    candidate.enabled
+        && (!origin_is_approved
+            || !current.enabled
+            || current.base_url.as_deref() != candidate.base_url.as_deref())
+}
+
+async fn confirm_server_origin(app: tauri::AppHandle, origin: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(format!(
+                "Allow Yap to connect to this private server?\n\n{origin}\n\nOnly approve an address supplied by your trusted administrator."
+            ))
+            .title("Confirm private server")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Connect".into(),
+                "Cancel".into(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|error| format!("Could not show server confirmation: {error}"))
 }
 
 #[cfg(test)]
@@ -487,6 +570,65 @@ fn finish_settings_save_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_or_reenabled_server_origins_require_native_confirmation() {
+        let disabled = config::ServerSettings {
+            schema_version: config::CURRENT_SCHEMA_VERSION,
+            enabled: false,
+            base_url: Some("https://asr.example.test/v1".into()),
+        };
+        let enabled = config::ServerSettings {
+            enabled: true,
+            ..disabled.clone()
+        };
+        assert!(requires_server_origin_confirmation(
+            &disabled, &enabled, false
+        ));
+        assert!(requires_server_origin_confirmation(
+            &enabled, &enabled, false
+        ));
+        assert!(!requires_server_origin_confirmation(
+            &enabled, &enabled, true
+        ));
+
+        let changed = config::ServerSettings {
+            base_url: Some("https://other.example.test/v1".into()),
+            ..enabled.clone()
+        };
+        assert!(requires_server_origin_confirmation(
+            &enabled, &changed, false
+        ));
+
+        let disabled_change = config::ServerSettings {
+            enabled: false,
+            ..changed
+        };
+        assert!(!requires_server_origin_confirmation(
+            &enabled,
+            &disabled_change,
+            false
+        ));
+    }
+
+    #[test]
+    fn unapproved_origin_fails_before_any_health_socket_is_created() {
+        let result = tauri::async_runtime::block_on(check_health_for_approved_origin(
+            &client::bounded_client().unwrap(),
+            "http://127.0.0.1:9",
+            false,
+            |_| Ok(false),
+        ));
+
+        assert_eq!(
+            result,
+            client::HealthCheckResult::Offline {
+                api_version: None,
+                error_code: "UNAPPROVED_SERVER_ORIGIN",
+                retryable: false,
+            }
+        );
+    }
 
     #[test]
     fn settings_load_cannot_run_ahead_of_the_connector_save_lock() {

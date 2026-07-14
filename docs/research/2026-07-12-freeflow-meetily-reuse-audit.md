@@ -2,7 +2,9 @@
 
 **Status:** Accepted research baseline; no donor code incorporated by this audit
 
-**As of:** 2026-07-12 at Yap `51931e5c79fe5efbeb03c83c5b3cb1d7b33ccb7e`
+**As of:** Donor comparison performed 2026-07-12 at Yap
+`51931e5c79fe5efbeb03c83c5b3cb1d7b33ccb7e`; Yap baseline reconciled
+2026-07-14 against the Phase 4 implementation candidate
 
 **Scope:** Compare the user-supplied Freeflow and Meetily repositories with the
 current Yap client/server boundary, then define what may be reused and what must
@@ -11,8 +13,9 @@ be rejected.
 ## Decision
 
 Yap remains the implementation foundation. Its Rust/Tauri capture, bounded
-sinks, exact gap accounting, crash-safe artifacts, Windows injection,
-authorization, installer, and release evidence are stronger than either donor.
+sinks, exact gap accounting, crash-safe artifacts, safe Windows clipboard
+delivery, authorization, installer, and release evidence are stronger than
+either donor.
 
 The supplied repositories are selective donors:
 
@@ -52,12 +55,12 @@ evidence. Only commands run against these pinned checkouts are reported above.
 
 | Domain | Yap authority to preserve | Current gap donors may help shape |
 |--------|---------------------------|-----------------------------------|
-| Island/window/tray | React projects typed live state; Tauri owns one non-focusable, always-on-top, taskbar-free window, Windows no-activate flags, native interaction regions, monitor following, recovery, and close-to-tray | The native frame stays `260x40`; the idle interaction region is a `260x8` sensor while the visible capsule is narrower. Collapsed/expanded bounds do not yet match visible content. |
-| Shortcuts/injection | Rust parses gesture semantics, dispatches global shortcuts, transactionally registers/reverts settings, captures and revalidates the Windows target, inserts Unicode text, and falls back visibly through the clipboard | Settings accept typed strings; paste-last has no default; there is no deliberate physical-chord recorder, explicit Cancel, or per-action Reset. macOS/Linux injection adapters remain absent. |
+| Island/window/tray | React projects minimized typed overlay state; Tauri owns one non-focusable, always-on-top, taskbar-free window, exact native bounds, Windows no-activate flags, rounded interaction regions, monitor following, recovery, and close-to-tray | Broader Windows display/elevation evidence and macOS/Linux adapters remain. |
+| Shortcuts/delivery | Rust dispatches global shortcuts, transactionally registers/reverts settings, enforces safe defaults, and performs native-confirmed bounded physical-chord enrollment. Completed text uses Windows clipboard-only delivery with visible paste guidance. | macOS/Linux hotkey/clipboard adapters remain absent. Direct insertion stays deferred until an adapter can prove exact-field authority. |
 | Audio/devices | Preallocated callback buffers, non-blocking bounded sinks, exact loss intervals, source-aware tracks, 16 kHz mono preprocessing, crash-safe recording, and immutable evidence/result contracts | No production Windows system loopback, durable hot-plug identity, Silero path, Opus transport, or meeting capture UX. |
-| Persistence/recovery | Rust owns canonical artifacts, commits, partial recovery, deletion intent, quarantine, and authorized file access | Imported jobs and their numeric IDs remain a React/localStorage projection. A Rust SQLite job ledger must precede upload/drain. |
-| Runtime/server | Typed route/orchestrator vocabulary blocks large jobs instead of pretending local success; the server has tested health/router value objects | No OpenAPI contract, network health endpoint, capability-aware connector, SQLite job ledger, HTTP/WSS runtime, upload/resume, worker, TLS, or auth. |
-| Tests/release | Vitest, Playwright, native Tauri WDIO, Rust/Python tests, dependency audits, NSIS smoke, immutable release evidence, and file-level third-party provenance | No licensed real-speech/WER or RTTM fixture, Windows loopback hardware lane, cross-platform native matrix, or server connector/auth end-to-end test. |
+| Persistence/recovery | Rust owns canonical artifacts, commits, partial recovery, deletion intent, quarantine, authorized file access, native import admission, and the bounded SQLite imported-job ledger | Phase 5 still must connect authenticated upload/drain and result publication; legacy raw path rows require explicit discard/re-add. |
+| Runtime/server | Typed route/orchestrator vocabulary blocks large jobs instead of pretending local success; Phase 3 supplies the OpenAPI contract, loopback health endpoint, capability-aware connector, and SQLite ledger; Phase 4 supplies an unconnected bounded reference router/pool and isolated Cohere worker | No connected job/upload/WSS path, persistent worker service, TLS edge, or authentication. |
+| Tests/release | Vitest, Playwright, native Tauri WDIO, Rust/Python tests, dependency audits, stock NSIS lifecycle evidence, immutable release evidence, file-level third-party provenance, and a licensed real-speech/WER fixture | The exact-head Phase 4 gate, RTTM fixture, Windows loopback hardware lane, cross-platform native matrix, and authenticated server connector end-to-end test remain. |
 
 The relevant Yap owners are `desktop/src-tauri/src/live/`,
 `desktop/src-tauri/src/audio/`, `desktop/src-tauri/src/runtime/`,

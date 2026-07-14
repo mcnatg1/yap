@@ -1,6 +1,13 @@
 # Live Speaking Overlay And Controls Implementation Plan
 
-> **Implementation status (2026-07-12):** Historical foundation plan. Overlay, hotkeys, capture, local streaming, recording, and Windows injection subsequently landed; the original exclusions below describe that PR's scope, not current product capability.
+> **Historical record — current authority (2026-07-14):** This foundation plan
+> predates the converged island and safety amendments. Any synthesized
+> `SendInput` delivery described below is retired; completed transcripts now use
+> clipboard-only delivery after native-confirmed bounded shortcut enrollment.
+> Use [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
+> [live client spec](../../specs/live-dictation-client-ux.md) as authority.
+
+> **Implementation status (2026-07-14):** Historical foundation plan. Overlay, hotkeys, capture, local streaming, recording, native chord enrollment, and Windows clipboard delivery subsequently landed; the original exclusions below describe that PR's scope, not current product capability.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -38,7 +38,7 @@ Do not add Nx, Turborepo, or a separate contracts repo during MVP. OpenAPI/types
 | **Contents** | Tauri + React thin client |
 | **Primary language** | Rust (Tauri backend) + TypeScript (React frontend) |
 | **Deployment** | NSIS installer (Windows); future: macOS DMG, Linux AppImage |
-| **Responsibilities** | Track-aware capture and deterministic preprocessing; recording; global hotkey + text injection (ADR 0013); ghost / preview UI; optional anonymous speaker evidence; server connector (WSS + HTTP); local file selection; local Nemotron INT8 fallback; Settings UI |
+| **Responsibilities** | Track-aware capture and deterministic preprocessing; recording; global hotkeys + safe cross-app delivery (ADR 0013); ghost / preview UI; optional anonymous speaker evidence; server connector (WSS + HTTP); native file selection; local Nemotron INT8 fallback; Settings UI |
 | **Maps from** | `cohere-transcribe-local/desktop/` |
 
 `yap-desktop` ships to end-user machines. It must be code-signed and notarised per-platform. It contains no server-side logic and no knowledge data.

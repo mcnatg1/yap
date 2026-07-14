@@ -15,6 +15,8 @@
 
 **Canonical Phase 9 knowledge boundary:** [ADR 0022](adr/0022-google-okf-permission-safe-projections.md) pins Google OKF v0.1 as the curated file/Git format, requires a Postgres typed-relationship and pgvector retrieval baseline, and treats Neo4j as a benchmark-gated challenger. It is a roadmap decision, not authorization to install databases or create Phase 9 infrastructure before the identity and meeting-result prerequisites exist.
 
+**Canonical server-priority amendment:** [ADR 0023](adr/0023-bounded-live-priority.md) keeps live work preferred while requiring one ready batch dispatch after a bounded live streak so accepted background work cannot starve.
+
 ## Implementation specs
 
 | Spec | Roadmap area | Status |
@@ -25,7 +27,7 @@
 | [local-live-fallback-sidecar.md](specs/local-live-fallback-sidecar.md) | Local live fallback | Implemented baseline; model licensing, hosted real-model/native CI, performance, and production-release proof remain |
 | [local-llm-sidecar.md](specs/local-llm-sidecar.md) | Local LLM polish | Deferred draft; solo profile only |
 | [live-dictation-client-ux.md](specs/live-dictation-client-ux.md) | Live dictation client | Windows baseline implemented; visible-bounds island and safe shortcut-recorder/default UX remain |
-| [server-tier-mvp.md](specs/server-tier-mvp.md) | Server tier MVP | Phase 3 contract, loopback health, connector state, and desktop ledger implemented; transport/inference deferred |
+| [server-tier-mvp.md](specs/server-tier-mvp.md) | Server tier MVP | Phase 3 boundary plus isolated Phase 4 Cohere reference pool implemented; connected transport/auth/persistent deployment deferred |
 | [2026-07-10-source-aware-diarization-design.md](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Capture foundation and meeting evidence | Capture/contract prerequisites implemented; speaker inference and server reconciliation not implemented |
 | [testing-strategy.md](specs/testing-strategy.md) | All | Living verification contract |
 
@@ -33,7 +35,9 @@
 
 The tooling-only PowerShell migration is implemented: repo-owned Windows scripts require PowerShell Core 7.4 or newer, executable selectors use `pwsh.exe`, and each Windows CI job validates its isolated runtime. A hash-pinned 7.4.17 compatibility lane parses all tracked scripts. This does not broaden the product architecture or start server inference.
 
-The [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) plan is the landed canonical Phase 3 implementation record: machine-readable contract, capability health service, connector state/retry, and SQLite job ledger. Phase 5 upload drain, WSS runtime, server ASR, authentication, model pools, and diarization remain gated and are not implied by Phase 3 health reachability.
+The [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) plan is the landed canonical Phase 3 implementation record: machine-readable contract, capability health service, connector state/retry, and SQLite job ledger. The Phase 4 private-ASR implementation adds a separate bounded reference router/pool and transient Cohere GB10 worker. Phase 5 upload drain, WSS runtime, authentication, persistent service integration, and diarization remain gated; none is implied by Phase 3 health reachability or the isolated Phase 4 worker.
+
+The [Phase 4 private ASR node implementation record](superpowers/plans/2026-07-13-phase4-private-asr-node.md) pins the Cohere/NGC/Python 3.12 choices, executable and process-safety seams, focused GB10 evidence, and the remaining clean-head gate. Its focused pre-gate timings are not release, long-recording, or concurrency evidence.
 
 The one-time Phase 3 implementation gate passed against exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05`. Its immutable GB10 archive (`be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`) passed 50/50 ARM64/Python 3.12 checks, transient loopback health drove the command-line connector to `Ready`, a separate refusal invocation drove it to `Retrying`, and teardown left no Yap process or port-18765 listener. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` subsequently passed hosted CI run `29293287930` and disposable-Windows stock NSIS lifecycle run `29293291582`. This is not evidence for a persistent service, same-process native UI transition, upload, WSS, authentication, ASR, external listener, or firewall change.
 

@@ -1,6 +1,6 @@
 use tauri::Manager;
 
-use crate::{authorization, commands, live, paths, runtime, stt, tray};
+use crate::{authorization, commands, jobs, live, paths, runtime, stt, tray};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitRequestDisposition {
@@ -14,6 +14,25 @@ fn exit_request_disposition(exit_authorized: bool) -> ExitRequestDisposition {
     } else {
         ExitRequestDisposition::PreventAndFinalize
     }
+}
+
+fn is_allowed_app_navigation(url: &tauri::Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match (url.scheme(), url.host_str(), url.port()) {
+        ("tauri", Some("localhost"), None) => true,
+        ("http" | "https", Some("tauri.localhost"), None) => true,
+        ("http", Some("localhost"), Some(1420)) if cfg!(debug_assertions) => true,
+        ("about", None, None) => url.path() == "blank" && url.query().is_none(),
+        _ => false,
+    }
+}
+
+fn navigation_guard<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|_, url| is_allowed_app_navigation(url))
+        .build()
 }
 
 fn write_startup_migration_diagnostic(
@@ -121,7 +140,9 @@ pub(crate) fn run() {
         live_runtime_for_monitor.unload_if_idle(std::time::Duration::from_secs(600));
     });
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let builder = tauri::Builder::default()
+        .plugin(navigation_guard())
+        .plugin(tauri_plugin_dialog::init());
 
     #[cfg(feature = "wdio")]
     let builder = builder
@@ -173,6 +194,18 @@ pub(crate) fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(move |app_handle, event| match event {
+            tauri::RunEvent::WebviewEvent {
+                label,
+                event: tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
+                ..
+            } if label == authorization::MAIN_WINDOW_LABEL => {
+                let app = app_handle.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = jobs::commands::import_native_paths(&app, paths) {
+                        jobs::commands::emit_native_import_error(&app, &error);
+                    }
+                });
+            }
             tauri::RunEvent::WindowEvent {
                 label,
                 event: tauri::WindowEvent::CloseRequested { api, .. },
@@ -215,7 +248,8 @@ pub(crate) fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_request_disposition, write_startup_migration_diagnostic, ExitRequestDisposition,
+        exit_request_disposition, is_allowed_app_navigation, write_startup_migration_diagnostic,
+        ExitRequestDisposition,
     };
 
     #[test]
@@ -228,6 +262,31 @@ mod tests {
             exit_request_disposition(true),
             ExitRequestDisposition::Allow
         );
+    }
+
+    #[test]
+    fn navigation_guard_allows_only_application_origins() {
+        for allowed in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/index.html",
+            "https://tauri.localhost/live-overlay.html",
+            "about:blank",
+        ] {
+            assert!(is_allowed_app_navigation(
+                &tauri::Url::parse(allowed).unwrap()
+            ));
+        }
+        for blocked in [
+            "https://example.com/",
+            "https://tauri.localhost.example.com/",
+            "https://user@tauri.localhost/",
+            "data:text/html,blocked",
+            "file:///C:/private.txt",
+        ] {
+            assert!(!is_allowed_app_navigation(
+                &tauri::Url::parse(blocked).unwrap()
+            ));
+        }
     }
 
     #[test]

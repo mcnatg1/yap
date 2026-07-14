@@ -125,6 +125,108 @@ class ServerNodeSetupTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("YAP_LAN_SSH_CIDR must be a valid", completed.stderr)
 
+    def test_effective_policy_address_must_be_a_representative_management_ip(self) -> None:
+        completed = _run_bash(
+            SCRIPT_ARGUMENT,
+            env={
+                "YAP_VALIDATE_ONLY": "1",
+                "YAP_PRIVATE_SSH_FROM": "",
+                "YAP_LAN_SSH_CIDR": "10.20.0.0/16",
+                "YAP_SSH_POLICY_TEST_ADDR": "192.168.50.63",
+            },
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must fall within a configured SSH management source", completed.stderr)
+
+    def test_effective_policy_requires_at_least_one_management_source(self) -> None:
+        completed = _run_bash(
+            SCRIPT_ARGUMENT,
+            env={
+                "YAP_VALIDATE_ONLY": "1",
+                "YAP_PRIVATE_SSH_FROM": "",
+                "YAP_LAN_SSH_CIDR": "",
+                "YAP_OVERLAY_SSH_CIDR": "",
+                "YAP_ZSCALER_SSH_CIDR": "",
+                "YAP_SSH_POLICY_TEST_ADDR": "192.168.50.63",
+            },
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must fall within a configured SSH management source", completed.stderr)
+
+    def test_effective_ssh_policy_rejects_earlier_weak_values(self) -> None:
+        harness = f"""
+source {SCRIPT_ARGUMENT!s}
+select_validation_python
+YAP_OWNER=admin
+YAP_SSH_POLICY_TEST_ADDR=192.168.50.63
+sshd() {{
+  cat <<'POLICY'
+authenticationmethods publickey
+allowusers admin
+allowagentforwarding no
+permittunnel no
+permituserenvironment no
+allowtcpforwarding local
+gatewayports no
+permitrootlogin no
+passwordauthentication yes
+pubkeyauthentication yes
+kbdinteractiveauthentication no
+x11forwarding no
+POLICY
+}}
+verify_effective_ssh_policy
+"""
+        completed = _run_bash("-c", harness)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("passwordauthentication", completed.stderr)
+
+    def test_effective_ssh_policy_rejects_additive_allowusers(self) -> None:
+        harness = f"""
+source {SCRIPT_ARGUMENT!s}
+select_validation_python
+YAP_OWNER=admin
+YAP_SSH_POLICY_TEST_ADDR=192.168.50.63
+sshd() {{
+  cat <<'POLICY'
+authenticationmethods publickey
+allowusers admin unexpected
+allowagentforwarding no
+permittunnel no
+permituserenvironment no
+allowtcpforwarding local
+gatewayports no
+permitrootlogin no
+passwordauthentication no
+pubkeyauthentication yes
+kbdinteractiveauthentication no
+x11forwarding no
+POLICY
+}}
+verify_effective_ssh_policy
+"""
+        completed = _run_bash("-c", harness)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("allowusers", completed.stderr)
+
+    def test_effective_policy_derives_a_context_for_every_management_source(self) -> None:
+        harness = f"""
+source {SCRIPT_ARGUMENT!s}
+select_validation_python
+YAP_SSH_POLICY_TEST_ADDR=192.168.50.63
+YAP_PRIVATE_SSH_FROM=192.168.50.63
+YAP_LAN_SSH_CIDR=10.20.0.0/16
+YAP_OVERLAY_SSH_CIDR=100.64.12.0/24
+YAP_ZSCALER_SSH_CIDR=
+management_policy_addresses
+"""
+        completed = _run_bash("-c", harness)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.stdout.splitlines(),
+            ["192.168.50.63", "10.20.0.1", "100.64.12.1"],
+        )
+
     def test_failed_private_profile_activation_is_fatal(self) -> None:
         harness = f"""
 source {SCRIPT_ARGUMENT!s}
@@ -201,6 +303,11 @@ verify_private_management_address
         self.assertLess(
             firewall.index("apply_management_ssh_rules"),
             firewall.index("ufw --force enable"),
+        )
+        ssh = self.script[self.script.index("setup_ssh() {") :]
+        self.assertLess(
+            ssh.index("verify_effective_ssh_policy"),
+            ssh.index("systemctl reload ssh"),
         )
 
 

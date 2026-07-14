@@ -1,6 +1,6 @@
 # Yap Server Node Setup Runbook
 
-Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 5 is intended to send authorized long recordings to `yap-server`; Phase 3 currently provides health reachability and durable queued-job ownership only.
+Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 3 provides health reachability and durable queued-job ownership. Phase 4 adds one transient, server-internal Cohere batch reference worker; Phase 5 is still required to send authorized desktop recordings through the contract.
 
 The first supported node profile is DGX Spark GB10. A later GB300-class node should keep the same server contract and change only host-specific config: NIC names, CIDRs, GPU/runtime sizing, and deployment capacity.
 
@@ -80,6 +80,73 @@ network failover.
 See the [GB10 readiness audit](../research/2026-07-12-gb10-readiness-audit.md)
 for the evidence and remaining gates.
 
+## Phase 4 Transient Batch-ASR Gate
+
+Phase 4 does not open an application port or install a worker service. Its gate
+builds one immutable ARM64 image, runs one licensed fixture through the bounded
+router and batch pool, writes result/evidence JSON, and removes the job
+container. The base is `nvcr.io/nvidia/pytorch:26.06-py3` by digest with Python
+3.12; the model remains the locked canonical Cohere Transcribe revision even
+though its public byte distribution avoids putting model credentials on the
+node.
+
+Run the final gate only from a clean checkout at the exact candidate SHA:
+
+```bash
+cd /path/to/clean/yap-candidate
+export YAP_CHECKED_HEAD="$(git rev-parse HEAD)"
+export YAP_PHASE4_MODEL_DIR=/path/to/private/cohere-transcribe-03-2026
+export YAP_PHASE4_EVIDENCE_DIR=/path/to/private/phase4-evidence/$YAP_CHECKED_HEAD
+bash infra/yap-server-node/phase4-asr-gate.sh
+```
+
+`YAP_PHASE4_EVIDENCE_DIR` is a one-shot checked-head destination and must not
+exist before the run. The finalizer creates it only after host-boundary
+verification and refuses to replace an existing directory or evidence file.
+Keep failed or completed directories for audit; remove one only through an
+explicitly reviewed rerun decision.
+
+The invoking POSIX identity must be non-root and must be able to read every
+locked model file. The host adapter passes that exact UID/GID into the worker.
+The gate prefers non-interactive read-only `sudo` access to the active host
+firewall status command (`ufw`, `nft`, or `iptables-save`). On the current UFW
+node, if that narrow access is unavailable, it compares non-root-readable UFW
+configuration metadata and the UFW unit state instead. That fallback proves
+the gate did not persist a UFW policy change; it does not replace the explicit
+root-level effective-rule review required before any persistent or exposed
+deployment.
+The worker has no network, a read-only root filesystem, dropped capabilities,
+`no-new-privileges`, read-only model/audio mounts, a non-executable general
+`/tmp`, and a private mode-0700 executable tmpfs used only for Triton JIT
+artifacts. Do not loosen the entire root filesystem or expose a model port to
+work around JIT requirements.
+
+The gate verifies:
+
+- the full model and fixture SHA-256 set;
+- the image's ARM64 architecture and exact checked-head revision label, then
+  execution by the inspected raw image ID rather than the mutable build tag;
+- router-to-pool dispatch and bounded one-worker execution;
+- the 96 GiB memory/no-swap, 16-CPU, PID, temporary-storage, and one-MiB
+  per-output-stream ceilings;
+- Python, Torch, CUDA, overlay-package, model, language, and punctuation
+  identities returned by the isolated process;
+- the worker result's exact input SHA-256, 16 kHz sample rate, and positive
+  duration before host publication;
+- exact `NVIDIA GB10`, compute capability 12.1, CUDA/BF16 execution, and fixture
+  WER no greater than `0.12`;
+- a unique named worker container is force-removed even when the Docker client
+  times out or exceeds its output bound;
+- before/after listener, firewall, and Yap service-unit snapshots match and no
+  Phase 4 container or worker process remains before atomic result/evidence
+  publication. Raw host snapshots are deleted with the temporary gate
+  directory; final evidence contains only their hashes, observation method,
+  and observed facts. Missing firewall observation tooling fails closed.
+
+This short fixture is a correctness gate, not a throughput or concurrency
+benchmark. Keep the image/model caches after the run unless a separate cleanup
+change is authorized.
+
 ## Fresh Dedicated Node Bootstrap
 
 On a genuinely fresh, dedicated demo node, validate the values first without
@@ -91,6 +158,7 @@ env \
   YAP_PRIVATE_IFACE=enP7s7 \
   YAP_PRIVATE_ADDR=192.168.50.1/24 \
   YAP_PRIVATE_SSH_FROM=192.168.50.63 \
+  YAP_SSH_POLICY_TEST_ADDR=192.168.50.63 \
   YAP_LAN_SSH_CIDR= \
   YAP_VALIDATE_ONLY=1 \
   bash infra/yap-server-node/setup-server.sh
@@ -105,6 +173,7 @@ sudo env \
   YAP_PRIVATE_IFACE=enP7s7 \
   YAP_PRIVATE_ADDR=192.168.50.1/24 \
   YAP_PRIVATE_SSH_FROM=192.168.50.63 \
+  YAP_SSH_POLICY_TEST_ADDR=192.168.50.63 \
   YAP_LAN_SSH_CIDR= \
   YAP_HARDWARE_PROFILE=dgx-spark-gb10 \
   YAP_FIREWALL_RESET=0 \
@@ -117,6 +186,13 @@ port. Because reset is disabled, existing UFW rules remain and must be
 inspected separately. Before running it remotely, prove that a second terminal
 can connect with `ssh dgx-spark-eth`. Missing `nmcli`, failed profile
 activation, or a missing private address now stops setup before UFW changes.
+Before SSH is reloaded, the script also evaluates `sshd -T -C` for the
+representative `YAP_SSH_POLICY_TEST_ADDR` and refuses the reload unless the
+effective owner, authentication, root-login, X11, agent, tunnel, environment,
+and forwarding policy exactly matches the documented baseline. The supplied
+address must be one client IP inside a configured management source, not a
+CIDR; setup also derives and evaluates a representative address from every
+configured management source.
 
 `YAP_DISABLE_NOISE_SERVICES=1` stops desktop/peripheral services. Use it only on
 a dedicated node. If incompatible existing UFW rules truly require a reset,
@@ -158,6 +234,7 @@ sudo env \
   YAP_CONFIGURE_PRIVATE_ETHERNET=0 \
   YAP_PRIVATE_SSH_FROM= \
   YAP_LAN_SSH_CIDR='<corp-admin-cidr>' \
+  YAP_SSH_POLICY_TEST_ADDR='<approved-admin-host-ip>' \
   YAP_FIREWALL_RESET=0 \
   YAP_DISABLE_NOISE_SERVICES=0 \
   bash infra/yap-server-node/setup-server.sh
@@ -168,6 +245,7 @@ Only set `YAP_APP_PORT` after `yap-server` exists and has TLS/auth in front of i
 ```bash
 sudo env \
   YAP_LAN_SSH_CIDR='<corp-admin-cidr>' \
+  YAP_SSH_POLICY_TEST_ADDR='<approved-admin-host-ip>' \
   YAP_APP_PORT=443 \
   YAP_APP_CIDR='<corp-client-or-vpn-cidr>' \
   YAP_FIREWALL_RESET=0 \
@@ -198,6 +276,7 @@ example as a firewall change by substituting laptop Wi-Fi addresses.
 sudo env \
   YAP_LAN_SSH_CIDR='<admin-cidr-or-empty>' \
   YAP_ZSCALER_SSH_CIDR='<zpa-admin-cidr>' \
+  YAP_SSH_POLICY_TEST_ADDR='<approved-zpa-admin-host-ip>' \
   YAP_APP_PORT=443 \
   YAP_APP_CIDR= \
   YAP_ZSCALER_APP_CIDR='<zpa-app-cidr>' \
@@ -243,8 +322,10 @@ the directory and allow-rule operations are repeatable.
 ## What Not To Do Yet
 
 - Do not open `11000`, `11434`, `5909`, database ports, or model worker ports directly.
-- Do not bind the Phase 3 service to `0.0.0.0`, `[::]`, the Wi-Fi address, or an
+- Do not bind the Phase 3 health service to `0.0.0.0`, `[::]`, the Wi-Fi address, or an
   overlay address.
+- Do not expose the Phase 4 container worker or model directory as a network
+  service.
 - Do not make the server node public-internet reachable.
 - Do not reuse cached model weights, Handy model files, or `latest` container
   tags without pinned provenance, licenses, and hashes.

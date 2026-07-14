@@ -1,5 +1,4 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -29,7 +28,6 @@ import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
 import { type TranscriptHistoryEntry } from "@/history";
 import {
-  audioExtensions,
   isRecordingFinished,
   type RailAction,
   type RecordingJobView,
@@ -75,7 +73,7 @@ export default function App() {
     transcriptText,
   } = useTranscriptText();
   const {
-    addPaths: enqueueImportedPaths,
+    addRecordings: pickImportedRecordings,
     clearQueue,
     discardLegacyQueue,
     legacyDiscardAllowed,
@@ -182,13 +180,13 @@ export default function App() {
     if (open) setAppModal("help");
     else setHelpOpen(false);
   }, [setAppModal, setHelpOpen]);
-  const addPaths = useCallback(async (paths: string[]) => {
-    const selectedQueueId = await enqueueImportedPaths(paths);
+  const addRecordings = useCallback(async () => {
+    const selectedQueueId = await pickImportedRecordings();
     if (selectedQueueId === undefined) return;
     openWorkspace("transcribe");
     selectQueueItem(selectedQueueId);
-  }, [enqueueImportedPaths, openWorkspace, selectQueueItem]);
-  const recordingDrop = useRecordingDrop(addPaths);
+  }, [openWorkspace, pickImportedRecordings, selectQueueItem]);
+  const recordingDrop = useRecordingDrop();
   const onLiveSessionSaved = useCallback((entry: TranscriptHistoryEntry) => {
     selectHistoryEntry(entry);
     openWorkspace("home");
@@ -253,13 +251,7 @@ export default function App() {
     }
 
     try {
-      const selected = await openDialog({
-        multiple: true,
-        title: "Choose recordings",
-        filters: [{ name: "Audio and video", extensions: audioExtensions }],
-      });
-      if (Array.isArray(selected)) await addPaths(selected);
-      else if (selected) await addPaths([selected]);
+      await addRecordings();
     } catch (error) {
       toast.error(`Picker failed: ${String(error)}`);
     }

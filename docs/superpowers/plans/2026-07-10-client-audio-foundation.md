@@ -1,5 +1,11 @@
 # Client Audio Foundation Implementation Plan
 
+> **Historical record — current authority (2026-07-14):** This plan preserves
+> the landed audio-foundation recipe. References below to focused-field or
+> synthesized text injection are superseded. Current behavior uses
+> native-confirmed bounded shortcut enrollment and clipboard-only delivery; use
+> [ADR 0013](../../adr/0013-global-hotkey-injection.md) as authority.
+
 > **Implementation status (2026-07-12):** Capture/session contracts, exact loss accounting, bounded sink fan-out, crash-safe streaming recording, immutable commit metadata, and recovery/deletion are implemented and unit/integration tested. Speaker inference, system loopback, server transport, and the durable job ledger remain separate future gates; unchecked boxes below are not reliable landed-state evidence.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -12,9 +18,9 @@
 
 ## Global Constraints
 
-- Apply ADR 0013 for focused-field injection, ADR 0014 for the client/server boundary, ADR 0019 for the local streaming model, and ADR 0020 for capture authority and persistence.
+- Apply ADR 0013 for client-owned hotkeys and safe delivery, ADR 0014 for the client/server boundary, ADR 0019 for the local streaming model, and ADR 0020 for capture authority and persistence.
 - Treat ADR 0002 runtime details and ADR 0015's earlier diarization split as historical. They do not authorize a second local ASR path or persistent local voice profiles.
-- Preserve current push-to-talk, hands-free, overlay, text-injection, model-download, playback, and history behavior.
+- Preserve current push-to-talk, hands-free, overlay, safe clipboard-delivery, model-download, playback, and history behavior.
 - Do not add a speaker model, embedding runtime, system-loopback capture, network connector, SQLite, Opus encoder, or inference framework.
 - Do not run official imported-file transcription through local Nemotron.
 - Do not serialize sample buffers, embeddings, credentials, raw OS device labels, or mutable retry state into the immutable capture manifest.
@@ -26,7 +32,7 @@
 
 ## Governing Documents
 
-- [ADR 0013: Global hotkey and injection](../../adr/0013-global-hotkey-injection.md)
+- [ADR 0013: Global hotkey and safe cross-app delivery](../../adr/0013-global-hotkey-injection.md)
 - [ADR 0014: Server-tier compute topology](../../adr/0014-server-tier-compute-topology.md)
 - [ADR 0019: Local streaming model selection](../../adr/0019-local-streaming-model-selection.md)
 - [ADR 0020: Meeting capture and diarization authority](../../adr/0020-meeting-capture-diarization-authority.md)

@@ -1,0 +1,31 @@
+# Resolver-minimal Cohere overlay for the immutable NGC PyTorch 26.06 ARM64
+# base. The base supplies Torch/CUDA, Hugging Face Hub, NumPy, Protobuf,
+# Safetensors, and every dependency not listed below.
+audioread==3.1.0 \
+    --hash=sha256:b30d1df6c5d3de5dcef0fb0e256f6ea17bdcf5f979408df0297d8a408e2971b4
+joblib==1.5.3 \
+    --hash=sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713
+lazy-loader==0.5 \
+    --hash=sha256:ab0ea149e9c554d4ffeeb21105ac60bed7f3b4fd69b1d2360a4add51b170b005
+librosa==0.11.0 \
+    --hash=sha256:0b6415c4fd68bff4c29288abe67c6d80b587e0e1e2cfb0aad23e4559504a7fa1
+msgpack==1.2.1 \
+    --hash=sha256:60926b75d00c8e816ef98f3034f484a8bc64242d66839cef4cf7e503142316a0
+narwhals==2.24.0 \
+    --hash=sha256:42fdedf44e5b2ca7505630d45b4ac3058f38d8485cba9fe1652ca23152df7489
+pooch==1.9.0 \
+    --hash=sha256:f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b
+scikit-learn==1.9.0 \
+    --hash=sha256:5e50ed4da51974e86e940690e9a3d82e729b62b5a49f7c9bac534d515d39d86f
+sentencepiece==0.2.1 \
+    --hash=sha256:99f955df238021bf11f0fc37cdb54fd5e5b5f7fd30ecc3d93fb48b6815437167
+soundfile==0.14.0 \
+    --hash=sha256:e85724a90bc99a6e8062c0b4ddf725f53b2a3b70afd4da875e9d2cfc4e92f377
+soxr==1.1.0 \
+    --hash=sha256:bf98c0d7b7d5ef5bf072fee8d3020e8b664f2d195933ea7bc5089267c2e22a06
+threadpoolctl==3.6.0 \
+    --hash=sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb
+tokenizers==0.22.2 \
+    --hash=sha256:2249487018adec45d6e3554c71d46eb39fa8ea67156c640f7513eb26f318cec7
+transformers==5.13.1 \
+    --hash=sha256:53f0ea8aa397e29244c2377ba981bcaf0c87adcf44fbdd447ef6306522afcacd

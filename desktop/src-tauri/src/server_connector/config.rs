@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reqwest::Url;
 
 pub const CURRENT_SCHEMA_VERSION: u16 = 1;
+const ORIGIN_APPROVAL_SCHEMA_VERSION: u16 = 1;
 
 static NEXT_SETTINGS_ARTIFACT: AtomicU64 = AtomicU64::new(0);
 
@@ -14,6 +15,13 @@ pub struct ServerSettings {
     pub schema_version: u16,
     pub enabled: bool,
     pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServerOriginApproval {
+    schema_version: u16,
+    origin: String,
 }
 
 impl Default for ServerSettings {
@@ -163,6 +171,88 @@ pub fn save(settings: &ServerSettings) -> Result<ServerSettings, ConfigError> {
     save_to_path(settings, &settings_path(), allow_insecure_private_server())
 }
 
+pub(super) fn origin_is_approved(origin: &str) -> Result<bool, ConfigError> {
+    origin_is_approved_at(
+        &origin_approval_path(),
+        origin,
+        allow_insecure_private_server(),
+    )
+}
+
+pub(super) fn approve_origin(origin: &str) -> Result<String, ConfigError> {
+    approve_origin_at(
+        &origin_approval_path(),
+        origin,
+        allow_insecure_private_server(),
+    )
+}
+
+fn origin_is_approved_at(
+    path: &Path,
+    origin: &str,
+    allow_insecure_private: bool,
+) -> Result<bool, ConfigError> {
+    let requested = validate_base_url(origin, allow_insecure_private)?;
+    Ok(
+        load_origin_approval_from_path(path, allow_insecure_private)?.as_deref()
+            == Some(requested.as_str()),
+    )
+}
+
+fn load_origin_approval_from_path(
+    path: &Path,
+    allow_insecure_private: bool,
+) -> Result<Option<String>, ConfigError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ConfigError::Invalid(
+                "Server origin approval must be a regular file.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ConfigError::AccessIo(error)),
+    }
+    let _lock = acquire_settings_access_lock(path)?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ConfigError::AccessIo(error)),
+    };
+    let approval: ServerOriginApproval = serde_json::from_str(&text)?;
+    if approval.schema_version != ORIGIN_APPROVAL_SCHEMA_VERSION {
+        return Err(ConfigError::Invalid(
+            "Server origin approval uses an unsupported schema.",
+        ));
+    }
+    let normalized = validate_base_url(&approval.origin, allow_insecure_private)?;
+    if normalized != approval.origin {
+        return Err(ConfigError::Invalid(
+            "Server origin approval is not canonical.",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn approve_origin_at(
+    path: &Path,
+    origin: &str,
+    allow_insecure_private: bool,
+) -> Result<String, ConfigError> {
+    let origin = validate_base_url(origin, allow_insecure_private)?;
+    let approval = ServerOriginApproval {
+        schema_version: ORIGIN_APPROVAL_SCHEMA_VERSION,
+        origin: origin.clone(),
+    };
+    let encoded = serde_json::to_vec_pretty(&approval)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(ConfigError::SaveIo)?;
+    }
+    let _lock = acquire_settings_lock(path)?;
+    write_atomically_locked_with_hooks(path, &encoded, |_, _| Ok(()), |_| Ok(()))?;
+    Ok(origin)
+}
+
 pub(crate) fn load_from_path(
     path: &Path,
     allow_insecure_private: bool,
@@ -281,7 +371,7 @@ fn ensure_schema_compatible(value: &serde_json::Value) -> Result<(), ConfigError
     Ok(())
 }
 
-fn normalize_settings(
+pub(super) fn normalize_settings(
     settings: &ServerSettings,
     allow_insecure_private: bool,
 ) -> Result<ServerSettings, ConfigError> {
@@ -307,6 +397,10 @@ fn normalize_settings(
 
 fn settings_path() -> PathBuf {
     crate::paths::app_data_dir().join("server-settings.json")
+}
+
+fn origin_approval_path() -> PathBuf {
+    crate::paths::app_data_dir().join("server-origin-approval.json")
 }
 
 fn allow_insecure_private_server() -> bool {
@@ -986,6 +1080,50 @@ mod tests {
         ] {
             assert!(validate_base_url(raw, false).is_err(), "accepted {raw}");
         }
+    }
+
+    #[test]
+    fn native_origin_approval_is_separate_and_exact() {
+        let dir = temp_dir("origin-approval");
+        let path = dir.join("server-origin-approval.json");
+
+        assert!(!origin_is_approved_at(&path, "https://approved.example/v1", false).unwrap());
+        assert_eq!(
+            approve_origin_at(&path, "https://approved.example/v1", false).unwrap(),
+            "https://approved.example"
+        );
+        assert!(origin_is_approved_at(&path, "https://approved.example", false).unwrap());
+        assert!(!origin_is_approved_at(&path, "https://tampered.example", false).unwrap());
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            stored.get("origin").and_then(serde_json::Value::as_str),
+            Some("https://approved.example")
+        );
+        assert_eq!(
+            stored
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn malformed_or_noncanonical_origin_approval_fails_closed() {
+        let dir = temp_dir("origin-approval-tamper");
+        let path = dir.join("server-origin-approval.json");
+        std::fs::write(&path, "{not-json").unwrap();
+        assert!(origin_is_approved_at(&path, "https://approved.example", false).is_err());
+
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"origin":"https://approved.example/v1"}"#,
+        )
+        .unwrap();
+        assert!(origin_is_approved_at(&path, "https://approved.example", false).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

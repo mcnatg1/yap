@@ -1,19 +1,11 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type DragEvent, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { fireAndReport } from "@/lib/fire-and-report";
-
-type RecordingDropHandler = (paths: string[]) => Promise<void> | void;
-
-export function useRecordingDrop(onDropPaths: RecordingDropHandler) {
+export function useRecordingDrop() {
   const [dragging, setDragging] = useState(false);
-  const onDropPathsRef = useRef(onDropPaths);
-
-  useEffect(() => {
-    onDropPathsRef.current = onDropPaths;
-  }, [onDropPaths]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -21,17 +13,14 @@ export function useRecordingDrop(onDropPaths: RecordingDropHandler) {
     const unlistenDrag = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "enter") setDragging(true);
       if (event.payload.type === "leave" || event.payload.type === "drop") setDragging(false);
-      if (event.payload.type === "drop") {
-        const { paths } = event.payload;
-        fireAndReport(
-          () => onDropPathsRef.current(paths),
-          (error) => toast.error(`Could not add recordings: ${error.message}`),
-        );
-      }
+    });
+    const unlistenError = listen<string>("recording-jobs-import-error", (event) => {
+      toast.error(`Could not add recordings: ${event.payload}`);
     });
 
     return () => {
       void unlistenDrag.then((fn) => fn());
+      void unlistenError.then((fn) => fn());
     };
   }, []);
 

@@ -270,11 +270,26 @@ async function showIdleOverlay() {
   }
   await browser.tauri.execute(({ core }) => core.invoke("show_live_overlay"));
   await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+  await browser.tauri.switchWindow("live-overlay");
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector('[data-overlay-surface="collapsed"]') !== null), {
+    interval: 25,
+    timeout: 5_000,
+    timeoutMsg: "live overlay window existed before its collapsed surface was ready",
+  });
+  await browser.tauri.switchWindow("main");
 }
 
 async function cycleIdleOverlay() {
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector('[data-overlay-surface="collapsed"]') !== null), {
+    interval: 20,
+    timeout: 2_000,
+    timeoutMsg: "collapsed overlay surface was unavailable before stability sampling",
+  });
   await browser.tauri.execute(() => {
     const root = document.querySelector('[data-overlay-surface="collapsed"]');
+    if (!root) throw new Error("collapsed overlay surface disappeared before pointerover");
     root.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
   });
   await browser.waitUntil(async () => browser.tauri.execute(() =>
@@ -285,6 +300,7 @@ async function cycleIdleOverlay() {
   });
   await browser.tauri.execute(() => {
     const root = document.querySelector('[data-overlay-surface="expanded"]');
+    if (!root) throw new Error("expanded overlay surface disappeared before pointerout");
     root.dispatchEvent(new PointerEvent("pointerout", {
       bubbles: true,
       relatedTarget: document.body,
@@ -346,6 +362,13 @@ describe("Yap live overlay window", () => {
   it("opens as a compact system overlay and refuses direct close", async () => {
     await showIdleOverlay();
 
+    await browser.tauri.switchWindow("live-overlay");
+    const scaleFactor = await browser.tauri.execute(() => window.devicePixelRatio);
+    if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+      throw new Error(`Overlay reported invalid devicePixelRatio ${scaleFactor}.`);
+    }
+    await browser.tauri.switchWindow("main");
+
     const overlay = await browser.tauri.execute(async ({ core }) => {
       const label = "live-overlay";
       const inner = await core.invoke("plugin:window|inner_size", { label });
@@ -355,17 +378,16 @@ describe("Yap live overlay window", () => {
         focused: await core.invoke("plugin:window|is_focused", { label }),
         inner,
         outer,
-        scaleFactor: await core.invoke("plugin:window|scale_factor", { label }),
         visible: await core.invoke("plugin:window|is_visible", { label }),
       };
     });
     const logicalInner = {
-      height: overlay.inner.height / overlay.scaleFactor,
-      width: overlay.inner.width / overlay.scaleFactor,
+      height: overlay.inner.height / scaleFactor,
+      width: overlay.inner.width / scaleFactor,
     };
     const logicalOuter = {
-      height: overlay.outer.height / overlay.scaleFactor,
-      width: overlay.outer.width / overlay.scaleFactor,
+      height: overlay.outer.height / scaleFactor,
+      width: overlay.outer.width / scaleFactor,
     };
     expect(overlay.visible).toBe(true);
     expect(overlay.focused).toBe(false);
@@ -380,6 +402,11 @@ describe("Yap live overlay window", () => {
   it("reuses one native window whose bounds equal each visible island surface", async () => {
     await showIdleOverlay();
     await browser.tauri.switchWindow("live-overlay");
+
+    const scaleFactor = await browser.tauri.execute(() => window.devicePixelRatio);
+    if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+      throw new Error(`Overlay reported invalid devicePixelRatio ${scaleFactor}.`);
+    }
 
     const labelsBefore = await browser.tauri.listWindows();
     expect(labelsBefore.filter((label) => label === "live-overlay")).toHaveLength(1);
@@ -405,12 +432,11 @@ describe("Yap live overlay window", () => {
       timeoutMsg: "expanded webview did not converge to the visible island",
     });
     await browser.tauri.switchWindow("main");
-    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }) => {
-      const scale = await core.invoke("plugin:window|scale_factor", { label: "live-overlay" });
+    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }, scale) => {
       const inner = await core.invoke("plugin:window|inner_size", { label: "live-overlay" });
       return Math.abs(inner.width / scale - 180) <= 0.5
         && Math.abs(inner.height / scale - 88) <= 0.5;
-    }), {
+    }, scaleFactor), {
       interval: 25,
       timeout: 5_000,
       timeoutMsg: "expanded native bounds did not converge to 180 by 88",
@@ -441,12 +467,11 @@ describe("Yap live overlay window", () => {
       timeoutMsg: "collapsed webview did not converge after the grace period",
     });
     await browser.tauri.switchWindow("main");
-    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }) => {
-      const scale = await core.invoke("plugin:window|scale_factor", { label: "live-overlay" });
+    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }, scale) => {
       const inner = await core.invoke("plugin:window|inner_size", { label: "live-overlay" });
       return Math.abs(inner.width / scale - 104) <= 0.5
         && Math.abs(inner.height / scale - 40) <= 0.5;
-    }), {
+    }, scaleFactor), {
       interval: 25,
       timeout: 5_000,
       timeoutMsg: "collapsed native bounds did not converge to 104 by 40",
@@ -476,49 +501,41 @@ describe("Yap live overlay window", () => {
     expect(listRecordingArtifacts(recordingRoot)).toEqual([]);
   });
 
-  it("registers a normalized safe shortcut and rejects reserved replacements", async () => {
+  it("does not expose raw renderer shortcut mutation commands", async () => {
     await browser.tauri.switchWindow("main");
     const original = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
 
-    try {
-      const changed = await browser.tauri.execute(({ core }) =>
-        core.invoke("set_live_hotkey", { hotkey: " alt + control + shift + f11 " }));
-      expect(changed.hotkey).toBe("Ctrl+Shift+Alt+F11");
-
-      const reserved = await browser.tauri.execute(async ({ core }) => {
+    for (const command of ["set_live_hotkey", "set_live_paste_hotkey"]) {
+      const result = await browser.tauri.execute(async ({ core }, unavailableCommand) => {
         try {
-          await core.invoke("set_live_hotkey", { hotkey: "Ctrl+Meta+7" });
+          await core.invoke(unavailableCommand, { hotkey: "Ctrl+Shift+Alt+F11" });
           return { message: "", ok: true };
         } catch (error) {
           return { message: String(error), ok: false };
         }
-      });
-      expect(reserved.ok).toBe(false);
-      expect(reserved.message).toContain("reserved by Windows");
-
-      const unchanged = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
-      expect(unchanged.hotkey).toBe("Ctrl+Shift+Alt+F11");
-
-      const reset = await browser.tauri.execute(({ core }) => core.invoke("reset_live_hotkey"));
-      expect(reset.hotkey).toBe("Ctrl+Shift+Space");
-    } finally {
-      if (original.hotkey) {
-        await browser.tauri.execute(
-          ({ core }, hotkey) => core.invoke("set_live_hotkey", { hotkey }),
-          original.hotkey,
-        );
-      } else {
-        await browser.tauri.execute(({ core }) => core.invoke("clear_live_hotkey"));
-      }
+      }, command);
+      expect(result.ok).toBe(false);
+      expect(result.message.toLowerCase()).toContain("not found");
     }
+
+    const unchanged = await browser.tauri.execute(({ core }) => core.invoke("live_status"));
+    expect(unchanged.hotkey).toBe(original.hotkey);
+    expect(unchanged.pasteHotkey).toBe(original.pasteHotkey);
   });
 
-  it("allows live status, rejects privileged commands, and survives close attempts", async () => {
+  it("allows only minimized overlay status, rejects privileged commands, and survives close attempts", async () => {
     await showIdleOverlay();
     await browser.tauri.switchWindow("live-overlay");
 
     const authorization = await browser.tauri.execute(async ({ core }) => {
-      const live = await core.invoke("live_status");
+      const live = await core.invoke("live_overlay_status");
+      let fullLive;
+      try {
+        await core.invoke("live_status");
+        fullLive = { ok: true, message: "" };
+      } catch (error) {
+        fullLive = { ok: false, message: String(error) };
+      }
       let setup;
       try {
         await core.invoke("setup_status");
@@ -533,9 +550,16 @@ describe("Yap live overlay window", () => {
       } catch (error) {
         file = { ok: false, message: String(error) };
       }
-      return { file, live, setup };
+      return { file, fullLive, live, setup };
     });
     expect(typeof authorization.live.status).toBe("string");
+    expect(authorization.live.hasFinalText).toBe(false);
+    expect(authorization.live).not.toHaveProperty("partialText");
+    expect(authorization.live).not.toHaveProperty("finalText");
+    expect(authorization.live).not.toHaveProperty("inputDeviceId");
+    expect(authorization.live).not.toHaveProperty("inputDeviceLabel");
+    expect(authorization.fullLive.ok).toBe(false);
+    expect(authorization.fullLive.message).toContain("Command is not available from this window.");
     expect(authorization.setup.ok).toBe(false);
     expect(authorization.setup.message).toContain("Command is not available from this window.");
     expect(authorization.file.ok).toBe(false);

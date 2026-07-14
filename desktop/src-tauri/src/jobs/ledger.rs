@@ -11,6 +11,7 @@ use std::{
 };
 
 const JOB_COLUMNS: &str = "job_id, session_mode, session_origin, source_path, source_ownership, output_path, display_name, status, route, attempt_count, next_attempt_at_ms, cancellation_requested, capture_commit_path, capture_manifest_sha256, error_code, error_message, created_at_ms, updated_at_ms, expires_at_ms";
+const MAX_TERMINAL_JOB_HISTORY: usize = 500;
 
 pub struct JobLedger {
     pub(super) connection: Mutex<Connection>,
@@ -22,15 +23,19 @@ impl JobLedger {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JobLedgerError> {
+        let connection = migrations::open_file(path.as_ref())?;
+        prune_terminal_history(&connection, None)?;
         Ok(Self {
-            connection: Mutex::new(migrations::open_file(path.as_ref())?),
+            connection: Mutex::new(connection),
         })
     }
 
     #[cfg(test)]
     pub(super) fn open_in_memory() -> Result<Self, JobLedgerError> {
+        let connection = migrations::open_in_memory()?;
+        prune_terminal_history(&connection, None)?;
         Ok(Self {
-            connection: Mutex::new(migrations::open_in_memory()?),
+            connection: Mutex::new(connection),
         })
     }
 
@@ -252,6 +257,14 @@ impl JobLedger {
             params![to.as_db(), updated_at_ms, job_id],
         )?;
         let updated = query_job(&transaction, job_id)?.expect("updated job exists");
+        if matches!(
+            to,
+            RecordingJobStatus::Complete
+                | RecordingJobStatus::Partial
+                | RecordingJobStatus::Cancelled
+        ) {
+            prune_terminal_history(&transaction, Some(job_id))?;
+        }
         transaction.commit()?;
         updated.try_into()
     }
@@ -409,6 +422,7 @@ impl JobLedger {
             params![updated_at_ms, job_id],
         )?;
         let updated = query_job(&transaction, job_id)?.expect("cancelled job exists");
+        prune_terminal_history(&transaction, Some(job_id))?;
         transaction.commit()?;
         updated.try_into()
     }
@@ -437,6 +451,7 @@ impl JobLedger {
             params![updated_at_ms, job_id],
         )?;
         let updated = query_job(&transaction, job_id)?.expect("dismissed job exists");
+        prune_terminal_history(&transaction, Some(job_id))?;
         transaction.commit()?;
         updated.try_into()
     }
@@ -476,6 +491,29 @@ impl JobLedger {
             .lock()
             .map_err(|_| JobLedgerError::LockPoisoned)
     }
+}
+
+fn prune_terminal_history(
+    connection: &Connection,
+    protected_job_id: Option<&str>,
+) -> Result<usize, JobLedgerError> {
+    let terminal = "status IN ('complete', 'partial', 'cancelled')";
+    let deleted = if let Some(protected_job_id) = protected_job_id {
+        connection.execute(
+            &format!(
+                "DELETE FROM recording_jobs WHERE {terminal} AND job_id <> ?1 AND job_id NOT IN (SELECT job_id FROM recording_jobs WHERE {terminal} AND job_id <> ?1 ORDER BY updated_at_ms DESC, job_id DESC LIMIT ?2)"
+            ),
+            params![protected_job_id, (MAX_TERMINAL_JOB_HISTORY - 1) as i64],
+        )?
+    } else {
+        connection.execute(
+            &format!(
+                "DELETE FROM recording_jobs WHERE {terminal} AND job_id NOT IN (SELECT job_id FROM recording_jobs WHERE {terminal} ORDER BY updated_at_ms DESC, job_id DESC LIMIT ?1)"
+            ),
+            [MAX_TERMINAL_JOB_HISTORY as i64],
+        )?
+    };
+    Ok(deleted)
 }
 
 struct ValidatedJob {
@@ -1114,6 +1152,131 @@ mod tests {
         );
         assert!(source.exists());
         drop(ledger);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_history_is_bounded_without_pruning_recoverable_or_current_jobs() {
+        let ledger = JobLedger::open_in_memory().unwrap();
+        ledger.insert_job(&imported_job("active-survivor")).unwrap();
+        let mut failed = imported_job("failed-survivor");
+        failed.status = RecordingJobStatus::Failed;
+        ledger.insert_job(&failed).unwrap();
+
+        for index in 0..MAX_TERMINAL_JOB_HISTORY {
+            let id = format!("terminal-{index:04}");
+            let job = imported_job(&id);
+            if index == 0 {
+                ledger
+                    .insert_job_with_chunks(
+                        &job,
+                        &[chunk_at(std::env::temp_dir().join("old.flac"))],
+                    )
+                    .unwrap();
+            } else {
+                ledger.insert_job(&job).unwrap();
+            }
+            ledger
+                .request_cancellation(&id, 1_000 + index as u64)
+                .unwrap();
+        }
+
+        ledger
+            .insert_job(&imported_job("protected-current"))
+            .unwrap();
+        ledger.request_cancellation("protected-current", 1).unwrap();
+
+        let connection = ledger.connection.lock().unwrap();
+        let terminal_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM recording_jobs WHERE status IN ('complete', 'partial', 'cancelled')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pruned_chunk_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM job_chunks WHERE job_id = 'terminal-0000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(terminal_count, MAX_TERMINAL_JOB_HISTORY as i64);
+        assert!(ledger.get_job("terminal-0000").unwrap().is_none());
+        assert!(ledger.get_job("protected-current").unwrap().is_some());
+        assert!(ledger.get_job("active-survivor").unwrap().is_some());
+        assert_eq!(
+            ledger.get_job("failed-survivor").unwrap().unwrap().status,
+            RecordingJobStatus::Failed
+        );
+        assert_eq!(pruned_chunk_count, 0);
+    }
+
+    #[test]
+    fn reopening_legacy_database_prunes_preexisting_terminal_overflow_and_chunks() {
+        let dir = temp_dir("terminal-reopen-prune");
+        let path = dir.join("jobs.sqlite3");
+        {
+            let ledger = JobLedger::open(&path).unwrap();
+            ledger.insert_job(&imported_job("active-survivor")).unwrap();
+            let mut failed = imported_job("failed-survivor");
+            failed.status = RecordingJobStatus::Failed;
+            ledger.insert_job(&failed).unwrap();
+
+            ledger
+                .insert_job_with_chunks(
+                    &imported_job("terminal-0000"),
+                    &[chunk_at(dir.join("old-terminal.flac"))],
+                )
+                .unwrap();
+            let overflow = (1..=MAX_TERMINAL_JOB_HISTORY)
+                .map(|index| imported_job(&format!("terminal-{index:04}")))
+                .collect::<Vec<_>>();
+            ledger.insert_jobs(&overflow).unwrap();
+
+            let mut connection = ledger.connection.lock().unwrap();
+            let transaction = connection.transaction().unwrap();
+            for index in 0..=MAX_TERMINAL_JOB_HISTORY {
+                transaction
+                    .execute(
+                        "UPDATE recording_jobs SET status = 'cancelled', updated_at_ms = ?1 WHERE job_id = ?2",
+                        params![1_000 + index as i64, format!("terminal-{index:04}")],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+
+        let reopened = JobLedger::open(&path).unwrap();
+        let connection = reopened.connection.lock().unwrap();
+        let terminal_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM recording_jobs WHERE status IN ('complete', 'partial', 'cancelled')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pruned_chunk_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM job_chunks WHERE job_id = 'terminal-0000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(terminal_count, MAX_TERMINAL_JOB_HISTORY as i64);
+        assert!(reopened.get_job("terminal-0000").unwrap().is_none());
+        assert!(reopened.get_job("terminal-0500").unwrap().is_some());
+        assert!(reopened.get_job("active-survivor").unwrap().is_some());
+        assert_eq!(
+            reopened.get_job("failed-survivor").unwrap().unwrap().status,
+            RecordingJobStatus::Failed
+        );
+        assert_eq!(pruned_chunk_count, 0);
+        drop(reopened);
         fs::remove_dir_all(dir).unwrap();
     }
 

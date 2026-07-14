@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { isRecordingCancellable, type RecordingJobView } from "@/lib/app-types";
 import {
   cancelRecordingJob,
-  createRecordingImports,
+  pickRecordingImports,
   discardLegacyRecordingQueue,
   dismissRecordingJob,
   migrateLegacyRecordingQueue,
@@ -63,11 +63,11 @@ export function useRecordingJobs(onClear: () => void) {
       failed(error, phase) {
         const legacyMigrationFailed = phase === "migrate";
         const message = legacyMigrationFailed
-          ? `Queued recording migration needs attention: ${error.message}`
+          ? error.message
           : `Recording jobs could not start: ${error.message}`;
         updateMigrationState("failed", message, legacyMigrationFailed);
         toast.error(legacyMigrationFailed
-          ? "Queued recordings could not be migrated. Retry or discard the old queue to continue."
+          ? "The old browser queue was kept. Discard it only when you are ready to re-add recordings through the native picker."
           : "Recording jobs could not start. Retry to continue.");
       },
       migrate: async () => {
@@ -98,9 +98,9 @@ export function useRecordingJobs(onClear: () => void) {
     setStartupAttempt((attempt) => attempt + 1);
   }, [updateMigrationState]);
 
-  const addPaths = useCallback(async (paths: string[]) => {
+  const addRecordings = useCallback(async () => {
     ensureMigrationReady();
-    const created = await createRecordingImports(paths);
+    const created = await pickRecordingImports();
     await refresh();
     return created[created.length - 1]?.id;
   }, [ensureMigrationReady, refresh]);
@@ -139,7 +139,7 @@ export function useRecordingJobs(onClear: () => void) {
   }, [ensureMigrationReady, queue, refresh]);
 
   return {
-    addPaths,
+    addRecordings,
     clearQueue,
     discardLegacyQueue,
     legacyDiscardAllowed,

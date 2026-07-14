@@ -8,6 +8,7 @@ set -euo pipefail
 : "${YAP_PRIVATE_IFACE:=enP7s7}"
 : "${YAP_PRIVATE_ADDR:=192.168.50.1/24}"
 : "${YAP_PRIVATE_SSH_FROM=192.168.50.63}"
+: "${YAP_SSH_POLICY_TEST_ADDR:=192.168.50.63}"
 : "${YAP_CONFIGURE_PRIVATE_ETHERNET:=0}"
 : "${YAP_LAN_SSH_CIDR=}"
 : "${YAP_OVERLAY_SSH_CIDR=}"
@@ -95,6 +96,68 @@ except ValueError:
 PY
 }
 
+valid_ip_address() {
+  "$YAP_VALIDATION_PYTHON" - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+PY
+}
+
+policy_address_matches_management_source() {
+  "$YAP_VALIDATION_PYTHON" - \
+    "$YAP_SSH_POLICY_TEST_ADDR" \
+    "$YAP_PRIVATE_SSH_FROM" \
+    "$YAP_LAN_SSH_CIDR" \
+    "$YAP_OVERLAY_SSH_CIDR" \
+    "$YAP_ZSCALER_SSH_CIDR" <<'PY'
+import ipaddress
+import sys
+
+address = ipaddress.ip_address(sys.argv[1])
+sources = [ipaddress.ip_network(value, strict=False) for value in sys.argv[2:] if value]
+if not sources or not any(address in source for source in sources):
+    raise SystemExit(1)
+PY
+}
+
+management_policy_addresses() {
+  "$YAP_VALIDATION_PYTHON" - \
+    "$YAP_SSH_POLICY_TEST_ADDR" \
+    "$YAP_PRIVATE_SSH_FROM" \
+    "$YAP_LAN_SSH_CIDR" \
+    "$YAP_OVERLAY_SSH_CIDR" \
+    "$YAP_ZSCALER_SSH_CIDR" <<'PY'
+import ipaddress
+import sys
+
+addresses = []
+seen = set()
+
+def emit(address):
+    value = str(address)
+    if value not in seen:
+        seen.add(value)
+        addresses.append(value)
+
+emit(ipaddress.ip_address(sys.argv[1]))
+for value in sys.argv[2:]:
+    if not value:
+        continue
+    network = ipaddress.ip_network(value, strict=False)
+    candidate = network.network_address
+    if network.num_addresses > 2:
+        candidate += 1
+    emit(candidate)
+
+print("\n".join(addresses))
+PY
+}
+
 validate_config() {
   valid_user "$YAP_OWNER" || die "Refusing invalid YAP_OWNER: $YAP_OWNER"
   select_validation_python
@@ -126,6 +189,11 @@ validate_config() {
       valid_ip_network "$value" || die "$setting must be a valid IP address or CIDR"
     fi
   done
+
+  valid_ip_address "$YAP_SSH_POLICY_TEST_ADDR" \
+    || die "YAP_SSH_POLICY_TEST_ADDR must be one client IP address, not a CIDR"
+  policy_address_matches_management_source \
+    || die "YAP_SSH_POLICY_TEST_ADDR must fall within a configured SSH management source"
 
   for port in $YAP_TUNNEL_ONLY_PORTS; do
     case "$port" in
@@ -219,6 +287,7 @@ AllowAgentForwarding no
 PermitTunnel no
 PermitUserEnvironment no
 AllowTcpForwarding local
+GatewayPorts no
 EOF
 
   cat >/etc/ssh/sshd_config.d/99-server-hardening.conf <<'EOF'
@@ -232,7 +301,45 @@ ClientAliveCountMax 3
 EOF
 
   sshd -t
+  verify_effective_ssh_policy
   systemctl reload ssh
+}
+
+assert_effective_ssh_value() {
+  policy=$1
+  key=$2
+  expected=$3
+  actual=$(printf '%s\n' "$policy" | awk -v key="$key" '$1 == key { $1=""; sub(/^ /, ""); print; exit }')
+  [ "$actual" = "$expected" ] \
+    || die "Effective SSH policy mismatch for $key: expected '$expected', got '${actual:-<unset>}'"
+}
+
+verify_effective_ssh_policy() {
+  policy_addresses=$(management_policy_addresses) \
+    || die "Unable to derive representative SSH management addresses"
+  [ -n "$policy_addresses" ] || die "No SSH management policy context is available"
+  for policy_address in $policy_addresses; do
+    criteria="user=${YAP_OWNER},host=yap-policy-check.invalid,addr=${policy_address}"
+    owner_policy=$(sshd -T -C "$criteria") \
+      || die "Unable to evaluate effective SSH policy for $criteria"
+    assert_effective_ssh_value "$owner_policy" authenticationmethods publickey
+    assert_effective_ssh_value "$owner_policy" allowusers "$YAP_OWNER"
+    assert_effective_ssh_value "$owner_policy" allowagentforwarding no
+    assert_effective_ssh_value "$owner_policy" permittunnel no
+    assert_effective_ssh_value "$owner_policy" permituserenvironment no
+    assert_effective_ssh_value "$owner_policy" allowtcpforwarding local
+    assert_effective_ssh_value "$owner_policy" gatewayports no
+    assert_effective_ssh_value "$owner_policy" permitrootlogin no
+    assert_effective_ssh_value "$owner_policy" passwordauthentication no
+    assert_effective_ssh_value "$owner_policy" pubkeyauthentication yes
+    assert_effective_ssh_value "$owner_policy" kbdinteractiveauthentication no
+    assert_effective_ssh_value "$owner_policy" x11forwarding no
+
+    root_policy=$(sshd -T -C "user=root,host=yap-policy-check.invalid,addr=${policy_address}") \
+      || die "Unable to evaluate effective SSH root policy for ${policy_address}"
+    assert_effective_ssh_value "$root_policy" permitrootlogin no
+    assert_effective_ssh_value "$root_policy" allowusers "$YAP_OWNER"
+  done
 }
 
 setup_private_ethernet() {
