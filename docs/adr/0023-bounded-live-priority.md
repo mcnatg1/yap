@@ -63,6 +63,9 @@ decisions remain unchanged.
   dispatch streak and forces one ready batch dispatch at the configured bound.
 - Focused router tests cover live preference, the bounded batch dispatch, owner
   round robin, target availability, duplicate rejection, and backpressure.
+- The reference rule was included in the complete one-time Phase 4 matrix that
+  passed on exact executable candidate
+  `309a2d427707e3483b2649f13940bd48dfaee836`.
 - Production promotion requires durable-queue, cancellation, recovery,
   authenticated-owner, and mixed-load latency/capacity evidence.
 

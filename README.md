@@ -29,6 +29,8 @@ Repo-owned Windows automation now requires PowerShell Core 7.4 or newer, selects
 
 The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668165d54b64d1af61e41adad05`: the GB10 ARM64/Python 3.12 server suite passed 50/50, transient loopback health reached the command-line production connector as `Ready`, a separate refused-tunnel run projected `Retrying`, and teardown left no Yap process or port-18765 listener. The deployment archive SHA-256 is `be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` then passed hosted CI run `29293287930`, including the checksum-pinned RustSec audit, and stock NSIS lifecycle run `29293291582` on a disposable `windows-2025` runner. No persistent service, external application bind, or firewall change was introduced.
 
+The Phase 4 executable tree is pinned to exact candidate `309a2d427707e3483b2649f13940bd48dfaee836`. Its one-time local/native/server/GB10 gate passed: the transient ARM64 image `sha256:8b98372d980b3d3ae3cb8bb5cc1498141d161d15157cbd6114339e7a31b8ddff` ran the locked Cohere revision on an NVIDIA GB10 with Python 3.12.3, NVIDIA Torch `2.13.0a0+8145d630e8.nv26.06`, CUDA 13.3, BF16, and WER `0.0` against the `0.12` ceiling. Result SHA-256 `1a2850ad767489e00f6a496a46f95384d0d14b4a609d537a27a1304b80cfbbf0` is bound by evidence SHA-256 `3157efc6845d3c03e05e22a5ad5d0a2e216de5ae26ae990501586a2dfa45312b`; before/after listener, firewall-policy, and service observations matched, and teardown left no Phase 4 container or worker. This proves the isolated reference slice, not the deferred upload/drain, authenticated service, long-recording capacity, or production deployment.
+
 ## Repository Layout
 
 ```text

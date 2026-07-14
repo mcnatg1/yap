@@ -8,7 +8,7 @@
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
 **Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
 **Amended by:** [ADR 0023](0023-bounded-live-priority.md) (interactive live work remains preferred, but a ready batch job must run after a bounded live-dispatch streak)
-**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Phase 4 also implements a bounded in-memory reference router and one transient, isolated Cohere GPU batch pool on GB10. Upload/drain, WSS, authenticated sessions, durable server queues, persistent services, multi-worker capacity, and the TLS/QUIC edge are not implemented.
+**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Phase 4 implements a bounded in-memory reference router and one transient, isolated Cohere GPU batch pool whose exact-head local/native/server/GB10 gate passed. Upload/drain, WSS, authenticated sessions, durable server queues, persistent services, long-recording and multi-worker capacity, and the TLS/QUIC edge are not implemented.
 
 ## Context
 
@@ -186,10 +186,12 @@ C4Deployment
 | **Cohere batch pool** | Cohere Transcribe (GPU) | File / queue jobs | Multiple concurrent workers; expected to improve on the 26-min CPU result, subject to GB10 benchmarks |
 | **LLM pool** | Scribe/polish + agent models (GPU) | Scribe polish, Student/Curator/Analyst/Coordinator | Multi-tenant; `-ngl` not 0 on GPU |
 
-Current Phase 4 evidence covers only the Cohere row's single-worker reference
-seam: one licensed 7.4-second fixture completed in BF16 on an NVIDIA GB10 with
-WER `0.0`. That proves real CUDA inference and the locked runtime/model path;
-it does not establish 45-minute throughput, warm-pool behavior, or safe
+Exact-head Phase 4 evidence covers only the Cohere row's single-worker reference
+seam: executable candidate `309a2d427707e3483b2649f13940bd48dfaee836`
+passed the complete matrix, and one licensed 7.4-second fixture completed in
+BF16 on an NVIDIA GB10 with WER `0.0`. That proves real CUDA inference, the
+locked runtime/model path, teardown, and unchanged observed host boundaries; it
+does not establish 45-minute throughput, warm-pool behavior, or safe
 concurrency. The streaming and LLM rows remain targets.
 
 #### Client/server protocol shape
@@ -324,7 +326,8 @@ On `Connected` loss, live dictation may switch to local fallback with a visible 
 - [ ] Streaming ASR pool: GPU ASR, WSS endpoint
 - [x] Cohere batch reference pool: one bounded isolated GPU worker, immutable
   model/runtime lock, licensed WER fixture, and transient clean-head GB10 gate
-  harness (the final candidate-head run remains pending)
+  harness; exact executable candidate
+  `309a2d427707e3483b2649f13940bd48dfaee836` passed the one-time gate
 - [ ] Cohere batch production pool: durable job queue, warm/multiple workers,
   measured capacity, cancellation, supervision, and observability
 - [ ] Client transport: WSS live path + HTTP batch upload/drain + authenticated profile detection

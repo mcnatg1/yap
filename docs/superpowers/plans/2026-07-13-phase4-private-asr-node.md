@@ -1,7 +1,7 @@
 # Phase 4 Private ASR Node Implementation Record
 
-**Status:** Implementation candidate; final clean-head Phase 4 gate and reviewed
-PR remain pending.
+**Status:** Exact-head executable gate passed; reviewed PR and hosted closure
+remain pending.
 
 **Branch:** `feat/phase4-private-asr-node`
 
@@ -174,18 +174,17 @@ past that count, and follows redirects only to approved Hugging Face HTTPS
 hosts. The gate inspects the candidate tag once and executes the returned raw
 image ID, not the mutable tag.
 
-## Focused Pre-Gate Evidence
+## Focused Development Evidence
 
-This evidence proves the implementation seam while the one-time clean-head
-phase gate remains pending:
+This evidence established the implementation seam before the final gate and is
+retained as development history:
 
 - Focused local checks: 40 model-pool tests and 17 runtime/router tests passed;
   compilation and `git diff --check` passed.
 - Server-node/SSH policy checks passed 19/19, and focused overlay/bridge checks
   passed 16/16 after the client-boundary remediation.
 - An earlier pre-hardening focused subset passed on the GB10 under Python 3.12;
-  the final exact-head matrix and transient inference gate remain pending and
-  will supersede that development evidence.
+  the final checked-head evidence below supersedes it for release decisions.
 - Derived ARM64 image:
   `sha256:c513d6c39cb8ad1ce5e16ee650b46e3001318fef017af2ca17d7bec1f8399446`.
 - Public worker path ran the licensed 7.435-second fixture on `NVIDIA GB10`,
@@ -196,8 +195,47 @@ phase gate remains pending:
   `2.13.0a0+8145d630e8.nv26.06`, Torch CUDA 13.3, and all 14 locked overlay
   versions.
 
-This is not final checked-head evidence and is not a long-file or concurrency
-benchmark.
+This development evidence is not a long-file or concurrency benchmark.
+
+## Final Checked-Head Evidence
+
+Executable candidate `309a2d427707e3483b2649f13940bd48dfaee836`
+passed the complete Phase 4 matrix once on 2026-07-14:
+
+- Frontend/release: frozen install and high-severity pnpm audit passed; release
+  contracts passed 32/32, Vitest passed 261/261 across 31 files, the production
+  build completed with 295 modules, and Playwright passed 23/23.
+- Portable server: Python 3.12.13 passed 109/109 tests.
+- Rust: format and warnings-denied all-target Clippy passed; 687/687 library
+  tests and 27/27 integration tests passed. The checksum-pinned RustSec audit
+  reported zero vulnerabilities, with only 17 documented target-all warnings,
+  and the Windows dependency graph contained no reachable `glib`.
+- Live connector: 10/10 tests passed against the bounded Python health process;
+  the process exited and port 18765 had no remaining listener.
+- Native Windows: all four WDIO specs passed 13 required assertions. The one
+  optional real-microphone/Nemotron probe was explicitly skipped because no
+  verified local Nemotron model is installed; all Yap processes and WDIO ports
+  were gone afterward.
+- GB10: the disposable detached checkout at the exact candidate built and ran
+  ARM64 image
+  `sha256:8b98372d980b3d3ae3cb8bb5cc1498141d161d15157cbd6114339e7a31b8ddff`.
+  Locked Cohere revision `b1eacc2686a3d08ceaae5f24a88b1d519620bc09`
+  ran on `NVIDIA GB10` compute capability 12.1 in CUDA/BF16 with Python 3.12.3,
+  NVIDIA Torch `2.13.0a0+8145d630e8.nv26.06`, Torch CUDA 13.3, model load
+  20,277 ms, inference 1,975 ms, and WER `0.0` against the `0.12` ceiling.
+- Immutable private evidence: result SHA-256
+  `1a2850ad767489e00f6a496a46f95384d0d14b4a609d537a27a1304b80cfbbf0`
+  is bound by evidence SHA-256
+  `3157efc6845d3c03e05e22a5ad5d0a2e216de5ae26ae990501586a2dfa45312b`.
+  Listener, firewall-policy, and service-unit observations matched before and
+  after; no port or persistent service was created, and no Phase 4 container or
+  worker remained. The evidence files are mode 0600 and remain on the private
+  node.
+
+Post-gate changes are limited to evidence/status documentation. The executable
+tree remains byte-for-byte the tree gated at the candidate above. This is still
+not a long-recording, multi-worker capacity, connected-client, or production
+service proof.
 
 ## Final Phase 4 Gate
 
@@ -205,10 +243,10 @@ Before the PR is eligible to merge:
 
 1. [x] Finish code, notices, runbook, ADR, architecture, and status reconciliation.
 2. [x] Review the complete diff and resolve correctness/security findings.
-3. Commit a clean implementation candidate.
-4. Run `infra/yap-server-node/phase4-asr-gate.sh` exactly once on that exact
+3. [x] Commit a clean implementation candidate.
+4. [x] Run `infra/yap-server-node/phase4-asr-gate.sh` exactly once on that exact
    clean SHA in the disposable GB10 candidate checkout.
-5. Record the immutable result/evidence digest only after before/after
+5. [x] Record the immutable result/evidence digest only after before/after
    listener, firewall-policy observation, and Yap service-unit snapshots match
    and no Phase 4 container or worker process remains. The firewall observation
    uses effective UFW status when narrowly authorized and otherwise compares
@@ -217,9 +255,9 @@ Before the PR is eligible to merge:
    and observed pass/fail facts. The checked-head evidence directory must not
    exist before the run; publication reserves it once and refuses every
    overwrite or silent reuse.
-6. Add only evidence/status reconciliation after the gate; do not change the
+6. [x] Add only evidence/status reconciliation after the gate; do not change the
    gated executable tree.
-7. Open a focused PR, use hosted CI when available, and merge only after the
+7. [ ] Open a focused PR, use hosted CI when available, and merge only after the
    checked PR head SHA is green.
 
 ## Explicit Phase 5 And Enterprise Handoffs

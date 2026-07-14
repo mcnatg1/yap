@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-14; the merged stock-NSIS Phase 3 evidence remains recorded below. The Phase 4 branch has an isolated private-ASR implementation candidate with focused local and pre-hardening GB10 evidence; its final exact-head local/native/server/GB10 gate and reviewed PR remain pending.
+**As of:** 2026-07-14; the merged stock-NSIS Phase 3 evidence remains recorded below. The isolated Phase 4 private-ASR executable tree passed its one-time exact-head local/native/server/GB10 gate; reviewed PR and hosted closure remain pending.
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -35,7 +35,7 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 | [0011](adr/0011-vector-rag-retrieval.md) | Accepted retrieval principles; team projection amended by 0017/0022 | Server | **0** | None | No FTS/vector store, embeddings, chunker, RRF, calibration, citations, permission filtering, or graph projection | Phase 9 after authoritative OKF and access boundaries |
 | [0012](adr/0012-mcp-server-surface.md) | Accepted Phase 9 target; team hosting amended by 0017 | Server | **0** | None | No MCP runtime, tools/resources, transport, opt-in, authorization, or tests | Phase 9 after permission-filtered KB APIs |
 | [0013](adr/0013-global-hotkey-injection.md) | Accepted as amended 2026-07-14; Windows hotkey and safe-delivery implementation active | Client | **180** | Dual safe defaults, native-confirmed 15-second physical-chord enrollment with neutral/chord/release and modifier floors, normalization and reserved/conflict rejection, Cancel/per-action Reset, transactional registration rollback, one exact-bounds non-focusable island, clipboard-only delivery with Yap HWND ownership and visible paste guidance, focused native WDIO, stock installer contract, and a passing hosted disposable-Windows lifecycle | No macOS/Linux hotkey/clipboard adapters, broad real-app clipboard matrix, exact-field authority for safe direct insertion, or verified local real-model/hardware lifecycle on this machine | Expand native compatibility and hardware evidence without reintroducing synthesized input without exact-field authority |
-| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021/0023 | Shared | **100** | Client route vocabulary/orchestrator projection, versioned contracts, bounded loopback capability-health API, validated connector state, durable SQLite imported jobs, hardened host bootstrap, bounded in-memory owner-fair router, immutable Cohere/NGC/Python 3.12 lock, licensed WER fixture, and one isolated transient GB10 batch worker with focused WER `0.0` proof | No final exact-head Phase 4 gate, persistent service, production/durable router, queue drain, WSS/upload workers, TLS/QUIC edge, auth, streaming pool, or multi-worker capacity result | Close the Phase 4 exact-head gate, then Phase 5 remote STT |
+| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021/0023 | Shared | **100** | Client route vocabulary/orchestrator projection, versioned contracts, bounded loopback capability-health API, validated connector state, durable SQLite imported jobs, hardened host bootstrap, bounded in-memory owner-fair router, immutable Cohere/NGC/Python 3.12 lock, licensed WER fixture, and one isolated transient GB10 batch worker whose exact-head matrix and WER `0.0` gate passed | No persistent service, production/durable router, queue drain, WSS/upload workers, TLS/QUIC edge, auth, streaming pool, long-recording benchmark, or multi-worker capacity result | Complete reviewed Phase 4 closure, then Phase 5 remote STT |
 | [0015](adr/0015-two-pass-diarization-speaker-identity.md) | Superseded by 0020 | Server | **0** | No implementation of the retired ECAPA/VBx design | Entire retired design absent by intent | Do not implement; use 0020 |
 | [0016](adr/0016-auth-identity-bridge.md) | Canonical Phase 7 decision | Shared | **15** | Evidence/result contracts require provenance for named server assertions | No MSAL, credential storage, Yap-token validation, identity DB, grants, enrollment, deletion, or audit | Phase 7 after the server boundary works privately |
 | [0017](adr/0017-knowledge-base-compiler.md) | Canonical team KB/compiler decision; format/projection amended by 0022 | Server | **0** | None beyond repository documentation | No Lane 1 store, `yap-knowledge`, compiler, databases, permission inheritance, APIs, or IaC | Phase 9 after identity and result authority |
@@ -70,24 +70,38 @@ executable behavior and remains subject to the final checked-head PR gate.
 
 The GB10 run did not prove a persistent service or same-process native UI transition, and it introduced no upload, WSS, authentication, ASR, external listener, or firewall change. The local machine did not have `cargo-audit`; the checksum-pinned hosted RustSec lane supplied that evidence and passed on the implementation head.
 
-### Phase 4 pre-gate evidence
+### Phase 4 checked-head evidence
 
-The current Phase 4 branch passed **40/40 model-pool tests**, **17/17
-runtime/router tests**, **19/19 server-node/SSH policy tests**, and **16/16
-focused overlay/bridge tests** under the applicable runtimes. Those checks cover immutable
-model/runtime/fixture locks, bounded downloads, input/result identity, exact
-GB10/BF16 gate attestation, named-container teardown, observed host-boundary
-finalization, router fairness/backpressure, and the complete model license
-artifact, as well as effective SSH ownership/authentication/forwarding policy,
-native chord enrollment, minimized overlay state, and listener-before-snapshot
-ordering. TypeScript compilation and `git diff --check` passed. A private
-post-remediation security review is complete; its scan artifacts remain local
-and are not repository or PR material.
+Exact executable candidate `309a2d427707e3483b2649f13940bd48dfaee836`
+passed the one-time complete matrix. Frozen frontend install, the high-severity
+pnpm audit, 32/32 release-contract tests, 261/261 Vitest tests, the 295-module
+production build, and 23/23 Playwright tests passed. Python 3.12.13 passed
+109/109 portable server tests. Rust format, warnings-denied all-target Clippy,
+687/687 library tests, 27/27 integration tests, the no-`glib` Windows boundary,
+and the checksum-pinned RustSec audit passed; the audit reported zero
+vulnerabilities and 17 documented target-all warnings. The live connector
+passed 10/10 with clean process/listener teardown. Native WDIO passed all four
+spec files and 13 required assertions; its one optional real-microphone/model
+probe remained explicitly skipped because no verified Nemotron model is
+installed locally.
 
-Earlier development evidence ran the locked licensed 7.435-second fixture on
-an NVIDIA GB10 in CUDA/BF16 and returned WER `0.0`. It is useful pre-gate proof,
-not final checked-head evidence: the one-time exact-head Phase 4 matrix and
-transient inference gate have not run yet.
+The disposable exact-head GB10 gate built ARM64 image
+`sha256:8b98372d980b3d3ae3cb8bb5cc1498141d161d15157cbd6114339e7a31b8ddff`
+and ran the locked Cohere revision on NVIDIA GB10 compute capability 12.1 in
+CUDA/BF16. The returned runtime was Python 3.12.3, NVIDIA Torch
+`2.13.0a0+8145d630e8.nv26.06`, and Torch CUDA 13.3; WER was `0.0` against the
+`0.12` ceiling. Result SHA-256
+`1a2850ad767489e00f6a496a46f95384d0d14b4a609d537a27a1304b80cfbbf0`
+is bound by evidence SHA-256
+`3157efc6845d3c03e05e22a5ad5d0a2e216de5ae26ae990501586a2dfa45312b`.
+Before/after listener, firewall-policy, and service-unit observations matched;
+the run opened no port or persistent service and left no Phase 4 container or
+worker. Post-gate repository changes are evidence/status documentation only.
+
+A private post-remediation security review is complete; its scan artifacts
+remain local and are not repository or PR material. ADR 0014 remains at
+**100/200** because the checked reference worker is still not a connected,
+durable, authenticated, capacity-tested service.
 
 These checks do not activate missing product gates. A committed licensed
 real-speech/WER fixture and isolated server inference seam now exist, but there
