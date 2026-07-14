@@ -270,11 +270,26 @@ async function showIdleOverlay() {
   }
   await browser.tauri.execute(({ core }) => core.invoke("show_live_overlay"));
   await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+  await browser.tauri.switchWindow("live-overlay");
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector('[data-overlay-surface="collapsed"]') !== null), {
+    interval: 25,
+    timeout: 5_000,
+    timeoutMsg: "live overlay window existed before its collapsed surface was ready",
+  });
+  await browser.tauri.switchWindow("main");
 }
 
 async function cycleIdleOverlay() {
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector('[data-overlay-surface="collapsed"]') !== null), {
+    interval: 20,
+    timeout: 2_000,
+    timeoutMsg: "collapsed overlay surface was unavailable before stability sampling",
+  });
   await browser.tauri.execute(() => {
     const root = document.querySelector('[data-overlay-surface="collapsed"]');
+    if (!root) throw new Error("collapsed overlay surface disappeared before pointerover");
     root.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
   });
   await browser.waitUntil(async () => browser.tauri.execute(() =>
@@ -285,6 +300,7 @@ async function cycleIdleOverlay() {
   });
   await browser.tauri.execute(() => {
     const root = document.querySelector('[data-overlay-surface="expanded"]');
+    if (!root) throw new Error("expanded overlay surface disappeared before pointerout");
     root.dispatchEvent(new PointerEvent("pointerout", {
       bubbles: true,
       relatedTarget: document.body,
@@ -346,6 +362,13 @@ describe("Yap live overlay window", () => {
   it("opens as a compact system overlay and refuses direct close", async () => {
     await showIdleOverlay();
 
+    await browser.tauri.switchWindow("live-overlay");
+    const scaleFactor = await browser.tauri.execute(() => window.devicePixelRatio);
+    if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+      throw new Error(`Overlay reported invalid devicePixelRatio ${scaleFactor}.`);
+    }
+    await browser.tauri.switchWindow("main");
+
     const overlay = await browser.tauri.execute(async ({ core }) => {
       const label = "live-overlay";
       const inner = await core.invoke("plugin:window|inner_size", { label });
@@ -355,17 +378,16 @@ describe("Yap live overlay window", () => {
         focused: await core.invoke("plugin:window|is_focused", { label }),
         inner,
         outer,
-        scaleFactor: await core.invoke("plugin:window|scale_factor", { label }),
         visible: await core.invoke("plugin:window|is_visible", { label }),
       };
     });
     const logicalInner = {
-      height: overlay.inner.height / overlay.scaleFactor,
-      width: overlay.inner.width / overlay.scaleFactor,
+      height: overlay.inner.height / scaleFactor,
+      width: overlay.inner.width / scaleFactor,
     };
     const logicalOuter = {
-      height: overlay.outer.height / overlay.scaleFactor,
-      width: overlay.outer.width / overlay.scaleFactor,
+      height: overlay.outer.height / scaleFactor,
+      width: overlay.outer.width / scaleFactor,
     };
     expect(overlay.visible).toBe(true);
     expect(overlay.focused).toBe(false);
@@ -380,6 +402,11 @@ describe("Yap live overlay window", () => {
   it("reuses one native window whose bounds equal each visible island surface", async () => {
     await showIdleOverlay();
     await browser.tauri.switchWindow("live-overlay");
+
+    const scaleFactor = await browser.tauri.execute(() => window.devicePixelRatio);
+    if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+      throw new Error(`Overlay reported invalid devicePixelRatio ${scaleFactor}.`);
+    }
 
     const labelsBefore = await browser.tauri.listWindows();
     expect(labelsBefore.filter((label) => label === "live-overlay")).toHaveLength(1);
@@ -405,12 +432,11 @@ describe("Yap live overlay window", () => {
       timeoutMsg: "expanded webview did not converge to the visible island",
     });
     await browser.tauri.switchWindow("main");
-    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }) => {
-      const scale = await core.invoke("plugin:window|scale_factor", { label: "live-overlay" });
+    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }, scale) => {
       const inner = await core.invoke("plugin:window|inner_size", { label: "live-overlay" });
       return Math.abs(inner.width / scale - 180) <= 0.5
         && Math.abs(inner.height / scale - 88) <= 0.5;
-    }), {
+    }, scaleFactor), {
       interval: 25,
       timeout: 5_000,
       timeoutMsg: "expanded native bounds did not converge to 180 by 88",
@@ -441,12 +467,11 @@ describe("Yap live overlay window", () => {
       timeoutMsg: "collapsed webview did not converge after the grace period",
     });
     await browser.tauri.switchWindow("main");
-    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }) => {
-      const scale = await core.invoke("plugin:window|scale_factor", { label: "live-overlay" });
+    await browser.waitUntil(async () => browser.tauri.execute(async ({ core }, scale) => {
       const inner = await core.invoke("plugin:window|inner_size", { label: "live-overlay" });
       return Math.abs(inner.width / scale - 104) <= 0.5
         && Math.abs(inner.height / scale - 40) <= 0.5;
-    }), {
+    }, scaleFactor), {
       interval: 25,
       timeout: 5_000,
       timeoutMsg: "collapsed native bounds did not converge to 104 by 40",

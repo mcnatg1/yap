@@ -34,6 +34,14 @@ async function showIdleOverlay() {
   }
   await browser.tauri.execute(({ core }) => core.invoke("show_live_overlay"));
   await browser.waitUntil(async () => (await browser.tauri.listWindows()).includes("live-overlay"));
+  await browser.tauri.switchWindow("live-overlay");
+  await browser.waitUntil(async () => browser.tauri.execute(() =>
+    document.querySelector('[data-overlay-surface="collapsed"]') !== null), {
+    interval: 25,
+    timeout: 5_000,
+    timeoutMsg: "live overlay window existed before its collapsed surface was ready",
+  });
+  await browser.tauri.switchWindow("main");
 }
 
 async function nativeReadiness() {
