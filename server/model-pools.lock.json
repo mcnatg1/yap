@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "image": "nvcr.io/nvidia/pytorch",
+    "sourceTag": "26.06-py3",
+    "source": "https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags",
+    "platform": "linux/arm64",
+    "pythonVersion": "3.12",
+    "torchVersion": "2.13.0a0+8145d630e8.nv26.06",
+    "cudaVersion": "13.3.0",
+    "torchCudaVersion": "13.3",
+    "overlayPackages": {
+      "audioread": "3.1.0",
+      "joblib": "1.5.3",
+      "lazy-loader": "0.5",
+      "librosa": "0.11.0",
+      "msgpack": "1.2.1",
+      "narwhals": "2.24.0",
+      "pooch": "1.9.0",
+      "scikit-learn": "1.9.0",
+      "sentencepiece": "0.2.1",
+      "soundfile": "0.14.0",
+      "soxr": "1.1.0",
+      "threadpoolctl": "3.6.0",
+      "tokenizers": "0.22.2",
+      "transformers": "5.13.1"
+    },
+    "digest": "sha256:dcae8df08ef61b019b8eb109113428cba4ef0e37484c6e722406150dd5ada759",
+    "license": "NVIDIA Software License Agreement and Product-Specific Terms for NVIDIA AI Products",
+    "requirementsLock": "server/runtime/asr/requirements.lock"
+  },
+  "pool": {
+    "id": "cohere-batch",
+    "role": "phase4-private-batch-asr",
+    "productionDefault": false,
+    "engine": "transformers",
+    "model": {
+      "id": "CohereLabs/cohere-transcribe-03-2026",
+      "revision": "b1eacc2686a3d08ceaae5f24a88b1d519620bc09",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/CohereLabs/cohere-transcribe-03-2026",
+      "distribution": {
+        "id": "ZoOtMcNoOt/yap-cohere-transcribe-03-2026",
+        "revision": "7fd11d290a33580014fc2d347ea81aa2670c2ea9",
+        "source": "https://huggingface.co/ZoOtMcNoOt/yap-cohere-transcribe-03-2026",
+        "provenance": "The small runtime artifacts were byte-compared with the canonical CohereLabs revision; the 4.13 GB weight has the same immutable Xet object identity and size upstream and in this distribution. The public distribution avoids placing Hugging Face credentials on the GB10."
+      }
+    },
+    "supportedLanguages": [
+      "ar",
+      "de",
+      "el",
+      "en",
+      "es",
+      "fr",
+      "it",
+      "ja",
+      "ko",
+      "nl",
+      "pl",
+      "pt",
+      "vi",
+      "zh"
+    ],
+    "artifacts": [
+      {
+        "path": "config.json",
+        "size": 3998,
+        "sha256": "5de7e586cec6d8f51225c8d5fe17a56a3043dda9af8c42f9cb01dd545905eb18"
+      },
+      {
+        "path": "generation_config.json",
+        "size": 234,
+        "sha256": "a4837377b5696b1d04033536f25a6d0a11d5e613c6d7d75bf20ffc463ae642c6"
+      },
+      {
+        "path": "model.safetensors",
+        "size": 4131862976,
+        "sha256": "987bd3e141c7bfdb5a78f5db11397ee7737308357e6cc0a3f36a4979b158137a"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "size": 420,
+        "sha256": "9f297d330646ecc8ebb9dc5784f48b7c35b118c913e306a1ccd0192f2c976332"
+      },
+      {
+        "path": "processor_config.json",
+        "size": 131,
+        "sha256": "d5eff85971bab7f42480856f8fb397d8dd966858d67049def99aa8a665aa87d5"
+      },
+      {
+        "path": "special_tokens_map.json",
+        "size": 4091,
+        "sha256": "1814ce01458ff6a72b04a6618e75f18ce627be4dc17619cd3a7cd7f71e137f0f"
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 1816694,
+        "sha256": "780ccca2de2ccd289971b1fb7d4f0b5ec2dc908872f6e350181c7eba9db3fa9f"
+      },
+      {
+        "path": "tokenizer.model",
+        "size": 492827,
+        "sha256": "6d21e6a83b2d0d3e1241a7817e4bef8eb63bcb7cfe4a2675af9a35ff3bbf0e14"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 48138,
+        "sha256": "b462e16e04c9dbae82289b6ef9b080d8dbad331586ece3ebded0bd09996db636"
+      }
+    ],
+    "limitations": [
+      "The caller must select one of the 14 locked languages; the model does not auto-detect language.",
+      "The model returns transcript text without timestamps or diarization; those remain later preprocessing and meeting-evidence phases.",
+      "The Phase 4 reference worker accepts only mono signed-PCM16 WAV at 16 kHz; Phase 5 media admission and preprocessing must produce that contract before dispatch.",
+      "One worker input is bounded to four hours, but the Phase 4 fixture is a short correctness check rather than long-recording performance evidence.",
+      "Phase 4 validates one isolated GB10 worker; higher concurrency remains a measured capacity gate.",
+      "The public distribution revision is used only as a byte-identical delivery path for the canonical CohereLabs model."
+    ]
+  },
+  "fixture": {
+    "path": "server/tests/fixtures/asr/2086-149220-0033.wav",
+    "source": "https://dldata-public.s3.us-east-2.amazonaws.com/2086-149220-0033.wav",
+    "license": "CC-BY-4.0",
+    "sha256": "5fceacff0315d49cb59fcc505bcecf1ed5f2f35c2897b1e65a59f30e5d922150",
+    "goldenTranscript": "Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. It is certainly very like the old portrait."
+  }
+}

@@ -1,0 +1,27 @@
+# Keep the exact-head worker context free of ignored executable and private state.
+**/__pycache__/
+**/*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env*
+data/
+logs/
+models/
+volumes/
+.runtime/
+tests/
+**/*.log
+**/*.sqlite*
+**/*.db
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.gguf
+**/*.safetensors
+**/*.onnx
+**/*.pt
+**/*.pth
+**/*.ckpt

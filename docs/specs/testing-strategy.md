@@ -1,11 +1,16 @@
 # Spec: Testing strategy
 
-**Status:** Living verification contract (updated 2026-07-12); future phase gates activate only when their fixtures exist
+**Status:** Living verification contract (updated 2026-07-13); future phase gates activate only when their fixtures exist
 **Scope:** Cross-cutting tests for the desktop runtime, track-aware audio contracts, local fallback, source-aware diarization, server contracts, and native UI.
 
 This is the shared reference the phase specs point to for their acceptance tests.
 
-**Current activation:** deterministic generated-tone and contract fixtures exist. The licensed speech clips/golden transcripts, `tests/wer_check.py`, meeting RTTM manifest, diarization benchmark harness, bundled llama-server, and per-OS real-model matrix described below do not exist yet. Their tables are target gates, not claims about active CI.
+**Current activation:** deterministic generated-tone and contract fixtures exist.
+Phase 4 also has one committed, licensed LibriSpeech WAV with a locked golden
+transcript and a standard-library WER gate for the private Cohere worker. The
+desktop speech suite, meeting RTTM manifest, diarization benchmark harness,
+bundled llama-server, and per-OS real-model matrix described below do not exist
+yet. Their tables are target gates, not claims about active CI.
 
 ---
 
@@ -16,7 +21,7 @@ This is the shared reference the phase specs point to for their acceptance tests
 | **Unit** | Pure logic — error mapping, language code map, manifest serde, path naming | `vitest` (TS), `cargo test` (Rust) |
 | **Integration** | Rust ↔ sidecar over real IPC; one fixture in → expected shape out | `cargo test` w/ sidecar launched; tagged `#[ignore]` unless binaries present |
 | **E2E (smoke)** | App boots, overlay responds, desktop shell opens | Playwright for browser/Tauri shell surfaces; WebdriverIO for true desktop smoke |
-| **Accuracy** | WER spot-check vs golden transcripts | Python `jiwer` script in CI, tolerance-gated |
+| **Accuracy** | WER spot-check vs golden transcripts | Phase 4 standard-library WER gate now; backend-specific licensed suites later |
 | **Diarization** | DER/JER, speaker count, short-turn recall, overlap, and identity false-name gates | License-clear RTTM fixtures + benchmark harness |
 | **Reliability/privacy** | Gap recovery, reconnect revisions, consent, deletion, tenant isolation | Rust integration and server contract tests |
 | **Performance** | Capture drops, ASR regression, CPU, RSS, and RTF | Deterministic profiler jobs; hardware results recorded separately from CI pass/fail when hosts differ |
@@ -78,8 +83,12 @@ Current generated fixtures:
 |------|---------|-------------|
 | `desktop/tests/fixtures/audio-fixture.ts` | Deterministic 16 kHz mono WAV generator for UI/contract tests | Stable bytes; not treated as speech quality evidence |
 
-Future speech fixtures should be stored under `desktop/tests/fixtures/`
-(small, license-clear audio):
+The active server fixture is
+`server/tests/fixtures/asr/2086-149220-0033.wav`; its source, CC BY 4.0 license,
+SHA-256, and golden transcript are locked in `server/model-pools.lock.json`.
+
+Future desktop and meeting speech fixtures should be stored under
+`desktop/tests/fixtures/` (small, license-clear audio):
 
 | File | Purpose | Expectation |
 |------|---------|-------------|
@@ -104,7 +113,10 @@ timestamp-shape coverage without shipping private or unclear audio.
 
 ## 3. Accuracy spot-checks (WER)
 
-- Script: `tests/wer_check.py` → `jiwer` WER between fixture output and golden.
+- Active server implementation:
+  `yap_server.pools.phase4_gate.word_error_rate` compares normalized words
+  without adding a runtime dependency. Future suites may introduce a separately
+  locked scorer only when needed.
 - Gates (tune with real data; starting points):
 
 | Path | WER gate |
@@ -112,7 +124,8 @@ timestamp-shape coverage without shipping private or unclear audio.
 | Server Cohere batch (en) | ≤ 0.12 |
 | Nemotron INT8 live (en, finals) | ≤ 0.18 |
 
-- A regression beyond gate **fails CI** for that backend; server pool sizing/model choice is the mitigation.
+- A regression beyond the threshold fails that backend's applicable gate. The
+  private GB10 check is a phase gate, not a portable hosted-CI inference job.
 
 ### Diarization and identity gates
 
@@ -157,14 +170,15 @@ The risk is **native runtimes**, not app logic. CI must run the pinned Nemotron/
 
 | Phase | Critical tests |
 |-------|----------------|
-| 1–2 STT | Nemotron profiler, live state transitions, local fallback disabled, queue blocks larger files without server |
-| A–D LLM | Polish parity, 400 ms Scribe bypass, backend flag, empty-completion retry |
-| 3 Live | partial latency, silence finalize, raw-mode badge, mic-denied recovery, dual-STT block |
-| 4 LID | code mapping, low-confidence gate, multi-window probe agreement |
+| 1–2 Desktop/fallback | Nemotron profiler, live state transitions, local fallback disabled, queue blocks larger files without server |
+| 3 Contract | OpenAPI/schema validation, loopback health bounds, connector failure/retry, durable client ledger restart |
+| 4 Server node | Router fairness/backpressure, immutable runtime/model/fixture locks, isolated non-root container, ARM64/CUDA attestation, WER, atomic evidence, no persistent listener |
+| 5 Remote STT | Resumable upload identity, queue drain, job state/cancel/retry, capability truth, result ingestion, tunnel-loss recovery |
 | 6 Preprocessing | mixed-session rejection, track-aware content IDs, explicit gaps, bounded windows, advisory VAD |
 | 7 Identity/access | Yap API token audience, `(tid, oid)` isolation, consent and withdrawal, profile-version compatibility |
 | 8 Meeting evidence | one/two/overlap/short/noisy speakers, stable result revisions, bounded clusters, no local names or persistent embeddings |
-| 7d–e Agents | citation-required Analyst, three-strike Student, RAG confidence floor |
+| 9 Knowledge/agents | Google OKF conformance, permission-safe projection, citation-required Analyst, three-strike Student, RAG confidence floor |
+| 10 Enterprise/release | approved network/policy evidence, deployment rollback, publication governance, repo-boundary checks |
 
 ---
 

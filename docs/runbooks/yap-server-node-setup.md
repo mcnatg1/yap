@@ -1,6 +1,6 @@
 # Yap Server Node Setup Runbook
 
-Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 5 is intended to send authorized long recordings to `yap-server`; Phase 3 currently provides health reachability and durable queued-job ownership only.
+Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 3 provides health reachability and durable queued-job ownership. Phase 4 adds one transient, server-internal Cohere batch reference worker; Phase 5 is still required to send authorized desktop recordings through the contract.
 
 The first supported node profile is DGX Spark GB10. A later GB300-class node should keep the same server contract and change only host-specific config: NIC names, CIDRs, GPU/runtime sizing, and deployment capacity.
 
@@ -79,6 +79,54 @@ network failover.
 
 See the [GB10 readiness audit](../research/2026-07-12-gb10-readiness-audit.md)
 for the evidence and remaining gates.
+
+## Phase 4 Transient Batch-ASR Gate
+
+Phase 4 does not open an application port or install a worker service. Its gate
+builds one immutable ARM64 image, runs one licensed fixture through the bounded
+router and batch pool, writes result/evidence JSON, and removes the job
+container. The base is `nvcr.io/nvidia/pytorch:26.06-py3` by digest with Python
+3.12; the model remains the locked canonical Cohere Transcribe revision even
+though its public byte distribution avoids putting model credentials on the
+node.
+
+Run the final gate only from a clean checkout at the exact candidate SHA:
+
+```bash
+cd /path/to/clean/yap-candidate
+export YAP_CHECKED_HEAD="$(git rev-parse HEAD)"
+export YAP_PHASE4_MODEL_DIR=/path/to/private/cohere-transcribe-03-2026
+export YAP_PHASE4_EVIDENCE_DIR=/path/to/private/phase4-evidence/$YAP_CHECKED_HEAD
+bash infra/yap-server-node/phase4-asr-gate.sh
+```
+
+The invoking POSIX identity must be non-root and must be able to read every
+locked model file. The host adapter passes that exact UID/GID into the worker.
+The worker has no network, a read-only root filesystem, dropped capabilities,
+`no-new-privileges`, read-only model/audio mounts, a non-executable general
+`/tmp`, and a private mode-0700 executable tmpfs used only for Triton JIT
+artifacts. Do not loosen the entire root filesystem or expose a model port to
+work around JIT requirements.
+
+The gate verifies:
+
+- the full model and fixture SHA-256 set;
+- the image's ARM64 architecture and exact checked-head revision label, then
+  execution by the inspected raw image ID rather than the mutable build tag;
+- router-to-pool dispatch and bounded one-worker execution;
+- the 96 GiB memory/no-swap, 16-CPU, PID, temporary-storage, and one-MiB
+  per-output-stream ceilings;
+- Python, Torch, CUDA, overlay-package, model, language, and punctuation
+  identities returned by the isolated process;
+- the worker result's exact input SHA-256, 16 kHz sample rate, and positive
+  duration before host publication;
+- CUDA execution and fixture WER no greater than `0.12`;
+- atomic result/evidence publication with no service, listener, or firewall
+  mutation.
+
+This short fixture is a correctness gate, not a throughput or concurrency
+benchmark. Keep the image/model caches after the run unless a separate cleanup
+change is authorized.
 
 ## Fresh Dedicated Node Bootstrap
 
@@ -243,8 +291,10 @@ the directory and allow-rule operations are repeatable.
 ## What Not To Do Yet
 
 - Do not open `11000`, `11434`, `5909`, database ports, or model worker ports directly.
-- Do not bind the Phase 3 service to `0.0.0.0`, `[::]`, the Wi-Fi address, or an
+- Do not bind the Phase 3 health service to `0.0.0.0`, `[::]`, the Wi-Fi address, or an
   overlay address.
+- Do not expose the Phase 4 container worker or model directory as a network
+  service.
 - Do not make the server node public-internet reachable.
 - Do not reuse cached model weights, Handy model files, or `latest` container
   tags without pinned provenance, licenses, and hashes.

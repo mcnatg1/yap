@@ -7,7 +7,7 @@
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
 **Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
-**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Upload/drain, WSS, authenticated sessions, model pools, TLS/QUIC edge, and server inference are not implemented.
+**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Phase 4 also implements a bounded in-memory reference router and one transient, isolated Cohere GPU batch pool on GB10. Upload/drain, WSS, authenticated sessions, durable server queues, persistent services, multi-worker capacity, and the TLS/QUIC edge are not implemented.
 
 ## Context
 
@@ -173,7 +173,7 @@ C4Deployment
 | Concern | Mechanism |
 |---------|-----------|
 | **Per-tenant queues** | One queue per authenticated user (ADR 0016); fairness prevents one user monopolising GPU |
-| **Priority** | Interactive live (ASR pool) always prioritised over background batch jobs |
+| **Priority** | Interactive live work is preferred, but the reference router forces one ready batch job after a bounded live streak (default: eight) so batch cannot starve |
 | **Backpressure** | Router signals client when all pool workers are busy; client falls back to local sidecar or queues |
 | **Model residency** | Client local-model exclusivity **relaxes on the server**: a GPU pool can hold multiple models resident simultaneously; the router allocates to the appropriate pool per request type |
 
@@ -184,6 +184,12 @@ C4Deployment
 | **Streaming ASR pool** | Server-selected GPU ASR | Live mic, real-time WSS | Wispr-Flow-style; thin client streams Opus chunks; server returns partial/final tokens |
 | **Cohere batch pool** | Cohere Transcribe (GPU) | File / queue jobs | Multiple concurrent workers; expected to improve on the 26-min CPU result, subject to GB10 benchmarks |
 | **LLM pool** | Scribe/polish + agent models (GPU) | Scribe polish, Student/Curator/Analyst/Coordinator | Multi-tenant; `-ngl` not 0 on GPU |
+
+Current Phase 4 evidence covers only the Cohere row's single-worker reference
+seam: one licensed 7.4-second fixture completed in BF16 on an NVIDIA GB10 with
+WER `0.0`. That proves real CUDA inference and the locked runtime/model path;
+it does not establish 45-minute throughput, warm-pool behavior, or safe
+concurrency. The streaming and LLM rows remain targets.
 
 #### Client/server protocol shape
 
@@ -310,9 +316,16 @@ On `Connected` loss, live dictation may switch to local fallback with a visible 
 - [x] `server/` staging area, machine-readable Phase 3 contract, and loopback capability-health process in the MVP monorepo (ADR 0018; split to `yap-server` in canonical Phase 10)
 - [x] Client capability-health connector: validated settings, bounded HTTP checks, fail-closed state/capability projection, generation safety, and retry cancellation
 - [x] Rust-owned SQLite imported-job ledger with restart recovery and idempotent legacy migration
-- [ ] Workload router: per-user queues, priority, pool dispatch
+- [x] Reference workload router: bounded per-owner queues, bounded live
+  priority, round-robin fairness, backpressure, and pool dispatch
+- [ ] Production workload router: auth-derived ownership, durable queues,
+  concurrent admission, cancellation, recovery, and service integration
 - [ ] Streaming ASR pool: GPU ASR, WSS endpoint
-- [ ] Cohere batch pool: concurrent GPU workers, job queue
+- [x] Cohere batch reference pool: one bounded isolated GPU worker, immutable
+  model/runtime lock, licensed WER fixture, and transient clean-head GB10 gate
+  harness (the final candidate-head run remains pending)
+- [ ] Cohere batch production pool: durable job queue, warm/multiple workers,
+  measured capacity, cancellation, supervision, and observability
 - [ ] Client transport: WSS live path + HTTP batch upload/drain + authenticated profile detection
 - [ ] Local-fallback logic: auto-switch on server unreachability
 
