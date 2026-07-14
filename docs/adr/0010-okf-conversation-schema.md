@@ -17,7 +17,7 @@ Conversation outputs remain **Markdown + YAML frontmatter**, UTF-8, human-readab
 
 ## Historical schema sketch (non-normative)
 
-The remainder of this section preserves the original solo-profile proposal. It is decision history, not an implementation-ready v1 contract. In that proposal, files lived under `%LOCALAPPDATA%/Yap/knowledge_base/`.
+The remainder of this section preserves the original solo-profile proposal. It is decision history, not an implementation-ready v1 contract. That proposal used `%LOCALAPPDATA%/Yap/knowledge_base/`; any implementation now resolves the equivalent tree through Tauri app data (`%APPDATA%/com.mcnatg1.yap/knowledge_base/` on Windows).
 
 ### Conversation — `conversations/<session-id>.md`
 

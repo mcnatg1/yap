@@ -31,11 +31,11 @@
 
 ## Current execution boundary
 
-The tooling-only PowerShell migration is implemented: repo-owned Windows scripts require PowerShell Core 7.4 or newer, executable selectors use `pwsh.exe`, and each Windows CI job validates its isolated runtime. A hash-pinned 7.4.17 compatibility lane parses all tracked scripts and runs the focused native-process suite. This does not broaden the product architecture or start server inference.
+The tooling-only PowerShell migration is implemented: repo-owned Windows scripts require PowerShell Core 7.4 or newer, executable selectors use `pwsh.exe`, and each Windows CI job validates its isolated runtime. A hash-pinned 7.4.17 compatibility lane parses all tracked scripts. This does not broaden the product architecture or start server inference.
 
 The [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) plan is the landed canonical Phase 3 implementation record: machine-readable contract, capability health service, connector state/retry, and SQLite job ledger. Phase 5 upload drain, WSS runtime, server ASR, authentication, model pools, and diarization remain gated and are not implied by Phase 3 health reachability.
 
-The full local Phase 3 gate and exact GB10 private-link gate are complete. GB10 evidence is pinned only to `099e558a27a747a7a2f24ec4e86f9c13f7604c13`: 49/49 ARM64/Python 3.12 checks, transient loopback health, command-line connector `Ready`, separate tunnel-refusal `Retrying`, and teardown with no Yap process or port-18765 listener. It is not evidence for a persistent service, same-process native UI transition, upload, WSS, authentication, ASR, external listener, or firewall change; later local fixes were not part of that GB10 run.
+The one-time Phase 3 implementation gate passed against exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05`. Its immutable GB10 archive (`be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`) passed 50/50 ARM64/Python 3.12 checks, transient loopback health drove the command-line connector to `Ready`, a separate refusal invocation drove it to `Retrying`, and teardown left no Yap process or port-18765 listener. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` subsequently passed hosted CI run `29293287930` and disposable-Windows stock NSIS lifecycle run `29293291582`. This is not evidence for a persistent service, same-process native UI transition, upload, WSS, authentication, ASR, external listener, or firewall change.
 
 The [client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md) is a landed implementation record. Its unchecked future inference/transport gates are not evidence that the capture foundation is absent.
 

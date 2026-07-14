@@ -143,7 +143,12 @@ where
 }
 
 pub fn models_dir() -> PathBuf {
-    models_dir_from(|key| std::env::var(key).ok())
+    if let Some(dir) =
+        crate::paths::absolute_env_path(&|key| std::env::var(key).ok(), "YAP_MODELS_DIR")
+    {
+        return dir;
+    }
+    crate::paths::app_data_dir().join("models")
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
@@ -736,13 +741,13 @@ mod tests {
     }
 
     #[test]
-    fn models_dir_falls_back_to_localappdata() {
+    fn models_dir_uses_app_data_override() {
         let local = std::env::temp_dir().join("local-data");
         let dir = models_dir_from(|key| match key {
-            "LOCALAPPDATA" => Some(local.display().to_string()),
+            "YAP_APP_DATA_DIR" => Some(local.display().to_string()),
             _ => None,
         });
-        assert_eq!(dir, local.join("Yap").join("models"));
+        assert_eq!(dir, local.join("models"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Client Hardening And Storage Implementation Plan
 
-> **Implementation status (2026-07-12):** Scoped implementation is present and the local unit, Rust, Playwright, required WDIO, release-contract, provenance, build, and test-identity installer gates pass. Treat its boxes as historical work notes; branch closure still requires a green PR/CI and merge, not checkbox count.
+> **Implementation status (2026-07-13):** Scoped client hardening is present. The historical test-identity installer gate referenced below was retired by the approved lean Tauri closure; current installer truth is stock NSIS plus a disposable-Windows lifecycle gate. Treat the boxes as historical work notes, not current status evidence.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -32,7 +32,7 @@ This ADR specifies **where Silero lives**, **scoped agent profiles**, and a **ru
 | **Meeting diarization** | Optional client evidence / server reconciliation | Client hints may be reused, but authoritative processing may re-evaluate activity; a client false negative never removes source audio |
 | **CrispASR Firered VAD** | Optional fallback | Batch/long-file paths inside crispasr only if Rust Silero not run on that audio |
 
-**Bundle:** ship `silero_vad.onnx` (or equivalent pinned Silero v4/v5 ONNX) under `%LOCALAPPDATA%/Yap/models/`.
+**Bundle:** ship `silero_vad.onnx` (or equivalent pinned Silero v4/v5 ONNX) under `%APPDATA%/com.mcnatg1.yap/models/` on Windows.
 
 **Not on hot path:** speaker evidence, alignment, or clustering.
 

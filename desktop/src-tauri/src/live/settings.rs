@@ -66,7 +66,7 @@ pub fn settings_dir_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
 }
 
 fn settings_path() -> PathBuf {
-    settings_dir_from(|key| std::env::var(key).ok()).join("live-settings.json")
+    crate::paths::app_data_dir().join("live-settings.json")
 }
 
 #[cfg(test)]
@@ -84,12 +84,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_dir_uses_local_app_data() {
+    fn settings_dir_uses_app_data_override() {
         let local = std::env::temp_dir().join("local-data");
-        let dir =
-            settings_dir_from(|key| (key == "LOCALAPPDATA").then(|| local.display().to_string()));
+        let dir = settings_dir_from(|key| {
+            (key == "YAP_APP_DATA_DIR").then(|| local.display().to_string())
+        });
 
-        assert_eq!(dir, local.join("Yap"));
+        assert_eq!(dir, local);
     }
 
     #[test]

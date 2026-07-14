@@ -167,25 +167,6 @@ function namedStepIndex(steps, name) {
   return index;
 }
 
-function extractNsisMacro(source, macroName) {
-  const marker = `!macro ${macroName}`;
-  const start = source.indexOf(marker);
-  assert.notEqual(start, -1, `NSIS hooks are missing ${macroName}`);
-  const bodyStart = start + marker.length;
-  const end = source.indexOf("!macroend", bodyStart);
-  assert.notEqual(end, -1, `NSIS hook ${macroName} is missing !macroend`);
-  return source.slice(bodyStart, end);
-}
-
-function assertPatternsInOrder(source, patterns, label) {
-  let offset = 0;
-  for (const pattern of patterns) {
-    const match = pattern.exec(source.slice(offset));
-    assert.ok(match, `${label} is missing ordered structure ${pattern}`);
-    offset += match.index + match[0].length;
-  }
-}
-
 function runNodeScript(relativePath, args = []) {
   return spawnSync(process.execPath, [path.join(repoRoot, relativePath), ...args], {
     cwd: repoRoot,
@@ -205,7 +186,6 @@ async function createReleaseGitFixture(prefix = "yap-release-contract-") {
     "desktop/src/app.ts": "export const fixture = true;\n",
     "desktop/src-tauri/Cargo.lock": "# fixture lock\n",
     "desktop/src-tauri/Cargo.toml": "[package]\nname = 'fixture'\nversion = '0.1.0'\n",
-    "desktop/src-tauri/nsis-hooks.nsh": "fixture hook\r\n",
     "desktop/src-tauri/rust-toolchain.toml": "[toolchain]\nchannel = '1.96.0'\n",
     "desktop/src-tauri/tauri.conf.json": `${JSON.stringify({ version: "0.1.0" })}\n`,
   };
@@ -1015,9 +995,9 @@ test("supported release path binds a default-branch commit to a read-only build 
     "${{ steps.seal.outputs.installer_sha256 }}",
   );
   assert.match(buildSteps[smoke].run, /-ExpectedInstallerSha256 \$env:SEALED_INSTALLER_SHA256/);
-  assert.match(buildSteps[captureEnvironment].run, /Get-TauriNsisToolPaths/);
-  assert.match(buildSteps[captureEnvironment].run, /LauncherPath \/VERSION/);
-  assert.match(buildSteps[captureEnvironment].run, /CompilerPath \/VERSION/);
+  assert.match(buildSteps[captureEnvironment].run, /Join-Path \$nsisRoot "makensis\.exe"/);
+  assert.match(buildSteps[captureEnvironment].run, /\$nsisLauncher \/VERSION/);
+  assert.match(buildSteps[captureEnvironment].run, /\$nsisCompiler \/VERSION/);
   assert.match(buildSteps[captureEnvironment].run, /NSIS_LAUNCHER_SHA256/);
   assert.match(buildSteps[captureEnvironment].run, /NSIS_COMPILER_SHA256/);
   assert.match(buildSteps[captureEnvironment].run, /YAP_RELEASE_POWERSHELL_EDITION/);
@@ -1127,14 +1107,14 @@ test("release artifact helper executes exact-ref binding and rejects ambiguous a
       bound.metadata.buildEnvironment.inputsSha256["desktop/src-tauri/Cargo.lock"],
       /^[0-9a-f]{64}$/,
     );
-    const committedHook = execFileSync(
+    const committedConfig = execFileSync(
       "git",
-      ["cat-file", "blob", `${commitSha}:desktop/src-tauri/nsis-hooks.nsh`],
+      ["cat-file", "blob", `${commitSha}:desktop/src-tauri/tauri.conf.json`],
       { cwd: testRoot },
     );
     assert.equal(
-      bound.metadata.buildEnvironment.inputsSha256["desktop/src-tauri/nsis-hooks.nsh"],
-      createHash("sha256").update(committedHook).digest("hex"),
+      bound.metadata.buildEnvironment.inputsSha256["desktop/src-tauri/tauri.conf.json"],
+      createHash("sha256").update(committedConfig).digest("hex"),
     );
     assert.match(await readFile(githubOutput, "utf8"), /release_sha=[0-9a-f]{40}/);
 
@@ -1489,105 +1469,69 @@ test("provenance gate requires exact scoped review evidence and current local ha
   );
 });
 
-test("NSIS smoke separates local-safe validation from isolated production deletion", async () => {
-  const hooks = await readRepoFile("desktop/src-tauri/nsis-hooks.nsh");
+test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", async () => {
+  const config = JSON.parse(await readRepoFile("desktop/src-tauri/tauri.conf.json"));
+  const paths = await readRepoFile("desktop/src-tauri/src/paths.rs");
+  const app = await readRepoFile("desktop/src-tauri/src/app.rs");
   const smoke = await readRepoFile("desktop/tests/scripts/smoke-nsis.ps1");
-  const smokeHelpers = await readRepoFile("desktop/tests/scripts/nsis-smoke-helpers.psm1");
-  const localSmoke = await readRepoFile("desktop/tests/scripts/smoke-nsis-local.ps1");
-  const testDeleteSmoke = await readRepoFile("desktop/tests/scripts/smoke-nsis-test-delete.ps1");
-  const productionDeleteSmoke = await readRepoFile("desktop/tests/scripts/smoke-nsis-production-delete.ps1");
-  const testConfig = JSON.parse(await readRepoFile("desktop/src-tauri/tauri.test.conf.json"));
-
-  const preUninstall = extractNsisMacro(hooks, "NSIS_HOOK_PREUNINSTALL");
-  const postUninstall = extractNsisMacro(hooks, "NSIS_HOOK_POSTUNINSTALL");
-  assert.match(hooks, /!macro YAP_ABORT_DELETE_WITH_ROLLBACK/);
-  assert.match(hooks, /Function un\.YapValidateDeleteEntry/);
-  assert.match(hooks, /\$\{un\.GetFileAttributes\} "\$R9" "REPARSE_POINT"/);
-  assert.doesNotMatch(preUninstall, /^\s*(?:Rename|RMDir)\b/m);
-  assert.match(preUninstall, /YAP_VALIDATE_DELETE_TREE "\$APPDATA\\\$\{BUNDLEID\}"/);
-  assert.match(preUninstall, /YAP_VALIDATE_DELETE_TREE "\$LOCALAPPDATA\\\$\{BUNDLEID\}"/);
-  assert.doesNotMatch(
-    postUninstall,
-    /^\s*RMDir \/r "\$LOCALAPPDATA\\\$\{PRODUCTNAME\}"\s*$/m,
-  );
-  assertPatternsInOrder(
-    preUninstall,
-    [
-      /\$CMDLINE "\/DELETEAPPDATA=" \$YapDeleteToken/,
-      /RUNNER_ENVIRONMENT/,
-      /FileOpen[^\n]+\.yap-destructive-uninstall-test/,
-      /\$R2 != \$YapDeleteToken/,
-      /StrCpy \$YapAutomatedDelete "1"/,
-      /StrCpy \$DeleteAppDataCheckboxState 1/,
-    ],
-    "NSIS pre-uninstall authorization",
-  );
-  assertPatternsInOrder(
-    postUninstall,
-    [
-      /\$DeleteAppDataCheckboxState == 1/,
-      /\$YapAutomatedDelete == "1"/,
-      /FileOpen[^\n]+\.yap-destructive-uninstall-test/,
-      /\$R2 != \$YapDeleteToken/,
-      /\$\{FileExists\}[^\n]+\.delete-quarantine/,
-      /Rename[^\n]+\.delete-quarantine/,
-      /\$\{un\.GetFileAttributes\}[^\n]+\.delete-quarantine[^\n]+"REPARSE_POINT"/,
-      /\$R6 == "1"/,
-      /\$\{un\.Locate\}[^\n]+\.delete-quarantine[^\n]+\/G=1/,
-      /\$YapDeleteValidationFailure != ""/,
-      /FileOpen[^\n]+\.delete-quarantine\\\.yap-destructive-uninstall-test/,
-      /\$R2 != \$YapDeleteToken/,
-      /RMDir \/r[^\n]+\.delete-quarantine/,
-      /\$\{FileExists\}[^\n]+\.delete-quarantine/,
-    ],
-    "NSIS post-uninstall authenticated quarantine deletion",
-  );
-  assert.match(smoke, /defaultPreservedData/);
-  assert.match(smoke, /explicitDeletion/);
+  assert.equal(config.identifier, "com.mcnatg1.yap");
+  assert.match(paths, new RegExp(`PRODUCTION_IDENTIFIER: &str = "${config.identifier}"`));
+  assert.equal(config.bundle.windows?.nsis?.installerHooks, undefined);
+  assert.equal(config.bundle.windows?.nsis?.installMode, "currentUser");
+  assert.match(paths, /\.legacy-migration\.lock/);
+  assert.match(paths, /MIGRATION_LOCK_TIMEOUT/);
+  assert.match(paths, /try_lock\(\)/);
+  assert.match(paths, /recover_migration_residue/);
+  assert.match(paths, /copy_tree_verified/);
+  assert.match(paths, /output\.sync_all\(\)/);
+  assert.match(paths, /trees_equal/);
+  assert.match(app, /MessageBoxW/);
+  assert.match(app, /Yap-startup-migration-error/);
+  assert.doesNotMatch(JSON.stringify(config), /installerHooks|nsis-hooks\.nsh/);
   assert.match(smoke, /GITHUB_ACTIONS/);
   assert.match(smoke, /RUNNER_ENVIRONMENT/);
   assert.match(smoke, /github-hosted/);
-  assert.match(smoke, /Windows Sandbox/);
-  assert.match(smoke, /Yap\.Test/);
-  assert.match(smoke, /YAP_APP_DATA_DIR/);
-  assert.match(smoke, /IsolatedProductionDelete/);
-  assert.match(smoke, /VersionInfo\.ProductName/);
+  assert.match(smoke, /YAP_DISPOSABLE_WINDOWS/);
+  assert.match(smoke, /com\.mcnatg1\.yap/);
+  assert.match(smoke, /ApplicationData/);
+  assert.match(smoke, /LocalApplicationData/);
+  assert.match(smoke, /expectedInstallLocation/);
+  assert.match(smoke, /Start-Process/);
+  assert.match(smoke, /WaitForExit/);
+  assert.match(smoke, /Kill\(\$true\)/);
+  assert.match(
+    smoke,
+    /function Wait-ForPathAbsence[\s\S]*?Start-Sleep -Milliseconds 100/,
+  );
+  assert.match(
+    smoke,
+    /-LiteralPaths @\(\$uninstallRegistryPath, \$installLocation\)/,
+  );
   assert.match(smoke, /ExpectedInstallerSha256/);
-  assert.match(smoke, /artifactIntegrity/);
-  assert.match(smoke, /beforeSha256/);
-  assert.match(smoke, /afterSha256/);
-  assert.doesNotMatch(smoke, /AllowProfileMutation/);
-  assert.match(smoke, /dataMarkerPaths/);
-  assert.match(smoke, /deleteQuarantine/);
-  assert.match(smoke, /Remove-OwnedDeleteQuarantine/);
-  assert.match(smoke, /Delete-quarantine cleanup refuses data from another test run/);
-  assert.match(smoke, /Get-Content[^\n]+markerPath[^\n]+-Raw/);
-  assert.match(smoke, /-ArgumentList @\("\/S"\)/);
-  assert.match(smoke, /-ArgumentList @\("\/S", "\/DELETEAPPDATA=\$runToken"\)/);
-  assert.match(smoke, /Import-Module[^\n]+nsis-smoke-helpers\.psm1/);
-  assert.match(smoke, /Enter-SmokeRunLock/);
-  assert.match(smokeHelpers, /System\.Threading\.Mutex/);
-  assert.match(localSmoke, /-Mode LocalSafe/);
-  assert.match(localSmoke, /-ExpectedInstallerSha256 \$ExpectedInstallerSha256/);
-  assert.match(testDeleteSmoke, /-Mode TestIdentityDelete/);
-  assert.match(testDeleteSmoke, /-ExpectedInstallerSha256 \$ExpectedInstallerSha256/);
-  assert.match(productionDeleteSmoke, /-Mode IsolatedProductionDelete/);
-  assert.match(productionDeleteSmoke, /-ExpectedInstallerSha256 \$ExpectedInstallerSha256/);
-  assert.equal(testConfig.productName, "Yap.Test");
-  assert.equal(testConfig.identifier, "com.mcnatg1.yap.test");
-  assert.equal(testConfig.mainBinaryName, "yap-test");
-});
-
-test("Windows release automation requires PowerShell 7.4 Core", async () => {
-  const powerShellFiles = [
-    "desktop/tests/scripts/bind-pnpm-cache-store.ps1",
+  assert.match(smoke, /THIRD_PARTY_NOTICES\.md/);
+  assert.match(smoke, /THIRD_PARTY_PROVENANCE\.json/);
+  assert.match(smoke, /stockSilentUninstallPreservedProductRegistry/);
+  assert.match(smoke, /@\("\/S"\)/);
+  assert.match(smoke, /preserved/i);
+  assert.doesNotMatch(smoke, /DELETEAPPDATA|RMDir|Remove-Item|YAP_APP_DATA_DIR/);
+  for (const retiredPath of [
+    "desktop/src-tauri/nsis-hooks.nsh",
+    "desktop/src-tauri/tauri.test.conf.json",
     "desktop/tests/scripts/build-nsis-test.ps1",
-    "desktop/tests/scripts/native-window-recovery.test.ps1",
     "desktop/tests/scripts/nsis-smoke-helpers.psm1",
     "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
     "desktop/tests/scripts/smoke-nsis-local.ps1",
     "desktop/tests/scripts/smoke-nsis-production-delete.ps1",
     "desktop/tests/scripts/smoke-nsis-test-delete.ps1",
+  ]) {
+    await assert.rejects(access(path.join(repoRoot, retiredPath)), /ENOENT/);
+  }
+});
+
+test("Windows release automation requires PowerShell 7.4 Core", async () => {
+  const powerShellFiles = [
+    "desktop/tests/scripts/bind-pnpm-cache-store.ps1",
+    "desktop/tests/scripts/native-window-recovery.test.ps1",
     "desktop/tests/scripts/smoke-nsis.ps1",
     "desktop/tests/wdio/native-window-recovery.psm1",
   ];
@@ -1617,30 +1561,9 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
     );
   }
 
-  const nsisBuildScript = await readRepoFile(
-    "desktop/tests/scripts/build-nsis-test.ps1",
-  );
-  assert.match(nsisBuildScript, /Get-Command "pnpm"/);
-  assert.match(nsisBuildScript, /\("\.cmd", "\.exe"\)/);
-  assert.match(nsisBuildScript, /Select-Object -First 1/);
-  assert.match(nsisBuildScript, /-Environment @\{ CARGO_TARGET_DIR = \$targetRoot \}/);
-  assert.match(nsisBuildScript, /\$process\.WaitForExit\(\$buildTimeoutMilliseconds\)/);
-  assert.match(nsisBuildScript, /\$process\.Kill\(\$true\)/);
-  assert.match(nsisBuildScript, /\$process\.WaitForExit\(10000\)/);
-  assert.doesNotMatch(nsisBuildScript, /\s-Wait\b/);
-  assert.doesNotMatch(nsisBuildScript, /SetEnvironmentVariable/);
-  assert.doesNotMatch(nsisBuildScript, /\$env:CARGO_TARGET_DIR\s*=/i);
-
-  const nsisHelpers = await readRepoFile(
-    "desktop/tests/scripts/nsis-smoke-helpers.psm1",
-  );
-  assert.match(nsisHelpers, /Environment = \$childEnvironment/);
-  assert.doesNotMatch(nsisHelpers, /SetEnvironmentVariable/);
-
   const legacyWindowsPowerShell = ["power", "shell.exe"].join("");
   const runtimeSelectors = [
     "desktop/package.json",
-    "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
     "desktop/tests/scripts/release-evidence.contract.mjs",
     "desktop/tests/wdio/live-overlay.spec.js",
   ];
@@ -1652,31 +1575,16 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
       `${relativePath} still selects legacy Windows PowerShell`,
     );
   }
-  const helperTest = await readRepoFile(
-    "desktop/tests/scripts/nsis-smoke-helpers.test.ps1",
-  );
-  assert.match(helperTest, /Join-Path \$PSHOME "pwsh\.exe"/);
-  const releaseContract = await readRepoFile(
-    "desktop/tests/scripts/release-evidence.contract.mjs",
-  );
-  assert.match(releaseContract, /spawnSync\(\s*"pwsh\.exe"/);
   const liveOverlaySpec = await readRepoFile(
     "desktop/tests/wdio/live-overlay.spec.js",
   );
   assert.match(liveOverlaySpec, /execFileAsync\(\s*"pwsh\.exe"/);
 
   const packageJson = JSON.parse(await readRepoFile("desktop/package.json"));
-  for (const scriptName of [
-    "build:nsis:test",
-    "test:nsis:local",
-    "test:nsis:test-delete",
-  ]) {
-    assert.match(
-      packageJson.scripts[scriptName],
-      /(?:^|\s)pwsh\.exe\s/i,
-      `${scriptName} must select PowerShell 7 explicitly`,
-    );
-  }
+  assert.match(
+    packageJson.scripts["test:nsis:disposable"],
+    /(?:^|\s)pwsh\.exe\s/i,
+  );
 
   for (const relativePath of [
     ".github/workflows/ci.yml",
@@ -1745,49 +1653,32 @@ test("Windows release automation requires PowerShell 7.4 Core", async () => {
     (step) => step.name === "Run focused suite under PowerShell 7.4",
   );
   assert.match(runCompatibilitySuite.run, /YAP_POWERSHELL_74/);
-  assert.match(runCompatibilitySuite.run, /nsis-smoke-helpers\.test\.ps1/);
   assert.match(runCompatibilitySuite.run, /Language\.Parser/);
-  assert.match(runCompatibilitySuite.run, /nestedRuntime/);
   assert.match(runCompatibilitySuite.run, /PSEdition -cne "Core"/);
   assert.match(runCompatibilitySuite.run, /PSVersion\.ToString\(\)/);
   assert.match(runCompatibilitySuite.run, /POWERSHELL_74_VERSION/);
+  assert.doesNotMatch(runCompatibilitySuite.run, /nsis-smoke-helpers/);
 
-  const helperModulePath = path
-    .join(repoRoot, "desktop/tests/scripts/nsis-smoke-helpers.psm1")
+  const smokeScriptPath = path
+    .join(repoRoot, "desktop/tests/scripts/smoke-nsis.ps1")
     .replaceAll("'", "''");
   const legacyResult = spawnSync(
     legacyWindowsPowerShell,
     [
       "-NoProfile",
       "-NonInteractive",
-      "-Command",
-      `Import-Module '${helperModulePath}' -Force`,
+      "-File",
+      smokeScriptPath,
     ],
     { cwd: repoRoot, encoding: "utf8", timeout: 10_000 },
   );
   assert.notEqual(
     legacyResult.status,
     0,
-    "legacy Windows PowerShell unexpectedly loaded release automation",
+    "legacy Windows PowerShell unexpectedly ran release automation",
   );
   assert.match(
     `${legacyResult.stdout}\n${legacyResult.stderr}`,
     /#requires[\s\S]*PowerShell 7\.4|PSEdition Core/i,
   );
-});
-
-test("NSIS helper behavior passes its focused PowerShell 7 suite", () => {
-  const result = spawnSync(
-    "pwsh.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      path.join(repoRoot, "desktop/tests/scripts/nsis-smoke-helpers.test.ps1"),
-    ],
-    { cwd: repoRoot, encoding: "utf8", timeout: 60_000 },
-  );
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });

@@ -25,25 +25,37 @@ Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
 
 ### Windows installer safety boundary
 
-| Validation lane | Where it runs | Identity and storage | Destructive scope |
-|---|---|---|---|
-| Local enterprise-machine validation | Representative developer/corporate Windows host | `Yap.Test`, `com.mcnatg1.yap.test`, `%LOCALAPPDATA%\Yap.Test` | Default uninstall plus sentinel-owned test cleanup only; never `/DELETEAPPDATA` |
-| Local test-identity deletion | Representative Windows host | `Yap.Test`, `com.mcnatg1.yap.test`, `%LOCALAPPDATA%\Yap.Test` | `/DELETEAPPDATA` may remove only the sentinel-owned test namespace |
-| Isolated local destructive validation | Windows Sandbox or a dedicated `YapTest*`/`YapSmoke*` disposable account | Production installer inside a disposable Windows profile | May verify production app-data deletion after exact-target and per-run sentinel checks |
-| GitHub-hosted destructive verification | Fresh `windows-2025` runner | Production `Yap` identity in the ephemeral runner profile | Verifies default preservation followed by explicit production-data deletion |
+Yap uses Tauri's stock NSIS template without installer hooks. The application and Tauri agree on the
+same canonical data namespace: Tauri `app_data_dir()` for `com.mcnatg1.yap`, which is
+`%APPDATA%\com.mcnatg1.yap` on Windows. Local development may build the bundle and run static
+release contracts, but must not execute the production installer lifecycle on an everyday profile.
 
-The local-safe script must reject production installer metadata before execution. Every
-script-owned recursive deletion is fail-closed: the target is a strict child of its expected root,
-contains the exact test-tree sentinel, contains no reparse point, and is not `Yap` or
-`com.mcnatg1.yap`. Explicit data deletion additionally requires a per-run token that matches the
-sentinel read by the uninstaller, and smoke runs serialize access to each installer identity.
-`RUNNER_ENVIRONMENT=github-hosted` reduces accidental misuse but is not treated as an authorization
-or cryptographic boundary.
+The lifecycle smoke runs only on a fresh GitHub-hosted Windows runner or in an explicitly disposable
+Windows VM (`YAP_DISPOSABLE_WINDOWS=1`). It fails if production install, registry, or app-data state
+already exists; verifies the installer hash when supplied; uses bounded process handles for install,
+app launch, and uninstall; proves the app writes its log under the canonical Tauri directory; and
+uses stock silent uninstall. It also hashes the installed notice and provenance resources against
+the reviewed repository inputs. Stock silent uninstall preserves app data and the product
+install-location registry record; disposal of the Windows environment clears that residual state.
+The workflow makes no automated delete-data claim and performs no script-owned recursive cleanup.
+
+The application performs the one-time storage transition before opening any runtime state. A
+cross-process file lock serializes starts; a second launch times out after ten seconds and uses the
+native startup-error path rather than waiting forever. Yap recursively validates only recognized runtime entries
+from the former `%LOCALAPPDATA%\Yap` tree, rejects links/reparse points and dangling destinations,
+copies into staging on the canonical volume, flushes and hash-verifies the full trees, publishes and
+re-verifies every destination, and only then retires legacy sources. On restart, transaction-owned
+staging and retirement residue is reconciled under the lock; a duplicate is removed only after a
+byte-identical source or canonical copy is verified, an only copy is preserved, and cleanup failures
+are surfaced. Installer files stay in place,
+and redirected profiles with Local and Roaming AppData on different volumes are supported. A conflict
+or failure stops startup with a native error and a uniquely created temporary diagnostic rather than
+overwriting or silently abandoning either copy.
 
 The supported release workflow stages a verified GitHub draft from an immutable commit on `main`.
-The private repository plan does not support required-reviewer environment rules, so the workflow
-never publishes the draft itself. Final publication is an explicit GitHub UI action after reviewing
-the draft assets and `release-metadata.json`.
+The live `production-release` environment currently has branch-policy protection but no required-
+reviewer rule. The workflow therefore never publishes the draft itself. Final publication is an
+explicit GitHub UI action after reviewing the draft assets and `release-metadata.json`.
 
 ### Overlay and motion contract
 
@@ -193,4 +205,4 @@ The risk is **native runtimes**, not app logic. CI must run the pinned Nemotron/
 
 - No cloud test infra (local-first; fixtures are committed/small).
 - No generic enterprise load laboratory in v1; targeted capture, ASR, diarization, and reconnect stress tests are required for their phases.
-- No telemetry — debugging uses local logs (`%LOCALAPPDATA%/Yap/logs/`).
+- No telemetry — debugging uses Tauri app-data logs (`%APPDATA%/com.mcnatg1.yap/logs/` on Windows).

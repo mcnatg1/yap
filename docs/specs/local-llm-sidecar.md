@@ -49,7 +49,7 @@ Three tones (`light`/`clean`/`notes`) with per-tone instruction, temperature, `n
 | Binary | `llama-server` from pinned llama.cpp; in Tauri resources per OS/arch |
 | Port | `127.0.0.1:8081` (probe up to `8091` on conflict; held in Rust manager state) |
 | Model | `~2B Q4_K` instruct GGUF, filename pinned in `desktop/llama-model.txt` |
-| Cache | `YAP_MODELS_DIR` else `%LOCALAPPDATA%/Yap/models/` (shared with STT GGUF) |
+| Cache | `YAP_MODELS_DIR` else Tauri app data (`%APPDATA%/com.mcnatg1.yap/models/` on Windows; shared with STT GGUF) |
 | Launch | `llama-server -m <path> --host 127.0.0.1 --port 8081 -c 2048 -t 4 -ngl 0` |
 | Alias | Served model alias `scribe`; weights bound by `-m` |
 
@@ -138,7 +138,7 @@ Exhaustive `match` on the code enum.
 
 ## 7. Lifecycle (Rust manager)
 
-Same rules as STT sidecar: lazy spawn on first Polish/Scribe use, `/health` ready gate (10 s), serialized HOT calls, auto-restart once, kill on app exit, logs at `%LOCALAPPDATA%/Yap/logs/llama-server.log`. Idle: keep model warm while app open; unload on app background only if RAM pressure (later). Coexists with STT sidecar within the 16 GB budget ([ADR 0004 §9](../adr/0004-background-diarization-okf-agents.md)).
+Same rules as STT sidecar: lazy spawn on first Polish/Scribe use, `/health` ready gate (10 s), serialized HOT calls, auto-restart once, kill on app exit, logs at `%APPDATA%/com.mcnatg1.yap/logs/llama-server.log` on Windows. Idle: keep model warm while app open; unload on app background only if RAM pressure (later). Coexists with STT sidecar within the 16 GB budget ([ADR 0004 §9](../adr/0004-background-diarization-okf-agents.md)).
 
 ---
 
