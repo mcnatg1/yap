@@ -8,6 +8,30 @@ pub const SHORTCUT_DOUBLE_TAP_MS: u64 = 320;
 pub const SHORTCUT_HOLD_MS: u64 = 160;
 
 pub fn parse_hotkey(input: &str) -> Result<Shortcut, String> {
+    let (modifiers, key) = parse_hotkey_parts(input)?;
+    Ok(Shortcut::new(Some(modifiers), key))
+}
+
+pub fn normalize_hotkey(input: &str) -> Result<String, String> {
+    let (modifiers, key) = parse_hotkey_parts(input)?;
+    let mut parts = Vec::with_capacity(5);
+    if modifiers.contains(Modifiers::CONTROL) {
+        parts.push("Ctrl");
+    }
+    if modifiers.contains(Modifiers::SHIFT) {
+        parts.push("Shift");
+    }
+    if modifiers.contains(Modifiers::ALT) {
+        parts.push("Alt");
+    }
+    if modifiers.contains(Modifiers::SUPER) {
+        parts.push("Meta");
+    }
+    parts.push(code_name(key)?);
+    Ok(parts.join("+"))
+}
+
+fn parse_hotkey_parts(input: &str) -> Result<(Modifiers, Code), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("Shortcut cannot be empty.".into());
@@ -36,7 +60,18 @@ pub fn parse_hotkey(input: &str) -> Result<Shortcut, String> {
     if modifiers.is_empty() {
         return Err("Shortcut needs at least one modifier.".into());
     }
-    Ok(Shortcut::new(Some(modifiers), key))
+    if is_windows_reserved(modifiers, key) {
+        return Err("Shortcut is reserved by Windows.".into());
+    }
+    Ok((modifiers, key))
+}
+
+fn is_windows_reserved(modifiers: Modifiers, key: Code) -> bool {
+    key == Code::F12
+        || modifiers.contains(Modifiers::SUPER)
+        || (modifiers.contains(Modifiers::ALT)
+            && matches!(key, Code::F4 | Code::Tab | Code::Space | Code::Escape))
+        || (modifiers.contains(Modifiers::CONTROL) && key == Code::Escape)
 }
 
 pub(crate) fn configured_hotkeys_match(left: &str, right: &str) -> bool {
@@ -64,6 +99,65 @@ fn parse_code(part: &str) -> Result<Code, String> {
         value if value.starts_with('F') => function_key_code(value),
         _ => Err("Unsupported shortcut key.".into()),
     }
+}
+
+fn code_name(code: Code) -> Result<&'static str, String> {
+    Ok(match code {
+        Code::Space => "Space",
+        Code::Escape => "Escape",
+        Code::Enter => "Enter",
+        Code::Tab => "Tab",
+        Code::Backspace => "Backspace",
+        Code::KeyA => "A",
+        Code::KeyB => "B",
+        Code::KeyC => "C",
+        Code::KeyD => "D",
+        Code::KeyE => "E",
+        Code::KeyF => "F",
+        Code::KeyG => "G",
+        Code::KeyH => "H",
+        Code::KeyI => "I",
+        Code::KeyJ => "J",
+        Code::KeyK => "K",
+        Code::KeyL => "L",
+        Code::KeyM => "M",
+        Code::KeyN => "N",
+        Code::KeyO => "O",
+        Code::KeyP => "P",
+        Code::KeyQ => "Q",
+        Code::KeyR => "R",
+        Code::KeyS => "S",
+        Code::KeyT => "T",
+        Code::KeyU => "U",
+        Code::KeyV => "V",
+        Code::KeyW => "W",
+        Code::KeyX => "X",
+        Code::KeyY => "Y",
+        Code::KeyZ => "Z",
+        Code::Digit0 => "0",
+        Code::Digit1 => "1",
+        Code::Digit2 => "2",
+        Code::Digit3 => "3",
+        Code::Digit4 => "4",
+        Code::Digit5 => "5",
+        Code::Digit6 => "6",
+        Code::Digit7 => "7",
+        Code::Digit8 => "8",
+        Code::Digit9 => "9",
+        Code::F1 => "F1",
+        Code::F2 => "F2",
+        Code::F3 => "F3",
+        Code::F4 => "F4",
+        Code::F5 => "F5",
+        Code::F6 => "F6",
+        Code::F7 => "F7",
+        Code::F8 => "F8",
+        Code::F9 => "F9",
+        Code::F10 => "F10",
+        Code::F11 => "F11",
+        Code::F12 => "F12",
+        _ => return Err("Unsupported shortcut key.".into()),
+    })
 }
 
 fn letter_code(letter: char) -> Result<Code, String> {
@@ -307,6 +401,41 @@ mod tests {
     fn rejects_empty_or_modifier_only_hotkeys() {
         assert!(parse_hotkey("").is_err());
         assert!(parse_hotkey("Ctrl+Shift").is_err());
+    }
+
+    #[test]
+    fn rejects_windows_reserved_hotkeys_before_registration() {
+        for hotkey in [
+            "Alt+F4",
+            "Alt+Tab",
+            "Ctrl+Alt+Tab",
+            "Alt+Space",
+            "Alt+Escape",
+            "Ctrl+Escape",
+            "Ctrl+Shift+Escape",
+            "Meta+L",
+            "Ctrl+Meta+7",
+            "Super+R",
+            "Ctrl+F12",
+        ] {
+            assert_eq!(
+                parse_hotkey(hotkey),
+                Err("Shortcut is reserved by Windows.".into()),
+                "{hotkey}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_aliases_and_modifier_order_before_persistence() {
+        assert_eq!(
+            normalize_hotkey(" option + control + shift + v "),
+            Ok("Ctrl+Shift+Alt+V".into())
+        );
+        assert_eq!(
+            normalize_hotkey("cmd+f1"),
+            Err("Shortcut is reserved by Windows.".into())
+        );
     }
 
     #[test]

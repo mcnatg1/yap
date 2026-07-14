@@ -12,14 +12,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
-  hoverSensorHeight,
+  collapseGraceMs,
   modelFromLiveView,
-  overlayFrame,
-  overlayIslandWidth,
   overlaySurface,
+  previewOverlayFrame,
   successVisibleMs,
   type OverlayModel,
-  type OverlaySurface,
 } from "@/components/live/live-overlay-state";
 import { createNativeSurfaceSync } from "@/components/live/native-surface-sync";
 import { type LiveSessionView } from "@/lib/app-types";
@@ -43,78 +41,48 @@ export function LiveOverlay({
   view,
 }: LiveOverlayProps) {
   const model = modelFromLiveView(view);
-  const [peeked, setPeeked] = useState(false);
-  const [retracting, setRetracting] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [successVisible, setSuccessVisible] = useState(false);
+  const native = isTauri();
   const prefersReducedMotion = usePrefersReducedMotion();
-  const islandRef = useRef<HTMLDivElement>(null);
-  const previousSurfaceRef = useRef<OverlaySurface>("sensor");
-  const previousIslandWidthRef = useRef<number | undefined>(undefined);
+  const contentRef = useRef<HTMLDivElement>(null);
   const previousStatusRef = useRef(view.status);
+  const collapseTimerRef = useRef<number | undefined>(undefined);
   const successTimerRef = useRef<number | undefined>(undefined);
   const hasCopyableFinal = Boolean(model.finalText?.trim());
-  const surface = overlaySurface(model, peeked, retracting, successVisible && hasCopyableFinal);
-  const frame = overlayFrame(surface, model);
-  const islandWidth = overlayIslandWidth(surface, model);
-  const width = frame.width;
-  const rootFrameStyle: CSSProperties | undefined = isTauri() ? undefined : { height: frame.height, width };
+  const surface = overlaySurface(model, expanded, successVisible && hasCopyableFinal);
+  const previewFrame = native ? undefined : previewOverlayFrame(surface);
+  const rootFrameStyle: CSSProperties | undefined = previewFrame;
   const hiddenIdle = view.visibility === "hidden" && model.phase === "idle";
 
   useLayoutEffect(() => {
-    const previousSurface = previousSurfaceRef.current;
-    previousSurfaceRef.current = surface;
-    const island = islandRef.current;
-    if (!island) {
-      if (surface === "sensor") previousIslandWidthRef.current = undefined;
-      return;
-    }
-
-    gsap.killTweensOf(island);
-    const previousWidth = previousIslandWidthRef.current ?? islandWidth;
-    previousIslandWidthRef.current = islandWidth;
+    const content = contentRef.current;
+    if (!content) return;
+    gsap.killTweensOf(content);
 
     if (prefersReducedMotion) {
-      gsap.set(island, { width: islandWidth, yPercent: 0 });
-      if (retracting) setRetracting(false);
+      gsap.set(content, { opacity: 1, y: 0 });
       return;
     }
-
-    if (retracting && surface === "peek") {
-      gsap.to(island, {
-        duration: 0.16,
-        ease: "power2.inOut",
-        onComplete: () => setRetracting(false),
-        overwrite: true,
-        yPercent: -100,
-      });
-      return () => gsap.killTweensOf(island);
-    }
-
-    if (previousSurface === "sensor") {
-      gsap.fromTo(
-        island,
-        { width: previousWidth, yPercent: -100 },
-        { duration: 0.18, ease: "power3.out", overwrite: true, width: islandWidth, yPercent: 0 },
-      );
-    } else {
-      gsap.to(island, {
-        duration: 0.14,
-        ease: "power2.out",
-        overwrite: true,
-        width: islandWidth,
-        yPercent: 0,
-      });
-    }
-
-    return () => gsap.killTweensOf(island);
-  }, [islandWidth, prefersReducedMotion, retracting, surface]);
+    gsap.fromTo(
+      content,
+      { opacity: 0.72, y: -2 },
+      { duration: 0.12, ease: "power2.out", opacity: 1, overwrite: true, y: 0 },
+    );
+    return () => gsap.killTweensOf(content);
+  }, [prefersReducedMotion, surface]);
 
   useEffect(() => {
     if (model.phase === "idle") return;
-    cancelRetract();
-    setPeeked(false);
-    setRetracting(false);
+    cancelCollapse();
+    setExpanded(false);
   }, [model.phase]);
+
+  useLayoutEffect(() => {
+    if (!hiddenIdle) return;
+    cancelCollapse();
+    setExpanded(false);
+  }, [hiddenIdle]);
 
   useEffect(() => {
     const previousStatus = previousStatusRef.current;
@@ -134,11 +102,12 @@ export function LiveOverlay({
 
   useEffect(() => {
     if (hiddenIdle) return;
-    setNativeOverlaySurface({ errorMessage: model.errorMessage, surface });
-  }, [hiddenIdle, model.errorMessage, surface]);
+    setNativeOverlaySurface({ surface });
+  }, [hiddenIdle, surface]);
 
   useEffect(() => {
     return () => {
+      cancelCollapse();
       clearSuccessTimer();
     };
   }, []);
@@ -149,104 +118,86 @@ export function LiveOverlay({
     successTimerRef.current = undefined;
   }
 
-  function cancelRetract() {
-    const island = islandRef.current;
-    if (island) gsap.killTweensOf(island);
+  function cancelCollapse() {
+    if (collapseTimerRef.current === undefined) return;
+    window.clearTimeout(collapseTimerRef.current);
+    collapseTimerRef.current = undefined;
   }
 
-  function openIdlePreview() {
-    cancelRetract();
-    setRetracting(false);
-    setPeeked(true);
+  function openIdleIsland() {
+    cancelCollapse();
+    setExpanded(true);
   }
 
-  function closeIdlePreview() {
-    cancelRetract();
-    setPeeked(false);
-    setRetracting(true);
+  function scheduleIdleCollapse() {
+    cancelCollapse();
+    collapseTimerRef.current = window.setTimeout(() => {
+      collapseTimerRef.current = undefined;
+      setExpanded(false);
+    }, collapseGraceMs);
   }
 
   if (hiddenIdle) return null;
-  if (surface === "sensor") {
-    return (
-      <div
-        className="live-overlay-root pointer-events-none relative h-full w-full bg-transparent"
-        data-overlay-phase={model.phase}
-        data-overlay-surface={surface}
-        data-testid="live-overlay-root"
-        style={rootFrameStyle}
-      >
-        <div
-          aria-hidden="true"
-          className="pointer-events-auto absolute inset-x-0 top-0"
-          data-testid="live-overlay-sensor"
-          key="idle-sensor"
-          onPointerEnter={openIdlePreview}
-          onPointerMove={openIdlePreview}
-          style={{ height: hoverSensorHeight }}
-        />
-      </div>
-    );
-  }
 
   return (
     <div
       className={cn(
         "live-overlay-root h-full w-full overflow-hidden bg-transparent p-0",
-        surface === "peek" ? "pointer-events-auto" : "pointer-events-none",
+        model.phase === "idle" ? "pointer-events-auto" : "pointer-events-none",
       )}
       data-overlay-phase={model.phase}
       data-overlay-surface={surface}
       data-testid="live-overlay-root"
       onPointerEnter={() => {
-        if (retracting) openIdlePreview();
+        if (model.phase === "idle") openIdleIsland();
       }}
-      onPointerLeave={() => {
-        if (surface === "peek") closeIdlePreview();
+      onMouseLeave={() => {
+        if (surface === "expanded") scheduleIdleCollapse();
+      }}
+      onPointerOut={(event) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+        if (surface === "expanded") scheduleIdleCollapse();
       }}
       style={rootFrameStyle}
     >
       <div
-        className="pointer-events-auto h-full text-white"
+        className="pointer-events-auto h-full w-full text-white"
         data-testid="live-overlay-island"
         key="active-island"
-        ref={islandRef}
         style={{
           backgroundColor: "black",
-          borderBottomLeftRadius: 14,
-          borderBottomRightRadius: 14,
-          marginInline: "auto",
+          borderRadius: native ? undefined : 14,
           overflow: "hidden",
-          width: islandWidth,
         }}
       >
-        {surface === "peek" ? (
-          <PeekOverlayView
-            onOpenScratch={onOpenScratch}
-            onOpenTransform={onOpenTransform}
-            onStart={onStart}
-          />
-        ) : surface === "success" ? (
-          <SuccessOverlayView />
-        ) : (
-          <RecordingOverlayView
-            model={model}
-            onRetryButtonPressed={onRetry}
-            onStopButtonPressed={onStop}
-            prefersReducedMotion={prefersReducedMotion}
-          />
-        )}
+        <div className="h-full w-full" ref={contentRef}>
+          {surface === "collapsed" ? (
+            <CollapsedOverlayView />
+          ) : surface === "expanded" ? (
+            <ExpandedOverlayView
+              onOpenScratch={onOpenScratch}
+              onOpenTransform={onOpenTransform}
+              onStart={onStart}
+            />
+          ) : surface === "success" ? (
+            <SuccessOverlayView />
+          ) : (
+            <RecordingOverlayView
+              model={model}
+              onRetryButtonPressed={onRetry}
+              onStopButtonPressed={onStop}
+              prefersReducedMotion={prefersReducedMotion}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-const setNativeOverlaySurface = createNativeSurfaceSync(async ({ surface, errorMessage }) => {
+const setNativeOverlaySurface = createNativeSurfaceSync(async ({ surface }) => {
   if (!isTauri()) return;
-  await invoke("set_live_overlay_surface", {
-    errorMessage: errorMessage ?? null,
-    surface,
-  });
+  await invoke("set_live_overlay_surface", { surface });
 });
 
 const liveOverlayLevelEvent = "yap-live-overlay-level";
@@ -256,7 +207,16 @@ export function emitLiveOverlayLevel(level: number) {
   window.dispatchEvent(new CustomEvent(liveOverlayLevelEvent, { detail: normalized }));
 }
 
-function PeekOverlayView({
+function CollapsedOverlayView() {
+  return (
+    <div className="flex h-full w-full items-center justify-center gap-2 px-3" aria-label="Yap dictation island">
+      <Mic className="size-4 text-fuchsia-200" weight="fill" />
+      <span className="text-[12px] font-semibold leading-none text-white">Yap</span>
+    </div>
+  );
+}
+
+function ExpandedOverlayView({
   onOpenScratch,
   onOpenTransform,
   onStart,
@@ -266,16 +226,22 @@ function PeekOverlayView({
   onStart?: () => void;
 }) {
   return (
-    <div className="flex h-full w-full items-center justify-center gap-2 px-3">
-      <IslandInlineButton label="Start dictating" onClick={onStart}>
-        <Mic className="size-[18px]" weight="bold" />
-      </IslandInlineButton>
-      <IslandInlineButton label="Open scratch" onClick={onOpenScratch}>
-        <MessageSquareText className="size-4" weight="bold" />
-      </IslandInlineButton>
-      <IslandInlineButton label="Open transform" onClick={onOpenTransform}>
-        <Sparkles className="size-4" weight="bold" />
-      </IslandInlineButton>
+    <div className="flex h-full w-full flex-col">
+      <div className="flex h-10 shrink-0 items-center justify-center gap-2 border-b border-white/10 px-3">
+        <Mic className="size-4 text-fuchsia-200" weight="fill" />
+        <span className="text-[12px] font-semibold leading-none text-white">Yap</span>
+      </div>
+      <div className="flex min-h-0 flex-1 items-center justify-center gap-2 px-3">
+        <IslandInlineButton label="Start dictating" onClick={onStart}>
+          <Mic className="size-[18px]" weight="bold" />
+        </IslandInlineButton>
+        <IslandInlineButton label="Open scratch" onClick={onOpenScratch}>
+          <MessageSquareText className="size-4" weight="bold" />
+        </IslandInlineButton>
+        <IslandInlineButton label="Open transform" onClick={onOpenTransform}>
+          <Sparkles className="size-4" weight="bold" />
+        </IslandInlineButton>
+      </div>
     </div>
   );
 }

@@ -10,6 +10,8 @@ import {
   listenLiveSession,
   liveStatus,
   preflightInputDevice,
+  resetLiveHotkey as resetLiveHotkeyToDefault,
+  resetLivePasteHotkey as resetLivePasteHotkeyToDefault,
   setInputDevice,
   setLiveCaptureMode,
   setLiveHotkey,
@@ -19,12 +21,10 @@ import {
   stopLiveSession,
 } from "@/live";
 
-const defaultLiveHotkey = "Ctrl+Shift+Space";
-
 const initialLiveView: LiveSessionView = {
   captureMode: "pushToTalk",
-  hotkey: defaultLiveHotkey,
-  pasteHotkey: "",
+  hotkey: "Ctrl+Shift+Space",
+  pasteHotkey: "Ctrl+Shift+Alt+V",
   route: "none",
   status: "idle",
   transcriptionDegraded: false,
@@ -102,7 +102,7 @@ export function useLiveControl() {
   );
 
   const resetLiveHotkey = useCallback(() => {
-    void updateLive(() => setLiveHotkey(defaultLiveHotkey), "Live shortcut reset");
+    void updateLive(resetLiveHotkeyToDefault, "Live shortcut reset");
   }, [updateLive]);
 
   const clearLiveShortcut = useCallback(() => {
@@ -122,6 +122,10 @@ export function useLiveControl() {
 
   const clearLivePasteShortcut = useCallback(() => {
     void updateLive(clearLivePasteHotkey, "Paste shortcut cleared");
+  }, [updateLive]);
+
+  const resetLivePasteHotkey = useCallback(() => {
+    void updateLive(resetLivePasteHotkeyToDefault, "Paste shortcut reset");
   }, [updateLive]);
 
   const updateLiveCaptureMode = useCallback(
@@ -160,6 +164,7 @@ export function useLiveControl() {
     preflightLiveInput,
     refreshLiveState,
     resetLiveHotkey,
+    resetLivePasteHotkey,
     startLive,
     stopLive,
     updateInputDevice,

@@ -93,6 +93,21 @@ pub(crate) fn clear_live_hotkey(
 }
 
 #[tauri::command]
+pub(crate) fn reset_live_hotkey(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<live::state::LiveSessionView, String> {
+    change_live_hotkey(
+        window,
+        app,
+        state,
+        LiveHotkeyKind::Dictation,
+        Some(live::settings::DEFAULT_HOTKEY.into()),
+    )
+}
+
+#[tauri::command]
 pub(crate) fn set_live_paste_hotkey(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -111,6 +126,21 @@ pub(crate) fn clear_live_paste_hotkey(
     change_live_hotkey(window, app, state, LiveHotkeyKind::PasteLast, None)
 }
 
+#[tauri::command]
+pub(crate) fn reset_live_paste_hotkey(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, live::LiveSessionState>,
+) -> Result<live::state::LiveSessionView, String> {
+    change_live_hotkey(
+        window,
+        app,
+        state,
+        LiveHotkeyKind::PasteLast,
+        Some(live::settings::DEFAULT_PASTE_HOTKEY.into()),
+    )
+}
+
 fn change_live_hotkey(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -122,16 +152,21 @@ fn change_live_hotkey(
     ensure_live_hotkey_idle(state.snapshot().status)?;
 
     let snapshot = state.snapshot();
-    let next_value = hotkey
+    let requested_value = hotkey
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
-    let next = if next_value.is_empty() {
-        None
+    let (next_value, next) = if requested_value.is_empty() {
+        (String::new(), None)
     } else {
-        Some(live::hotkeys::parse_hotkey(&next_value)?)
+        let normalized = live::hotkeys::normalize_hotkey(&requested_value)?;
+        let shortcut = live::hotkeys::parse_hotkey(&normalized)?;
+        (normalized, Some(shortcut))
     };
     if live::hotkeys::configured_hotkeys_match(kind.conflicting(&snapshot), &next_value) {
         return Err(kind.conflict_message().into());
+    }
+    if kind.current(&snapshot) == next_value {
+        return Ok(snapshot);
     }
 
     let previous = live::hotkeys::parse_hotkey(kind.current(&snapshot)).ok();

@@ -414,12 +414,11 @@ export default function App() {
         liveView={settings.live.view}
         localComputeTargets={settings.compute.targets}
         onCancelFallbackInstall={() => void settings.fallback.cancelInstall()}
-        onClearLiveHotkey={settings.live.clearShortcut}
-        onClearLivePasteHotkey={settings.live.clearPasteShortcut}
         onInstallFallback={(options) => void settings.fallback.install(options)}
         onOpenFallbackFolder={() => void settings.fallback.openFolder()}
         onPreflightLiveInput={settings.live.preflightInput}
         onResetLiveHotkey={settings.live.resetHotkey}
+        onResetLivePasteHotkey={settings.live.resetPasteHotkey}
         onOpenChange={onDetailsOpenChange}
         onRemoveFallback={() => void settings.fallback.remove()}
         onSetInputDevice={settings.live.updateInputDevice}

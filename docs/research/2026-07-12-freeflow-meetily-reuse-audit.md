@@ -242,3 +242,22 @@ the user separately authorizes them after a complete provenance review.
 Every PR uses local/server evidence while hosted GitHub Actions are unavailable.
 Hosted billing failures are infrastructure status, not passing or failing test
 evidence.
+
+## 2026-07-13 convergence implementation follow-up
+
+The first convergence slice implemented the approved behavior without copying
+or adapting source from `mrinalwadhwa/freeflow` or Meetily. Yap's existing
+Rust/Tauri boundary remains authoritative: Rust maps semantic surfaces to exact
+native bounds and a rounded Windows region, while React renders inside the
+current window and owns only the explicit hover/collapse intent. The shortcut
+recorder was independently implemented from this audit's behavioral
+requirements using `KeyboardEvent.code`; it observes keys only while armed and
+persists only the final normalized chord through Yap's transactional commands.
+
+The already-attributed `zachlatta/freeflow` adaptation in
+`desktop/src/components/live/live-overlay.tsx` remains a distinct source and its
+result hash is updated by the same change. No new dependency, asset, icon,
+model, donor notice, or donor-source entry is introduced. Focused evidence now
+includes pure state/normalization tests, Playwright visual/motion and 20-sample
+hover-latency tests, Windows rounded-region tests, and native WDIO exact-bounds,
+focus, single-window, and close-to-tray checks.

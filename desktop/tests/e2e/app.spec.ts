@@ -7,7 +7,8 @@ async function installQueuedServerBridge(
   await page.addInitScript((state) => {
     Object.defineProperty(globalThis, "isTauri", { value: true });
     const calls: string[] = [];
-    Object.assign(globalThis, { __queuedServerBoundaryTest: { calls } });
+    const shortcutCalls: Array<{ args: unknown; command: string }> = [];
+    Object.assign(globalThis, { __queuedServerBoundaryTest: { calls, shortcutCalls } });
     let callbackId = 0;
     const serverSnapshot = {
       apiVersion: null,
@@ -35,6 +36,14 @@ async function installQueuedServerBridge(
       sourcePath: `C:\\recordings\\${state}-interview.wav`,
       status: "queued_server",
     };
+    let liveSnapshot = {
+      captureMode: "pushToTalk",
+      hotkey: "Ctrl+Shift+Space",
+      pasteHotkey: "Ctrl+Shift+Alt+V",
+      route: "localFallback",
+      status: "idle",
+      visibility: "enabled",
+    };
 
     Object.assign(globalThis, {
       __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
@@ -45,7 +54,7 @@ async function installQueuedServerBridge(
           currentWindow: { label: "main" },
         },
         transformCallback: () => ++callbackId,
-        invoke: async (command: string) => {
+        invoke: async (command: string, args?: unknown) => {
           calls.push(command);
           if (command === "plugin:event|listen") return ++callbackId;
           if (command === "plugin:event|unlisten") return undefined;
@@ -73,14 +82,27 @@ async function installQueuedServerBridge(
             enabled: state === "offline",
             schemaVersion: 1,
           };
-          if (command === "live_status") return {
-            captureMode: "pushToTalk",
-            hotkey: "Ctrl+Shift+Space",
-            pasteHotkey: "",
-            route: "localFallback",
-            status: "idle",
-            visibility: "enabled",
-          };
+          if (command === "live_status") return liveSnapshot;
+          if (command === "set_live_hotkey") {
+            shortcutCalls.push({ args, command });
+            liveSnapshot = { ...liveSnapshot, hotkey: String((args as { hotkey?: unknown })?.hotkey ?? "") };
+            return liveSnapshot;
+          }
+          if (command === "set_live_paste_hotkey") {
+            shortcutCalls.push({ args, command });
+            liveSnapshot = { ...liveSnapshot, pasteHotkey: String((args as { hotkey?: unknown })?.hotkey ?? "") };
+            return liveSnapshot;
+          }
+          if (command === "reset_live_hotkey") {
+            shortcutCalls.push({ args, command });
+            liveSnapshot = { ...liveSnapshot, hotkey: "Ctrl+Shift+Space" };
+            return liveSnapshot;
+          }
+          if (command === "reset_live_paste_hotkey") {
+            shortcutCalls.push({ args, command });
+            liveSnapshot = { ...liveSnapshot, pasteHotkey: "Ctrl+Shift+Alt+V" };
+            return liveSnapshot;
+          }
           if (command === "list_local_compute_targets") {
             return [{ id: "auto", label: "Auto", selected: true }];
           }
@@ -135,12 +157,73 @@ for (const scenario of [
   });
 }
 
+test("shortcut settings capture only deliberate physical chords and expose per-action reset", async ({ page }) => {
+  await installQueuedServerBridge(page, "not_set");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open settings" }).click();
+
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  const dictationRow = settings.getByText("Dictation shortcut", { exact: true }).locator("xpath=../..");
+  const pasteRow = settings.getByText("Paste-last shortcut", { exact: true }).locator("xpath=../..");
+  await expect(dictationRow).toContainText("Ctrl+Shift+Space");
+  await expect(pasteRow).toContainText("Ctrl+Shift+Alt+V");
+  await expect(dictationRow.getByRole("textbox")).toHaveCount(0);
+  await expect(pasteRow.getByRole("textbox")).toHaveCount(0);
+
+  await dictationRow.getByRole("button", { name: "Change shortcut" }).click();
+  const dictationCapture = dictationRow.getByRole("button", { name: "Press shortcut for Dictation" });
+  await expect(dictationCapture).toBeFocused();
+  await page.keyboard.press("D");
+  await expect(dictationRow.getByText("Add Ctrl, Shift, or Alt.")).toBeVisible();
+  await dictationRow.getByRole("button", { name: "Cancel" }).click();
+  await expect(dictationRow).toContainText("Ctrl+Shift+Space");
+
+  await page.keyboard.press("A");
+  expect(await shortcutCalls(page)).toEqual([]);
+
+  await dictationRow.getByRole("button", { name: "Change shortcut" }).click();
+  await page.keyboard.press("Control+Shift+D");
+  await expect(dictationRow).toContainText("Ctrl+Shift+D");
+
+  await pasteRow.getByRole("button", { name: "Change shortcut" }).click();
+  const pasteCapture = pasteRow.getByRole("button", { name: "Press shortcut for Paste last" });
+  await pasteCapture.dispatchEvent("keydown", {
+    altKey: true,
+    bubbles: true,
+    code: "KeyP",
+    ctrlKey: true,
+    repeat: true,
+    shiftKey: true,
+  });
+  await expect(pasteCapture).toBeVisible();
+  await page.keyboard.press("Control+Shift+Alt+P");
+  await expect(pasteRow).toContainText("Ctrl+Shift+Alt+P");
+
+  await pasteRow.getByRole("button", { name: "Reset" }).click();
+  await expect(pasteRow).toContainText("Ctrl+Shift+Alt+V");
+  expect((await shortcutCalls(page)).map(({ command }) => command)).toEqual([
+    "set_live_hotkey",
+    "set_live_paste_hotkey",
+    "reset_live_paste_hotkey",
+  ]);
+});
+
 test("main app renders the home surface", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByText("Welcome back")).toBeVisible();
   await expect(page.getByRole("button", { name: "Home" })).toBeVisible();
 });
+
+async function shortcutCalls(page: Page) {
+  return page.evaluate(() =>
+    (globalThis as unknown as {
+      __queuedServerBoundaryTest: {
+        shortcutCalls: Array<{ args: unknown; command: string }>;
+      };
+    }).__queuedServerBoundaryTest.shortcutCalls,
+  );
+}
 
 test("browser preview keeps its startup status and auth labels", async ({ page }) => {
   await page.goto("/");

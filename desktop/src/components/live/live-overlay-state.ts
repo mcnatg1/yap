@@ -1,7 +1,7 @@
 import type { LiveCaptureMode, LiveSessionView } from "@/lib/app-types";
 
 type OverlayPhase = "idle" | "initializing" | "recording" | "processing" | "feedback";
-export type OverlaySurface = "sensor" | "peek" | Exclude<OverlayPhase, "idle"> | "success";
+export type OverlaySurface = "collapsed" | "expanded" | Exclude<OverlayPhase, "idle"> | "success";
 
 export type OverlayModel = {
   audioLevel: number;
@@ -14,29 +14,19 @@ export type OverlayModel = {
   recordingTriggerMode: "hold" | "toggle";
 };
 
-const compactHeight = 40;
-export const hoverSensorHeight = 8;
-export const idleSensorWidth = 260;
-export const peekHeight = 40;
-export const peekWidth = 150;
+export const collapseGraceMs = 200;
 export const successVisibleMs = 2_500;
 
-const defaultWidth = 104;
-const activeWidth = 112;
-const successWidth = 168;
-const minErrorWidth = 180;
-const maxErrorWidth = 252;
-
-export function overlayIslandWidth(surface: OverlaySurface, model: OverlayModel) {
-  if (surface === "peek") return peekWidth;
-  if (surface === "success") return successWidth;
-  if (surface === "recording" || surface === "processing" || surface === "initializing") return activeWidth;
-  if (surface === "feedback") {
-    if (!model.errorMessage) return defaultWidth;
-    return Math.min(maxErrorWidth, Math.max(minErrorWidth, model.errorMessage.length * 6.8 + 74));
-  }
-  return defaultWidth;
-}
+// Browser preview only. Rust is the sole owner of production native-window bounds.
+const previewSurfaceFrames: Record<OverlaySurface, { height: number; width: number }> = {
+  collapsed: { height: 40, width: 104 },
+  expanded: { height: 88, width: 180 },
+  feedback: { height: 40, width: 252 },
+  initializing: { height: 40, width: 112 },
+  processing: { height: 40, width: 112 },
+  recording: { height: 40, width: 112 },
+  success: { height: 40, width: 168 },
+};
 
 export function modelFromLiveView(view: LiveSessionView): OverlayModel {
   const triggerMode = triggerModeFromCaptureMode(view.activeCaptureMode ?? view.captureMode);
@@ -79,18 +69,14 @@ export function modelFromLiveView(view: LiveSessionView): OverlayModel {
   }
 }
 
-export function overlaySurface(model: OverlayModel, peeked: boolean, retracting: boolean, successVisible: boolean): OverlaySurface {
+export function overlaySurface(model: OverlayModel, expanded: boolean, successVisible: boolean): OverlaySurface {
   if (model.phase !== "idle") return model.phase;
   if (successVisible) return "success";
-  if (peeked || retracting) return "peek";
-  return "sensor";
+  return expanded ? "expanded" : "collapsed";
 }
 
-export function overlayFrame(surface: OverlaySurface, model: OverlayModel) {
-  if (surface === "feedback" && model.errorMessage) {
-    return { height: compactHeight, width: idleSensorWidth };
-  }
-  return { height: compactHeight, width: idleSensorWidth };
+export function previewOverlayFrame(surface: OverlaySurface) {
+  return previewSurfaceFrames[surface];
 }
 
 function triggerModeFromCaptureMode(captureMode: LiveCaptureMode): "hold" | "toggle" {

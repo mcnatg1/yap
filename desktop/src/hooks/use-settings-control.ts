@@ -316,6 +316,7 @@ export function useSettingsControl({
       inputDevices: live.liveInputDevices,
       preflightInput: live.preflightLiveInput,
       resetHotkey: live.resetLiveHotkey,
+      resetPasteHotkey: live.resetLivePasteHotkey,
       settingsError: live.liveSettingsError,
       start: live.startLive,
       stop: live.stopLive,

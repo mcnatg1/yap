@@ -5,7 +5,7 @@ use tauri::Manager;
 #[cfg(target_os = "windows")]
 use windows::core::Free;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn, HRGN};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
@@ -15,20 +15,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub(crate) const WINDOW_LABEL: &str = crate::authorization::LIVE_OVERLAY_WINDOW_LABEL;
 
-static IDLE_SENSOR_ACTIVE: AtomicBool = AtomicBool::new(true);
+static IDLE_COLLAPSED_ACTIVE: AtomicBool = AtomicBool::new(true);
 
 const COMPACT_HEIGHT: f64 = 40.0;
-const HOVER_SENSOR_WIDTH: f64 = 260.0;
-const HOVER_SENSOR_HEIGHT: f64 = 8.0;
-const ACTIVE_INTERACTION_WIDTH: f64 = 252.0;
+const COLLAPSED_WIDTH: f64 = 104.0;
+const EXPANDED_WIDTH: f64 = 180.0;
+const EXPANDED_HEIGHT: f64 = 88.0;
+const ACTIVE_WIDTH: f64 = 112.0;
+const SUCCESS_WIDTH: f64 = 168.0;
+const FEEDBACK_WIDTH: f64 = 252.0;
+const CORNER_RADIUS: f64 = 14.0;
 const TOP_BEZEL_OFFSET: f64 = 0.0;
 
 pub(crate) fn ensure_active(app: &tauri::AppHandle) -> Result<(), String> {
-    ensure_surface(app, "recording", None)
+    ensure_surface(app, "recording")
 }
 
 pub(crate) fn ensure_idle(app: &tauri::AppHandle) -> Result<(), String> {
-    ensure_surface(app, "sensor", None)
+    ensure_surface(app, "collapsed")
 }
 
 pub(crate) fn recover(app: &tauri::AppHandle) {
@@ -55,25 +59,24 @@ pub(crate) fn recover(app: &tauri::AppHandle) {
     }
 }
 
-pub(crate) fn frame(surface: &str, error_message: Option<&str>) -> (f64, f64) {
-    let _ = (surface, error_message);
-    (HOVER_SENSOR_WIDTH, COMPACT_HEIGHT)
+pub(crate) fn frame(surface: &str) -> Result<(f64, f64), String> {
+    match surface {
+        "collapsed" => Ok((COLLAPSED_WIDTH, COMPACT_HEIGHT)),
+        "expanded" => Ok((EXPANDED_WIDTH, EXPANDED_HEIGHT)),
+        "recording" | "processing" | "initializing" => Ok((ACTIVE_WIDTH, COMPACT_HEIGHT)),
+        "success" => Ok((SUCCESS_WIDTH, COMPACT_HEIGHT)),
+        "feedback" => Ok((FEEDBACK_WIDTH, COMPACT_HEIGHT)),
+        _ => Err("Unsupported live overlay surface.".into()),
+    }
 }
 
-pub(crate) fn ensure_surface(
-    app: &tauri::AppHandle,
-    surface: &str,
-    error_message: Option<&str>,
-) -> Result<(), String> {
-    let (width, height) = frame(surface, error_message);
-    let interaction_width = interaction_width(surface);
+pub(crate) fn ensure_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
+    let (width, height) = frame(surface)?;
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         ensure_dimensions(&window, width, height)?;
-        if matches!(surface, "sensor" | "peek") {
-            position(app, &window, width)?;
-        }
-        apply_interaction_region(&window, surface, interaction_width, width, height)?;
-        IDLE_SENSOR_ACTIVE.store(surface == "sensor", Ordering::Release);
+        position(app, &window, width)?;
+        apply_visible_region(&window, width, height)?;
+        IDLE_COLLAPSED_ACTIVE.store(surface == "collapsed", Ordering::Release);
         window
             .show()
             .map_err(|err| format!("Failed to show live overlay: {err}"))?;
@@ -104,14 +107,14 @@ pub(crate) fn ensure_surface(
         .set_focusable(false)
         .map_err(|err| format!("Failed to keep live overlay unfocusable: {err}"))?;
     make_system_window(&window)?;
-    apply_interaction_region(&window, surface, interaction_width, width, height)?;
-    IDLE_SENSOR_ACTIVE.store(surface == "sensor", Ordering::Release);
+    apply_visible_region(&window, width, height)?;
+    IDLE_COLLAPSED_ACTIVE.store(surface == "collapsed", Ordering::Release);
     position(app, &window, width)?;
     Ok(())
 }
 
 pub(crate) fn follow_cursor_if_idle(app: &tauri::AppHandle) {
-    if !IDLE_SENSOR_ACTIVE.load(Ordering::Acquire) {
+    if !IDLE_COLLAPSED_ACTIVE.load(Ordering::Acquire) {
         return;
     }
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
@@ -131,7 +134,7 @@ pub(crate) fn follow_cursor_if_idle(app: &tauri::AppHandle) {
     {
         return;
     }
-    let _ = position_on_monitor(&window, &target_monitor, HOVER_SENSOR_WIDTH);
+    let _ = position_on_monitor(&window, &target_monitor, COLLAPSED_WIDTH);
 }
 
 fn ensure_dimensions(window: &tauri::WebviewWindow, width: f64, height: f64) -> Result<(), String> {
@@ -148,14 +151,6 @@ fn ensure_dimensions(window: &tauri::WebviewWindow, width: f64, height: f64) -> 
     window
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|err| format!("Failed to size live overlay: {err}"))
-}
-
-fn interaction_width(surface: &str) -> f64 {
-    if surface == "sensor" {
-        HOVER_SENSOR_WIDTH
-    } else {
-        ACTIVE_INTERACTION_WIDTH
-    }
 }
 
 fn position(
@@ -197,11 +192,30 @@ fn monitor_for_cursor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
 
 fn position_for_monitor(monitor: &tauri::Monitor, width: f64) -> (f64, f64) {
     let scale = monitor.scale_factor();
-    let position = monitor.position().to_logical::<f64>(scale);
-    let size = monitor.size().to_logical::<f64>(scale);
+    let position = monitor.position();
+    let size = monitor.size();
+    position_for_monitor_metrics(
+        f64::from(position.x),
+        f64::from(position.y),
+        f64::from(size.width),
+        scale,
+        width,
+    )
+}
+
+fn position_for_monitor_metrics(
+    physical_x: f64,
+    physical_y: f64,
+    physical_width: f64,
+    scale: f64,
+    window_width: f64,
+) -> (f64, f64) {
+    let logical_x = physical_x / scale;
+    let logical_y = physical_y / scale;
+    let logical_width = physical_width / scale;
     (
-        position.x + ((size.width - width) / 2.0).max(0.0),
-        position.y + TOP_BEZEL_OFFSET,
+        logical_x + ((logical_width - window_width) / 2.0).max(0.0),
+        logical_y + TOP_BEZEL_OFFSET,
     )
 }
 
@@ -210,10 +224,8 @@ fn same_monitor(left: &tauri::Monitor, right: &tauri::Monitor) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn apply_interaction_region(
+fn apply_visible_region(
     window: &tauri::WebviewWindow,
-    surface: &str,
-    island_width: f64,
     window_width: f64,
     window_height: f64,
 ) -> Result<(), String> {
@@ -223,21 +235,7 @@ fn apply_interaction_region(
     let scale = window
         .scale_factor()
         .map_err(|err| format!("Failed to read live overlay scale: {err}"))?;
-    let physical_width = (window_width * scale).round().max(1.0) as i32;
-    let physical_height = (window_height * scale).round().max(1.0) as i32;
-    let mut region = if surface == "sensor" {
-        let sensor_height = (HOVER_SENSOR_HEIGHT * scale).ceil().max(1.0) as i32;
-        unsafe { CreateRectRgn(0, 0, physical_width, sensor_height) }
-    } else {
-        let island_width = (island_width * scale)
-            .round()
-            .clamp(1.0, f64::from(physical_width)) as i32;
-        let left = (physical_width - island_width) / 2;
-        unsafe { CreateRectRgn(left, 0, left + island_width, physical_height) }
-    };
-    if region.is_invalid() {
-        return Err("Failed to create live overlay interaction region.".into());
-    }
+    let mut region = create_visible_region(window_width, window_height, scale)?;
     if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
         unsafe { region.free() };
         return Err("Failed to apply live overlay interaction region.".into());
@@ -245,11 +243,34 @@ fn apply_interaction_region(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn create_visible_region(
+    window_width: f64,
+    window_height: f64,
+    scale: f64,
+) -> Result<HRGN, String> {
+    let physical_width = (window_width * scale).round().max(1.0) as i32;
+    let physical_height = (window_height * scale).round().max(1.0) as i32;
+    let corner_diameter = (CORNER_RADIUS * 2.0 * scale).round().max(1.0) as i32;
+    let region = unsafe {
+        CreateRoundRectRgn(
+            0,
+            0,
+            physical_width,
+            physical_height,
+            corner_diameter,
+            corner_diameter,
+        )
+    };
+    if region.is_invalid() {
+        return Err("Failed to create live overlay interaction region.".into());
+    }
+    Ok(region)
+}
+
 #[cfg(not(target_os = "windows"))]
-fn apply_interaction_region(
+fn apply_visible_region(
     _window: &tauri::WebviewWindow,
-    _surface: &str,
-    _island_width: f64,
     _window_width: f64,
     _window_height: f64,
 ) -> Result<(), String> {
@@ -289,34 +310,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_matches_frontend_surface_contract() {
-        for surface in ["peek", "recording", "processing", "initializing", "success"] {
-            assert_eq!(frame(surface, None), (HOVER_SENSOR_WIDTH, COMPACT_HEIGHT));
+    fn frame_matches_visible_surface_contract() {
+        assert_eq!(frame("collapsed"), Ok((104.0, 40.0)));
+        assert_eq!(frame("expanded"), Ok((180.0, 88.0)));
+        for surface in ["recording", "processing", "initializing"] {
+            assert_eq!(frame(surface), Ok((112.0, 40.0)));
         }
-        assert_eq!(frame("sensor", None), (HOVER_SENSOR_WIDTH, COMPACT_HEIGHT));
+        assert_eq!(frame("success"), Ok((168.0, 40.0)));
+        assert_eq!(frame("feedback"), Ok((252.0, 40.0)));
     }
 
     #[test]
-    fn feedback_uses_the_fixed_frame_and_active_interaction_region() {
+    fn feedback_width_is_static() {
+        assert_eq!(frame("feedback"), Ok((252.0, 40.0)));
+    }
+
+    #[test]
+    fn unknown_surface_cannot_allocate_an_arbitrary_native_window() {
         assert_eq!(
-            frame("feedback", Some(&"x".repeat(200))),
-            (HOVER_SENSOR_WIDTH, COMPACT_HEIGHT)
+            frame("sensor"),
+            Err("Unsupported live overlay surface.".into())
         );
-        assert_eq!(interaction_width("feedback"), ACTIVE_INTERACTION_WIDTH);
     }
 
     #[test]
-    fn active_interaction_region_does_not_change_between_surfaces() {
-        assert_eq!(interaction_width("sensor"), HOVER_SENSOR_WIDTH);
-        for surface in [
-            "peek",
-            "recording",
-            "processing",
-            "initializing",
-            "success",
-            "feedback",
-        ] {
-            assert_eq!(interaction_width(surface), ACTIVE_INTERACTION_WIDTH);
-        }
+    fn top_center_position_handles_negative_multi_monitor_origins_and_dpi() {
+        let collapsed = position_for_monitor_metrics(-1920.0, 0.0, 1920.0, 1.5, 104.0);
+        let expanded = position_for_monitor_metrics(-1920.0, 0.0, 1920.0, 1.5, 180.0);
+
+        assert_eq!(collapsed, (-692.0, 0.0));
+        assert_eq!(expanded, (-730.0, 0.0));
+        assert_eq!(collapsed.1, expanded.1);
+    }
+
+    #[test]
+    fn top_center_position_uses_target_monitor_logical_width_at_two_x_dpi() {
+        assert_eq!(
+            position_for_monitor_metrics(1920.0, 0.0, 3840.0, 2.0, 104.0),
+            (1868.0, 0.0)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn visible_region_excludes_rounded_transparent_corners() {
+        use windows::Win32::Graphics::Gdi::PtInRegion;
+
+        let mut region = create_visible_region(104.0, 40.0, 1.0).unwrap();
+        assert!(unsafe { PtInRegion(region, 52, 20) }.as_bool());
+        assert!(!unsafe { PtInRegion(region, 0, 0) }.as_bool());
+        assert!(!unsafe { PtInRegion(region, 103, 39) }.as_bool());
+        unsafe { region.free() };
     }
 }
