@@ -100,11 +100,21 @@ export YAP_PHASE4_EVIDENCE_DIR=/path/to/private/phase4-evidence/$YAP_CHECKED_HEA
 bash infra/yap-server-node/phase4-asr-gate.sh
 ```
 
+`YAP_PHASE4_EVIDENCE_DIR` is a one-shot checked-head destination and must not
+exist before the run. The finalizer creates it only after host-boundary
+verification and refuses to replace an existing directory or evidence file.
+Keep failed or completed directories for audit; remove one only through an
+explicitly reviewed rerun decision.
+
 The invoking POSIX identity must be non-root and must be able to read every
 locked model file. The host adapter passes that exact UID/GID into the worker.
-It also needs non-interactive read-only `sudo` access to the active host
-firewall status command (`ufw`, `nft`, or `iptables-save`) so the gate can
-compare before/after state without changing it.
+The gate prefers non-interactive read-only `sudo` access to the active host
+firewall status command (`ufw`, `nft`, or `iptables-save`). On the current UFW
+node, if that narrow access is unavailable, it compares non-root-readable UFW
+configuration metadata and the UFW unit state instead. That fallback proves
+the gate did not persist a UFW policy change; it does not replace the explicit
+root-level effective-rule review required before any persistent or exposed
+deployment.
 The worker has no network, a read-only root filesystem, dropped capabilities,
 `no-new-privileges`, read-only model/audio mounts, a non-executable general
 `/tmp`, and a private mode-0700 executable tmpfs used only for Triton JIT
@@ -130,7 +140,8 @@ The gate verifies:
 - before/after listener, firewall, and Yap service-unit snapshots match and no
   Phase 4 container or worker process remains before atomic result/evidence
   publication. Raw host snapshots are deleted with the temporary gate
-  directory; final evidence contains only their hashes and observed facts.
+  directory; final evidence contains only their hashes, observation method,
+  and observed facts. Missing firewall observation tooling fails closed.
 
 This short fixture is a correctness gate, not a throughput or concurrency
 benchmark. Keep the image/model caches after the run unless a separate cleanup

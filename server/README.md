@@ -133,7 +133,8 @@ bash infra/yap-server-node/phase4-asr-gate.sh
 The gate builds and runs a transient container only. It does not install a
 service, publish a port, or change the host firewall. Raw host snapshots exist
 only in its temporary directory; final evidence stores hashes and observed
-facts, not listener or firewall details.
+facts, not listener or firewall details. Its checked-head evidence directory
+must be new and is never overwritten or silently reused.
 
 ## Run the Phase 3 health service
 

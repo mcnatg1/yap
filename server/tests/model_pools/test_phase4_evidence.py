@@ -9,7 +9,7 @@ from yap_server.pools.phase4_evidence import finalize_host_boundary_evidence
 
 SNAPSHOT_FILES = {
     "listeners.txt": b"tcp LISTEN 0 128 0.0.0.0:22\n",
-    "firewall.txt": b"ufw\nStatus: active\n",
+    "firewall.txt": b"tool=ufw-config-metadata\nStatus: active\n",
     "services.txt": b"",
     "containers.txt": b"",
     "workers.txt": b"",
@@ -47,8 +47,9 @@ class Phase4EvidenceTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            result = root / "result.json"
-            evidence = root / "evidence.json"
+            published = root / "published"
+            result = published / "result.json"
+            evidence = published / "evidence.json"
 
             finalized = finalize_host_boundary_evidence(
                 before_dir=before,
@@ -67,10 +68,63 @@ class Phase4EvidenceTests(unittest.TestCase):
             self.assertEqual(boundary["hostObservation"], "verified")
             observed = boundary["observedHostBoundary"]
             self.assertTrue(observed["listenerStateUnchanged"])
-            self.assertTrue(observed["firewallStateUnchanged"])
+            self.assertTrue(observed["firewallObservationUnchanged"])
+            self.assertEqual(
+                observed["firewallObservationMethod"],
+                "ufw-config-metadata",
+            )
             self.assertTrue(observed["serviceUnitsUnchanged"])
             self.assertEqual(observed["remainingPhase4Containers"], 0)
             self.assertEqual(observed["remainingWorkerProcesses"], 0)
+
+    def test_rejects_an_unobserved_firewall_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = root / "before"
+            after = root / "after"
+            snapshots = dict(SNAPSHOT_FILES)
+            snapshots["firewall.txt"] = b"tool=none\n"
+            _write_snapshot(before, snapshots)
+            _write_snapshot(after, snapshots)
+            inference_result, inference_evidence = self._inference_files(root)
+
+            with self.assertRaises(RuntimeError):
+                finalize_host_boundary_evidence(
+                    before_dir=before,
+                    after_dir=after,
+                    inference_result_path=inference_result,
+                    inference_evidence_path=inference_evidence,
+                    result_path=root / "published" / "result.json",
+                    evidence_path=root / "published" / "evidence.json",
+                )
+
+    def test_refuses_to_overwrite_checked_head_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = root / "before"
+            after = root / "after"
+            _write_snapshot(before)
+            _write_snapshot(after)
+            inference_result, inference_evidence = self._inference_files(root)
+            published = root / "published"
+            published.mkdir()
+            result = published / "result.json"
+            evidence = published / "evidence.json"
+            result.write_bytes(b"existing-result\n")
+            evidence.write_bytes(b"existing-evidence\n")
+
+            with self.assertRaises(RuntimeError):
+                finalize_host_boundary_evidence(
+                    before_dir=before,
+                    after_dir=after,
+                    inference_result_path=inference_result,
+                    inference_evidence_path=inference_evidence,
+                    result_path=result,
+                    evidence_path=evidence,
+                )
+
+            self.assertEqual(result.read_bytes(), b"existing-result\n")
+            self.assertEqual(evidence.read_bytes(), b"existing-evidence\n")
 
     def test_rejects_a_listener_or_firewall_change(self) -> None:
         for changed_file in ("listeners.txt", "firewall.txt"):

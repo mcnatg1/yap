@@ -72,7 +72,7 @@ The GB10 run did not prove a persistent service or same-process native UI transi
 
 ### Phase 4 pre-gate evidence
 
-The current Phase 4 branch passed **38/38 model-pool tests** and **17/17
+The current Phase 4 branch passed **40/40 model-pool tests** and **17/17
 runtime/router tests** under Python 3.12. Those focused tests cover immutable
 model/runtime/fixture locks, bounded downloads, input/result identity, exact
 GB10/BF16 gate attestation, named-container teardown, observed host-boundary

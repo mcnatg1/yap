@@ -44,14 +44,29 @@ capture_host_boundary() {
   ss -H -lntu | LC_ALL=C sort >"$target/listeners.txt"
 
   if command -v ufw >/dev/null 2>&1; then
-    {
-      printf '%s\n' "tool=ufw"
-      sudo -n ufw status verbose
-    } >"$target/firewall.txt"
+    local firewall_probe="$target/.firewall-probe"
+    if sudo -n ufw status verbose >"$firewall_probe" 2>/dev/null; then
+      {
+        printf '%s\n' "tool=ufw-status"
+        cat "$firewall_probe"
+      } >"$target/firewall.txt"
+    else
+      rm -f -- "$firewall_probe"
+      {
+        printf '%s\n' "tool=ufw-config-metadata"
+        stat -Lc '%n|%d|%i|%s|%Y|%Z|%a|%U|%G' \
+          /etc/default/ufw \
+          /etc/ufw/ufw.conf \
+          /etc/ufw/user.rules \
+          /etc/ufw/user6.rules
+        systemctl show ufw --property=ActiveState,SubState,UnitFileState
+      } >"$target/firewall.txt"
+    fi
+    rm -f -- "$firewall_probe"
   elif command -v nft >/dev/null 2>&1; then
     {
       printf '%s\n' "tool=nft"
-      sudo -n nft list ruleset
+      sudo -n nft --stateless list ruleset
     } >"$target/firewall.txt"
   elif command -v iptables-save >/dev/null 2>&1; then
     {
@@ -59,7 +74,8 @@ capture_host_boundary() {
       sudo -n iptables-save
     } >"$target/firewall.txt"
   else
-    printf '%s\n' "tool=none" >"$target/firewall.txt"
+    echo "Phase 4 gate cannot observe the host firewall boundary" >&2
+    return 1
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
@@ -79,7 +95,11 @@ capture_host_boundary() {
 
 lock_path="$repo_root/server/model-pools.lock.json"
 image="yap-phase4-asr:phase4-$YAP_CHECKED_HEAD"
-mkdir -p "$YAP_PHASE4_MODEL_DIR" "$YAP_PHASE4_EVIDENCE_DIR"
+mkdir -p "$YAP_PHASE4_MODEL_DIR" "$(dirname -- "$YAP_PHASE4_EVIDENCE_DIR")"
+if [ -e "$YAP_PHASE4_EVIDENCE_DIR" ]; then
+  echo "Phase 4 checked-head evidence directory already exists" >&2
+  exit 2
+fi
 gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/yap-phase4-gate.XXXXXXXX")"
 trap 'rm -rf -- "$gate_tmp"' EXIT
 

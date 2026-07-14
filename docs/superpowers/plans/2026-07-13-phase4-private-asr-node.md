@@ -158,7 +158,7 @@ image ID, not the mutable tag.
 This evidence proves the implementation seam while the one-time clean-head
 phase gate remains pending:
 
-- Focused local checks: 38 model-pool tests and 17 runtime/router tests passed;
+- Focused local checks: 40 model-pool tests and 17 runtime/router tests passed;
   compilation and `git diff --check` passed.
 - An earlier pre-hardening focused subset passed on the GB10 under Python 3.12;
   the final exact-head matrix and transient inference gate remain pending and
@@ -186,10 +186,14 @@ Before the PR is eligible to merge:
 4. Run `infra/yap-server-node/phase4-asr-gate.sh` exactly once on that exact
    clean SHA in the disposable GB10 candidate checkout.
 5. Record the immutable result/evidence digest only after before/after
-   listener, firewall, and Yap service-unit snapshots match and no Phase 4
-   container or worker process remains. Raw host snapshots stay in the gate's
-   temporary directory; final evidence contains only hashes and observed
-   pass/fail facts.
+   listener, firewall-policy observation, and Yap service-unit snapshots match
+   and no Phase 4 container or worker process remains. The firewall observation
+   uses effective UFW status when narrowly authorized and otherwise compares
+   persistent UFW configuration metadata plus unit state. Raw host snapshots
+   stay in the gate's temporary directory; final evidence contains only hashes
+   and observed pass/fail facts. The checked-head evidence directory must not
+   exist before the run; publication reserves it once and refuses every
+   overwrite or silent reuse.
 6. Add only evidence/status reconciliation after the gate; do not change the
    gated executable tree.
 7. Open a focused PR, use hosted CI when available, and merge only after the
