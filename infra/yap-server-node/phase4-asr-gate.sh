@@ -33,9 +33,57 @@ if [ -n "$worktree_status" ]; then
   exit 2
 fi
 
+capture_host_boundary() {
+  local target="$1"
+  mkdir -p "$target"
+
+  if ! command -v ss >/dev/null 2>&1; then
+    echo "Phase 4 gate requires ss for listener read-back" >&2
+    return 1
+  fi
+  ss -H -lntu | LC_ALL=C sort >"$target/listeners.txt"
+
+  if command -v ufw >/dev/null 2>&1; then
+    {
+      printf '%s\n' "tool=ufw"
+      sudo -n ufw status verbose
+    } >"$target/firewall.txt"
+  elif command -v nft >/dev/null 2>&1; then
+    {
+      printf '%s\n' "tool=nft"
+      sudo -n nft list ruleset
+    } >"$target/firewall.txt"
+  elif command -v iptables-save >/dev/null 2>&1; then
+    {
+      printf '%s\n' "tool=iptables-save"
+      sudo -n iptables-save
+    } >"$target/firewall.txt"
+  else
+    printf '%s\n' "tool=none" >"$target/firewall.txt"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl list-unit-files --type=service --no-legend --no-pager \
+      | awk '$1 ~ /^yap.*\.service$/ { print }' \
+      | LC_ALL=C sort >"$target/services.txt"
+  else
+    printf '%s\n' "systemd-unavailable" >"$target/services.txt"
+  fi
+
+  docker ps -a --format '{{.Names}}' \
+    | awk '/^yap-phase4-asr-[0-9a-f]+$/ { print }' \
+    | LC_ALL=C sort >"$target/containers.txt"
+  (pgrep -af '[y]ap_server\.pools\.batch_asr_worker' || true) \
+    | LC_ALL=C sort >"$target/workers.txt"
+}
+
 lock_path="$repo_root/server/model-pools.lock.json"
 image="yap-phase4-asr:phase4-$YAP_CHECKED_HEAD"
 mkdir -p "$YAP_PHASE4_MODEL_DIR" "$YAP_PHASE4_EVIDENCE_DIR"
+gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/yap-phase4-gate.XXXXXXXX")"
+trap 'rm -rf -- "$gate_tmp"' EXIT
+
+capture_host_boundary "$gate_tmp/before"
 
 PYTHONPATH="$repo_root/server/src" \
   python3 -m yap_server.pools.model_assets \
@@ -56,5 +104,16 @@ PYTHONPATH="$repo_root/server/src" \
     --lock "$lock_path" \
     --model-dir "$YAP_PHASE4_MODEL_DIR" \
     --repo-root "$repo_root" \
+    --result "$gate_tmp/inference-result.json" \
+    --evidence "$gate_tmp/inference-evidence.json"
+
+capture_host_boundary "$gate_tmp/after"
+
+PYTHONPATH="$repo_root/server/src" \
+  python3 -m yap_server.pools.phase4_evidence \
+    --before "$gate_tmp/before" \
+    --after "$gate_tmp/after" \
+    --inference-result "$gate_tmp/inference-result.json" \
+    --inference-evidence "$gate_tmp/inference-evidence.json" \
     --result "$YAP_PHASE4_EVIDENCE_DIR/result.json" \
     --evidence "$YAP_PHASE4_EVIDENCE_DIR/evidence.json"

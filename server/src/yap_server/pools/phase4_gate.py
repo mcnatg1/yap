@@ -24,6 +24,9 @@ from yap_server.workload_router import WorkloadRequest, WorkloadRouter
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_PHASE4_DEVICE_NAME = "NVIDIA GB10"
+_PHASE4_COMPUTE_CAPABILITY = [12, 1]
+_PHASE4_DTYPE = "bfloat16"
 
 
 def inspect_container_image(
@@ -102,6 +105,19 @@ def word_error_rate(reference: str, hypothesis: str) -> float:
     return previous[-1] / len(expected)
 
 
+def validate_gb10_runtime(runtime: object) -> None:
+    if not isinstance(runtime, dict) or runtime.get("device") != "cuda":
+        raise RuntimeError("worker result did not attest CUDA execution")
+    if runtime.get("deviceName") != _PHASE4_DEVICE_NAME:
+        raise RuntimeError("worker result did not attest the Phase 4 GB10 device")
+    if runtime.get("computeCapability") != _PHASE4_COMPUTE_CAPABILITY:
+        raise RuntimeError(
+            "worker result did not attest GB10 compute capability 12.1"
+        )
+    if runtime.get("dtype") != _PHASE4_DTYPE:
+        raise RuntimeError("worker result did not attest BF16 model execution")
+
+
 def run_gate(
     *,
     checked_head: str,
@@ -166,8 +182,7 @@ def run_gate(
         or model.get("poolId") != lock.pool_id
     ):
         raise RuntimeError("worker result did not attest the locked model")
-    if not isinstance(runtime, dict) or runtime.get("device") != "cuda":
-        raise RuntimeError("worker result did not attest CUDA execution")
+    validate_gb10_runtime(runtime)
     if not isinstance(transcript, dict) or not isinstance(transcript.get("text"), str):
         raise RuntimeError("worker result did not contain a transcript")
     measured_wer = word_error_rate(lock.fixture.golden_transcript, transcript["text"])
@@ -193,9 +208,8 @@ def run_gate(
         "runtime": runtime,
         "boundary": {
             "network": "none",
-            "ports": [],
-            "persistentService": False,
             "workerCount": 1,
+            "hostObservation": "pending-wrapper-read-back",
         },
     }
     _write_json_atomic(evidence_path, evidence)

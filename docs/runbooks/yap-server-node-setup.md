@@ -102,6 +102,9 @@ bash infra/yap-server-node/phase4-asr-gate.sh
 
 The invoking POSIX identity must be non-root and must be able to read every
 locked model file. The host adapter passes that exact UID/GID into the worker.
+It also needs non-interactive read-only `sudo` access to the active host
+firewall status command (`ufw`, `nft`, or `iptables-save`) so the gate can
+compare before/after state without changing it.
 The worker has no network, a read-only root filesystem, dropped capabilities,
 `no-new-privileges`, read-only model/audio mounts, a non-executable general
 `/tmp`, and a private mode-0700 executable tmpfs used only for Triton JIT
@@ -120,9 +123,14 @@ The gate verifies:
   identities returned by the isolated process;
 - the worker result's exact input SHA-256, 16 kHz sample rate, and positive
   duration before host publication;
-- CUDA execution and fixture WER no greater than `0.12`;
-- atomic result/evidence publication with no service, listener, or firewall
-  mutation.
+- exact `NVIDIA GB10`, compute capability 12.1, CUDA/BF16 execution, and fixture
+  WER no greater than `0.12`;
+- a unique named worker container is force-removed even when the Docker client
+  times out or exceeds its output bound;
+- before/after listener, firewall, and Yap service-unit snapshots match and no
+  Phase 4 container or worker process remains before atomic result/evidence
+  publication. Raw host snapshots are deleted with the temporary gate
+  directory; final evidence contains only their hashes and observed facts.
 
 This short fixture is a correctness gate, not a throughput or concurrency
 benchmark. Keep the image/model caches after the run unless a separate cleanup

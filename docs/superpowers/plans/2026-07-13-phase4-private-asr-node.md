@@ -5,8 +5,48 @@ PR remain pending.
 
 **Branch:** `feat/phase4-private-asr-node`
 
+**Canonical owner:** Server (`server/` and `infra/yap-server-node/`)
+
+**Merge/expiry target:** The focused Phase 4 private-ASR-node PR.
+
+**Delete/archive condition:** Archive this working record after the Phase 4 PR
+merges and its final checked-head gate evidence is preserved in the PR and ADR
+implementation audit. Delete it only if a later durable implementation record
+supersedes those links and evidence.
+
 **Scope:** Prove one real private-server batch-ASR path on the DGX Spark GB10
 without connecting or widening the Phase 3 client-facing service boundary.
+
+## Architecture Authority And Phase Boundary
+
+Applied decisions:
+
+- [ADR 0014](../../adr/0014-server-tier-compute-topology.md) owns the private
+  server topology and Phase 4 router/model-pool boundary.
+- [ADR 0018](../../adr/0018-three-repo-topology.md) keeps the MVP in the staged
+  monorepo; the repository split remains Phase 10.
+- [ADR 0019](../../adr/0019-local-streaming-model-selection.md) keeps Nemotron
+  as the desktop-local offline/degraded fallback and not imported-file ASR.
+- [ADR 0021](../../adr/0021-http3-secure-edge-transport.md) keeps the future
+  secure edge gated; Phase 4 opens no external listener or firewall rule.
+- [ADR 0023](../../adr/0023-bounded-live-priority.md) amends ADR 0014's
+  absolute priority wording with bounded live preference.
+
+Superseded or historical details intentionally ignored:
+
+- Local-heavy runtime/model details in ADRs 0002, 0005, and 0009 do not select
+  the team server runtime.
+- Historical phase numbering does not move upload/drain, live transport,
+  authentication, or repository splitting into this phase.
+- ADR 0014's original absolute live-priority sentence is preserved as history
+  and amended by ADR 0023 rather than silently rewritten.
+
+The exact acceptance path is the focused Python 3.12 model/runtime/router test
+set, compilation and diff checks, review/security closure, followed once by the
+clean checked-head local/native/server/GB10 matrix and
+`infra/yap-server-node/phase4-asr-gate.sh`. Phase 4 ends at one transient,
+isolated batch worker plus an unconnected reference router. The Phase 5 and
+enterprise decisions listed at the end of this record remain deferred.
 
 ## Selected Runtime And Model
 
@@ -78,6 +118,8 @@ Each inference job runs with:
   identity, because the pinned NVIDIA Torch build JIT-compiles and maps a small
   Triton helper;
 - a one-MiB ceiling on each captured worker output stream;
+- a unique per-job container name and unconditional force-remove read-back, so
+  killing a timed-out Docker client cannot leave its container running;
 - result publication only after the worker's audio SHA-256, duration, sample
   rate, model, runtime, language, and punctuation attestations match the job.
 
@@ -93,7 +135,9 @@ worker adds exactly the 14-package resolver delta in
 `server/runtime/asr/requirements.lock`; every wheel is version- and SHA-256
 locked. `librosa` and `soundfile` are required by the actual Cohere feature
 extractor even when Yap passes a NumPy waveform. The runtime notice records all
-overlay licenses plus the LGPL notices for bundled `libsndfile` and libsoxr.
+overlay licenses plus the LGPL notices for bundled `libsndfile` and libsoxr;
+the reference image also carries the complete Apache-2.0 text governing the
+Cohere model.
 
 The Docker build fails on:
 
@@ -114,7 +158,7 @@ image ID, not the mutable tag.
 This evidence proves the implementation seam while the one-time clean-head
 phase gate remains pending:
 
-- Focused local checks: 32 model-pool tests and 16 runtime/router tests passed;
+- Focused local checks: 38 model-pool tests and 17 runtime/router tests passed;
   compilation and `git diff --check` passed.
 - An earlier pre-hardening focused subset passed on the GB10 under Python 3.12;
   the final exact-head matrix and transient inference gate remain pending and
@@ -141,8 +185,11 @@ Before the PR is eligible to merge:
 3. Commit a clean implementation candidate.
 4. Run `infra/yap-server-node/phase4-asr-gate.sh` exactly once on that exact
    clean SHA in the disposable GB10 candidate checkout.
-5. Record the immutable result/evidence digest and the absence of a persistent
-   service, listener, or firewall change.
+5. Record the immutable result/evidence digest only after before/after
+   listener, firewall, and Yap service-unit snapshots match and no Phase 4
+   container or worker process remains. Raw host snapshots stay in the gate's
+   temporary directory; final evidence contains only hashes and observed
+   pass/fail facts.
 6. Add only evidence/status reconciliation after the gate; do not change the
    gated executable tree.
 7. Open a focused PR, use hosted CI when available, and merge only after the

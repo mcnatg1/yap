@@ -7,6 +7,7 @@
 **Amended by:** [ADR 0016](0016-auth-identity-bridge.md) (auth gates the server connector)
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
 **Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
+**Amended by:** [ADR 0023](0023-bounded-live-priority.md) (interactive live work remains preferred, but a ready batch job must run after a bounded live-dispatch streak)
 **Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop health connector/state machine, and the durable SQLite imported-job ledger exist. Phase 4 also implements a bounded in-memory reference router and one transient, isolated Cohere GPU batch pool on GB10. Upload/drain, WSS, authenticated sessions, durable server queues, persistent services, multi-worker capacity, and the TLS/QUIC edge are not implemented.
 
 ## Context
@@ -173,7 +174,7 @@ C4Deployment
 | Concern | Mechanism |
 |---------|-----------|
 | **Per-tenant queues** | One queue per authenticated user (ADR 0016); fairness prevents one user monopolising GPU |
-| **Priority** | Interactive live work is preferred, but the reference router forces one ready batch job after a bounded live streak (default: eight) so batch cannot starve |
+| **Priority** | Interactive live (ASR pool) always prioritised over background batch jobs. This original rule is amended by [ADR 0023](0023-bounded-live-priority.md), which requires bounded live preference so ready batch work cannot starve. |
 | **Backpressure** | Router signals client when all pool workers are busy; client falls back to local sidecar or queues |
 | **Model residency** | Client local-model exclusivity **relaxes on the server**: a GPU pool can hold multiple models resident simultaneously; the router allocates to the appropriate pool per request type |
 

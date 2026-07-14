@@ -5,6 +5,7 @@ import unittest
 from yap_server.pools.phase4_gate import (
     inspect_container_image,
     normalized_words,
+    validate_gb10_runtime,
     word_error_rate,
 )
 
@@ -84,6 +85,28 @@ class Phase4GateTests(unittest.TestCase):
 
     def test_normalization_preserves_apostrophes(self) -> None:
         self.assertEqual(normalized_words("Don't stop."), ["don't", "stop"])
+
+    def test_gate_requires_the_exact_gb10_bfloat16_runtime(self) -> None:
+        runtime = {
+            "device": "cuda",
+            "deviceName": "NVIDIA GB10",
+            "computeCapability": [12, 1],
+            "dtype": "bfloat16",
+        }
+
+        validate_gb10_runtime(runtime)
+
+        for field, value in (
+            ("device", "cpu"),
+            ("deviceName", "NVIDIA H100 80GB HBM3"),
+            ("computeCapability", [9, 0]),
+            ("dtype", "float16"),
+        ):
+            with self.subTest(field=field):
+                invalid = dict(runtime)
+                invalid[field] = value
+                with self.assertRaises(RuntimeError):
+                    validate_gb10_runtime(invalid)
 
 
 if __name__ == "__main__":

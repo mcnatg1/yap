@@ -36,6 +36,7 @@ RUN set -eu; \
 
 COPY model-pools.lock.json /opt/yap-server/model-pools.lock.json
 COPY runtime/asr/THIRD_PARTY_NOTICES.md /opt/yap-server/THIRD_PARTY_NOTICES.md
+COPY runtime/asr/licenses /opt/yap-server/licenses
 COPY src/yap_server /opt/yap-server/yap_server
 
 RUN python3 -c 'import importlib.metadata as m, json, sys; import librosa, soundfile; from transformers import AutoProcessor, CohereAsrForConditionalGeneration; import torch; lock = json.load(open("/opt/yap-server/model-pools.lock.json", encoding="utf-8")); expected = lock["runtime"]["overlayPackages"]; actual = {name: m.version(name) for name in expected}; assert actual == expected, (actual, expected); assert sys.version_info[:2] == (3, 12); assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06"; assert torch.version.cuda == "13.3"' \

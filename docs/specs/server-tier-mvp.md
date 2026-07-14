@@ -65,20 +65,23 @@ health capabilities or make those contract-only routes executable.
 
 - A bounded in-memory workload router enforces total and per-owner admission,
   bounded live priority without batch starvation, round-robin owner fairness,
-  and explicit target availability.
+  and explicit target availability under ADR 0023.
 - A bounded thread-backed batch pool dispatches one reference job to a
   non-root, networkless, read-only container with dropped capabilities,
   `no-new-privileges`, resource and output ceilings, read-only inputs, an
   explicitly non-executable general `/tmp`, and a private executable Triton
-  cache.
+  cache. Unique naming plus unconditional force-remove cleanup prevents a
+  killed or timed-out Docker client from leaving the worker container behind.
 - `server/model-pools.lock.json` pins the canonical Cohere model, its public
   byte-distribution revision, all model hashes, the licensed WER fixture, the
   exact NGC ARM64 base digest, Python 3.12, Torch/CUDA identities, and every
   overlay wheel version.
 - The transient GB10 gate verifies artifacts, image architecture/revision,
   execution by the inspected raw image ID, router-to-pool dispatch, input/result
-  audio identity, CUDA execution, runtime identity, atomic result publication,
-  and maximum WER without installing a daemon or opening a port.
+  audio identity, exact GB10 compute capability and BF16 execution, runtime
+  identity, and maximum WER. It publishes final evidence only after observed
+  listener/firewall/service state is unchanged and no Phase 4 container or
+  worker remains.
 
 This is a private reference vertical slice, not a production multi-user
 router. Safe multi-worker capacity, a durable server queue, upload/drain, live

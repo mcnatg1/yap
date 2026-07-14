@@ -12,6 +12,14 @@ DOCKERFILE = REPO_ROOT / "server" / "runtime" / "asr" / "Dockerfile"
 DOCKERIGNORE = REPO_ROOT / "server" / ".dockerignore"
 REQUIREMENTS = REPO_ROOT / "server" / "runtime" / "asr" / "requirements.lock"
 RUNTIME_NOTICE = REPO_ROOT / "server" / "runtime" / "asr" / "THIRD_PARTY_NOTICES.md"
+MODEL_LICENSE = (
+    REPO_ROOT
+    / "server"
+    / "runtime"
+    / "asr"
+    / "licenses"
+    / "COHERE_TRANSCRIBE_APACHE-2.0.txt"
+)
 GATE = REPO_ROOT / "infra" / "yap-server-node" / "phase4-asr-gate.sh"
 
 
@@ -104,10 +112,11 @@ class Phase4AsrRuntimeContractTests(unittest.TestCase):
             len(expected_packages),
         )
 
-    def test_gate_builds_then_runs_without_persistent_service_or_port(self) -> None:
+    def test_gate_observes_host_boundary_and_publishes_only_after_teardown(self) -> None:
         script = GATE.read_text(encoding="utf-8")
         self.assertIn("docker build", script)
         self.assertIn("phase4_gate", script)
+        self.assertIn("phase4_evidence", script)
         self.assertIn(
             'git -C "$repo_root" rev-parse --is-inside-work-tree',
             script,
@@ -118,8 +127,23 @@ class Phase4AsrRuntimeContractTests(unittest.TestCase):
         for line in script.splitlines():
             option = line.strip()
             self.assertFalse(option.startswith(("-p ", "-p=", "--publish")))
-        self.assertNotIn("ufw", script.lower())
-        self.assertNotIn("systemctl", script.lower())
+        self.assertIn("ss -H -lntu", script)
+        self.assertIn("docker ps -a", script)
+        self.assertIn("pgrep -af", script)
+        self.assertIn("sudo -n ufw status verbose", script)
+        self.assertIn("systemctl list-unit-files", script)
+        self.assertLess(script.index('capture_host_boundary "$gate_tmp/before"'), script.index("docker build"))
+        self.assertLess(script.index("phase4_gate"), script.index('capture_host_boundary "$gate_tmp/after"'))
+        self.assertLess(script.index('capture_host_boundary "$gate_tmp/after"'), script.index("phase4_evidence"))
+        for mutation in (
+            "ufw allow",
+            "ufw delete",
+            "ufw enable",
+            "systemctl enable",
+            "systemctl start",
+            "systemctl restart",
+        ):
+            self.assertNotIn(mutation, script.lower())
 
     def test_worker_build_context_excludes_ignored_executable_and_private_state(self) -> None:
         patterns = set(DOCKERIGNORE.read_text(encoding="utf-8").splitlines())
@@ -145,6 +169,17 @@ class Phase4AsrRuntimeContractTests(unittest.TestCase):
             self.assertIn(f"`{package_name}`", notice)
         self.assertIn("libsndfile", notice)
         self.assertIn("LGPL-2.1", notice)
+
+    def test_container_carries_the_model_license_text(self) -> None:
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        license_text = MODEL_LICENSE.read_text(encoding="utf-8")
+
+        self.assertIn("Apache License", license_text)
+        self.assertIn("Version 2.0, January 2004", license_text)
+        self.assertIn(
+            "COPY runtime/asr/licenses /opt/yap-server/licenses",
+            dockerfile,
+        )
 
 
 if __name__ == "__main__":

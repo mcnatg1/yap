@@ -12,6 +12,8 @@ The Phase 4 reference worker uses these pinned third-party artifacts:
   upstream identity, the public distribution revision, byte comparisons for
   the small runtime artifacts, matching upstream/distribution weight object
   identity and size, and the raw SHA-256 of every deployed artifact.
+  The complete license text is shipped at
+  `licenses/COHERE_TRANSCRIBE_APACHE-2.0.txt` in the reference image.
 - The ASR gate fixture is a LibriSpeech sample distributed under CC BY 4.0.
   Its source, digest, and golden transcript are in
   `server/model-pools.lock.json`.

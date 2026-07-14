@@ -81,7 +81,8 @@ Phase 3 health process into a production service:
 
 - `model-pools.lock.json` pins the canonical Cohere model and revision, the
   public byte-distribution revision, every deployed artifact hash, the licensed
-  speech fixture, and the exact ARM64 runtime identity.
+  speech fixture, the complete model license text, and the exact ARM64 runtime
+  identity.
 - `runtime/asr/Dockerfile` uses
   `nvcr.io/nvidia/pytorch:26.06-py3` by immutable digest, Python 3.12, the
   NVIDIA Torch/CUDA build from that image, and a hash-locked resolver-minimal
@@ -93,11 +94,14 @@ Phase 3 health process into a production service:
   runs each job non-root with no network, a read-only root filesystem, dropped
   capabilities, `no-new-privileges`, memory/CPU/PID/output ceilings, read-only
   model/audio mounts, an explicitly non-executable `/tmp`, and only a private
-  executable tmpfs for Triton JIT output.
+  executable tmpfs for Triton JIT output. Every run has a unique container name
+  and an unconditional force-remove cleanup check.
 - `phase4_gate.py` connects router -> pool -> isolated worker, verifies the
   immutable model and licensed fixture, executes the inspected raw image ID,
-  requires input/result audio identity plus CUDA/ARM64/runtime attestation,
-  publishes results atomically, and enforces the fixture WER threshold.
+  requires input/result audio identity plus exact GB10/compute-capability/BF16
+  runtime attestation, and enforces the fixture WER threshold. The wrapper
+  publishes results atomically only after listener, firewall, Yap service-unit,
+  container, and worker-process read-back passes.
 
 The reference slice is not an upload endpoint, automatic desktop queue drain,
 authenticated session, persistent server process, external listener, or
@@ -127,7 +131,9 @@ bash infra/yap-server-node/phase4-asr-gate.sh
 ```
 
 The gate builds and runs a transient container only. It does not install a
-service, publish a port, or change the host firewall.
+service, publish a port, or change the host firewall. Raw host snapshots exist
+only in its temporary directory; final evidence stores hashes and observed
+facts, not listener or firewall details.
 
 ## Run the Phase 3 health service
 

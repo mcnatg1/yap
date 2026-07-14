@@ -5,9 +5,11 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from yap_server.pools.batch_asr import (
     _MAX_WORKER_OUTPUT_BYTES,
+    _force_remove_container,
     _run_bounded_process,
     BatchAsrJob,
     BatchAsrPool,
@@ -224,6 +226,81 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 output_limit_bytes=1024,
             )
 
+    def test_default_runner_force_removes_the_named_container_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_dir = root / "model"
+            model_dir.mkdir()
+            input_path = root / "speech.wav"
+            input_path.write_bytes(b"wav")
+            worker = ContainerBatchAsrWorker(
+                image=IMAGE_ID,
+                model_dir=model_dir,
+                lock=self.lock,
+                run_as_uid=1000,
+                run_as_gid=1000,
+            )
+            job = BatchAsrJob(
+                "job-1",
+                input_path,
+                root / "result.json",
+                language="en",
+                input_sha256=AUDIO_SHA256,
+            )
+
+            with (
+                patch(
+                    "yap_server.pools.batch_asr._run_bounded_process",
+                    side_effect=WorkerExecutionError("isolated ASR worker timed out"),
+                ),
+                patch("yap_server.pools.batch_asr._force_remove_container") as remove,
+            ):
+                with self.assertRaisesRegex(WorkerExecutionError, "timed out"):
+                    worker.run(job)
+
+            remove.assert_called_once()
+            docker_binary, container_name = remove.call_args.args
+            self.assertEqual(docker_binary, "docker")
+            self.assertRegex(container_name, r"^yap-phase4-asr-[0-9a-f]{32}$")
+
+    def test_container_cleanup_requires_removal_or_verified_absence(self) -> None:
+        def missing_runner(
+            *args: object,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            del args, kwargs
+            return subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=1,
+                stdout="",
+                stderr="Error response from daemon: No such container: worker",
+            )
+
+        _force_remove_container(
+            "docker",
+            "yap-phase4-asr-" + "a" * 32,
+            runner=missing_runner,
+        )
+
+        def denied_runner(
+            *args: object,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            del args, kwargs
+            return subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=1,
+                stdout="",
+                stderr="permission denied",
+            )
+
+        with self.assertRaisesRegex(WorkerExecutionError, "could not remove"):
+            _force_remove_container(
+                "docker",
+                "yap-phase4-asr-" + "a" * 32,
+                runner=denied_runner,
+            )
+
     def test_rejects_a_root_or_non_numeric_service_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model_dir = Path(directory)
@@ -265,6 +342,7 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
             )
             rendered = " ".join(command)
 
+            self.assertRegex(rendered, r"--name yap-phase4-asr-[0-9a-f]{32}")
             self.assertIn("--network none", rendered)
             self.assertIn("--read-only", command)
             self.assertIn("--cap-drop ALL", rendered)

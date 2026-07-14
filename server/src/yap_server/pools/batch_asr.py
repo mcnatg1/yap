@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 from typing import BinaryIO, Callable, Protocol
+from uuid import uuid4
 
 from yap_server.pools.model_lock import ModelPoolLock
 
@@ -22,6 +23,7 @@ _WORKER_MEMORY_LIMIT = "96g"
 _WORKER_CPU_LIMIT = "16"
 _MAX_WORKER_OUTPUT_BYTES = 1024 * 1024
 _PROCESS_READ_BYTES = 64 * 1024
+_CONTAINER_CLEANUP_TIMEOUT_SECONDS = 30
 
 
 class PoolBackpressure(RuntimeError):
@@ -97,6 +99,17 @@ class ContainerBatchAsrWorker:
         self._runner = runner
 
     def build_command(self, job: BatchAsrJob) -> list[str]:
+        return self._build_command(
+            job,
+            container_name=f"yap-phase4-asr-{uuid4().hex}",
+        )
+
+    def _build_command(
+        self,
+        job: BatchAsrJob,
+        *,
+        container_name: str,
+    ) -> list[str]:
         if job.language not in self._lock.supported_languages:
             raise ValueError("batch language is not supported by the locked model")
         input_path = _safe_mount_path(job.input_path.resolve(strict=True))
@@ -106,6 +119,8 @@ class ContainerBatchAsrWorker:
             self._docker_binary,
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--pull",
             "never",
             "--network",
@@ -163,13 +178,17 @@ class ContainerBatchAsrWorker:
         ]
 
     def run(self, job: BatchAsrJob) -> dict[str, object]:
-        command = self.build_command(job)
+        container_name = f"yap-phase4-asr-{uuid4().hex}"
+        command = self._build_command(job, container_name=container_name)
         if self._runner is None:
-            completed = _run_bounded_process(
-                command,
-                timeout_seconds=self._timeout_seconds,
-                output_limit_bytes=_MAX_WORKER_OUTPUT_BYTES,
-            )
+            try:
+                completed = _run_bounded_process(
+                    command,
+                    timeout_seconds=self._timeout_seconds,
+                    output_limit_bytes=_MAX_WORKER_OUTPUT_BYTES,
+                )
+            finally:
+                _force_remove_container(self._docker_binary, container_name)
         else:
             completed = self._runner(
                 command,
@@ -194,6 +213,36 @@ class ContainerBatchAsrWorker:
         result = dict(payload)
         _publish_result(job.result_path, result)
         return result
+
+
+def _force_remove_container(
+    docker_binary: str,
+    container_name: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    try:
+        completed = runner(
+            [docker_binary, "container", "rm", "--force", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_CONTAINER_CLEANUP_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise WorkerExecutionError(
+            "could not verify isolated ASR container cleanup"
+        ) from error
+    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+    missing = any(
+        marker in stderr.casefold()
+        for marker in ("no such container", "no such object")
+    )
+    if completed.returncode != 0 and not missing:
+        raise WorkerExecutionError("could not remove the isolated ASR container")
 
 
 def _validate_worker_output(completed: subprocess.CompletedProcess[str]) -> None:

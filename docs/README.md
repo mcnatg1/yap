@@ -15,6 +15,8 @@
 
 **Canonical Phase 9 knowledge boundary:** [ADR 0022](adr/0022-google-okf-permission-safe-projections.md) pins Google OKF v0.1 as the curated file/Git format, requires a Postgres typed-relationship and pgvector retrieval baseline, and treats Neo4j as a benchmark-gated challenger. It is a roadmap decision, not authorization to install databases or create Phase 9 infrastructure before the identity and meeting-result prerequisites exist.
 
+**Canonical server-priority amendment:** [ADR 0023](adr/0023-bounded-live-priority.md) keeps live work preferred while requiring one ready batch dispatch after a bounded live streak so accepted background work cannot starve.
+
 ## Implementation specs
 
 | Spec | Roadmap area | Status |
