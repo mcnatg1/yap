@@ -9,6 +9,7 @@ use tokio::{sync::Semaphore, time::timeout_at};
 
 const MAX_DECODED_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPT_READ_BYTES: u64 = 2 * 1024 * 1024;
+#[cfg(test)]
 const MAX_REGISTERED_PLAYBACK_PATHS: usize = 500;
 const MAX_RECORDING_JOB_PLAYBACK_PATHS: usize = 200;
 const MAX_HIDDEN_PRUNE_CANDIDATES: usize = 200;
@@ -714,6 +715,7 @@ fn mint_playback_admission(
     })
 }
 
+#[cfg(test)]
 fn registered_canonical_recording_path_at(
     path: &std::path::Path,
     registry_path: &std::path::Path,

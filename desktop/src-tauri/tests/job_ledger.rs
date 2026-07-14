@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use yap_desktop_lib::jobs::commands::{LegacyQueueImport, LegacyQueueJob, RecordingJobs};
 use yap_desktop_lib::jobs::{
     JobLedger, NewRecordingJob, RecordingJobStatus, RecordingRoute, SessionMode, SessionOrigin,
     SourceOwnership,
@@ -46,46 +45,32 @@ fn file_backed_job_identity_status_and_attempts_survive_reopen() {
 }
 
 #[test]
-fn interrupted_legacy_import_replay_is_idempotent() {
-    let temp = TestDir::new("legacy-replay");
+fn terminal_history_stays_bounded_across_reopen() {
+    const MAX_TERMINAL_HISTORY: usize = 500;
+    let temp = TestDir::new("terminal-history");
     let database = temp.path().join("jobs.sqlite3");
-    let owned = temp.path().join("owned-live-recordings");
-    let registry = temp.path().join("recording-job-playback-registry.json");
-    let source = temp.path().join("legacy.wav");
-    fs::create_dir_all(&owned).unwrap();
-    fs::write(&source, b"RIFF-legacy-replay-proof").unwrap();
+    let source = temp.path().join("terminal.wav");
+    fs::write(&source, b"RIFF-terminal-history-proof").unwrap();
 
-    let jobs = RecordingJobs::open(&database, &owned, &registry).unwrap();
-    let payload = || LegacyQueueImport {
-        schema_version: 1,
-        jobs: vec![LegacyQueueJob {
-            id: 41,
-            path: source.display().to_string(),
-        }],
-    };
+    {
+        let ledger = JobLedger::open(&database).unwrap();
+        for index in 0..=MAX_TERMINAL_HISTORY {
+            let job_id = format!("terminal-{index:04}");
+            ledger.insert_job(&accepted_job(&job_id, &source)).unwrap();
+            ledger
+                .request_cancellation(&job_id, 1_000 + index as u64)
+                .unwrap();
+        }
+    }
 
-    let first = jobs.import_legacy(payload(), 1_000).unwrap();
-    assert_eq!(first.accepted.len(), 1);
-    assert!(first.duplicates.is_empty());
-    assert!(first.rejected.is_empty());
-    let imported_job_id = first.accepted[0].job_id.clone();
-    drop(jobs);
-
-    // The browser has not deleted its legacy localStorage row yet, so a later
-    // native-process startup reopens the ledger and replays it.
-    let jobs = RecordingJobs::open(&database, &owned, &registry).unwrap();
-    let replay = jobs.import_legacy(payload(), 2_000).unwrap();
-    assert!(replay.accepted.is_empty());
-    assert_eq!(replay.duplicates.len(), 1);
-    assert!(replay.rejected.is_empty());
-    assert_eq!(replay.duplicates[0].job_id, imported_job_id);
-
-    drop(jobs);
-    let rows = JobLedger::open(&database).unwrap().list_jobs().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].job_id, imported_job_id);
-    assert_eq!(rows[0].status, RecordingJobStatus::QueuedServer);
-    assert_eq!(rows[0].attempt_count, 0);
+    let reopened = JobLedger::open(&database).unwrap();
+    let rows = reopened.list_jobs().unwrap();
+    assert_eq!(rows.len(), MAX_TERMINAL_HISTORY);
+    assert!(rows
+        .iter()
+        .all(|row| row.status == RecordingJobStatus::Cancelled));
+    assert!(reopened.get_job("terminal-0000").unwrap().is_none());
+    assert!(reopened.get_job("terminal-0500").unwrap().is_some());
 }
 
 fn accepted_job(job_id: &str, source: &Path) -> NewRecordingJob {
