@@ -1,7 +1,7 @@
 # Phase 4 Private ASR Node Implementation Record
 
-**Status:** Exact-head executable gate passed; reviewed PR and hosted closure
-remain pending.
+**Status:** Exact-head executable gate and hosted closure passed; final reviewed
+PR head and merge remain pending.
 
 **Branch:** `feat/phase4-private-asr-node`
 
@@ -231,6 +231,13 @@ passed the complete Phase 4 matrix once on 2026-07-14:
   after; no port or persistent service was created, and no Phase 4 container or
   worker remained. The evidence files are mode 0600 and remain on the private
   node.
+- Hosted closure: evidence-only PR head
+  `7c7970ffb959209ba283918a4a200cc16c35fb1f` passed CI run `29363957581`
+  and CodeQL run `29363955498`. Stock NSIS run `29364138311` passed once on the
+  same head in a disposable `windows-2025` environment. Installer SHA-256
+  `8908b394f9fe9e9fe5a6b393c9b7ed7d44f360103b3e9624323d8b6b3e613627`
+  used `%APPDATA%\com.mcnatg1.yap`; stock silent uninstall preserved app data
+  and the product registry record. The everyday Windows profile was not used.
 
 Post-gate changes are limited to evidence/status documentation. The executable
 tree remains byte-for-byte the tree gated at the candidate above. This is still
@@ -257,8 +264,10 @@ Before the PR is eligible to merge:
    overwrite or silent reuse.
 6. [x] Add only evidence/status reconciliation after the gate; do not change the
    gated executable tree.
-7. [ ] Open a focused PR, use hosted CI when available, and merge only after the
-   checked PR head SHA is green.
+7. [x] Open focused PR 55 and obtain hosted CI, CodeQL, and disposable stock-NSIS
+   closure on evidence-only head
+   `7c7970ffb959209ba283918a4a200cc16c35fb1f`.
+8. [ ] Merge only after the final documentation-only PR head SHA is green.
 
 ## Explicit Phase 5 And Enterprise Handoffs
 

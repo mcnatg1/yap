@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-14; the merged stock-NSIS Phase 3 evidence remains recorded below. The isolated Phase 4 private-ASR executable tree passed its one-time exact-head local/native/server/GB10 gate; reviewed PR and hosted closure remain pending.
+**As of:** 2026-07-14; the merged stock-NSIS Phase 3 evidence remains recorded below. The isolated Phase 4 private-ASR executable tree passed its one-time exact-head local/native/server/GB10 gate, and its evidence-only PR head passed hosted CI, CodeQL, and the disposable stock-NSIS lifecycle; final PR merge remains pending.
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -102,6 +102,18 @@ A private post-remediation security review is complete; its scan artifacts
 remain local and are not repository or PR material. ADR 0014 remains at
 **100/200** because the checked reference worker is still not a connected,
 durable, authenticated, capacity-tested service.
+
+Hosted closure ran on evidence-only PR head
+`7c7970ffb959209ba283918a4a200cc16c35fb1f`. CI run `29363957581` passed
+frontend, portable server, Rust format/Clippy/tests/connector integration,
+the Windows advisory boundary, the checksum-pinned RustSec audit, and required
+native WDIO. CodeQL run `29363955498` passed for Actions,
+JavaScript/TypeScript, Python, and Rust. Stock NSIS run `29364138311` passed
+once on a disposable `windows-2025` runner; installer SHA-256
+`8908b394f9fe9e9fe5a6b393c9b7ed7d44f360103b3e9624323d8b6b3e613627`
+used `%APPDATA%\com.mcnatg1.yap`, and silent uninstall preserved app data plus
+the stock product registry record. These hosted runs add no persistent service,
+external listener, firewall mutation, or production deployment claim.
 
 These checks do not activate missing product gates. A committed licensed
 real-speech/WER fixture and isolated server inference seam now exist, but there

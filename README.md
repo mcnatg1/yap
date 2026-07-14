@@ -31,6 +31,8 @@ The Phase 3 implementation gate is pinned to immutable release `c3999b7b685dd668
 
 The Phase 4 executable tree is pinned to exact candidate `309a2d427707e3483b2649f13940bd48dfaee836`. Its one-time local/native/server/GB10 gate passed: the transient ARM64 image `sha256:8b98372d980b3d3ae3cb8bb5cc1498141d161d15157cbd6114339e7a31b8ddff` ran the locked Cohere revision on an NVIDIA GB10 with Python 3.12.3, NVIDIA Torch `2.13.0a0+8145d630e8.nv26.06`, CUDA 13.3, BF16, and WER `0.0` against the `0.12` ceiling. Result SHA-256 `1a2850ad767489e00f6a496a46f95384d0d14b4a609d537a27a1304b80cfbbf0` is bound by evidence SHA-256 `3157efc6845d3c03e05e22a5ad5d0a2e216de5ae26ae990501586a2dfa45312b`; before/after listener, firewall-policy, and service observations matched, and teardown left no Phase 4 container or worker. This proves the isolated reference slice, not the deferred upload/drain, authenticated service, long-recording capacity, or production deployment.
 
+Evidence-only PR head `7c7970ffb959209ba283918a4a200cc16c35fb1f` then passed hosted CI run `29363957581` and CodeQL run `29363955498`. Stock NSIS run `29364138311` passed once on the same head in a disposable `windows-2025` environment; installer SHA-256 `8908b394f9fe9e9fe5a6b393c9b7ed7d44f360103b3e9624323d8b6b3e613627` installed and launched against `%APPDATA%\com.mcnatg1.yap`, and silent uninstall preserved app data and the stock product registry record as designed. The everyday Windows profile was not used for installer lifecycle testing.
+
 ## Repository Layout
 
 ```text
