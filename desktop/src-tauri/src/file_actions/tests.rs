@@ -24,7 +24,8 @@ fn temp_test_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
-mod playback;
+mod playback_paths;
+mod playback_registry;
 mod transcript_io;
 mod transcript_prune;
 mod transcript_read;
