@@ -1,11 +1,14 @@
 use super::*;
 use crate::audio::capture::{new_callback_boundary, CapturePacket, CapturePorts};
+use crate::audio::coordinator::{
+    bounded_sink, BoundedReceiver, BoundedSink, Coordinator, CoordinatorPorts, SinkKind,
+};
 use crate::audio::frame::{AudioFrame, GapCause, PreparedFrame};
 use crate::audio::recording::{
     allocate_recording_session, scan_recordings, CaptureStatus, RecordingSinkHandle,
 };
 use crate::audio::session::{SessionId, TrackId};
-use crate::audio::timeline::{LossAccumulator, LossSnapshot};
+use crate::audio::timeline::{LossAccumulator, LossSnapshot, RecordingInput};
 use std::sync::Barrier;
 
 fn capture_loss_coordinator() -> (
