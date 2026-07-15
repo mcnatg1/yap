@@ -168,7 +168,6 @@ pub(crate) fn run() {
     let stt_state = stt::dispatch::SttState::new();
     let live_settings = live::settings::load();
     let live_shortcuts = live::shortcut_runtime::prepare(&live_settings);
-    let runtime_state = runtime::RuntimeOrchestratorState::new();
     let live_runtime = live::runtime::LiveRuntime::new();
     let live_state = live::LiveSessionState::new(live_settings);
     let fallback_model_install_state = stt::fallback_model::FallbackModelInstallState::new();
@@ -191,7 +190,6 @@ pub(crate) fn run() {
         .manage(live_runtime)
         .manage(live::actions::QuitCoordinator::new())
         .manage(fallback_model_install_state)
-        .manage(runtime_state)
         .manage(desktop_lifecycle)
         .setup(move |app| {
             live::shortcut_runtime::install(app, live_shortcuts)?;

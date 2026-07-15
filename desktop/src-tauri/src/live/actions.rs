@@ -167,14 +167,12 @@ fn run_quit_with(
 fn finalize_live_before_quit(app: &tauri::AppHandle) -> Result<(), String> {
     let live = app.state::<live::LiveSessionState>();
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
-    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
     live_runtime.cancel_pending_start();
     let outcome = live_runtime.run_stop_lifecycle(|| {
         finalize_live_runtime_with_mode(
             app.clone(),
             &live,
             &live_runtime,
-            &orchestrator,
             None,
             None,
             CompletionMode::Quit,
@@ -202,23 +200,14 @@ pub(crate) fn start_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
     let stt = app.state::<stt::dispatch::SttState>();
-    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
     let capture_mode = live.snapshot().capture_mode;
-    let _ = start_live_runtime(
-        app.clone(),
-        &live,
-        &live_runtime,
-        &stt,
-        &orchestrator,
-        capture_mode,
-    );
+    let _ = start_live_runtime(app.clone(), &live, &live_runtime, &stt, capture_mode);
 }
 
 pub(crate) fn stop_live_from_app(app: &tauri::AppHandle) {
     let live = app.state::<live::LiveSessionState>();
     let live_runtime = app.state::<live::runtime::LiveRuntime>();
-    let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-    let _ = stop_live_runtime(app.clone(), &live, &live_runtime, &orchestrator);
+    let _ = stop_live_runtime(app.clone(), &live, &live_runtime);
 }
 
 struct CompletionEffects<I, S> {
@@ -349,15 +338,7 @@ pub(crate) fn handle_live_shortcut_action(
             let live = app.state::<live::LiveSessionState>();
             let live_runtime = app.state::<live::runtime::LiveRuntime>();
             let stt = app.state::<stt::dispatch::SttState>();
-            let orchestrator = app.state::<runtime::RuntimeOrchestratorState>();
-            let view = start_live_runtime(
-                app.clone(),
-                &live,
-                &live_runtime,
-                &stt,
-                &orchestrator,
-                capture_mode,
-            );
+            let view = start_live_runtime(app.clone(), &live, &live_runtime, &stt, capture_mode);
             view.active_capture_mode
         }
         live::hotkeys::LiveShortcutAction::Stop => {
@@ -372,7 +353,6 @@ pub(crate) fn start_live_runtime(
     live: &live::LiveSessionState,
     live_runtime: &live::runtime::LiveRuntime,
     stt: &stt::dispatch::SttState,
-    orchestrator: &runtime::RuntimeOrchestratorState,
     active_capture_mode: live::state::LiveCaptureMode,
 ) -> live::state::LiveSessionView {
     let intent = live_runtime.capture_start_intent();
@@ -383,7 +363,6 @@ pub(crate) fn start_live_runtime(
             live,
             live_runtime,
             stt,
-            orchestrator,
             active_capture_mode,
             intent,
         )
@@ -398,7 +377,7 @@ pub(crate) fn start_live_runtime(
                     let Some(message) = live_runtime.claim_start_failure(failure) else {
                         return live.snapshot();
                     };
-                    let _ = stop_live_runtime(app.clone(), live, live_runtime, orchestrator);
+                    let _ = stop_live_runtime(app.clone(), live, live_runtime);
                     let view = live.update(|view| {
                         view.error = Some(append_error(view.error.take(), &message));
                         view.route = live::state::LiveRoute::Blocked;
@@ -422,7 +401,6 @@ fn start_live_runtime_serialized(
     live: &live::LiveSessionState,
     live_runtime: &live::runtime::LiveRuntime,
     stt: &stt::dispatch::SttState,
-    orchestrator: &runtime::RuntimeOrchestratorState,
     active_capture_mode: live::state::LiveCaptureMode,
     intent: live::runtime::StartIntent,
 ) -> StartLifecycleResult {
@@ -442,7 +420,6 @@ fn start_live_runtime_serialized(
     }
 
     let setup = runtime_policy::current_setup_status().runtime_setup_state();
-    orchestrator.with(|orchestrator| orchestrator.set_setup(setup));
     if live::state::live_route_for(setup, false) == live::state::LiveRoute::Blocked {
         let view = block_for_setup(live, setup);
         if view.visibility == live::state::LiveOverlayVisibility::Enabled {
@@ -467,17 +444,6 @@ fn start_live_runtime_serialized(
         stt::log_yap(&format!("live overlay initializing show failed: {error}"));
     }
     live::events::emit_session(&app, &armed);
-
-    if let Err(error) = orchestrator.with(|orchestrator| orchestrator.start_fallback()) {
-        let view = live.block_with_error(&runtime_policy::runtime_error_to_stt(error).message);
-        if view.visibility == live::state::LiveOverlayVisibility::Enabled {
-            if let Err(error) = live::overlay_window::ensure_active(&app) {
-                stt::log_yap(&format!("live overlay route error show failed: {error}"));
-            }
-        }
-        live::events::emit_session(&app, &view);
-        return StartLifecycleResult::Complete(view);
-    }
 
     match live_runtime.start_local_capture(
         app.clone(),
@@ -508,7 +474,6 @@ fn start_live_runtime_serialized(
             let Some(message) = live_runtime.claim_start_failure(failure) else {
                 return StartLifecycleResult::Complete(live.snapshot());
             };
-            orchestrator.with(|orchestrator| orchestrator.finish_active_work());
             let view = live.block_with_error(&message);
             if let Err(error) = live::overlay_window::ensure_active(&app) {
                 stt::log_yap(&format!("live overlay start failure show failed: {error}"));
@@ -530,31 +495,20 @@ pub(crate) fn stop_live_runtime(
     app: tauri::AppHandle,
     live: &live::LiveSessionState,
     live_runtime: &live::runtime::LiveRuntime,
-    orchestrator: &runtime::RuntimeOrchestratorState,
 ) -> live::state::LiveSessionView {
     live_runtime.cancel_pending_start();
-    live_runtime.run_stop_lifecycle(|| {
-        finalize_live_runtime(app, live, live_runtime, orchestrator, None, None)
-    })
+    live_runtime.run_stop_lifecycle(|| finalize_live_runtime(app, live, live_runtime, None, None))
 }
 
 pub(crate) fn stop_live_runtime_after_crash(
     app: tauri::AppHandle,
     live: &live::LiveSessionState,
     live_runtime: &live::runtime::LiveRuntime,
-    orchestrator: &runtime::RuntimeOrchestratorState,
     session: u64,
     message: &str,
 ) -> live::state::LiveSessionView {
     live_runtime.run_stop_lifecycle(|| {
-        finalize_live_runtime(
-            app,
-            live,
-            live_runtime,
-            orchestrator,
-            Some(session),
-            Some(message),
-        )
+        finalize_live_runtime(app, live, live_runtime, Some(session), Some(message))
     })
 }
 
@@ -562,7 +516,6 @@ fn finalize_live_runtime(
     app: tauri::AppHandle,
     live: &live::LiveSessionState,
     live_runtime: &live::runtime::LiveRuntime,
-    orchestrator: &runtime::RuntimeOrchestratorState,
     expected_session: Option<u64>,
     completion_error: Option<&str>,
 ) -> live::state::LiveSessionView {
@@ -570,7 +523,6 @@ fn finalize_live_runtime(
         app,
         live,
         live_runtime,
-        orchestrator,
         expected_session,
         completion_error,
         CompletionMode::Normal,
@@ -583,7 +535,6 @@ fn finalize_live_runtime_with_mode(
     app: tauri::AppHandle,
     live: &live::LiveSessionState,
     live_runtime: &live::runtime::LiveRuntime,
-    orchestrator: &runtime::RuntimeOrchestratorState,
     expected_session: Option<u64>,
     completion_error: Option<&str>,
     mode: CompletionMode,
@@ -628,7 +579,6 @@ fn finalize_live_runtime_with_mode(
     } else {
         live.snapshot()
     };
-    orchestrator.with(|orchestrator| orchestrator.finish_active_work());
     let effects = run_completion_effects_with_mode(
         &before_stop,
         mode,

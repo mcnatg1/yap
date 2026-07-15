@@ -369,7 +369,6 @@ async fn run(app: tauri::AppHandle) {
         }
 
         let connector = app.state::<ServerConnector>();
-        let runtime_state = app.state::<crate::runtime::RuntimeOrchestratorState>();
         let now = now_ms();
         let drain = app.state::<RemoteJobDrain>();
         match advance_persisted_cancellation_once(
@@ -394,7 +393,7 @@ async fn run(app: tauri::AppHandle) {
             }
         }
         if connector.batch_connection_lease().ok().flatten().is_none() {
-            connector.refresh_for_job_drain(&app, &runtime_state).await;
+            connector.refresh_for_job_drain(&app).await;
         }
         if connector.batch_connection_lease().ok().flatten().is_none() {
             tokio::time::sleep(Duration::from_secs(2)).await;

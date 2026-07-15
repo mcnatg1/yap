@@ -1150,12 +1150,10 @@ impl LiveRuntime {
             return;
         }
         let state = app.state::<LiveSessionState>();
-        let orchestrator = app.state::<crate::runtime::RuntimeOrchestratorState>();
         let _ = super::actions::stop_live_runtime_after_crash(
             app.clone(),
             &state,
             self,
-            &orchestrator,
             session,
             message,
         );
@@ -3974,11 +3972,8 @@ mod tests {
     }
 
     #[test]
-    fn stop_cancels_initializing_start_before_capture_and_clears_runtime_busy() {
+    fn stop_cancels_initializing_start_before_capture_and_releases_the_lifecycle_gate() {
         let runtime = Arc::new(LiveRuntime::new());
-        let orchestrator = Arc::new(crate::runtime::RuntimeOrchestratorState::new());
-        orchestrator
-            .with(|state| state.set_setup(crate::runtime::state::SetupState::FallbackReady));
         let intent = runtime.capture_start_intent();
         let start_entered = Arc::new(Barrier::new(2));
         let release_start = Arc::new(Barrier::new(2));
@@ -3986,13 +3981,11 @@ mod tests {
 
         let starter = {
             let runtime = Arc::clone(&runtime);
-            let orchestrator = Arc::clone(&orchestrator);
             let start_entered = Arc::clone(&start_entered);
             let release_start = Arc::clone(&release_start);
             let capture_opened = Arc::clone(&capture_opened);
             std::thread::spawn(move || {
                 runtime.run_start_lifecycle(intent, || {
-                    orchestrator.with(|state| state.start_fallback().unwrap());
                     start_entered.wait();
                     release_start.wait();
                     if runtime.start_intent_is_current(intent) {
@@ -4006,21 +3999,17 @@ mod tests {
         runtime.cancel_pending_start();
         let stopper = {
             let runtime = Arc::clone(&runtime);
-            let orchestrator = Arc::clone(&orchestrator);
-            std::thread::spawn(move || {
-                runtime.run_stop_lifecycle(|| {
-                    orchestrator.with(|state| state.finish_active_work());
-                });
-            })
+            std::thread::spawn(move || runtime.run_stop_lifecycle(|| {}))
         };
         release_start.wait();
 
         starter.join().unwrap();
         stopper.join().unwrap();
         assert!(!capture_opened.load(Ordering::SeqCst));
+        let next_intent = runtime.capture_start_intent();
         assert_eq!(
-            orchestrator.with(|state| state.runtime()),
-            crate::runtime::state::RuntimeState::FallbackReady
+            runtime.run_start_lifecycle(next_intent, || true),
+            Some(true)
         );
     }
 

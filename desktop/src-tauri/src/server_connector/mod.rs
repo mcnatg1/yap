@@ -141,12 +141,11 @@ impl ServerConnector {
 
     fn synchronize_from_disk(
         &self,
-        runtime_state: &runtime::RuntimeOrchestratorState,
         app: &tauri::AppHandle,
     ) -> Result<ServerConnectionSnapshot, config::ConfigError> {
         self.with_loaded_settings(config::load, |inner, settings| {
             self.synchronize_settings_locked(inner, &settings, |snapshot| {
-                project_transition(runtime_state, app, snapshot);
+                emit_transition(app, snapshot);
             })
         })
     }
@@ -257,21 +256,19 @@ impl ServerConnector {
     pub(crate) async fn refresh_for_job_drain(
         &self,
         app: &tauri::AppHandle,
-        runtime_state: &runtime::RuntimeOrchestratorState,
     ) -> ServerConnectionSnapshot {
-        if self.synchronize_from_disk(runtime_state, app).is_err() {
+        if self.synchronize_from_disk(app).is_err() {
             return self.snapshot();
         }
-        self.refresh(app, runtime_state).await
+        self.refresh(app).await
     }
 
     async fn refresh<R: tauri::Runtime>(
         &self,
         app: &tauri::AppHandle<R>,
-        runtime_state: &runtime::RuntimeOrchestratorState,
     ) -> ServerConnectionSnapshot {
         let Some((generation, base_url)) = self.begin_health_request_with(|snapshot| {
-            project_transition(runtime_state, app, snapshot);
+            emit_transition(app, snapshot);
         }) else {
             return self.snapshot();
         };
@@ -287,7 +284,7 @@ impl ServerConnector {
         self.accept_health_result_with(
             generation,
             result,
-            |snapshot| project_transition(runtime_state, app, snapshot),
+            |snapshot| emit_transition(app, snapshot),
             move |generation, retry_token, delay| {
                 spawn_retry(retry_app, generation, retry_token, delay)
             },
@@ -367,14 +364,10 @@ impl ServerConnector {
     }
 }
 
-fn project_transition<R: tauri::Runtime>(
-    runtime_state: &runtime::RuntimeOrchestratorState,
+fn emit_transition<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     snapshot: &ServerConnectionSnapshot,
 ) {
-    runtime_state.with(|orchestrator| {
-        orchestrator.set_server(snapshot.state, snapshot.capabilities);
-    });
     if let Err(error) = app.emit_to(
         crate::authorization::MAIN_WINDOW_LABEL,
         "server-connection",
@@ -421,10 +414,9 @@ async fn run_scheduled_retry<R: tauri::Runtime>(
     retry_token: u64,
 ) {
     let connector = app.state::<ServerConnector>();
-    let runtime_state = app.state::<runtime::RuntimeOrchestratorState>();
     let Some(base_url) =
         connector.begin_scheduled_retry_with(generation, retry_token, |snapshot| {
-            project_transition(&runtime_state, &app, snapshot);
+            emit_transition(&app, snapshot);
         })
     else {
         return;
@@ -441,7 +433,7 @@ async fn run_scheduled_retry<R: tauri::Runtime>(
     connector.accept_health_result_with(
         generation,
         result,
-        |snapshot| project_transition(&runtime_state, &app, snapshot),
+        |snapshot| emit_transition(&app, snapshot),
         move |generation, retry_token, delay| {
             spawn_retry(retry_app, generation, retry_token, delay)
         },
@@ -515,11 +507,10 @@ pub(crate) fn server_connection_status(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     connector: tauri::State<'_, ServerConnector>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> Result<ServerConnectionSnapshot, String> {
     crate::authorization::ensure_main(&window)?;
     connector
-        .synchronize_from_disk(&runtime_state, &app)
+        .synchronize_from_disk(&app)
         .map_err(|error| error.to_string())
 }
 
@@ -528,13 +519,12 @@ pub(crate) async fn refresh_server_connection(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     connector: tauri::State<'_, ServerConnector>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> Result<ServerConnectionSnapshot, String> {
     crate::authorization::ensure_main(&window)?;
     connector
-        .synchronize_from_disk(&runtime_state, &app)
+        .synchronize_from_disk(&app)
         .map_err(|error| error.to_string())?;
-    Ok(connector.refresh(&app, &runtime_state).await)
+    Ok(connector.refresh(&app).await)
 }
 
 #[tauri::command]
@@ -550,7 +540,6 @@ pub(crate) async fn set_server_settings(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     connector: tauri::State<'_, ServerConnector>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     settings: config::ServerSettings,
 ) -> Result<config::ServerSettings, String> {
     crate::authorization::ensure_main(&window)?;
@@ -595,7 +584,7 @@ pub(crate) async fn set_server_settings(
         .or_else(|| config::load().ok())
         .unwrap_or(current);
     inner.apply_server_settings(generation, effective.enabled, effective.base_url.clone());
-    project_transition(&runtime_state, &app, &inner.snapshot());
+    emit_transition(&app, &inner.snapshot());
     result
 }
 

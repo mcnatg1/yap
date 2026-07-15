@@ -1,6 +1,6 @@
 use tauri::{Emitter, Manager};
 
-use crate::{authorization, file_actions, live, runtime, stt};
+use crate::{authorization, file_actions, live, stt};
 
 #[tauri::command]
 pub(super) fn live_status(
@@ -222,7 +222,6 @@ pub(super) fn start_live_session(
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     stt_state: tauri::State<'_, stt::dispatch::SttState>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     active_capture_mode: Option<live::state::LiveCaptureMode>,
 ) -> Result<live::state::LiveSessionView, String> {
     authorization::ensure_main(&window)?;
@@ -233,7 +232,6 @@ pub(super) fn start_live_session(
         &state,
         &live_runtime,
         &stt_state,
-        &runtime_state,
         capture_mode,
     ))
 }
@@ -245,20 +243,13 @@ pub(super) fn start_live_overlay_session(
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
     stt_state: tauri::State<'_, stt::dispatch::SttState>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
     active_capture_mode: Option<live::state::LiveCaptureMode>,
 ) -> Result<live::state::LiveOverlayView, String> {
     authorization::ensure_live_overlay(&window)?;
     live::actions::warm_on_intent(&app, &live_runtime);
     let capture_mode = active_capture_mode.unwrap_or_else(|| state.snapshot().capture_mode);
-    let view = live::actions::start_live_runtime(
-        app,
-        &state,
-        &live_runtime,
-        &stt_state,
-        &runtime_state,
-        capture_mode,
-    );
+    let view =
+        live::actions::start_live_runtime(app, &state, &live_runtime, &stt_state, capture_mode);
     Ok(live::state::LiveOverlayView::from(&view))
 }
 
@@ -268,15 +259,9 @@ pub(super) fn stop_live_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> Result<live::state::LiveSessionView, String> {
     authorization::ensure_main(&window)?;
-    Ok(live::actions::stop_live_runtime(
-        app,
-        &state,
-        &live_runtime,
-        &runtime_state,
-    ))
+    Ok(live::actions::stop_live_runtime(app, &state, &live_runtime))
 }
 
 #[tauri::command]
@@ -285,10 +270,9 @@ pub(super) fn stop_live_overlay_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, live::LiveSessionState>,
     live_runtime: tauri::State<'_, live::runtime::LiveRuntime>,
-    runtime_state: tauri::State<'_, runtime::RuntimeOrchestratorState>,
 ) -> Result<live::state::LiveOverlayView, String> {
     authorization::ensure_live_overlay(&window)?;
-    let view = live::actions::stop_live_runtime(app, &state, &live_runtime, &runtime_state);
+    let view = live::actions::stop_live_runtime(app, &state, &live_runtime);
     Ok(live::state::LiveOverlayView::from(&view))
 }
 
