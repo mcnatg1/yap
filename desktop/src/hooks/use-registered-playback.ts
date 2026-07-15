@@ -5,12 +5,14 @@ import type { RecordingJobView } from "@/lib/app-types";
 import {
   currentPlaybackPaths,
   mergeHistoryPlaybackAdmissions,
-  reconcilePlaybackAdmissionLifecycle,
-  releaseRecordingPlaybackPaths,
   restoreHistoryPlaybackAdmission,
   trimHistoryPlaybackAdmissions,
   type HistoryPlaybackAdmissions,
-} from "@/lib/playback-registry";
+} from "@/lib/history-playback";
+import {
+  reconcilePlaybackAdmissionLifecycle,
+  releaseRecordingPlaybackPaths,
+} from "@/lib/playback-admission";
 
 export function useRegisteredPlayback(
   queue: RecordingJobView[],

@@ -40,7 +40,7 @@ import { cn } from "@/lib/utils";
 import {
   projectHistoryPlaybackAdmission,
   type HistoryPlaybackAdmissions,
-} from "@/lib/playback-registry";
+} from "@/lib/history-playback";
 
 const unavailableHistoryRetry = () => undefined;
 
