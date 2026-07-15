@@ -61,7 +61,10 @@ fn prepared_frame(sample: f32) -> PreparedFrame {
 }
 
 mod adapters;
-mod capture;
+mod capture_loop;
+mod capture_loss;
+mod capture_recording;
+mod capture_safety;
 mod lifecycle;
 mod telemetry;
 mod warmup_finalization;
