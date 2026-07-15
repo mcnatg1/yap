@@ -159,6 +159,7 @@ pub(crate) fn run() {
         .setup(move |app| {
             live::shortcut_runtime::install(app, live_shortcuts)?;
             tray::install(app.handle())?;
+            jobs::start_remote_job_drain(app.handle());
             {
                 let app = app.handle().clone();
                 std::thread::spawn(move || {

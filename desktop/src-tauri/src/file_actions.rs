@@ -324,7 +324,8 @@ pub async fn read_text_preview(
 }
 
 fn read_text_file_at(path: String) -> Result<String, String> {
-    read_text_file_at_from_dir(path, &crate::live::recordings::recordings_dir())
+    read_text_file_at_from_dir(path.clone(), &crate::live::recordings::recordings_dir())
+        .or_else(|_| crate::jobs::read_published_remote_transcript(std::path::Path::new(&path)))
 }
 
 fn read_text_file_at_from_dir(path: String, owned_dir: &std::path::Path) -> Result<String, String> {
@@ -338,7 +339,17 @@ fn read_text_file_at_from_dir(path: String, owned_dir: &std::path::Path) -> Resu
 }
 
 fn read_text_preview_at(path: String, max_chars: usize) -> Result<String, String> {
-    read_text_preview_at_from_dir(path, max_chars, &crate::live::recordings::recordings_dir())
+    match read_text_preview_at_from_dir(
+        path.clone(),
+        max_chars,
+        &crate::live::recordings::recordings_dir(),
+    ) {
+        Ok(preview) => Ok(preview),
+        Err(_) => {
+            let text = crate::jobs::read_published_remote_transcript(std::path::Path::new(&path))?;
+            Ok(text.chars().take(max_chars.clamp(1, 4_000)).collect())
+        }
+    }
 }
 
 fn read_text_preview_at_from_dir(
@@ -497,6 +508,12 @@ pub fn reveal_app_path(window: tauri::WebviewWindow, path: String) -> Result<(),
 }
 
 fn openable_app_path(path: String) -> Result<std::path::PathBuf, String> {
+    let candidate = std::path::PathBuf::from(&path);
+    if is_transcript_path(&candidate) {
+        if let Ok(authorized) = crate::jobs::authorize_published_remote_transcript(&candidate) {
+            return Ok(authorized);
+        }
+    }
     openable_app_path_from_registry_paths_with_limits(
         path,
         &[(

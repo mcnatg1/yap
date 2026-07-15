@@ -7,6 +7,7 @@ import {
   deriveSetupStateFromFallbackModel,
   isFallbackModelBusy,
   isRecordingActive,
+  isRecordingCancellable,
   isRecordingFinished,
   isWorkspaceView,
   fallbackModelLabel,
@@ -100,6 +101,15 @@ describe("client recording workflow projection", () => {
     expect(isRecordingFinished("complete")).toBe(true);
     expect(isRecordingFinished("partial")).toBe(true);
     expect(isRecordingFinished("queued_server")).toBe(false);
+  });
+
+  it("allows cancellation through every active remote-client stage only", () => {
+    for (const status of ["preprocessing", "uploading", "server_processing", "saving"] as const) {
+      expect(isRecordingCancellable(status)).toBe(true);
+    }
+    expect(isRecordingCancellable("local_transcribing")).toBe(false);
+    expect(isRecordingCancellable("diarization_running")).toBe(false);
+    expect(isRecordingCancellable("complete")).toBe(false);
   });
 
   it("guards workspace event payloads at runtime", () => {

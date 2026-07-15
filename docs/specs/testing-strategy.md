@@ -1,6 +1,6 @@
 # Spec: Testing strategy
 
-**Status:** Living verification contract (updated 2026-07-13); future phase gates activate only when their fixtures exist
+**Status:** Living verification contract (updated 2026-07-14); future phase gates activate only when their fixtures exist
 **Scope:** Cross-cutting tests for the desktop runtime, track-aware audio contracts, local fallback, source-aware diarization, server contracts, and native UI.
 
 This is the shared reference the phase specs point to for their acceptance tests.
@@ -8,6 +8,9 @@ This is the shared reference the phase specs point to for their acceptance tests
 **Current activation:** deterministic generated-tone and contract fixtures exist.
 Phase 4 also has one committed, licensed LibriSpeech WAV with a locked golden
 transcript and a standard-library WER gate for the private Cohere worker. The
+Phase 5 candidate adds focused frontend, Rust, Python 3.12, API, contract,
+restart, reconnect, cancellation, retention, and result-publication coverage.
+Its complete local/native/server/GB10 gate has not run. The
 desktop speech suite, meeting RTTM manifest, diarization benchmark harness,
 bundled llama-server, and per-OS real-model matrix described below do not exist
 yet. Their tables are target gates, not claims about active CI.
@@ -23,10 +26,30 @@ yet. Their tables are target gates, not claims about active CI.
 | **E2E (smoke)** | App boots, overlay responds, desktop shell opens | Playwright for browser/Tauri shell surfaces; WebdriverIO for true desktop smoke |
 | **Accuracy** | WER spot-check vs golden transcripts | Phase 4 standard-library WER gate now; backend-specific licensed suites later |
 | **Diarization** | DER/JER, speaker count, short-turn recall, overlap, and identity false-name gates | License-clear RTTM fixtures + benchmark harness |
-| **Reliability/privacy** | Gap recovery, reconnect revisions, consent, deletion, tenant isolation | Rust integration and server contract tests |
+| **Reliability/privacy** | Gap recovery, batch reconnect/cancellation/restart/retention, consent, deletion, tenant isolation | Rust integration plus Python service/API/contract tests |
 | **Performance** | Capture drops, ASR regression, CPU, RSS, and RTF | Deterministic profiler jobs; hardware results recorded separately from CI pass/fail when hosts differ |
 
 Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
+
+### Phase 5 checked-head boundary
+
+Focused development suites may run repeatedly while the candidate changes. The
+complete Phase 5 local/native/server/GB10 matrix runs exactly once only after
+implementation, documentation, private security review, and focused review are
+ready on one frozen SHA. It must exercise a licensed, non-sensitive desktop
+import through preparation, SSH-forwarded loopback upload, the actual GB10
+worker, verified History publication, reconnect, cancellation, retry, retention,
+and clean process/listener/container teardown. Private audio, transcripts, host
+snapshots, and security-scan material are never repository, CI-artifact, or PR
+content.
+
+The native vertical-slice gate owns one explicitly configured SSH alias and
+interrupts/restores that forward around the same durable client job; it never
+accepts an already reachable local port. Cancellation races, user retry,
+restart replay, malformed input, worker failure, saturation, storage limits,
+and retention are covered by the complete Rust/Python matrix on the same frozen
+SHA, while the GB10 portion supplies the real image/model/runtime/WER and clean
+host-boundary evidence.
 
 ### Windows installer safety boundary
 

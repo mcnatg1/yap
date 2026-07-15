@@ -59,6 +59,9 @@ async function installQueuedServerBridge(
           if (command === "plugin:event|listen") return ++callbackId;
           if (command === "plugin:event|unlisten") return undefined;
           if (command === "recording_jobs_snapshot") return [queuedJob];
+          if (command === "recording_jobs_completed_transcripts") {
+            return { maintenanceWarnings: [], sessions: [] };
+          }
           if (command === "setup_status") return {
             engineBinaryStatus: "ready",
             engineReady: true,
@@ -151,8 +154,11 @@ for (const scenario of [
     );
     expect(calls).not.toContain("start_transcribe");
     expect(calls).not.toContain("fallback_model_install");
+    expect(calls).toContain("recording_jobs_completed_transcripts");
     expect(calls.filter((command) =>
-      command.startsWith("recording_job") && command !== "recording_jobs_snapshot"
+      command.startsWith("recording_job") &&
+      command !== "recording_jobs_snapshot" &&
+      command !== "recording_jobs_completed_transcripts"
     )).toEqual([]);
   });
 }
@@ -398,6 +404,9 @@ test("history keeps committed review actions separate from recoverable capture a
             };
           }
           if (command === "recording_jobs_snapshot") return [];
+          if (command === "recording_jobs_completed_transcripts") {
+            return { maintenanceWarnings: [], sessions: [] };
+          }
           if (command === "list_input_devices" || command === "resolve_owned_live_transcript_paths") return [];
           if (command === "list_local_compute_targets") return [{ id: "auto", label: "Auto", selected: true }];
           if (command === "read_text_file" || command === "read_text_preview") return "";

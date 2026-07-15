@@ -14,5 +14,17 @@ _HEALTH_VIEW = HealthView(
 )
 
 
-def health() -> dict[str, object]:
-    return _HEALTH_VIEW.to_wire()
+def health(*, batch_jobs: bool = False) -> dict[str, object]:
+    if not batch_jobs:
+        return _HEALTH_VIEW.to_wire()
+    return HealthView(
+        service="yap-server",
+        status="ok",
+        api_version="1",
+        auth="not_configured",
+        capabilities=ServerCapabilities(
+            batch_jobs=True,
+            live_streaming=False,
+            job_status=True,
+        ),
+    ).to_wire()

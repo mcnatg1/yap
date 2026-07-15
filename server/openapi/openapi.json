@@ -4,7 +4,7 @@
   "info": {
     "title": "Yap Server API",
     "version": "1.0.0",
-    "description": "Normative Yap server wire contract. Phase 3 implements only GET /v1/health. Job, chunk, commit, and live-session operations are contract-only boundaries owned by Phase 5."
+    "description": "Normative Yap server wire contract. The default Phase 3 profile implements only GET /v1/health. The optional Phase 5 loopback development profile implements the bounded job, chunk, commit, status, result, and cancellation operations. Live-session operations remain contract-only."
   },
   "tags": [
     {
@@ -13,7 +13,7 @@
     },
     {
       "name": "jobs",
-      "description": "Contract-only Phase 5 batch job and resumable upload boundary."
+      "description": "Implemented only by the optional Phase 5 loopback batch profile; unavailable in the default Phase 3 profile."
     },
     {
       "name": "live",
@@ -59,10 +59,11 @@
           "jobs"
         ],
         "summary": "Create a recording job",
-        "description": "Phase 5 contract only. Phase 3 has no upload intake, queue, persistence, auth, or inference implementation. The request never supplies tenant or owner-subject identity; a future authenticated server derives those values from a validated token.",
+        "description": "Implemented by the Phase 5 loopback-only development runtime with bounded durable intake. The request never supplies tenant or owner-subject identity; the future authenticated server derives those values from a validated token.",
         "operationId": "createJob",
         "x-yap-phase-3-behavior": "Contract only",
         "x-yap-later-owner": "Phase 5 upload intake",
+        "x-yap-current-behavior": "Implemented in the Phase 5 loopback batch runtime",
         "requestBody": {
           "required": true,
           "content": {
@@ -75,7 +76,7 @@
         },
         "responses": {
           "202": {
-            "description": "The job contract was accepted for future upload processing.",
+            "description": "The loopback batch job was durably accepted for upload processing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -107,10 +108,11 @@
           "jobs"
         ],
         "summary": "Read recording job status",
-        "description": "Phase 5 contract only. Phase 3 does not persist or report jobs.",
+        "description": "Implemented by the Phase 5 loopback batch runtime as a bounded persisted job projection without transcript content.",
         "operationId": "getJob",
         "x-yap-phase-3-behavior": "Contract only",
         "x-yap-later-owner": "Phase 5 job status",
+        "x-yap-current-behavior": "Implemented in the Phase 5 loopback batch runtime",
         "parameters": [
           {
             "$ref": "#/components/parameters/JobId"
@@ -139,11 +141,12 @@
         "tags": [
           "jobs"
         ],
-        "summary": "Request recording job cancellation",
-        "description": "Phase 5 contract only. Cancellation is a state transition request, not proof that already-running work stopped synchronously.",
+        "summary": "Cancel a recording job and delete its private artifacts",
+        "description": "Implemented by the Phase 5 loopback batch runtime. DELETE records a durable cancelled tombstone from any lifecycle state, prevents later upload/result resurrection, and purges private audio and transcript results immediately or when in-flight work reaches a safe boundary; it is not proof that already-running work stopped synchronously.",
         "operationId": "cancelJob",
         "x-yap-phase-3-behavior": "Contract only",
         "x-yap-later-owner": "Phase 5 cancellation",
+        "x-yap-current-behavior": "Implemented in the Phase 5 loopback batch runtime",
         "parameters": [
           {
             "$ref": "#/components/parameters/JobId"
@@ -151,11 +154,47 @@
         ],
         "responses": {
           "202": {
-            "description": "Cancellation was recorded or the terminal cancellation state was replayed.",
+            "description": "The cancelled tombstone was recorded, private artifacts were purged or bound to deferred safe-boundary purge, or the cancelled state was replayed.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RecordingJob"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/ApiErrorResponse"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplementedResponse"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{jobId}/result": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Read the immutable transcript result",
+        "description": "Phase 5 result retrieval. A completed server batch job publishes one immutable TranscriptResultRevision rooted in the accepted capture-manifest hash. Status polling never embeds transcript content.",
+        "operationId": "getJobResult",
+        "x-yap-phase-3-behavior": "Contract only",
+        "x-yap-later-owner": "Phase 5 result retrieval",
+        "x-yap-current-behavior": "Implemented in the Phase 5 loopback batch runtime",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The immutable transcript result revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResultRevision"
                 }
               }
             }
@@ -178,10 +217,11 @@
           "jobs"
         ],
         "summary": "Upload one immutable audio chunk",
-        "description": "Phase 5 contract only. The body is raw little-endian PCM bytes. Replay identity and byte content identity are independent. The job, idempotency-key session, manifest session, track, sequence range, and content hash MUST satisfy x-yap-source-identity-invariants. Every explicit Yap header and path range MUST match exactly one chunk entry in the immutable capture manifest; a mismatch is rejected before bytes are accepted.",
+        "description": "Implemented by the Phase 5 loopback batch runtime. The body is raw little-endian PCM bytes. Replay identity and byte content identity are independent. The job, idempotency-key session, manifest session, track, sequence range, content hash, and PCM frame count MUST satisfy x-yap-source-identity-invariants. Every explicit Yap header and path range MUST match exactly one chunk entry in the immutable capture manifest; a mismatch is rejected before bytes are accepted.",
         "operationId": "uploadJobChunk",
         "x-yap-phase-3-behavior": "Contract only",
         "x-yap-later-owner": "Phase 5 resumable upload",
+        "x-yap-current-behavior": "Implemented in the Phase 5 loopback batch runtime",
         "x-yap-replay-semantics": {
           "sameKeySameHash": "replay_success",
           "sameKeyDifferentHash": {
@@ -222,6 +262,12 @@
               "headers.Idempotency-Key.sequenceStart-sequenceEnd",
               "manifestChunk.replayKey.sequenceStart-sequenceEnd"
             ]
+          },
+          "pcmFrameCount": {
+            "rule": "inclusive_range_length_equals_pcm16_frame_count",
+            "rangePath": "manifestChunk.replayKey.sequenceStart-sequenceEnd",
+            "byteLengthPath": "manifestChunk.contentIdentity.byteLength",
+            "formula": "sequenceEnd - sequenceStart + 1 == byteLength / 2"
           },
           "contentIdentity": {
             "rule": "all_equal",
@@ -394,10 +440,11 @@
           "jobs"
         ],
         "summary": "Commit a complete recording upload",
-        "description": "Phase 5 contract only. Commit makes the immutable capture manifest eligible for queued server processing after every referenced chunk is present and hash-verified.",
+        "description": "Implemented by the Phase 5 loopback batch runtime. Commit makes the immutable capture manifest eligible for bounded server processing after every referenced chunk is present and hash-verified.",
         "operationId": "commitJob",
         "x-yap-phase-3-behavior": "Contract only",
         "x-yap-later-owner": "Phase 5 upload commit",
+        "x-yap-current-behavior": "Implemented in the Phase 5 loopback batch runtime",
         "parameters": [
           {
             "$ref": "#/components/parameters/JobId"
@@ -445,10 +492,11 @@
           "live"
         ],
         "summary": "Upgrade to the Yap live event protocol",
-        "description": "Phase 5 event-schema contract only. Phase 3 has no WebSocket runtime, streaming inference, authentication, or reconnect drain.",
+        "description": "The live event schema remains contract-only. Phase 5 implements the durable HTTP batch vertical slice but does not advertise a WebSocket runtime, streaming inference, or authentication.",
         "operationId": "connectLive",
         "x-yap-phase-3-behavior": "Event schema only",
         "x-yap-later-owner": "Phase 5 WSS streaming",
+        "x-yap-current-behavior": "Contract only; capability remains false",
         "x-yap-live-events-schema": "./live-events.schema.json",
         "responses": {
           "101": {
@@ -1562,7 +1610,7 @@
       "CreateRecordingJobRequest": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Phase 5 upload-intake request. metadata, captureManifest, and every chunk replay key MUST name one session; every chunk track MUST belong to the unique declared track set; replay keys MUST be unique; and the accepted manifest reference and chunk declaration become immutable. metadata.origin MUST agree with every track source kind: imported_file requires imported tracks, live_capture requires captured tracks, and an imported physical-source hint is valid only as user_declared provenance. Identity ownership is server-derived after token validation; privacyPolicyVersion unconfigured cannot authorize a team upload once policy gating ships.",
+        "description": "Phase 5 loopback batch intake accepts one imported meeting track with a non-null finite UTC retention expiry. metadata, captureManifest, and every chunk replay key MUST name one session; replay keys MUST be unique and contiguous from zero; and the accepted manifest reference and chunk declaration become immutable. An imported physical-source hint is valid only as user_declared provenance. Identity ownership is server-derived after token validation; privacyPolicyVersion unconfigured cannot authorize a team upload once policy gating ships.",
         "x-yap-source-identity-invariants": {
           "singleSessionIdentity": {
             "rule": "all_equal",
@@ -1597,8 +1645,7 @@
           "originTrackCoherence": {
             "rule": "origin_matches_all_track_source_kinds",
             "cases": {
-              "imported_file": "imported",
-              "live_capture": "captured"
+              "imported_file": "imported"
             }
           },
           "importedPhysicalSourceHint": {
@@ -1722,11 +1769,30 @@
             "maxLength": 256
           },
           "metadata": {
-            "$ref": "#/components/schemas/SessionMetadata"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SessionMetadata"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "meeting"
+                  },
+                  "origin": {
+                    "const": "imported_file"
+                  },
+                  "retentionExpiresAtUtc": {
+                    "$ref": "#/components/schemas/UtcDateTime"
+                  }
+                }
+              }
+            ]
           },
           "tracks": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 1,
             "items": {
               "$ref": "#/components/schemas/CaptureTrackDescriptor"
             }
@@ -1741,6 +1807,7 @@
           "chunks": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 4096,
             "items": {
               "$ref": "#/components/schemas/CaptureChunkReference"
             }

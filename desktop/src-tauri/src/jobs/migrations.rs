@@ -2,8 +2,10 @@ use crate::jobs::model::JobLedgerError;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::{path::Path, time::Duration};
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
-const MIGRATION_SQL: &str = include_str!("../../migrations/0001_job_ledger.sql");
+const CURRENT_SCHEMA_VERSION: i64 = 3;
+const MIGRATION_1_SQL: &str = include_str!("../../migrations/0001_job_ledger.sql");
+const MIGRATION_2_SQL: &str = include_str!("../../migrations/0002_prepared_remote_jobs.sql");
+const MIGRATION_3_SQL: &str = include_str!("../../migrations/0003_remote_spool_cleanup.sql");
 
 pub(super) fn open_file(path: &Path) -> Result<Connection, JobLedgerError> {
     open_file_with_migration_hook(path, || {})
@@ -49,7 +51,16 @@ fn migrate_with_hook(
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         CURRENT_SCHEMA_VERSION => {}
-        0 => transaction.execute_batch(MIGRATION_SQL)?,
+        2 => transaction.execute_batch(MIGRATION_3_SQL)?,
+        1 => {
+            transaction.execute_batch(MIGRATION_2_SQL)?;
+            transaction.execute_batch(MIGRATION_3_SQL)?;
+        }
+        0 => {
+            transaction.execute_batch(MIGRATION_1_SQL)?;
+            transaction.execute_batch(MIGRATION_2_SQL)?;
+            transaction.execute_batch(MIGRATION_3_SQL)?;
+        }
         unsupported => return Err(JobLedgerError::UnsupportedSchema(unsupported)),
     }
     transaction.commit()?;
@@ -114,9 +125,18 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(version, 1);
+        assert_eq!(version, 3);
         assert_eq!(foreign_keys, 1);
-        assert_eq!(tables, ["job_chunks", "recording_jobs"]);
+        assert_eq!(
+            tables,
+            [
+                "detached_remote_cancellations",
+                "job_chunks",
+                "prepared_remote_jobs",
+                "recording_jobs",
+                "remote_spool_cleanup",
+            ]
+        );
         assert!(connection.execute(
             "INSERT INTO job_chunks (job_id, owner_namespace, session_id, track_id, sequence_start, sequence_end, content_sha256, artifact_path) VALUES ('missing', 'local:test', 'session', 'mic', 0, 1, 'hash', 'artifact')",
             [],
@@ -190,13 +210,48 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         let table_count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('recording_jobs', 'job_chunks')",
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('recording_jobs', 'job_chunks', 'prepared_remote_jobs', 'detached_remote_cancellations', 'remote_spool_cleanup')",
             [],
             |row| row.get(0),
         ).unwrap();
-        assert_eq!((version, table_count), (1, 2));
+        assert_eq!((version, table_count), (3, 5));
         drop(connection);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn version_one_database_upgrades_without_replacing_existing_jobs() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure_connection(&connection, false).unwrap();
+        connection.execute_batch(MIGRATION_1_SQL).unwrap();
+        connection.execute(
+            "INSERT INTO recording_jobs (job_id, session_mode, session_origin, source_path, display_name, status, created_at_ms, updated_at_ms) VALUES ('existing', 'meeting', 'imported_file', 'C:/existing.wav', 'existing.wav', 'queued_server', 1, 1)",
+            [],
+        ).unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let existing: String = connection
+            .query_row(
+                "SELECT display_name FROM recording_jobs WHERE job_id = 'existing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let remote_table: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'prepared_remote_jobs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            (version, existing.as_str(), remote_table),
+            (3, "existing.wav", 1)
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useHistoryActions } from "@/hooks/use-history-actions";
 import { useRecordingJobs } from "@/hooks/use-imported-recording-queue";
 import { useLiveHistorySync } from "@/hooks/use-live-history-sync";
+import { useRemoteHistorySync } from "@/hooks/use-remote-history-sync";
 import { useRecordingSelection } from "@/hooks/use-recording-selection";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
@@ -202,6 +203,21 @@ export default function App() {
     captureNativeHistoryReconciliation,
     onSaved: onLiveSessionSaved,
     reconcileHiddenHistory,
+    recordVisibleHistoryEntries,
+  });
+  const onRemoteTranscriptSaved = useCallback((entry: TranscriptHistoryEntry) => {
+    selectHistoryEntry(entry);
+    openWorkspace("home");
+    setStatus("Ready");
+    void loadTranscriptText(entry.outputPath).catch(() => undefined);
+    if (entry.warning) {
+      toast.warning(entry.warning);
+    } else {
+      toast.success("Server transcript saved");
+    }
+  }, [loadTranscriptText, openWorkspace, selectHistoryEntry]);
+  useRemoteHistorySync({
+    onSaved: onRemoteTranscriptSaved,
     recordVisibleHistoryEntries,
   });
   const historyActions = useHistoryActions({

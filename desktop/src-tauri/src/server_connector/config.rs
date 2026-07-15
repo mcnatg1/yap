@@ -93,6 +93,7 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+#[cfg(test)]
 impl ConfigError {
     pub(crate) fn settings_may_have_changed(&self) -> bool {
         matches!(

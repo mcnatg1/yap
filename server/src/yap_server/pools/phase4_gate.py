@@ -6,14 +6,13 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import tempfile
-from typing import Callable
 
 from yap_server.pools.batch_asr import (
     BatchAsrJob,
     BatchAsrPool,
     ContainerBatchAsrWorker,
+    inspect_worker_image as inspect_container_image,
 )
 from yap_server.pools.model_lock import (
     load_model_pool_lock,
@@ -27,58 +26,6 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _PHASE4_DEVICE_NAME = "NVIDIA GB10"
 _PHASE4_COMPUTE_CAPABILITY = [12, 1]
 _PHASE4_DTYPE = "bfloat16"
-
-
-def inspect_container_image(
-    image: str,
-    checked_head: str,
-    *,
-    docker_binary: str = "docker",
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> dict[str, object]:
-    completed = runner(
-        [docker_binary, "image", "inspect", image],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-        stdin=subprocess.DEVNULL,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError("could not inspect the Phase 4 worker image")
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("worker image inspection returned invalid JSON") from error
-    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
-        raise RuntimeError("worker image inspection returned an unexpected shape")
-    record = payload[0]
-    config = record.get("Config")
-    labels = config.get("Labels") if isinstance(config, dict) else None
-    if not isinstance(labels, dict) or labels.get("org.opencontainers.image.revision") != checked_head:
-        raise RuntimeError("worker image revision label does not match the checked head")
-    image_id = record.get("Id")
-    architecture = record.get("Architecture")
-    repo_digests = record.get("RepoDigests")
-    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
-        raise RuntimeError("worker image ID is invalid")
-    if architecture != "arm64":
-        raise RuntimeError("worker image architecture is not ARM64")
-    if repo_digests is None:
-        repo_digests = []
-    if not isinstance(repo_digests, list) or not all(
-        isinstance(item, str) for item in repo_digests
-    ):
-        raise RuntimeError("worker image repository digests are invalid")
-    return {
-        "reference": image,
-        "id": image_id,
-        "architecture": architecture,
-        "repoDigests": repo_digests,
-        "revision": checked_head,
-    }
 
 
 def normalized_words(value: str) -> list[str]:

@@ -281,7 +281,7 @@ fn recover_staging_residue(legacy: &Path, canonical: &Path) -> io::Result<()> {
                     format!("staging residue has no entry name: {}", staged.display()),
                 )
             })?;
-            if !is_legacy_runtime_entry(name) {
+            if !is_recognized_legacy_runtime_entry(name) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -339,7 +339,7 @@ fn recover_retirement_residue(legacy: &Path, canonical: &Path) -> io::Result<()>
                     ),
                 )
             })?;
-            if !is_legacy_runtime_entry(name) {
+            if !is_recognized_legacy_runtime_entry(name) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -474,7 +474,7 @@ fn discover_legacy_entries(legacy: &Path, canonical: &Path) -> io::Result<Vec<(P
     let mut sources = Vec::new();
     for entry in fs::read_dir(legacy)? {
         let entry = entry?;
-        if is_legacy_runtime_entry(&entry.file_name()) {
+        if is_migratable_legacy_runtime_entry(&entry.file_name()) {
             sources.push(entry.path());
         }
     }
@@ -665,7 +665,14 @@ fn create_unique_directory(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
     ))
 }
 
-fn is_legacy_runtime_entry(name: &OsStr) -> bool {
+fn is_migratable_legacy_runtime_entry(name: &OsStr) -> bool {
+    // Canonical logging can already have created a different logs tree. Logs
+    // are diagnostic residue, not authoritative runtime state, so preserve the
+    // legacy copy in place instead of letting it block the data migration.
+    name.to_str() != Some("logs") && is_recognized_legacy_runtime_entry(name)
+}
+
+fn is_recognized_legacy_runtime_entry(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
@@ -673,6 +680,7 @@ fn is_legacy_runtime_entry(name: &OsStr) -> bool {
         name,
         "models"
             | "live-recordings"
+            | "remote-jobs"
             | "logs"
             | "install-id"
             | "local-fallback.disabled"
@@ -682,8 +690,10 @@ fn is_legacy_runtime_entry(name: &OsStr) -> bool {
         || name == "jobs.sqlite3-wal"
         || name.starts_with("live-settings.json")
         || name.starts_with("server-settings.json")
+        || name.starts_with("server-origin-approval.json")
         || name.starts_with("recording-playback-registry.json")
         || name.starts_with("recording-job-playback-registry.json")
+        || name.starts_with("recording-native-selection-registry.json")
 }
 
 fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
@@ -820,13 +830,32 @@ mod tests {
         let canonical = root.join("canonical");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(legacy.join("models")).unwrap();
+        std::fs::create_dir_all(legacy.join("remote-jobs").join("job-legacy")).unwrap();
         std::fs::write(legacy.join("models").join("model.bin"), b"model").unwrap();
+        std::fs::write(
+            legacy
+                .join("remote-jobs")
+                .join("job-legacy")
+                .join("private.pcm"),
+            b"private recording",
+        )
+        .unwrap();
         std::fs::write(legacy.join("jobs.sqlite3"), b"ledger").unwrap();
+        std::fs::write(
+            legacy.join("recording-native-selection-registry.json"),
+            b"native selection",
+        )
+        .unwrap();
+        std::fs::write(
+            legacy.join("server-origin-approval.json"),
+            b"server approval",
+        )
+        .unwrap();
         std::fs::write(legacy.join("yap-desktop.exe"), b"installed binary").unwrap();
 
         let outcome = migrate_legacy_entries(&legacy, &canonical).unwrap();
 
-        assert_eq!(outcome, LegacyMigrationOutcome::Migrated { entries: 2 });
+        assert_eq!(outcome, LegacyMigrationOutcome::Migrated { entries: 5 });
         assert_eq!(
             std::fs::read(canonical.join("models").join("model.bin")).unwrap(),
             b"model"
@@ -835,7 +864,68 @@ mod tests {
             std::fs::read(canonical.join("jobs.sqlite3")).unwrap(),
             b"ledger"
         );
+        assert_eq!(
+            std::fs::read(
+                canonical
+                    .join("remote-jobs")
+                    .join("job-legacy")
+                    .join("private.pcm")
+            )
+            .unwrap(),
+            b"private recording"
+        );
+        assert_eq!(
+            std::fs::read(canonical.join("recording-native-selection-registry.json")).unwrap(),
+            b"native selection"
+        );
+        assert_eq!(
+            std::fs::read(canonical.join("server-origin-approval.json")).unwrap(),
+            b"server approval"
+        );
         assert!(legacy.join("yap-desktop.exe").is_file());
+        assert!(!legacy.join("jobs.sqlite3").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_logs_do_not_block_authoritative_data_migration() {
+        let root = std::env::temp_dir().join(format!(
+            "yap-app-data-migration-{}-{}",
+            std::process::id(),
+            12
+        ));
+        let legacy = root.join("legacy");
+        let canonical = root.join("canonical");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(legacy.join("logs")).unwrap();
+        std::fs::create_dir_all(canonical.join("logs")).unwrap();
+        std::fs::write(
+            legacy.join("logs").join("legacy.log"),
+            b"legacy diagnostics",
+        )
+        .unwrap();
+        std::fs::write(
+            canonical.join("logs").join("yap.log"),
+            b"canonical diagnostics",
+        )
+        .unwrap();
+        std::fs::write(legacy.join("jobs.sqlite3"), b"ledger").unwrap();
+
+        let outcome = migrate_legacy_entries(&legacy, &canonical).unwrap();
+
+        assert_eq!(outcome, LegacyMigrationOutcome::Migrated { entries: 1 });
+        assert_eq!(
+            std::fs::read(canonical.join("jobs.sqlite3")).unwrap(),
+            b"ledger"
+        );
+        assert_eq!(
+            std::fs::read(canonical.join("logs").join("yap.log")).unwrap(),
+            b"canonical diagnostics"
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("logs").join("legacy.log")).unwrap(),
+            b"legacy diagnostics"
+        );
         assert!(!legacy.join("jobs.sqlite3").exists());
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -54,8 +54,9 @@ decisions remain unchanged.
 
 - Admission bounds, per-owner round robin, pool capacity, and backpressure stay
   independent of this priority rule.
-- Phase 5 still owns connected upload/drain and live transport. Phase 7 still
-  owns authenticated owner identity.
+- The Phase 5 candidate connects durable batch upload/drain to the router for
+  one development owner. Live transport remains a later authenticated baseline,
+  and Phase 7 still owns authenticated owner identity.
 
 ## Implementation notes
 
@@ -66,6 +67,10 @@ decisions remain unchanged.
 - The reference rule was included in the complete one-time Phase 4 matrix that
   passed on exact executable candidate
   `309a2d427707e3483b2649f13940bd48dfaee836`.
+- The Phase 5 candidate routes loopback batch commits through this scheduler
+  with one fixed development owner. It does not add a live target, authenticated
+  ownership, measured mixed-load capacity, or production service integration;
+  the complete Phase 5 gate is pending.
 - Production promotion requires durable-queue, cancellation, recovery,
   authenticated-owner, and mixed-load latency/capacity evidence.
 

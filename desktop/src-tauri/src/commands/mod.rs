@@ -10,6 +10,10 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
             crate::jobs::commands::RecordingJobs::open_default()
                 .expect("recording job ledger must open before commands are registered"),
         )
+        .manage(
+            crate::jobs::RemoteJobDrain::open_default()
+                .expect("remote recording drain must open before commands are registered"),
+        )
         .manage(crate::server_connector::ServerConnector::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
@@ -18,6 +22,7 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::server_connector::server_settings,
         crate::server_connector::set_server_settings,
         crate::jobs::commands::recording_jobs_snapshot,
+        crate::jobs::commands::recording_jobs_completed_transcripts,
         crate::jobs::commands::recording_jobs_pick_imports,
         crate::jobs::commands::recording_job_cancel,
         crate::jobs::commands::recording_job_dismiss,

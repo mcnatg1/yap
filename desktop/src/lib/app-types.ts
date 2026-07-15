@@ -23,7 +23,7 @@ export function isWorkspaceView(value: unknown): value is WorkspaceView {
   return typeof value === "string" && (workspaceViews as readonly string[]).includes(value);
 }
 
-export const acceptedFormats = "MP3, M4A, WAV, MP4, FLAC, OGG, WEBM";
+export const acceptedFormats = "WAV only for now (mono PCM16, 16 kHz)";
 
 export const queuedServerMessage =
   "Queued for your organization's transcription server. It will start when Yap connects.";
@@ -246,7 +246,11 @@ export function isRecordingCancellable(status: RecordingJobStatus) {
     status === "blocked_server_unavailable" ||
     status === "blocked_sign_in_required" ||
     status === "queued_local_fallback" ||
-    status === "queued_server";
+    status === "queued_server" ||
+    status === "preprocessing" ||
+    status === "uploading" ||
+    status === "server_processing" ||
+    status === "saving";
 }
 
 export function isRecordingFinished(status?: RecordingJobStatus) {

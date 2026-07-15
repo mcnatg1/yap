@@ -101,6 +101,20 @@ class _BlockingWorker:
         return {"schemaVersion": 1, "jobId": job.job_id}
 
 
+class _ClosableWorker:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.closed = threading.Event()
+
+    def run(self, job: BatchAsrJob) -> dict[str, object]:
+        self.started.set()
+        self.closed.wait(timeout=0.25)
+        return {"schemaVersion": 1, "jobId": job.job_id}
+
+    def close(self) -> None:
+        self.closed.set()
+
+
 class BatchAsrPoolTests(unittest.TestCase):
     def test_batch_job_requires_an_explicit_iso_language(self) -> None:
         job = BatchAsrJob(
@@ -186,6 +200,24 @@ class BatchAsrPoolTests(unittest.TestCase):
             worker.release.set()
             pool.shutdown()
 
+    def test_pool_shutdown_stops_the_worker_before_waiting_for_threads(self) -> None:
+        worker = _ClosableWorker()
+        pool = BatchAsrPool(worker, max_workers=1, max_queued=0)
+        pool.submit(
+            BatchAsrJob(
+                "job-1",
+                Path("one.wav"),
+                Path("one.json"),
+                language="en",
+                input_sha256=AUDIO_SHA256,
+            )
+        )
+        self.assertTrue(worker.started.wait(timeout=2))
+
+        pool.shutdown()
+
+        self.assertTrue(worker.closed.is_set())
+
 
 class ContainerBatchAsrWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -225,6 +257,21 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 timeout_seconds=5,
                 output_limit_bytes=1024,
             )
+
+    def test_default_process_runner_honors_shutdown_cancellation(self) -> None:
+        cancelled = threading.Event()
+        trigger = threading.Timer(0.1, cancelled.set)
+        trigger.start()
+        try:
+            with self.assertRaisesRegex(WorkerExecutionError, "cancelled"):
+                _run_bounded_process(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    timeout_seconds=5,
+                    output_limit_bytes=1024,
+                    cancellation=cancelled,
+                )
+        finally:
+            trigger.join(timeout=1)
 
     def test_default_runner_force_removes_the_named_container_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

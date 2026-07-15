@@ -37,7 +37,7 @@ Keep the folder name `desktop/` while this is a staged monorepo. Rename the repo
 
 | Priority | Item | Current state | Next action |
 |----------|------|---------------|-------------|
-| P1 | Connected remote server processing remains deferred | Phase 4 has an isolated reference router and one transient Cohere batch worker, but the connector and SQLite ledger do not upload, drain, advertise, or process jobs | Phase 5 connects upload/drain and live transport only after its contract and security gates |
+| P1 | Production remote server processing remains deferred | The Phase 5 candidate connects durable loopback HTTP batch upload/drain, status, cancellation, result verification, and History projection to the isolated worker; its one-time complete gate is pending | Keep WSS/live, authentication, persistent service, external edge, and measured multi-worker capacity behind their explicit later gates |
 | P1 | CI parity clip is opt-in | Mock verbose JSON fixture protects timestamp contract in normal CI; real audio sidecar tests are ignored unless `YAP_PARITY_CLIP` is set | Add a licensed speech fixture later if real audio parity must run in CI |
 | P2 | ShadCN icon metadata now matches Phosphor | `components.json` declares Phosphor, and app imports Phosphor directly | Keep direct imports; do not add an icon adapter |
 | P2 | Active spec filenames use client/server names | Historical phase links were renamed to `local-live-fallback-sidecar.md`, `live-dictation-client-ux.md`, `server-tier-mvp.md`, and `local-llm-sidecar.md` | Leave ADR phase aliases intact unless an ADR is amended |
