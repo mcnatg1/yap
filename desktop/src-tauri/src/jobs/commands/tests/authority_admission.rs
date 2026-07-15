@@ -278,6 +278,10 @@ fn unrelated_mutations_preserve_playback_but_source_replacement_rotates_it() {
     );
     assert_eq!(media.active_admission_count_for_test(), 2);
 
+    // An active playback URL owns an open source lease on Windows. Release that
+    // authority before modeling an external replacement of the selected file.
+    jobs.release_playback(&selected_job.id, &media);
+    assert_eq!(media.active_admission_count_for_test(), 1);
     fs::rename(&selected, &original).unwrap();
     fs::write(&selected, b"RIFF-selected-replacement").unwrap();
     let after_replacement = jobs.snapshot(&media, 2_103).unwrap();
