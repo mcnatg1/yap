@@ -1,266 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { Copy } from "@phosphor-icons/react/Copy";
-import { ArrowClockwise as Recover } from "@phosphor-icons/react/ArrowClockwise";
-import { EyeSlash } from "@phosphor-icons/react/EyeSlash";
 import { FileText } from "@phosphor-icons/react/FileText";
-import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
-import { DotsThree as MoreHorizontal } from "@phosphor-icons/react/DotsThree";
 import { MagnifyingGlass as Search } from "@phosphor-icons/react/MagnifyingGlass";
-import { Trash as Trash2 } from "@phosphor-icons/react/Trash";
+import { useEffect, useMemo, useState } from "react";
 
-import { HistoryEntryPreview } from "@/components/panels/history-entry-preview";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import type { HistoryEntryActions, HistoryPanelProps } from "@/components/history/history-panel-contract";
+import { HistoryResults } from "@/components/history/history-results";
+import { projectHistorySearchDisplay } from "@/components/history/history-search";
+import { useHistorySearch } from "@/components/history/use-history-search";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Card, CardContent } from "@/components/ui/card";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  canDeleteTranscriptHistoryEntry,
-  isRecoverableTranscriptHistoryEntry,
-  isUntrustedNativeLiveTranscriptHistoryEntry,
-  maxTranscriptHistoryEntries,
-  recoverableLiveSessionActionIdentity,
-  type TranscriptHistoryEntry,
-} from "@/history";
-import { formatHistoryTime, groupHistoryByDay } from "@/lib/app-types";
+import { groupHistoryByDay } from "@/lib/app-types";
 import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
-import {
-  createPreviewSearchLoader,
-  createPreviewSearchGenerationGuard,
-  createPreviewTextLoader,
-  mergePreviewSearchFailures,
-  prunePreviewSearchFailures,
-  previewSearchEntries,
-  shouldSearchTranscriptBodies,
-  type PreviewSearchFailureState,
-} from "@/lib/history-preview-loader";
-import { pruneTextCache, rememberText, rememberTexts } from "@/lib/text-cache";
-import { cn } from "@/lib/utils";
-
-const maxHistoryPreviewCacheEntries = maxTranscriptHistoryEntries;
-const maxHistoryPreviewCharsPerEntry = 2_000;
-const maxHistoryPreviewCacheChars =
-  maxHistoryPreviewCacheEntries * maxHistoryPreviewCharsPerEntry;
-const noUnavailablePreviewPaths: ReadonlySet<string> = new Set();
-
-export type HistorySearchFailureState = PreviewSearchFailureState;
-
-type HistoryPreviewState = {
-  previewTextByPath: Record<string, string>;
-  searchFailures: HistorySearchFailureState;
-};
-
-function normalizeHistorySearchQuery(query: string) {
-  return query.trim().toLowerCase();
-}
-
-export function historySearchFailurePathsForQuery(
-  failure: HistorySearchFailureState,
-  query: string,
-) {
-  return shouldSearchTranscriptBodies(query)
-    ? failure.paths
-    : noUnavailablePreviewPaths;
-}
-
-export function projectHistorySearchDisplay({
-  hasResults,
-  indexingBodies,
-  hasUnavailableBodies = false,
-}: {
-  hasResults: boolean;
-  indexingBodies: boolean;
-  hasUnavailableBodies?: boolean;
-}): "results" | "indexing" | "unavailable" | "empty" {
-  if (hasResults) return "results";
-  if (indexingBodies) return "indexing";
-  return hasUnavailableBodies ? "unavailable" : "empty";
-}
-
-export function isHistoryBodySearchPending({
-  cachedOutputPaths,
-  terminalOutputPaths = new Set<string>(),
-  hasPreviewLoader,
-  outputPaths,
-  query,
-}: {
-  cachedOutputPaths: ReadonlySet<string>;
-  terminalOutputPaths?: ReadonlySet<string>;
-  hasPreviewLoader: boolean;
-  outputPaths: readonly string[];
-  query: string;
-}) {
-  return hasPreviewLoader
-    && shouldSearchTranscriptBodies(query)
-    && outputPaths.some(
-      (outputPath) => !cachedOutputPaths.has(outputPath) && !terminalOutputPaths.has(outputPath),
-    );
-}
-
-function HistoryActionMenu({
-  entry,
-  onCopy,
-  onDelete,
-  onDeleteRecoverable,
-  onHide,
-  onOpen,
-  onPreview,
-  onRecover,
-  onReveal,
-}: {
-  entry: TranscriptHistoryEntry;
-  onCopy: (entry: TranscriptHistoryEntry) => void;
-  onDelete: (entry: TranscriptHistoryEntry) => void;
-  onDeleteRecoverable: (entry: TranscriptHistoryEntry) => void;
-  onHide: (outputPath: string) => void;
-  onOpen: (entry: TranscriptHistoryEntry) => void;
-  onPreview: (entry: TranscriptHistoryEntry) => void;
-  onRecover: (entry: TranscriptHistoryEntry) => void;
-  onReveal: (entry: TranscriptHistoryEntry) => void;
-}) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const canDelete = canDeleteTranscriptHistoryEntry(entry);
-  const recoverable = isRecoverableTranscriptHistoryEntry(entry);
-  const canMutateRecoverable = recoverableLiveSessionActionIdentity(entry) !== undefined;
-  const hideOnly = isUntrustedNativeLiveTranscriptHistoryEntry(entry);
-
-  return (
-    <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label={`Actions for ${entry.name}`}
-            onClick={(event) => event.stopPropagation()}
-            size="icon-xs"
-            type="button"
-            variant="ghost"
-          >
-            <MoreHorizontal />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
-          <DropdownMenuLabel>{recoverable ? "Partial" : "Transcript"}</DropdownMenuLabel>
-          {recoverable ? (
-            <DropdownMenuGroup>
-              {canMutateRecoverable ? (
-                <DropdownMenuItem onSelect={() => onRecover(entry)}>
-                  <Recover />
-                  Recover
-                </DropdownMenuItem>
-              ) : null}
-              <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
-                <EyeSlash />
-                Hide
-              </DropdownMenuItem>
-              {canMutateRecoverable ? (
-                <DropdownMenuItem onSelect={() => onDeleteRecoverable(entry)} variant="destructive">
-                  <Trash2 />
-                  Delete
-                </DropdownMenuItem>
-              ) : null}
-            </DropdownMenuGroup>
-          ) : hideOnly ? (
-            <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
-              <EyeSlash />
-              Hide
-            </DropdownMenuItem>
-          ) : (
-            <>
-              <DropdownMenuGroup>
-                <DropdownMenuItem onSelect={() => onPreview(entry)}>
-                  <FileText />
-                  Preview
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onCopy(entry)}>
-                  <Copy />
-                  Copy transcript
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onOpen(entry)}>
-                  <FileText />
-                  Open file
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onReveal(entry)}>
-                  <FolderOpen />
-                  Reveal in Explorer
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => onHide(entry.outputPath)}>
-                <EyeSlash />
-                Hide
-              </DropdownMenuItem>
-            </>
-          )}
-          {!recoverable && canDelete ? (
-            <DropdownMenuItem
-              onSelect={(event) => {
-                event.preventDefault();
-                setConfirmDelete(true);
-              }}
-              variant="destructive"
-            >
-              <Trash2 />
-              Delete
-            </DropdownMenuItem>
-          ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <AlertDialog onOpenChange={setConfirmDelete} open={confirmDelete}>
-        <AlertDialogContent onClick={(event) => event.stopPropagation()}>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete from device?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This deletes the saved transcript. If the recording was captured by Yap, that audio file
-              is deleted too.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20"
-              onClick={() => onDelete(entry)}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
-  );
-}
 
 export function HistoryPanel({
   entries,
@@ -276,250 +27,30 @@ export function HistoryPanel({
   onReveal,
   onSelect,
   selectedOutputPath,
-}: {
-  entries: TranscriptHistoryEntry[];
-  onCopy: (entry: TranscriptHistoryEntry) => void;
-  onDelete: (entry: TranscriptHistoryEntry) => void;
-  onDeleteRecoverable: (entry: TranscriptHistoryEntry) => void;
-  onHide: (outputPath: string) => void;
-  onLoadPreviewText?: (entry: TranscriptHistoryEntry) => Promise<string>;
-  onOpen: (entry: TranscriptHistoryEntry) => void;
-  onOpenHelp?: () => void;
-  onPreview: (entry: TranscriptHistoryEntry) => void;
-  onRecover: (entry: TranscriptHistoryEntry) => void;
-  onReveal: (entry: TranscriptHistoryEntry) => void;
-  onSelect: (entry: TranscriptHistoryEntry, origin?: DOMRect) => void;
-  selectedOutputPath?: string;
-}) {
+}: HistoryPanelProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
-  const [searchRetryGeneration, setSearchRetryGeneration] = useState(0);
   const [renderLimit, setRenderLimit] = useState(historyRenderWindowSize);
-  const [historyPreviewState, setHistoryPreviewState] = useState<HistoryPreviewState>(() => ({
-    previewTextByPath: {},
-    searchFailures: { paths: new Set() },
-  }));
-  const { previewTextByPath, searchFailures } = historyPreviewState;
-  const previewTextByPathRef = useRef(previewTextByPath);
-  const previewLoaderRef = useRef(createPreviewTextLoader({
-    maxCharsPerEntry: maxHistoryPreviewCharsPerEntry,
-    maxEntries: maxHistoryPreviewCacheEntries,
-    maxTotalChars: maxHistoryPreviewCacheChars,
-  }));
-  const previewSearchLoaderRef = useRef(createPreviewSearchLoader());
-  const previewSearchGenerationRef = useRef(createPreviewSearchGenerationGuard());
-
-  useEffect(() => {
-    previewTextByPathRef.current = previewTextByPath;
-  }, [previewTextByPath]);
-
-  const searchableEntries = useMemo(() => previewSearchEntries(entries), [entries]);
-  const searchableOutputPaths = useMemo(
-    () => searchableEntries.map((entry) => entry.outputPath),
-    [searchableEntries],
-  );
-  const searchableOutputPathSet = useMemo(
-    () => new Set(searchableOutputPaths),
-    [searchableOutputPaths],
-  );
-  const searchableOutputPathSetRef = useRef(searchableOutputPathSet);
-  searchableOutputPathSetRef.current = searchableOutputPathSet;
-
-  const loadPreviewText = useCallback(async (entry: TranscriptHistoryEntry) => {
-    return previewLoaderRef.current.load(
-      entry,
-      previewTextByPathRef.current,
-      onLoadPreviewText,
-      (outputPath, text) => {
-        if (!searchableOutputPathSetRef.current.has(outputPath)) return;
-        setHistoryPreviewState((current) => {
-          const hasFailure = current.searchFailures.paths.has(outputPath);
-          const hasText = current.previewTextByPath[outputPath] !== undefined;
-          if (!hasFailure && hasText) return current;
-
-          const paths = hasFailure
-            ? new Set([...current.searchFailures.paths].filter((path) => path !== outputPath))
-            : current.searchFailures.paths;
-          return {
-            previewTextByPath: hasText
-              ? current.previewTextByPath
-              : rememberText(
-                  current.previewTextByPath,
-                  outputPath,
-                  text,
-                  maxHistoryPreviewCacheEntries,
-                  maxHistoryPreviewCharsPerEntry,
-                  maxHistoryPreviewCacheChars,
-                ),
-            searchFailures: hasFailure
-              ? { ...current.searchFailures, paths }
-              : current.searchFailures,
-          };
-        });
-      },
-    );
-  }, [onLoadPreviewText]);
-
-  const retrySearchFailures = useCallback(() => {
-    previewLoaderRef.current.retryFailures();
-    setSearchRetryGeneration((current) => current + 1);
-    setHistoryPreviewState((current) => ({
-      ...current,
-      searchFailures: { paths: new Set() },
-    }));
-  }, []);
-  const cachedOutputPaths = useMemo(
-    () => new Set(Object.keys(previewTextByPath)),
-    [previewTextByPath],
-  );
-  const normalizedSearchQuery = normalizeHistorySearchQuery(searchFilter);
-  const unavailablePreviewPaths = historySearchFailurePathsForQuery(
-    searchFailures,
-    normalizedSearchQuery,
-  );
-  const indexingBodies = isHistoryBodySearchPending({
-    cachedOutputPaths,
-    hasPreviewLoader: Boolean(onLoadPreviewText),
-    outputPaths: searchableOutputPaths,
-    query: searchFilter,
-    terminalOutputPaths: unavailablePreviewPaths,
-  });
-
-  useEffect(() => {
-    previewLoaderRef.current.prune(searchableOutputPathSet);
-    setHistoryPreviewState((current) => {
-      const previewText = pruneTextCache(
-        current.previewTextByPath,
-        searchableOutputPathSet,
-      );
-      const failures = prunePreviewSearchFailures(
-        current.searchFailures,
-        searchableOutputPathSet,
-      );
-      if (
-        previewText === current.previewTextByPath
-        && failures === current.searchFailures
-      ) {
-        return current;
-      }
-      return {
-        previewTextByPath: previewText,
-        searchFailures: failures,
-      };
-    });
-  }, [searchableOutputPathSet]);
-
-  useEffect(() => {
-    if (!indexingBodies || !onLoadPreviewText) return;
-
-    const controller = new AbortController();
-    const generation = previewSearchGenerationRef.current.begin();
-    const pendingEntries = searchableEntries.filter(
-      (entry) => previewTextByPathRef.current[entry.outputPath] === undefined,
-    );
-
-    void previewSearchLoaderRef.current.load({
-      entries: pendingEntries,
-      loadText: (entry) =>
-        previewLoaderRef.current.load(
-          entry,
-          previewTextByPathRef.current,
-          onLoadPreviewText,
-          () => undefined,
-        ),
-      onBatch: (batch) => {
-        if (
-          controller.signal.aborted
-          || !previewSearchGenerationRef.current.isCurrent(generation)
-        ) {
-          return;
-        }
-
-        setHistoryPreviewState((current) => {
-          if (
-            controller.signal.aborted
-            || !previewSearchGenerationRef.current.isCurrent(generation)
-          ) {
-            return current;
-          }
-
-          const retainedPreviewText = pruneTextCache(
-            current.previewTextByPath,
-            searchableOutputPathSet,
-          );
-          const loaded = batch.loaded.filter(
-            ({ outputPath }) =>
-              searchableOutputPathSet.has(outputPath)
-              && retainedPreviewText[outputPath] === undefined,
-          );
-          const failedOutputPaths = batch.failedOutputPaths.filter(
-            (outputPath) => retainedPreviewText[outputPath] === undefined,
-          );
-          const nextPreviewText = loaded.length > 0
-            ? rememberTexts(
-                retainedPreviewText,
-                loaded.map(({ outputPath, text }) => [outputPath, text]),
-                maxHistoryPreviewCacheEntries,
-                maxHistoryPreviewCharsPerEntry,
-                maxHistoryPreviewCacheChars,
-              )
-            : retainedPreviewText;
-          const nextSearchFailures = mergePreviewSearchFailures({
-            current: current.searchFailures,
-            failedOutputPaths,
-            loadedOutputPaths: batch.loaded.map(({ outputPath }) => outputPath),
-            visibleOutputPaths: searchableOutputPathSet,
-          });
-
-          if (
-            nextPreviewText === current.previewTextByPath
-            && nextSearchFailures === current.searchFailures
-          ) {
-            return current;
-          }
-
-          return {
-            previewTextByPath: nextPreviewText,
-            searchFailures: nextSearchFailures,
-          };
-        });
-      },
-      signal: controller.signal,
-    });
-
-    return () => {
-      controller.abort();
-    };
-  }, [
+  const {
+    filteredEntries,
     indexingBodies,
-    normalizedSearchQuery,
+    loadPreviewText,
+    retrySearchFailures,
+    unavailablePreviewPaths,
+  } = useHistorySearch({
+    entries,
     onLoadPreviewText,
-    searchableEntries,
-    searchableOutputPathSet,
-    searchRetryGeneration,
-  ]);
+    query: searchFilter,
+  });
 
   useEffect(() => {
     setRenderLimit(historyRenderWindowSize);
   }, [entries, searchFilter]);
 
-  const filteredEntries = useMemo(() => {
-    const query = normalizedSearchQuery;
-    const includePreviewText = shouldSearchTranscriptBodies(query);
-    return query
-      ? searchableEntries.filter((entry) =>
-          `${entry.name} ${entry.sourcePath} ${includePreviewText ? previewTextByPath[entry.outputPath] ?? "" : ""}`
-            .toLowerCase()
-            .includes(query),
-        )
-      : searchableEntries;
-  }, [normalizedSearchQuery, previewTextByPath, searchableEntries]);
-
   const historyWindow = useMemo(
     () => renderHistoryWindow(filteredEntries, renderLimit),
     [filteredEntries, renderLimit],
   );
-
   const visibleGroups = useMemo(
     () => groupHistoryByDay(historyWindow.visibleEntries),
     [historyWindow.visibleEntries],
@@ -529,6 +60,21 @@ export function HistoryPanel({
     hasResults: visibleGroups.length > 0,
     indexingBodies,
   });
+  const actions: HistoryEntryActions = {
+    onCopy,
+    onDelete,
+    onDeleteRecoverable,
+    onHide,
+    onOpen,
+    onPreview,
+    onRecover,
+    onReveal,
+  };
+
+  function clearSearch() {
+    setSearchFilter("");
+    setSearchOpen(false);
+  }
 
   return (
     <Card className="surface-workspace-inset min-w-0 bg-card py-0">
@@ -541,29 +87,24 @@ export function HistoryPanel({
                   <Search className="size-5 shrink-0 text-muted-foreground/70" weight="regular" />
                   <input
                     aria-label="Search past transcripts"
-                    autoFocus
                     autoComplete="off"
                     autoCorrect="off"
-                    spellCheck={false}
+                    autoFocus
                     className="h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-base font-normal text-foreground outline-none placeholder:text-muted-foreground/85 focus-visible:outline-none"
-                    placeholder="Search past transcripts"
-                    type="text"
-                    value={searchFilter}
                     onChange={(event) => setSearchFilter(event.target.value)}
                     onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        setSearchFilter("");
-                        setSearchOpen(false);
-                      }
+                      if (event.key === "Escape") clearSearch();
                     }}
+                    placeholder="Search past transcripts"
+                    spellCheck={false}
+                    type="text"
+                    value={searchFilter}
                   />
                 </div>
               ) : (
                 <Button
                   aria-label="Search past transcripts"
-                  onClick={() => {
-                    setSearchOpen(true);
-                  }}
+                  onClick={() => setSearchOpen(true)}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
@@ -577,140 +118,19 @@ export function HistoryPanel({
               className="h-[min(620px,calc(100vh-230px))] pr-3"
             >
               {searchDisplay === "results" ? (
-                <div className="flex flex-col gap-6">
-                  {indexingBodies || unavailablePreviewPaths.size > 0 ? (
-                    <div
-                      aria-live="polite"
-                      className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
-                      role="status"
-                    >
-                      <span>
-                        {indexingBodies
-                          ? "Searching more transcript text. Results may be incomplete."
-                          : "Some transcript text is unavailable. Results may be incomplete."}
-                      </span>
-                      {unavailablePreviewPaths.size > 0 ? (
-                        <Button
-                          onClick={retrySearchFailures}
-                          size="sm"
-                          type="button"
-                          variant="ghost"
-                        >
-                          Retry
-                        </Button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {visibleGroups.map((group) => (
-                    <section key={group.key}>
-                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group.label}</h3>
-                      <Table>
-                        <TableBody>
-                          {group.entries.map((entry) => {
-                            const selected = entry.outputPath === selectedOutputPath;
-                            const recoverable = isRecoverableTranscriptHistoryEntry(entry);
-                            const hideOnly = isUntrustedNativeLiveTranscriptHistoryEntry(entry);
-
-                            function selectEntry(event: MouseEvent<HTMLElement>) {
-                              if (recoverable || hideOnly) return;
-                              const row = event.currentTarget.closest("[data-history-entry-row]");
-                              onSelect(entry, row?.getBoundingClientRect());
-                            }
-
-                            return (
-                              <TableRow
-                                key={entry.outputPath}
-                                aria-current={selected ? "true" : undefined}
-                                className={cn(
-                                  selected && "border-primary/30 bg-[var(--primary-soft)]/40 hover:bg-[var(--primary-soft)]/40",
-                                )}
-                                data-state={selected ? "selected" : undefined}
-                                data-history-entry-row
-                              >
-                                <TableCell
-                                  className={cn(
-                                    "w-24 align-top text-xs tabular-nums text-muted-foreground",
-                                    !recoverable && !hideOnly && "cursor-pointer",
-                                  )}
-                                  onClick={recoverable || hideOnly ? undefined : selectEntry}
-                                >
-                                  {formatHistoryTime(entry.createdAt)}
-                                </TableCell>
-                                <TableCell
-                                  className={cn(
-                                    "max-w-0 whitespace-normal align-top",
-                                    !recoverable && !hideOnly && "cursor-pointer",
-                                  )}
-                                  onClick={recoverable || hideOnly ? undefined : selectEntry}
-                                >
-                                  <div className="flex min-w-0 items-start gap-2">
-                                    {recoverable ? (
-                                      <span className="shrink-0 text-xs font-medium text-muted-foreground">Partial</span>
-                                    ) : hideOnly ? (
-                                      <span className="truncate text-sm text-muted-foreground">{entry.name}</span>
-                                    ) : (
-                                      <HistoryEntryPreview
-                                        entry={entry}
-                                        onLoadPreviewText={loadPreviewText}
-                                        onReview={(origin) => onSelect(entry, origin)}
-                                      />
-                                    )}
-                                  </div>
-                                </TableCell>
-                                <TableCell className="w-[4.5rem] align-top text-right">
-                                  <div className="flex items-center justify-end gap-0.5">
-                                    {!recoverable && !hideOnly ? (
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <Button
-                                            aria-label={`Copy transcript for ${entry.name}`}
-                                            onClick={(event) => {
-                                              event.stopPropagation();
-                                              onCopy(entry);
-                                            }}
-                                            size="icon-xs"
-                                            title="Copy"
-                                            type="button"
-                                            variant="ghost"
-                                          >
-                                            <Copy />
-                                          </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>Copy</TooltipContent>
-                                      </Tooltip>
-                                    ) : null}
-                                    <HistoryActionMenu
-                                      entry={entry}
-                                      onCopy={onCopy}
-                              onDelete={onDelete}
-                              onDeleteRecoverable={onDeleteRecoverable}
-                                      onHide={onHide}
-                                      onOpen={onOpen}
-                              onPreview={onPreview}
-                              onRecover={onRecover}
-                                      onReveal={onReveal}
-                                    />
-                                  </div>
-                                </TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
-                    </section>
-                  ))}
-                  {historyWindow.hiddenCount ? (
-                    <Button
-                      className="self-center"
-                      onClick={() => setRenderLimit(historyWindow.nextLimit)}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      Show older
-                    </Button>
-                  ) : null}
-                </div>
+                <HistoryResults
+                  actions={actions}
+                  groups={visibleGroups}
+                  hiddenCount={historyWindow.hiddenCount}
+                  indexingBodies={indexingBodies}
+                  loadPreviewText={loadPreviewText}
+                  nextLimit={historyWindow.nextLimit}
+                  onRetrySearch={retrySearchFailures}
+                  onSelect={onSelect}
+                  onShowOlder={setRenderLimit}
+                  selectedOutputPath={selectedOutputPath}
+                  unavailablePreviewPaths={unavailablePreviewPaths}
+                />
               ) : searchDisplay === "indexing" ? (
                 <div
                   aria-live="polite"
@@ -733,15 +153,7 @@ export function HistoryPanel({
               ) : (
                 <div className="flex flex-col items-center gap-3 py-8 text-sm text-muted-foreground">
                   <p>No recordings match that search.</p>
-                  <Button
-                    onClick={() => {
-                      setSearchFilter("");
-                      setSearchOpen(false);
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
+                  <Button onClick={clearSearch} size="sm" type="button" variant="outline">
                     Clear search
                   </Button>
                 </div>
@@ -755,7 +167,9 @@ export function HistoryPanel({
             </EmptyMedia>
             <div>
               <EmptyTitle>No recordings yet</EmptyTitle>
-              <EmptyDescription>Finished transcriptions will appear here, grouped by day.</EmptyDescription>
+              <EmptyDescription>
+                Finished transcriptions will appear here, grouped by day.
+              </EmptyDescription>
               {onOpenHelp ? (
                 <Button
                   className="mt-2 h-auto px-0 text-muted-foreground"

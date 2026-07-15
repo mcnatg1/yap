@@ -5,7 +5,7 @@ import { projectAppModalState } from "@/components/panels/app-modal-state";
 import {
   isHistoryBodySearchPending,
   projectHistorySearchDisplay,
-} from "@/components/panels/history-panel";
+} from "@/components/history/history-search";
 import { isDevelopmentPolishAvailable } from "@/lib/product-features";
 import { createPolishOperationOwner, isPolishDraftCurrent } from "@/polish";
 

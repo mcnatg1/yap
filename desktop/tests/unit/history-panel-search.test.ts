@@ -4,7 +4,7 @@ import {
   historySearchFailurePathsForQuery,
   isHistoryBodySearchPending,
   projectHistorySearchDisplay,
-} from "@/components/panels/history-panel";
+} from "@/components/history/history-search";
 
 describe("history panel transcript search", () => {
   it("settles failed preview reads as unavailable instead of pending forever", () => {
