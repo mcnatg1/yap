@@ -375,11 +375,11 @@ class RecordingJobServiceTests(unittest.TestCase):
             )
             request = _create_request()
 
-            from yap_server.jobs import service as service_module
+            from yap_server.jobs import job_store as store_module
 
             with patch.object(
-                service_module,
-                "_publish_json",
+                store_module,
+                "publish_json",
                 side_effect=OSError("private state storage unavailable"),
             ):
                 with self.assertRaises(OSError):
@@ -558,9 +558,9 @@ class RecordingJobServiceTests(unittest.TestCase):
                 chunk,
             )
 
-            from yap_server.jobs import service as service_module
+            from yap_server.jobs import job_store as store_module
 
-            original_publish_json = service_module._publish_json
+            original_publish_json = store_module.publish_json
 
             def fail_processing_state(path: Path, value: object) -> None:
                 if (
@@ -570,7 +570,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                     raise OSError("private processing state unavailable")
                 original_publish_json(path, value)
 
-            with patch.object(service_module, "_publish_json", fail_processing_state):
+            with patch.object(store_module, "publish_json", fail_processing_state):
                 with self.assertRaises(OSError):
                     service.commit(
                         created["jobId"],
@@ -699,9 +699,9 @@ class RecordingJobServiceTests(unittest.TestCase):
                 "transcript": {"text": "Crash-safe private transcript."},
             }
 
-            from yap_server.jobs import service as service_module
+            from yap_server.jobs import job_store as store_module
 
-            original_publish_json = service_module._publish_json
+            original_publish_json = store_module.publish_json
 
             def fail_final_state(path: Path, value: object) -> None:
                 if path.name == "state.json" and (
@@ -711,7 +711,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 original_publish_json(path, value)
 
             with self.assertNoLogs("concurrent.futures", level="ERROR"):
-                with patch.object(service_module, "_publish_json", fail_final_state):
+                with patch.object(store_module, "publish_json", fail_final_state):
                     processor.future.set_result(worker_payload)
 
             self.assertEqual(service.get(created["jobId"])["status"], "complete")
@@ -798,16 +798,16 @@ class RecordingJobServiceTests(unittest.TestCase):
                 "content_length": len(chunk),
             }
 
-            from yap_server.jobs import service as service_module
+            from yap_server.jobs import job_store as store_module
 
-            original_publish_json = service_module._publish_json
+            original_publish_json = store_module.publish_json
 
             def fail_uploading_state(path: Path, value: object) -> None:
                 if path.name == "state.json" and value["projection"]["status"] == "uploading":
                     raise OSError("private receipt storage unavailable")
                 original_publish_json(path, value)
 
-            with patch.object(service_module, "_publish_json", fail_uploading_state):
+            with patch.object(store_module, "publish_json", fail_uploading_state):
                 with self.assertRaises(OSError):
                     service.accept_chunk(
                         service.prepare_chunk_upload(created["jobId"], **arguments),
@@ -1274,16 +1274,16 @@ class RecordingJobServiceTests(unittest.TestCase):
             )
             job_root = root / "jobs" / created["jobId"]
 
-            from yap_server.jobs import service as service_module
+            from yap_server.jobs import job_store as store_module
 
-            original_publish_json = service_module._publish_json
+            original_publish_json = store_module.publish_json
 
             def fail_cancelled_state(path: Path, value: object) -> None:
                 if path.name == "state.json" and value["projection"]["status"] == "cancelled":
                     raise OSError("private cancellation storage unavailable")
                 original_publish_json(path, value)
 
-            with patch.object(service_module, "_publish_json", fail_cancelled_state):
+            with patch.object(store_module, "publish_json", fail_cancelled_state):
                 with self.assertRaises(OSError):
                     service.cancel(created["jobId"])
 
@@ -1693,9 +1693,9 @@ class RecordingJobServiceTests(unittest.TestCase):
             release_publish = threading.Event()
             cancellation: dict[str, object] = {}
 
-            from yap_server.jobs import service as service_module
+            from yap_server.jobs import completion as completion_module
 
-            original_publish_json = service_module._publish_json
+            original_publish_json = completion_module.publish_json
 
             def blocked_publish_json(path: Path, value: object) -> None:
                 if path.name == "result-revision.json":
@@ -1710,7 +1710,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 except Exception as error:  # pragma: no cover - asserted below
                     cancellation["error"] = error
 
-            with patch.object(service_module, "_publish_json", blocked_publish_json):
+            with patch.object(completion_module, "publish_json", blocked_publish_json):
                 completing = threading.Thread(
                     target=processor.future.set_result,
                     args=(payload,),
