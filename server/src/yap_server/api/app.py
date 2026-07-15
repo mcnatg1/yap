@@ -23,6 +23,7 @@ from yap_server.jobs import JobServiceError, RecordingJobService
 
 
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
+_BODY_DRAIN_READ_BYTES = 64 * 1024
 MAX_LOG_METHOD_CHARS = 16
 MAX_LOG_PATH_CHARS = 128
 REQUEST_IO_TIMEOUT_SECONDS = 2.0
@@ -113,6 +114,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         self._request_id = f"req-{uuid4().hex}"
         self._request_logged = False
         self._content_length: int | None = None
+        self._body_bytes_read = 0
         self.requestline = ""
         self.request_version = ""
         self.command = ""
@@ -348,6 +350,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
 
     def _read_exact_body(self, content_length: int) -> bytes:
         body = self.rfile.read(content_length)
+        self._body_bytes_read += len(body)
         if len(body) != content_length:
             self.close_connection = True
             raise JobServiceError(
@@ -356,6 +359,22 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
                 "Request body ended before Content-Length bytes were received.",
             )
         return body
+
+    def _discard_unread_request_body(self) -> None:
+        if self._content_length is None:
+            return
+        remaining = max(0, self._content_length - self._body_bytes_read)
+        try:
+            while remaining:
+                body = self.rfile.read(min(remaining, _BODY_DRAIN_READ_BYTES))
+                if not body:
+                    self.close_connection = True
+                    return
+                consumed = len(body)
+                self._body_bytes_read += consumed
+                remaining -= consumed
+        except (OSError, TimeoutError, ValueError):
+            self.close_connection = True
 
     def _read_json_body(self) -> Mapping[str, object]:
         if self.headers.get_content_type() != "application/json":
@@ -490,6 +509,11 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         *,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        # On Windows, closing a socket with unread request bytes can emit a TCP
+        # reset that discards an otherwise valid error response. Every declared
+        # body is bounded before dispatch, so consume the bounded remainder at
+        # the response boundary without allowing drain failures to mask it.
+        self._discard_unread_request_body()
         body = json.dumps(
             payload,
             ensure_ascii=True,

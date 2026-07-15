@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import Future
 import hashlib
@@ -11,7 +12,13 @@ import wave
 from unittest.mock import patch
 
 from yap_server.jobs import JobServiceError, RecordingJobService
-from yap_server.pools.batch_asr import BatchAsrJob, PoolBackpressure
+from yap_server.pools.batch_asr import (
+    BatchAsrJob,
+    BatchAsrPool,
+    PoolBackpressure,
+    WorkerContainmentError,
+    WorkerExecutionError,
+)
 from yap_server.pools.batch_asr_worker import MAX_AUDIO_SECONDS, SAMPLE_RATE_HZ
 
 
@@ -33,6 +40,70 @@ class _ControlledProcessor:
 class _BusyProcessor:
     def submit(self, job: BatchAsrJob) -> Future[dict[str, object]]:
         raise PoolBackpressure(f"capacity unavailable for {job.job_id}")
+
+
+class _UnstoppableProcessor:
+    def __init__(self) -> None:
+        self.future: Future[dict[str, object]] = Future()
+
+    def submit(self, _job: BatchAsrJob) -> Future[dict[str, object]]:
+        self.future.set_running_or_notify_cancel()
+        return self.future
+
+    def cancel(self, _job_id: str) -> bool:
+        return False
+
+
+class _ActiveCancellationWorker:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped = threading.Event()
+
+    def run(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event,
+    ) -> dict[str, object]:
+        self.started.set()
+        if not cancellation.wait(timeout=5):
+            raise AssertionError(f"active job {job.job_id} was not cancelled")
+        self.stopped.set()
+        raise WorkerExecutionError("isolated ASR worker was cancelled")
+
+
+class _UnverifiedCleanupWorker:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+
+    def run(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event,
+    ) -> dict[str, object]:
+        self.started.set()
+        if not cancellation.wait(timeout=5):
+            raise AssertionError(f"active job {job.job_id} was not cancelled")
+        raise WorkerContainmentError("owned container cleanup could not be verified")
+
+
+class _DelayedCancellationWorker:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.cancellation_received = threading.Event()
+        self.release_cleanup = threading.Event()
+
+    def run(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event,
+    ) -> dict[str, object]:
+        self.started.set()
+        if not cancellation.wait(timeout=5):
+            raise AssertionError(f"active job {job.job_id} was not cancelled")
+        self.cancellation_received.set()
+        if not self.release_cleanup.wait(timeout=5):
+            raise AssertionError(f"active job {job.job_id} cleanup was not released")
+        raise WorkerExecutionError("isolated ASR worker was cancelled")
 
 
 def _create_request(
@@ -459,7 +530,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 },
             )
 
-    def test_commit_state_failure_keeps_worker_completion_owned(self) -> None:
+    def test_processing_intent_failure_prevents_worker_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             processor = _ControlledProcessor()
             service = RecordingJobService(
@@ -509,18 +580,11 @@ class RecordingJobServiceTests(unittest.TestCase):
                         },
                     )
 
-            processor.future.set_result(
-                {
-                    "model": {"id": "private-asr", "revision": "revision-1"},
-                    "transcript": {"text": "Owned after failed state publication."},
-                }
-            )
-
-            self.assertEqual(service.get(created["jobId"])["status"], "complete")
-            self.assertEqual(
-                service.get_result(created["jobId"])["transcript"],
-                "Owned after failed state publication.",
-            )
+            self.assertEqual(processor.jobs, [])
+            self.assertEqual(service.get(created["jobId"])["status"], "uploading")
+            with self.assertRaises(JobServiceError) as unavailable:
+                service.get_result(created["jobId"])
+            self.assertEqual(unavailable.exception.code, "RESULT_NOT_READY")
 
     def test_delete_after_completion_purges_private_artifacts_and_returns_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -591,6 +655,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 processor=_Processor(),
                 supported_languages=("en",),
                 now=lambda: "2026-07-14T21:03:31Z",
+                startup_worker_cleanup_verified=True,
             )
             self.assertEqual(restarted.get(created["jobId"]), cancelled)
 
@@ -660,6 +725,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 processor=_Processor(),
                 supported_languages=("en",),
                 now=lambda: "2026-07-14T21:04:00Z",
+                startup_worker_cleanup_verified=True,
             )
             self.assertEqual(restarted.get(created["jobId"])["status"], "complete")
             self.assertEqual(
@@ -946,6 +1012,196 @@ class RecordingJobServiceTests(unittest.TestCase):
             self.assertEqual(blocked.exception.status, 409)
             self.assertEqual(blocked.exception.code, "JOB_NOT_UPLOADABLE")
 
+    def test_running_cancellation_waits_for_worker_cleanup_before_acknowledging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker = _ActiveCancellationWorker()
+            pool = BatchAsrPool(worker, max_workers=1, max_queued=0)
+            try:
+                service = RecordingJobService(
+                    root,
+                    processor=pool,
+                    supported_languages=("en",),
+                    now=lambda: "2026-07-14T21:07:15Z",
+                )
+                request = _create_request()
+                created = service.create(request)
+                chunk = bytes(320)
+                service.accept_chunk(
+                    service.prepare_chunk_upload(
+                        created["jobId"],
+                        track_id="track-1",
+                        sequence_start=0,
+                        sequence_end=159,
+                        idempotency_key="1/s-phase5-create/track-1/0/159",
+                        content_sha256=hashlib.sha256(chunk).hexdigest(),
+                        audio_codec="pcm_s16le",
+                        sample_rate_hz=16000,
+                        channels=1,
+                        content_length=len(chunk),
+                    ),
+                    chunk,
+                )
+                service.commit(
+                    created["jobId"],
+                    {
+                        "captureManifest": request["captureManifest"],
+                        "chunkCount": 1,
+                    },
+                )
+                self.assertTrue(worker.started.wait(timeout=2))
+
+                cancelled = service.cancel(created["jobId"])
+
+                self.assertTrue(worker.stopped.is_set())
+                self.assertEqual(cancelled["status"], "cancelled")
+                self.assertEqual(pool.outstanding_count, 0)
+                job_root = root / "jobs" / created["jobId"]
+                self.assertEqual(list((job_root / "chunks").iterdir()), [])
+                self.assertFalse((job_root / "input.wav").exists())
+            finally:
+                pool.shutdown()
+
+    def test_unverified_cleanup_fails_cancellation_and_fences_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker = _UnverifiedCleanupWorker()
+            pool = BatchAsrPool(worker, max_workers=1, max_queued=0)
+            try:
+                service = RecordingJobService(
+                    root,
+                    processor=pool,
+                    supported_languages=("en",),
+                    now=lambda: "2026-07-14T21:07:20Z",
+                )
+                request = _create_request()
+                created = service.create(request)
+                chunk = bytes(320)
+                service.accept_chunk(
+                    service.prepare_chunk_upload(
+                        created["jobId"],
+                        track_id="track-1",
+                        sequence_start=0,
+                        sequence_end=159,
+                        idempotency_key="1/s-phase5-create/track-1/0/159",
+                        content_sha256=hashlib.sha256(chunk).hexdigest(),
+                        audio_codec="pcm_s16le",
+                        sample_rate_hz=16000,
+                        channels=1,
+                        content_length=len(chunk),
+                    ),
+                    chunk,
+                )
+                service.commit(
+                    created["jobId"],
+                    {
+                        "captureManifest": request["captureManifest"],
+                        "chunkCount": 1,
+                    },
+                )
+                self.assertTrue(worker.started.wait(timeout=2))
+
+                with self.assertRaises(JobServiceError) as cancellation:
+                    service.cancel(created["jobId"])
+
+                self.assertEqual(cancellation.exception.status, 503)
+                self.assertEqual(
+                    cancellation.exception.code,
+                    "CANCELLATION_CLEANUP_UNVERIFIED",
+                )
+                self.assertTrue(cancellation.exception.retryable)
+                failed = service.get(created["jobId"])
+                self.assertEqual(failed["status"], "failed")
+                self.assertEqual(failed["error"]["code"], "ASR_CLEANUP_UNVERIFIED")
+                self.assertTrue(pool.fenced)
+                self.assertEqual(pool.outstanding_count, 0)
+                state = json.loads(
+                    (root / "jobs" / created["jobId"] / "state.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertTrue(state["cancellationRequested"])
+
+                with self.assertRaisesRegex(ValueError, "startup cleanup"):
+                    RecordingJobService(
+                        root,
+                        processor=_Processor(),
+                        supported_languages=("en",),
+                        now=lambda: "2026-07-14T21:07:21Z",
+                    )
+                restarted = RecordingJobService(
+                    root,
+                    processor=_Processor(),
+                    supported_languages=("en",),
+                    now=lambda: "2026-07-14T21:07:21Z",
+                    startup_worker_cleanup_verified=True,
+                )
+                self.assertEqual(restarted.get(created["jobId"])["status"], "cancelled")
+            finally:
+                pool.shutdown()
+
+    def test_pending_cancellation_survives_restart_and_converges_to_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            processor = _UnstoppableProcessor()
+            service = RecordingJobService(
+                root,
+                processor=processor,
+                supported_languages=("en",),
+                now=lambda: "2026-07-14T21:07:25Z",
+                cancellation_timeout_seconds=0.01,
+            )
+            request = _create_request()
+            created = service.create(request)
+            chunk = bytes(320)
+            service.accept_chunk(
+                service.prepare_chunk_upload(
+                    created["jobId"],
+                    track_id="track-1",
+                    sequence_start=0,
+                    sequence_end=159,
+                    idempotency_key="1/s-phase5-create/track-1/0/159",
+                    content_sha256=hashlib.sha256(chunk).hexdigest(),
+                    audio_codec="pcm_s16le",
+                    sample_rate_hz=16000,
+                    channels=1,
+                    content_length=len(chunk),
+                ),
+                chunk,
+            )
+            service.commit(
+                created["jobId"],
+                {
+                    "captureManifest": request["captureManifest"],
+                    "chunkCount": 1,
+                },
+            )
+
+            with self.assertRaises(JobServiceError) as pending:
+                service.cancel(created["jobId"])
+            self.assertEqual(pending.exception.code, "CANCELLATION_PENDING")
+
+            with self.assertRaisesRegex(ValueError, "startup cleanup"):
+                RecordingJobService(
+                    root,
+                    processor=_Processor(),
+                    supported_languages=("en",),
+                    now=lambda: "2026-07-14T21:07:26Z",
+                )
+            restarted = RecordingJobService(
+                root,
+                processor=_Processor(),
+                supported_languages=("en",),
+                now=lambda: "2026-07-14T21:07:26Z",
+                startup_worker_cleanup_verified=True,
+            )
+            self.assertEqual(restarted.get(created["jobId"])["status"], "cancelled")
+            job_root = root / "jobs" / created["jobId"]
+            self.assertEqual(list((job_root / "chunks").iterdir()), [])
+            self.assertFalse((job_root / "input.wav").exists())
+
+            processor.future.set_exception(WorkerExecutionError("test cleanup"))
+
     def test_cancellation_purges_uploaded_audio_but_keeps_a_restart_safe_tombstone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -986,6 +1242,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 processor=_Processor(),
                 supported_languages=("en",),
                 now=lambda: "2026-07-14T21:07:31Z",
+                startup_worker_cleanup_verified=True,
             )
             self.assertEqual(restarted.get(created["jobId"]), cancelled)
 
@@ -1040,6 +1297,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 processor=_Processor(),
                 supported_languages=("en",),
                 now=lambda: "2026-07-14T21:07:31Z",
+                startup_worker_cleanup_verified=True,
             )
             self.assertEqual(restarted.get(created["jobId"])["status"], "cancelled")
 
@@ -1150,6 +1408,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 processor=_Processor(),
                 supported_languages=("en",),
                 now=lambda: "2026-07-14T21:21:00Z",
+                startup_worker_cleanup_verified=True,
             )
 
             self.assertEqual(restarted.get(created["jobId"])["status"], "complete")
@@ -1179,6 +1438,7 @@ class RecordingJobServiceTests(unittest.TestCase):
                 processor=_Processor(),
                 supported_languages=("en",),
                 now=lambda: "2026-07-14T21:23:00Z",
+                startup_worker_cleanup_verified=True,
             )
 
             self.assertEqual(restarted.get(created["jobId"]), cancelled)
@@ -1281,17 +1541,28 @@ class RecordingJobServiceTests(unittest.TestCase):
                 except Exception as error:  # pragma: no cover - assertion below reports it
                     outcome["error"] = error
 
+            def cancel() -> None:
+                try:
+                    outcome["cancelled"] = service.cancel(created["jobId"])
+                except Exception as error:  # pragma: no cover - assertion below reports it
+                    outcome["cancel_error"] = error
+
             with patch.object(service_module, "_publish_wav", blocked_publish_wav):
                 committing = threading.Thread(target=commit)
                 committing.start()
                 self.assertTrue(entered_publish.wait(timeout=2))
-                cancelled = service.cancel(created["jobId"])
+                cancelling = threading.Thread(target=cancel)
+                cancelling.start()
+                self.assertTrue(cancelling.is_alive())
                 release_publish.set()
                 committing.join(timeout=2)
+                cancelling.join(timeout=2)
 
             self.assertFalse(committing.is_alive())
+            self.assertFalse(cancelling.is_alive())
             self.assertNotIn("error", outcome)
-            self.assertEqual(outcome["projection"], cancelled)
+            self.assertNotIn("cancel_error", outcome)
+            self.assertEqual(outcome["projection"], outcome["cancelled"])
             self.assertEqual(service.get(created["jobId"])["status"], "cancelled")
             self.assertEqual(processor.jobs, [])
             job_root = Path(temporary) / "jobs" / created["jobId"]
@@ -1349,15 +1620,27 @@ class RecordingJobServiceTests(unittest.TestCase):
                 except Exception as error:  # pragma: no cover - asserted below
                     outcome["error"] = error
 
+            def cancel() -> None:
+                try:
+                    outcome["cancelled"] = service.cancel(created["jobId"])
+                except Exception as error:  # pragma: no cover - asserted below
+                    outcome["cancel_error"] = error
+
             with patch.object(service_module, "_publish_wav", failing_publish_wav):
                 committing = threading.Thread(target=commit)
                 committing.start()
                 self.assertTrue(entered_publish.wait(timeout=2))
-                service.cancel(created["jobId"])
+                cancelling = threading.Thread(target=cancel)
+                cancelling.start()
+                self.assertTrue(cancelling.is_alive())
                 release_publish.set()
                 committing.join(timeout=2)
+                cancelling.join(timeout=2)
 
             self.assertFalse(committing.is_alive())
+            self.assertFalse(cancelling.is_alive())
+            self.assertNotIn("cancel_error", outcome)
+            self.assertEqual(outcome["cancelled"]["status"], "cancelled")
             self.assertIsInstance(outcome.get("error"), OSError)
             self.assertEqual(
                 str(outcome["error"]),
@@ -1408,6 +1691,7 @@ class RecordingJobServiceTests(unittest.TestCase):
             }
             entered_publish = threading.Event()
             release_publish = threading.Event()
+            cancellation: dict[str, object] = {}
 
             from yap_server.jobs import service as service_module
 
@@ -1420,6 +1704,12 @@ class RecordingJobServiceTests(unittest.TestCase):
                         raise TimeoutError("test result publication was not released")
                 original_publish_json(path, value)
 
+            def cancel() -> None:
+                try:
+                    cancellation["projection"] = service.cancel(created["jobId"])
+                except Exception as error:  # pragma: no cover - asserted below
+                    cancellation["error"] = error
+
             with patch.object(service_module, "_publish_json", blocked_publish_json):
                 completing = threading.Thread(
                     target=processor.future.set_result,
@@ -1427,11 +1717,17 @@ class RecordingJobServiceTests(unittest.TestCase):
                 )
                 completing.start()
                 self.assertTrue(entered_publish.wait(timeout=2))
-                cancelled = service.cancel(created["jobId"])
+                cancelling = threading.Thread(target=cancel)
+                cancelling.start()
+                self.assertTrue(cancelling.is_alive())
                 release_publish.set()
                 completing.join(timeout=2)
+                cancelling.join(timeout=2)
 
             self.assertFalse(completing.is_alive())
+            self.assertFalse(cancelling.is_alive())
+            self.assertNotIn("error", cancellation)
+            cancelled = cancellation["projection"]
             self.assertEqual(cancelled["status"], "cancelled")
             self.assertEqual(service.get(created["jobId"])["status"], "cancelled")
             self.assertFalse(
@@ -1550,6 +1846,71 @@ class RecordingJobServiceTests(unittest.TestCase):
             self.assertFalse(expired_root.exists())
             with self.assertRaises(KeyError):
                 service.get(expired["jobId"])
+
+    def test_expired_running_job_stays_nonterminal_until_worker_cleanup_finishes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            clock = {"now": "2026-07-14T21:15:00Z"}
+            worker = _DelayedCancellationWorker()
+            pool = BatchAsrPool(worker, max_workers=1, max_queued=0)
+            try:
+                service = RecordingJobService(
+                    root,
+                    processor=pool,
+                    supported_languages=("en",),
+                    now=lambda: clock["now"],
+                )
+                request = _create_request(
+                    retention_expires_at_utc="2026-07-15T00:00:00Z"
+                )
+                created = service.create(request)
+                chunk = bytes(320)
+                service.accept_chunk(
+                    service.prepare_chunk_upload(
+                        created["jobId"],
+                        track_id="track-1",
+                        sequence_start=0,
+                        sequence_end=159,
+                        idempotency_key="1/s-phase5-create/track-1/0/159",
+                        content_sha256=hashlib.sha256(chunk).hexdigest(),
+                        audio_codec="pcm_s16le",
+                        sample_rate_hz=16000,
+                        channels=1,
+                        content_length=len(chunk),
+                    ),
+                    chunk,
+                )
+                service.commit(
+                    created["jobId"],
+                    {
+                        "captureManifest": request["captureManifest"],
+                        "chunkCount": 1,
+                    },
+                )
+                self.assertTrue(worker.started.wait(timeout=2))
+                job_root = root / "jobs" / created["jobId"]
+                clock["now"] = "2026-07-16T00:00:00Z"
+
+                self.assertEqual(service.prune_expired(), 0)
+                self.assertTrue(worker.cancellation_received.wait(timeout=2))
+                self.assertEqual(
+                    service.get(created["jobId"])["status"],
+                    "server_processing",
+                )
+                self.assertTrue(job_root.is_dir())
+
+                worker.release_cleanup.set()
+                deadline = time.monotonic() + 2
+                while pool.outstanding_count and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(pool.outstanding_count, 0)
+                self.assertEqual(service.prune_expired(), 1)
+                self.assertFalse(job_root.exists())
+            finally:
+                worker.release_cleanup.set()
+                pool.shutdown()
 
     def test_active_job_count_cap_fails_closed_without_mutating_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

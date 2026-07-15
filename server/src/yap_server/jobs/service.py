@@ -16,7 +16,11 @@ from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 import wave
 
-from yap_server.pools.batch_asr import BatchAsrJob, PoolBackpressure
+from yap_server.pools.batch_asr import (
+    BatchAsrJob,
+    PoolBackpressure,
+    WorkerContainmentError,
+)
 
 
 _OPAQUE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -33,6 +37,7 @@ _MAX_MODEL_PROVENANCE_CHARS = 256
 _MAX_STORED_JOBS = 512
 _MAX_PRIVATE_RETENTION = timedelta(days=30)
 _MAX_CLIENT_CLOCK_SKEW = timedelta(minutes=5)
+_CANCELLATION_ACK_TIMEOUT_SECONDS = 2.0
 _JOB_DIRECTORY = re.compile(r"^job-[0-9a-f]{32}$")
 _TERMINAL_STATUSES = frozenset({"complete", "partial", "failed", "cancelled"})
 _JOB_STATUSES = frozenset(
@@ -47,6 +52,7 @@ _PERSISTED_ERROR_CODES = frozenset(
     {
         "ASR_RESULT_INVALID",
         "ASR_RESULT_PUBLISH_FAILED",
+        "ASR_CLEANUP_UNVERIFIED",
         "ASR_WORKER_FAILED",
         "SERVER_RESTARTED",
         "SERVER_STORAGE_ERROR",
@@ -56,6 +62,8 @@ _PERSISTED_ERROR_CODES = frozenset(
 
 class BatchJobProcessor(Protocol):
     def submit(self, job: BatchAsrJob): ...
+
+    def cancel(self, job_id: str) -> bool: ...
 
 
 class JobServiceError(RuntimeError):
@@ -93,12 +101,20 @@ class RecordingJobService:
         processor: BatchJobProcessor,
         supported_languages: Sequence[str],
         now: Callable[[], str],
+        cancellation_timeout_seconds: float = _CANCELLATION_ACK_TIMEOUT_SECONDS,
+        startup_worker_cleanup_verified: bool = False,
     ) -> None:
+        if cancellation_timeout_seconds <= 0:
+            raise ValueError("cancellation timeout must be positive")
+        if not isinstance(startup_worker_cleanup_verified, bool):
+            raise ValueError("startup cleanup verification must be boolean")
         self._storage_root = storage_root.resolve()
         self._storage_root.mkdir(parents=True, exist_ok=True)
         self._processor = processor
         self._supported_languages = frozenset(supported_languages)
         self._now = now
+        self._cancellation_timeout_seconds = cancellation_timeout_seconds
+        self._startup_worker_cleanup_verified = startup_worker_cleanup_verified
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, object]] = {}
         self._requests: dict[str, dict[str, object]] = {}
@@ -109,6 +125,7 @@ class RecordingJobService:
         self._created_by_key: dict[str, str] = {}
         self._committing: set[str] = set()
         self._futures: dict[str, object] = {}
+        self._completion_events: dict[str, threading.Event] = {}
         self._load_existing_jobs()
         with self._lock:
             self._prune_expired_jobs_locked(
@@ -385,6 +402,7 @@ class RecordingJobService:
             self._committing.add(job_id)
 
         future: object | None = None
+        completion_event: threading.Event | None = None
         commit_error: BaseException | None = None
         try:
             input_path = job_root / "input.wav"
@@ -400,22 +418,40 @@ class RecordingJobService:
             with self._lock:
                 job = self._jobs[job_id]
                 if job_id in self._cancelled:
-                    return deepcopy(job)
+                    self._finalize_cancellation_locked(job_id)
+                    return deepcopy(self._jobs[job_id])
+                previous_status = job["status"]
+                previous_updated_at = job["updatedAtUtc"]
+                committed_at = self._now()
+                job["status"] = "server_processing"
+                job["updatedAtUtc"] = committed_at
+                try:
+                    self._persist_job_locked(job_id)
+                except BaseException:
+                    job["status"] = previous_status
+                    job["updatedAtUtc"] = previous_updated_at
+                    raise
                 try:
                     future = self._processor.submit(worker_job)
                 except PoolBackpressure as error:
+                    job["status"] = previous_status
+                    job["updatedAtUtc"] = previous_updated_at
+                    self._persist_job_locked(job_id)
                     raise JobServiceError(
                         429,
                         "SERVER_BUSY",
                         "Server capacity is temporarily unavailable.",
                         retryable=True,
                     ) from error
-                committed_at = self._now()
+                except BaseException:
+                    job["status"] = previous_status
+                    job["updatedAtUtc"] = previous_updated_at
+                    self._persist_job_locked(job_id)
+                    raise
                 self._futures[job_id] = future
-                job["status"] = "server_processing"
-                job["updatedAtUtc"] = committed_at
+                completion_event = threading.Event()
+                self._completion_events[job_id] = completion_event
                 projection = deepcopy(job)
-                self._persist_job_locked(job_id)
         except BaseException as error:
             commit_error = error
             raise
@@ -424,16 +460,18 @@ class RecordingJobService:
                 self._committing.discard(job_id)
                 if job_id in self._cancelled and job_id not in self._futures:
                     try:
-                        self._purge_private_audio_locked(job_id)
+                        self._finalize_cancellation_locked(job_id)
                     except Exception:
                         if commit_error is None:
                             raise
             if future is not None:
+                assert completion_event is not None
                 future.add_done_callback(
                     lambda completed: self._finish_job_safely(
                         job_id,
                         language_bcp47,
                         completed,
+                        completion_event,
                     )
                 )
         assert future is not None
@@ -444,6 +482,7 @@ class RecordingJobService:
         job_id: str,
         language_bcp47: str,
         future: object,
+        completion_event: threading.Event,
     ) -> None:
         try:
             self._finish_job(job_id, language_bcp47, future)
@@ -474,11 +513,29 @@ class RecordingJobService:
                         pass
             except Exception:
                 pass
+        finally:
+            completion_event.set()
+            with self._lock:
+                if self._completion_events.get(job_id) is completion_event:
+                    self._completion_events.pop(job_id, None)
 
     def cancel(self, job_id: str) -> dict[str, object]:
         future: object | None = None
+        completion_event: threading.Event | None = None
         with self._lock:
             job = self._jobs[job_id]
+            error = job.get("error")
+            if (
+                job.get("status") == "failed"
+                and isinstance(error, Mapping)
+                and error.get("code") == "ASR_CLEANUP_UNVERIFIED"
+            ):
+                raise JobServiceError(
+                    503,
+                    "CANCELLATION_CLEANUP_UNVERIFIED",
+                    "Worker cleanup could not be verified.",
+                    retryable=True,
+                )
             status = job["status"]
             if status == "cancelled":
                 if job_id in self._committing or job_id in self._futures:
@@ -486,19 +543,62 @@ class RecordingJobService:
                 else:
                     self._purge_private_audio_locked(job_id)
                 return deepcopy(job)
-            self._cancelled.add(job_id)
-            job["status"] = "cancelled"
-            job["updatedAtUtc"] = self._now()
-            job.pop("error", None)
             future = self._futures.get(job_id)
+            self._cancelled.add(job_id)
             if job_id in self._committing or future is not None:
-                self._persist_job_locked(job_id)
+                try:
+                    self._persist_job_locked(job_id)
+                except BaseException:
+                    self._cancelled.discard(job_id)
+                    raise
+                completion_event = self._completion_events.get(job_id)
+                if completion_event is None and job_id in self._committing:
+                    completion_event = threading.Event()
+                    self._completion_events[job_id] = completion_event
             else:
-                self._purge_private_audio_locked(job_id)
-            projection = deepcopy(job)
+                self._finalize_cancellation_locked(job_id)
+                return deepcopy(self._jobs[job_id])
         if future is not None:
-            future.cancel()
-        return projection
+            cancel_processor = getattr(self._processor, "cancel", None)
+            if callable(cancel_processor):
+                cancel_processor(job_id)
+            else:
+                future.cancel()
+        if completion_event is None or not completion_event.wait(
+            timeout=self._cancellation_timeout_seconds
+        ):
+            raise JobServiceError(
+                503,
+                "CANCELLATION_PENDING",
+                "Worker cleanup is still pending.",
+                retryable=True,
+            )
+        with self._lock:
+            job = self._jobs[job_id]
+            error = job.get("error")
+            if (
+                job.get("status") == "failed"
+                and isinstance(error, Mapping)
+                and error.get("code") == "ASR_CLEANUP_UNVERIFIED"
+            ):
+                raise JobServiceError(
+                    503,
+                    "CANCELLATION_CLEANUP_UNVERIFIED",
+                    "Worker cleanup could not be verified.",
+                    retryable=True,
+                )
+            self._finalize_cancellation_locked(job_id)
+            return deepcopy(self._jobs[job_id])
+
+    def _finalize_cancellation_locked(self, job_id: str) -> None:
+        job = self._jobs[job_id]
+        job["status"] = "cancelled"
+        job["updatedAtUtc"] = self._now()
+        job.pop("error", None)
+        self._purge_private_audio_locked(job_id)
+        completion_event = self._completion_events.pop(job_id, None)
+        if completion_event is not None:
+            completion_event.set()
 
     def get_result(self, job_id: str) -> dict[str, object]:
         with self._lock:
@@ -520,6 +620,9 @@ class RecordingJobService:
     def _finish_job(self, job_id: str, language_bcp47: str, future: object) -> None:
         try:
             payload = future.result()
+        except WorkerContainmentError:
+            self._mark_containment_unverified(job_id, future)
+            return
         except Exception:
             self._mark_failed_unless_cancelled(
                 job_id,
@@ -614,6 +717,21 @@ class RecordingJobService:
             self._discard_future_locked(job_id, future)
             self._persist_job_locked(job_id)
 
+    def _mark_containment_unverified(self, job_id: str, future: object) -> None:
+        failed_at = self._now()
+        with self._lock:
+            self._discard_future_locked(job_id, future)
+            job = self._jobs[job_id]
+            job["status"] = "failed"
+            job["updatedAtUtc"] = failed_at
+            job["error"] = {
+                "code": "ASR_CLEANUP_UNVERIFIED",
+                "message": "The private ASR worker cleanup could not be verified.",
+                "retryable": True,
+                "requestId": f"job-{job_id}",
+            }
+            self._purge_private_audio_locked(job_id)
+
     def _mark_failed_unless_cancelled(
         self,
         job_id: str,
@@ -686,15 +804,19 @@ class RecordingJobService:
         for job_id in expired:
             job = self._jobs[job_id]
             if job.get("status") not in _TERMINAL_STATUSES:
-                self._cancelled.add(job_id)
-                job["status"] = "cancelled"
-                job["updatedAtUtc"] = self._now()
-                self._persist_job_locked(job_id)
-            future = self._futures.get(job_id)
-            if future is not None:
-                future.cancel()
-            if job_id in self._committing or job_id in self._futures:
-                continue
+                if job_id not in self._cancelled:
+                    self._cancelled.add(job_id)
+                    self._persist_job_locked(job_id)
+                future = self._futures.get(job_id)
+                if future is not None:
+                    cancel_processor = getattr(self._processor, "cancel", None)
+                    if callable(cancel_processor):
+                        cancel_processor(job_id)
+                    else:
+                        future.cancel()
+                if job_id in self._committing or job_id in self._futures:
+                    continue
+                self._finalize_cancellation_locked(job_id)
             if job.get("status") == "cancelled":
                 self._purge_private_audio_locked(job_id)
             self._delete_job_locked(job_id)
@@ -734,8 +856,9 @@ class RecordingJobService:
         _publish_json(
             self._storage_root / "jobs" / job_id / "state.json",
             {
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "createIdempotencyKey": self._create_keys[job_id],
+                "cancellationRequested": job_id in self._cancelled,
                 "creation": self._requests[job_id],
                 "projection": self._jobs[job_id],
                 "receipts": receipts,
@@ -763,6 +886,7 @@ class RecordingJobService:
                     "persisted job state",
                 )
                 create_idempotency_key = None
+                cancellation_requested = False
             elif schema_version == 2:
                 _exact_keys(
                     state,
@@ -781,6 +905,29 @@ class RecordingJobService:
                     if raw_create_key is None
                     else _identifier(raw_create_key, 128, "create idempotency key")
                 )
+                cancellation_requested = False
+            elif schema_version == 3:
+                _exact_keys(
+                    state,
+                    {
+                        "schemaVersion",
+                        "createIdempotencyKey",
+                        "cancellationRequested",
+                        "creation",
+                        "projection",
+                        "receipts",
+                    },
+                    "persisted job state",
+                )
+                raw_create_key = state.get("createIdempotencyKey")
+                create_idempotency_key = (
+                    None
+                    if raw_create_key is None
+                    else _identifier(raw_create_key, 128, "create idempotency key")
+                )
+                cancellation_requested = state.get("cancellationRequested")
+                if not isinstance(cancellation_requested, bool):
+                    raise ValueError("persisted cancellation request is invalid")
             else:
                 raise ValueError("persisted job state has an unsupported schema")
             creation = _mapping(state.get("creation"), "persisted creation")
@@ -856,6 +1003,27 @@ class RecordingJobService:
             status = projection.get("status")
             if status not in _JOB_STATUSES:
                 raise ValueError("persisted job status is invalid")
+            error = projection.get("error")
+            cleanup_was_unverified = (
+                status == "failed"
+                and isinstance(error, Mapping)
+                and error.get("code") == "ASR_CLEANUP_UNVERIFIED"
+            )
+            if (
+                cancellation_requested
+                or status == "server_processing"
+                or cleanup_was_unverified
+            ) and not self._startup_worker_cleanup_verified:
+                raise ValueError(
+                    "persisted worker state requires verified startup cleanup"
+                )
+            if cancellation_requested and status != "cancelled":
+                self._cancelled.add(job_id)
+                projection["status"] = "cancelled"
+                projection["updatedAtUtc"] = self._now()
+                projection.pop("error", None)
+                self._purge_private_audio_locked(job_id)
+                continue
             result_path = job_root / "result-revision.json"
             if result_path.exists():
                 if status in {"cancelled", "failed"}:

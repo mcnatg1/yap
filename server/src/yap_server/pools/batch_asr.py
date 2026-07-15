@@ -26,10 +26,22 @@ _WORKER_CPU_LIMIT = "16"
 _MAX_WORKER_OUTPUT_BYTES = 1024 * 1024
 _PROCESS_READ_BYTES = 64 * 1024
 _CONTAINER_CLEANUP_TIMEOUT_SECONDS = 30
+_CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
+_CONTAINER_LABEL_VALUE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_OWNER_LABEL = "com.mcnatg1.yap.owner"
+_OWNER_VALUE = "batch-asr"
+_STORAGE_LABEL = "com.mcnatg1.yap.storage"
+_RUNTIME_LABEL = "com.mcnatg1.yap.runtime"
+_JOB_LABEL = "com.mcnatg1.yap.job"
+_REVISION_LABEL = "org.opencontainers.image.revision"
 
 
 class PoolBackpressure(RuntimeError):
     """Raised when every worker and bounded queue slot is occupied."""
+
+
+class PoolFenced(PoolBackpressure):
+    """Raised when worker containment is uncertain and capacity is quarantined."""
 
 
 class DuplicatePoolJob(ValueError):
@@ -38,6 +50,10 @@ class DuplicatePoolJob(ValueError):
 
 class WorkerExecutionError(RuntimeError):
     """Raised when the isolated GPU worker fails or returns invalid output."""
+
+
+class WorkerContainmentError(WorkerExecutionError):
+    """Raised when an owned worker container cannot be proven absent."""
 
 
 def inspect_worker_image(
@@ -116,7 +132,11 @@ class BatchAsrJob:
 
 
 class BatchWorker(Protocol):
-    def run(self, job: BatchAsrJob) -> dict[str, object]: ...
+    def run(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event,
+    ) -> dict[str, object]: ...
 
 
 class ContainerBatchAsrWorker:
@@ -128,6 +148,9 @@ class ContainerBatchAsrWorker:
         lock: ModelPoolLock,
         run_as_uid: int,
         run_as_gid: int,
+        checked_head: str,
+        storage_namespace: str,
+        runtime_instance_id: str | None = None,
         docker_binary: str = "docker",
         timeout_seconds: float = 30 * 60,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
@@ -136,6 +159,13 @@ class ContainerBatchAsrWorker:
             raise ValueError("worker image must use an immutable image ID or digest")
         if timeout_seconds <= 0:
             raise ValueError("worker timeout must be positive")
+        if _GIT_SHA.fullmatch(checked_head) is None:
+            raise ValueError("worker checked head must be a full lowercase Git SHA")
+        if _CONTAINER_LABEL_VALUE.fullmatch(storage_namespace) is None:
+            raise ValueError("worker storage namespace is invalid")
+        resolved_runtime_id = runtime_instance_id or uuid4().hex
+        if _CONTAINER_LABEL_VALUE.fullmatch(resolved_runtime_id) is None:
+            raise ValueError("worker runtime instance ID is invalid")
         if (
             not isinstance(run_as_uid, int)
             or isinstance(run_as_uid, bool)
@@ -150,6 +180,9 @@ class ContainerBatchAsrWorker:
         self._run_as_identity = f"{run_as_uid}:{run_as_gid}"
         self._run_as_uid = run_as_uid
         self._run_as_gid = run_as_gid
+        self._checked_head = checked_head
+        self._storage_namespace = storage_namespace
+        self._runtime_instance_id = resolved_runtime_id
         self._model_dir = _safe_mount_path(model_dir.resolve(strict=True))
         if not self._model_dir.is_dir():
             raise ValueError("model_dir must be a directory")
@@ -184,6 +217,16 @@ class ContainerBatchAsrWorker:
             "--rm",
             "--name",
             container_name,
+            "--label",
+            f"{_OWNER_LABEL}={_OWNER_VALUE}",
+            "--label",
+            f"{_STORAGE_LABEL}={self._storage_namespace}",
+            "--label",
+            f"{_RUNTIME_LABEL}={self._runtime_instance_id}",
+            "--label",
+            f"{_JOB_LABEL}={job.job_id}",
+            "--label",
+            f"{_REVISION_LABEL}={self._checked_head}",
             "--pull",
             "never",
             "--network",
@@ -240,8 +283,13 @@ class ContainerBatchAsrWorker:
             *([] if job.punctuation else ["--no-punctuation"]),
         ]
 
-    def run(self, job: BatchAsrJob) -> dict[str, object]:
-        if self._shutdown.is_set():
+    def run(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event | None = None,
+    ) -> dict[str, object]:
+        job_cancellation = cancellation or threading.Event()
+        if self._shutdown.is_set() or job_cancellation.is_set():
             raise WorkerExecutionError("isolated ASR worker was cancelled")
         container_name = f"yap-phase4-asr-{uuid4().hex}"
         command = self._build_command(job, container_name=container_name)
@@ -251,7 +299,7 @@ class ContainerBatchAsrWorker:
                     command,
                     timeout_seconds=self._timeout_seconds,
                     output_limit_bytes=_MAX_WORKER_OUTPUT_BYTES,
-                    cancellation=self._shutdown,
+                    cancellation=(self._shutdown, job_cancellation),
                 )
             finally:
                 _force_remove_container(self._docker_binary, container_name)
@@ -299,7 +347,7 @@ def _force_remove_container(
             stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise WorkerExecutionError(
+        raise WorkerContainmentError(
             "could not verify isolated ASR container cleanup"
         ) from error
     stderr = completed.stderr if isinstance(completed.stderr, str) else ""
@@ -308,7 +356,54 @@ def _force_remove_container(
         for marker in ("no such container", "no such object")
     )
     if completed.returncode != 0 and not missing:
-        raise WorkerExecutionError("could not remove the isolated ASR container")
+        raise WorkerContainmentError("could not remove the isolated ASR container")
+
+
+def reconcile_owned_containers(
+    docker_binary: str,
+    *,
+    storage_namespace: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> int:
+    if _CONTAINER_LABEL_VALUE.fullmatch(storage_namespace) is None:
+        raise ValueError("container storage namespace is invalid")
+    try:
+        completed = runner(
+            [
+                docker_binary,
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                f"label={_OWNER_LABEL}={_OWNER_VALUE}",
+                "--filter",
+                f"label={_STORAGE_LABEL}={storage_namespace}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_CONTAINER_CLEANUP_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise WorkerContainmentError(
+            "could not inspect owned ASR containers during startup"
+        ) from error
+    if completed.returncode != 0:
+        raise WorkerContainmentError(
+            "could not inspect owned ASR containers during startup"
+        )
+    container_ids = [
+        line.strip() for line in completed.stdout.splitlines() if line.strip()
+    ]
+    if not all(_CONTAINER_ID.fullmatch(container_id) for container_id in container_ids):
+        raise WorkerContainmentError("owned ASR container inventory was invalid")
+    for container_id in container_ids:
+        _force_remove_container(docker_binary, container_id, runner=runner)
+    return len(container_ids)
 
 
 def _validate_worker_output(completed: subprocess.CompletedProcess[str]) -> None:
@@ -331,7 +426,7 @@ def _run_bounded_process(
     *,
     timeout_seconds: float,
     output_limit_bytes: int,
-    cancellation: threading.Event | None = None,
+    cancellation: threading.Event | tuple[threading.Event, ...] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -388,7 +483,12 @@ def _run_bounded_process(
         reader.start()
     deadline = time.monotonic() + timeout_seconds
     while True:
-        if cancellation is not None and cancellation.is_set():
+        cancellation_requested = (
+            cancellation.is_set()
+            if isinstance(cancellation, threading.Event)
+            else any(event.is_set() for event in cancellation or ())
+        )
+        if cancellation_requested:
             kill_process()
             process.wait()
             for reader in readers:
@@ -434,6 +534,9 @@ class BatchAsrPool:
         self._slots = threading.BoundedSemaphore(max_workers + max_queued)
         self._lock = threading.Lock()
         self._outstanding: set[str] = set()
+        self._cancellations: dict[str, threading.Event] = {}
+        self._futures: dict[str, Future[dict[str, object]]] = {}
+        self._fenced_reason: str | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="yap-batch-asr",
@@ -444,29 +547,70 @@ class BatchAsrPool:
         with self._lock:
             return len(self._outstanding)
 
+    @property
+    def fenced(self) -> bool:
+        with self._lock:
+            return self._fenced_reason is not None
+
     def submit(self, job: BatchAsrJob) -> Future[dict[str, object]]:
         with self._lock:
+            if self._fenced_reason is not None:
+                raise PoolFenced(self._fenced_reason)
             if job.job_id in self._outstanding:
                 raise DuplicatePoolJob(f"pool job {job.job_id!r} is already outstanding")
             if not self._slots.acquire(blocking=False):
                 raise PoolBackpressure("batch ASR pool is at its bounded capacity")
             self._outstanding.add(job.job_id)
+            cancellation = threading.Event()
+            self._cancellations[job.job_id] = cancellation
         try:
-            future = self._executor.submit(self._worker.run, job)
+            future = self._executor.submit(self._run_job, job, cancellation)
+            with self._lock:
+                self._futures[job.job_id] = future
         except BaseException:
             self._release(job.job_id)
             raise
         future.add_done_callback(lambda _future: self._release(job.job_id))
         return future
 
+    def _run_job(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event,
+    ) -> dict[str, object]:
+        try:
+            return self._worker.run(job, cancellation)
+        except WorkerContainmentError:
+            with self._lock:
+                self._fenced_reason = (
+                    "batch ASR pool is fenced because container cleanup "
+                    "could not be verified"
+                )
+            raise
+
+    def cancel(self, job_id: str) -> bool:
+        with self._lock:
+            cancellation = self._cancellations.get(job_id)
+            future = self._futures.get(job_id)
+            if cancellation is None or future is None:
+                return False
+            cancellation.set()
+        future.cancel()
+        return True
+
     def _release(self, job_id: str) -> None:
         with self._lock:
             self._outstanding.discard(job_id)
+            self._cancellations.pop(job_id, None)
+            self._futures.pop(job_id, None)
             self._slots.release()
 
     def shutdown(self) -> None:
         close_worker = getattr(self._worker, "close", None)
         try:
+            with self._lock:
+                for cancellation in self._cancellations.values():
+                    cancellation.set()
             if callable(close_worker):
                 close_worker()
         finally:

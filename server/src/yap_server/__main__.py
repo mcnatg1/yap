@@ -30,7 +30,7 @@ def main() -> None:
         if runtime is not None:
             runtime.close()
         raise SystemExit(str(error)) from None
-    except OSError:
+    except (OSError, RuntimeError):
         if runtime is not None:
             runtime.close()
         raise SystemExit("Yap private server startup failed.") from None

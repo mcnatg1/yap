@@ -11,11 +11,14 @@ from yap_server.pools.batch_asr import (
     _MAX_WORKER_OUTPUT_BYTES,
     _force_remove_container,
     _run_bounded_process,
+    reconcile_owned_containers,
     BatchAsrJob,
     BatchAsrPool,
     ContainerBatchAsrWorker,
     DuplicatePoolJob,
     PoolBackpressure,
+    PoolFenced,
+    WorkerContainmentError,
     WorkerExecutionError,
 )
 from yap_server.pools.model_lock import LockedFixture, ModelPoolLock
@@ -24,6 +27,8 @@ from yap_server.pools.model_lock import LockedFixture, ModelPoolLock
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IMAGE_ID = "sha256:" + "e" * 64
 AUDIO_SHA256 = "f" * 64
+CHECKED_HEAD = "a" * 40
+STORAGE_NAMESPACE = "storage-test"
 
 
 def _test_lock() -> ModelPoolLock:
@@ -95,7 +100,11 @@ class _BlockingWorker:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, job: BatchAsrJob) -> dict[str, object]:
+    def run(
+        self,
+        job: BatchAsrJob,
+        _cancellation: threading.Event,
+    ) -> dict[str, object]:
         self.started.set()
         self.release.wait(timeout=5)
         return {"schemaVersion": 1, "jobId": job.job_id}
@@ -106,13 +115,45 @@ class _ClosableWorker:
         self.started = threading.Event()
         self.closed = threading.Event()
 
-    def run(self, job: BatchAsrJob) -> dict[str, object]:
+    def run(
+        self,
+        job: BatchAsrJob,
+        _cancellation: threading.Event,
+    ) -> dict[str, object]:
         self.started.set()
         self.closed.wait(timeout=0.25)
         return {"schemaVersion": 1, "jobId": job.job_id}
 
     def close(self) -> None:
         self.closed.set()
+
+
+class _CancellationAwareWorker:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped = threading.Event()
+
+    def run(
+        self,
+        job: BatchAsrJob,
+        cancellation: threading.Event,
+    ) -> dict[str, object]:
+        self.started.set()
+        if not cancellation.wait(timeout=5):
+            raise AssertionError(f"job {job.job_id} was not cancelled")
+        self.stopped.set()
+        raise WorkerExecutionError("isolated ASR worker was cancelled")
+
+
+class _ContainmentFailureWorker:
+    def run(
+        self,
+        job: BatchAsrJob,
+        _cancellation: threading.Event,
+    ) -> dict[str, object]:
+        raise WorkerContainmentError(
+            f"container cleanup could not be verified for {job.job_id}"
+        )
 
 
 class BatchAsrPoolTests(unittest.TestCase):
@@ -218,6 +259,96 @@ class BatchAsrPoolTests(unittest.TestCase):
 
         self.assertTrue(worker.closed.is_set())
 
+    def test_pool_cancels_one_running_job_without_stopping_the_worker(self) -> None:
+        worker = _CancellationAwareWorker()
+        pool = BatchAsrPool(worker, max_workers=1, max_queued=0)
+        try:
+            future = pool.submit(
+                BatchAsrJob(
+                    "job-1",
+                    Path("one.wav"),
+                    Path("one.json"),
+                    language="en",
+                    input_sha256=AUDIO_SHA256,
+                )
+            )
+            self.assertTrue(worker.started.wait(timeout=2))
+
+            self.assertTrue(pool.cancel("job-1"))
+
+            with self.assertRaisesRegex(WorkerExecutionError, "cancelled"):
+                future.result(timeout=2)
+            self.assertTrue(worker.stopped.is_set())
+            self.assertEqual(pool.outstanding_count, 0)
+            self.assertFalse(pool.cancel("job-1"))
+        finally:
+            pool.shutdown()
+
+    def test_pool_cancels_queued_work_without_deadlocking_its_completion_callback(
+        self,
+    ) -> None:
+        worker = _BlockingWorker()
+        pool = BatchAsrPool(worker, max_workers=1, max_queued=1)
+        try:
+            running = pool.submit(
+                BatchAsrJob(
+                    "job-1",
+                    Path("one.wav"),
+                    Path("one.json"),
+                    language="en",
+                    input_sha256=AUDIO_SHA256,
+                )
+            )
+            self.assertTrue(worker.started.wait(timeout=2))
+            queued = pool.submit(
+                BatchAsrJob(
+                    "job-2",
+                    Path("two.wav"),
+                    Path("two.json"),
+                    language="en",
+                    input_sha256=AUDIO_SHA256,
+                )
+            )
+
+            self.assertTrue(pool.cancel("job-2"))
+
+            self.assertTrue(queued.cancelled())
+            self.assertEqual(pool.outstanding_count, 1)
+            worker.release.set()
+            running.result(timeout=2)
+            self.assertEqual(pool.outstanding_count, 0)
+        finally:
+            worker.release.set()
+            pool.shutdown()
+
+    def test_pool_fences_new_work_after_unverified_container_cleanup(self) -> None:
+        pool = BatchAsrPool(_ContainmentFailureWorker(), max_workers=1, max_queued=0)
+        job = BatchAsrJob(
+            "job-1",
+            Path("one.wav"),
+            Path("one.json"),
+            language="en",
+            input_sha256=AUDIO_SHA256,
+        )
+        try:
+            with self.assertRaises(WorkerContainmentError):
+                pool.submit(job).result(timeout=2)
+
+            with self.assertRaisesRegex(PoolFenced, "cleanup"):
+                pool.submit(
+                    BatchAsrJob(
+                        "job-2",
+                        Path("two.wav"),
+                        Path("two.json"),
+                        language="en",
+                        input_sha256=AUDIO_SHA256,
+                    )
+                )
+            self.assertTrue(pool.fenced)
+            self.assertEqual(pool.outstanding_count, 0)
+        finally:
+            pool.shutdown()
+
 
 class ContainerBatchAsrWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -236,6 +367,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 lock=self.lock,
                 run_as_uid=1000,
                 run_as_gid=1001,
+                checked_head=CHECKED_HEAD,
+                storage_namespace=STORAGE_NAMESPACE,
             )
 
             command = worker.build_command(
@@ -286,6 +419,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 lock=self.lock,
                 run_as_uid=1000,
                 run_as_gid=1000,
+                checked_head=CHECKED_HEAD,
+                storage_namespace=STORAGE_NAMESPACE,
             )
             job = BatchAsrJob(
                 "job-1",
@@ -348,6 +483,59 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 runner=denied_runner,
             )
 
+    def test_startup_reconciles_only_owned_containers_in_the_storage_namespace(
+        self,
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def runner(
+            command: list[str],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["container", "ls"]:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=0,
+                    stdout="a" * 64 + "\n" + "b" * 64 + "\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+        removed = reconcile_owned_containers(
+            "docker-test",
+            storage_namespace="storage-a1b2c3",
+            runner=runner,
+        )
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            calls[0],
+            [
+                "docker-test",
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                "label=com.mcnatg1.yap.owner=batch-asr",
+                "--filter",
+                "label=com.mcnatg1.yap.storage=storage-a1b2c3",
+            ],
+        )
+        self.assertEqual(
+            calls[1:],
+            [
+                ["docker-test", "container", "rm", "--force", "a" * 64],
+                ["docker-test", "container", "rm", "--force", "b" * 64],
+            ],
+        )
+
     def test_rejects_a_root_or_non_numeric_service_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model_dir = Path(directory)
@@ -360,6 +548,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                             lock=self.lock,
                             run_as_uid=uid,
                             run_as_gid=gid,
+                            checked_head=CHECKED_HEAD,
+                            storage_namespace=STORAGE_NAMESPACE,
                         )
 
     def test_command_is_offline_read_only_non_root_and_capability_dropped(self) -> None:
@@ -376,6 +566,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 lock=self.lock,
                 run_as_uid=1000,
                 run_as_gid=1000,
+                checked_head=CHECKED_HEAD,
+                storage_namespace=STORAGE_NAMESPACE,
             )
 
             command = worker.build_command(
@@ -415,6 +607,47 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
             self.assertIn("--language en", rendered)
             self.assertNotIn(str(result_path), rendered)
 
+    def test_container_command_labels_checked_head_runtime_storage_and_job_owner(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_dir = root / "model"
+            model_dir.mkdir()
+            input_path = root / "speech.wav"
+            input_path.write_bytes(b"wav")
+            worker = ContainerBatchAsrWorker(
+                image=IMAGE_ID,
+                model_dir=model_dir,
+                lock=self.lock,
+                run_as_uid=1000,
+                run_as_gid=1000,
+                checked_head="a" * 40,
+                storage_namespace="storage-a1b2c3",
+                runtime_instance_id="c" * 32,
+            )
+
+            rendered = " ".join(
+                worker.build_command(
+                    BatchAsrJob(
+                        "job-1",
+                        input_path,
+                        root / "result.json",
+                        language="en",
+                        input_sha256=AUDIO_SHA256,
+                    )
+                )
+            )
+
+            for label in (
+                "com.mcnatg1.yap.owner=batch-asr",
+                "com.mcnatg1.yap.storage=storage-a1b2c3",
+                "com.mcnatg1.yap.runtime=" + "c" * 32,
+                "com.mcnatg1.yap.job=job-1",
+                "org.opencontainers.image.revision=" + "a" * 40,
+            ):
+                self.assertIn(f"--label {label}", rendered)
+
     def test_captures_validated_json_and_publishes_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -439,6 +672,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 lock=self.lock,
                 run_as_uid=1000,
                 run_as_gid=1000,
+                checked_head=CHECKED_HEAD,
+                storage_namespace=STORAGE_NAMESPACE,
                 runner=runner,
             )
             result = worker.run(
@@ -483,6 +718,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 lock=self.lock,
                 run_as_uid=1000,
                 run_as_gid=1000,
+                checked_head=CHECKED_HEAD,
+                storage_namespace=STORAGE_NAMESPACE,
                 runner=runner,
             )
 
@@ -521,6 +758,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                 lock=self.lock,
                 run_as_uid=1000,
                 run_as_gid=1000,
+                checked_head=CHECKED_HEAD,
+                storage_namespace=STORAGE_NAMESPACE,
                 runner=runner,
             )
 
@@ -574,6 +813,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                         lock=self.lock,
                         run_as_uid=1000,
                         run_as_gid=1000,
+                        checked_head=CHECKED_HEAD,
+                        storage_namespace=STORAGE_NAMESPACE,
                         runner=runner,
                     )
 
@@ -598,6 +839,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                     lock=self.lock,
                     run_as_uid=1000,
                     run_as_gid=1000,
+                    checked_head=CHECKED_HEAD,
+                    storage_namespace=STORAGE_NAMESPACE,
                 )
             with self.assertRaises(ValueError):
                 ContainerBatchAsrWorker(
@@ -606,6 +849,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                     lock=self.lock,
                     run_as_uid=1000,
                     run_as_gid=1000,
+                    checked_head=CHECKED_HEAD,
+                    storage_namespace=STORAGE_NAMESPACE,
                 )
             with self.assertRaises(ValueError):
                 ContainerBatchAsrWorker(
@@ -614,6 +859,8 @@ class ContainerBatchAsrWorkerTests(unittest.TestCase):
                     lock=self.lock,
                     run_as_uid=1000,
                     run_as_gid=1000,
+                    checked_head=CHECKED_HEAD,
+                    storage_namespace=STORAGE_NAMESPACE,
                 )
 
 

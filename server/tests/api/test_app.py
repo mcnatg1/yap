@@ -812,6 +812,33 @@ class BatchJobApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(payload["code"], "IDEMPOTENCY_KEY_REQUIRED")
 
+    def test_pre_body_rejection_drains_the_bounded_body_before_responding(self) -> None:
+        host, port = self.server.server_address[:2]
+        with socket.create_connection((host, port), timeout=2) as client:
+            client.settimeout(0.1)
+            client.sendall(
+                b"POST /v1/jobs HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 2\r\n"
+                b"\r\n"
+            )
+            with self.assertRaises(socket.timeout):
+                client.recv(1)
+
+            client.sendall(b"{}")
+            client.settimeout(2)
+            response = bytearray()
+            while True:
+                block = client.recv(4096)
+                if not block:
+                    break
+                response.extend(block)
+
+        head, body = bytes(response).split(b"\r\n\r\n", 1)
+        self.assertIn(b" 400 ", head)
+        self.assertEqual(json.loads(body)["code"], "IDEMPOTENCY_KEY_REQUIRED")
+
     def test_storage_failures_return_a_generic_error_without_private_paths(self) -> None:
         private_path = "C:/private/recordings/patient-audio.wav"
         stderr = io.StringIO()

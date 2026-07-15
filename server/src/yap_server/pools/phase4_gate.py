@@ -98,6 +98,8 @@ def run_gate(
         lock=lock,
         run_as_uid=getuid(),
         run_as_gid=getgid(),
+        checked_head=checked_head,
+        storage_namespace="phase4-gate",
     )
     router = WorkloadRouter(max_pending=4, max_pending_per_owner=2)
     request = WorkloadRequest("phase4-asr-gate", "phase4-gate", "batch")
