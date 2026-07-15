@@ -9,7 +9,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import { matchCompletedRemoteTranscript } from "./phase5-gate-support.js";
+import {
+  matchCompletedRemoteTranscript,
+  matchesVerifiedHistoryDialog,
+} from "./phase5-gate-support.js";
 
 const tunnelHost = "127.0.0.1";
 const tunnelPort = 18765;
@@ -258,17 +261,19 @@ describe("Phase 5 checked-head private-server gate", () => {
     });
 
     await browser.waitUntil(
-      async () => browser.execute(
-        (name, expectedTranscript) => {
-          const row = [...document.querySelectorAll("[data-history-entry-row]")]
-            .find((candidate) => candidate.textContent?.includes(name));
-          const dialog = document.querySelector('[role="dialog"]');
-          const transcript = dialog?.querySelector("pre")?.textContent?.trim() ?? "";
-          return Boolean(row && dialog && transcript === expectedTranscript);
-        },
-        history.name,
-        result.transcript.trim(),
-      ),
+      async () => {
+        const dialogs = await browser.execute(() => (
+          [...document.querySelectorAll('[role="dialog"][data-state="open"]')].map((dialog) => ({
+            label: dialog.querySelector('[data-slot="dialog-title"]')?.textContent?.trim() ?? "",
+            transcript: dialog.querySelector("pre")?.textContent?.trim() ?? "",
+          }))
+        ));
+        return matchesVerifiedHistoryDialog(
+          dialogs,
+          history.name,
+          result.transcript.trim(),
+        );
+      },
       {
         interval: 250,
         timeout: 15_000,

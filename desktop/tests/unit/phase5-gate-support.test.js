@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   matchCompletedRemoteTranscript,
+  matchesVerifiedHistoryDialog,
   resolvePhase5GateTimeout,
   sameWindowsPath,
 } from "../wdio/phase5-gate-support.js";
@@ -53,5 +54,26 @@ describe("Phase 5 native gate support", () => {
       createdJob,
       { maintenanceWarnings: [], sessions: [{ ...historyEntry, sourcePath: "C:\\other.wav" }] },
     )).toBeUndefined();
+  });
+
+  it("recognizes the exact verified transcript dialog without requiring the table behind it", () => {
+    const name = "fixture.wav";
+    const transcript = "Verified server transcript.";
+
+    expect(matchesVerifiedHistoryDialog(
+      [{ label: name, transcript }],
+      name,
+      transcript,
+    )).toBe(true);
+    expect(matchesVerifiedHistoryDialog(
+      [{ label: "other.wav", transcript }],
+      name,
+      transcript,
+    )).toBe(false);
+    expect(matchesVerifiedHistoryDialog(
+      [{ label: name, transcript: "Different text." }],
+      name,
+      transcript,
+    )).toBe(false);
   });
 });

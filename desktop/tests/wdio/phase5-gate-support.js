@@ -38,6 +38,19 @@ export function matchCompletedRemoteTranscript(job, catalog) {
   );
 }
 
+export function matchesVerifiedHistoryDialog(dialogs, name, expectedTranscript) {
+  if (
+    !Array.isArray(dialogs)
+    || typeof name !== "string"
+    || typeof expectedTranscript !== "string"
+  ) {
+    return false;
+  }
+  return dialogs.some(
+    (dialog) => dialog?.label === name && dialog.transcript === expectedTranscript,
+  );
+}
+
 export function resolvePhase5GateTimeout(value) {
   const timeoutMs = Number(value ?? defaultPhase5GateTimeoutMs);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 7_200_000) {
