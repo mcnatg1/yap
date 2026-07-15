@@ -1,5 +1,12 @@
+use super::super::remote;
 use super::*;
-use crate::{commands::media_protocol::MediaOwner, jobs::JobLedger};
+use crate::{
+    commands::media_protocol::MediaOwner,
+    jobs::{
+        JobLedger, NewRecordingJob, RecordingJobStatus, RecordingRoute, SessionMode, SessionOrigin,
+        SourceOwnership,
+    },
+};
 use std::{
     cell::{Cell, RefCell},
     fs,
