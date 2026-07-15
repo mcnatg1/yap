@@ -149,7 +149,7 @@ fn stalled_recognizer_times_out_stop_without_enqueuing_finish() {
 
     assert_eq!(status, StreamFinishStatus::TimedOut);
     assert!(started.elapsed() < Duration::from_millis(250));
-    assert!(adapter.worker.is_none());
+    assert!(!adapter.retains_cleanup_ownership());
     assert!(matches!(
         samples_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         StreamMessage::Samples { .. }
