@@ -79,8 +79,11 @@ fn intent_quarantine_count(dir: &Path) -> usize {
 }
 
 mod catalog;
-mod deletion;
+mod deletion_concurrency;
 mod deletion_maintenance;
+mod deletion_manual;
+mod deletion_recovery;
+mod deletion_retention;
 mod recovery;
 mod transcripts;
 
