@@ -23,7 +23,7 @@ fn cancellation_and_dismissal_delete_only_yap_owned_remote_spools() {
     let dismissed = jobs
         .create_imports(&media, vec![dismiss_source.display().to_string()], 7_100)
         .unwrap();
-    jobs.ledger
+    jobs.ledger()
         .fail_source_validation(&dismissed[0].id, "TEST_FAILED", 7_101)
         .unwrap();
     let dismiss_spool = dir.join("remote-jobs").join(&dismissed[0].id);
@@ -39,7 +39,7 @@ fn cancellation_and_dismissal_delete_only_yap_owned_remote_spools() {
     let retried = jobs
         .create_imports(&media, vec![retry_source.display().to_string()], 7_200)
         .unwrap();
-    jobs.ledger
+    jobs.ledger()
         .fail_source_validation(&retried[0].id, "TEST_FAILED", 7_201)
         .unwrap();
     let retry_spool = dir.join("remote-jobs").join(&retried[0].id);
@@ -81,7 +81,7 @@ fn dismissing_failed_jobs_preserves_provenance_and_frees_capacity_after_restart(
             )
             .unwrap();
         for (index, job) in created.iter().enumerate() {
-            jobs.ledger
+            jobs.ledger()
                 .fail_source_validation(&job.id, "TEST_FAILED", 5_600 + index as u64)
                 .unwrap();
             jobs.dismiss(&media, &job.id, 5_900 + index as u64, || {})
@@ -90,7 +90,7 @@ fn dismissing_failed_jobs_preserves_provenance_and_frees_capacity_after_restart(
 
         assert!(jobs.snapshot(&media, 6_200).unwrap().is_empty());
         assert_eq!(media.active_admission_count_for_test(), 0);
-        let durable = jobs.ledger.list_jobs().unwrap();
+        let durable = jobs.ledger().list_jobs().unwrap();
         assert_eq!(durable.len(), MAX_RECORDING_JOBS);
         assert!(durable.iter().all(|job| {
             job.status == RecordingJobStatus::Cancelled
@@ -137,7 +137,7 @@ fn more_than_five_hundred_terminal_imports_do_not_exhaust_job_path_authority() {
             jobs.cancel(&media, &created[0].id, 6_501 + index as u64 * 3, || {})
                 .unwrap();
         } else {
-            jobs.ledger
+            jobs.ledger()
                 .fail_source_validation(&created[0].id, "TEST_FAILED", 6_501 + index as u64 * 3)
                 .unwrap();
             jobs.dismiss(&media, &created[0].id, 6_502 + index as u64 * 3, || {})
@@ -180,14 +180,14 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
         cancelled_source.display().to_string(),
         &general_registry,
         &jobs.registry_path,
-        &jobs.owned_dir,
+        jobs.owned_dir(),
     )
     .is_err());
 
     let dismissed = jobs
         .create_imports(&media, vec![dismissed_source.display().to_string()], 8_202)
         .unwrap();
-    jobs.ledger
+    jobs.ledger()
         .fail_source_validation(&dismissed[0].id, "TEST_FAILED", 8_203)
         .unwrap();
     jobs.dismiss(&media, &dismissed[0].id, 8_204, || {})
@@ -196,7 +196,7 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
         dismissed_source.display().to_string(),
         &general_registry,
         &jobs.registry_path,
-        &jobs.owned_dir,
+        jobs.owned_dir(),
     )
     .is_err());
 
@@ -206,10 +206,10 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
     crate::file_actions::register_general_playback_path_at_for_test(
         general_source.display().to_string(),
         &general_registry,
-        &jobs.owned_dir,
+        jobs.owned_dir(),
     )
     .unwrap();
-    jobs.ledger
+    jobs.ledger()
         .fail_source_validation(&general[0].id, "TEST_FAILED", 8_206)
         .unwrap();
     jobs.dismiss(&media, &general[0].id, 8_207, || {}).unwrap();
@@ -218,7 +218,7 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
             general_source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
-            &jobs.owned_dir,
+            jobs.owned_dir(),
         )
         .unwrap(),
         general_source.canonicalize().unwrap()
@@ -249,10 +249,10 @@ fn restart_snapshot_prunes_job_authority_left_by_a_terminal_commit() {
             source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
-            &jobs.owned_dir,
+            jobs.owned_dir(),
         )
         .is_ok());
-        jobs.ledger
+        jobs.ledger()
             .request_cancellation(&created[0].id, 8_301)
             .unwrap();
     }
@@ -264,7 +264,7 @@ fn restart_snapshot_prunes_job_authority_left_by_a_terminal_commit() {
         source.display().to_string(),
         &general_registry,
         &jobs.registry_path,
-        &jobs.owned_dir,
+        jobs.owned_dir(),
     )
     .is_err());
     assert!(source.is_file());
@@ -291,7 +291,11 @@ fn terminal_registry_cleanup_failure_does_not_hide_the_committed_transition() {
         || jobs.cancel(&media, &created[0].id, 8_401, || {}),
         || {
             assert_eq!(
-                jobs.ledger.get_job(&created[0].id).unwrap().unwrap().status,
+                jobs.ledger()
+                    .get_job(&created[0].id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 RecordingJobStatus::Cancelled
             );
         },

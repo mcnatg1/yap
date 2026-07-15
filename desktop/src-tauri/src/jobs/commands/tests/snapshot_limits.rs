@@ -17,7 +17,7 @@ fn create_imports_is_all_or_nothing_for_invalid_paths_and_snapshot_is_stably_ord
         2_500,
     );
     assert_eq!(invalid.unwrap_err().code, "SOURCE_MISSING");
-    assert!(jobs.ledger.list_jobs().unwrap().is_empty());
+    assert!(jobs.ledger().list_jobs().unwrap().is_empty());
     assert!(!jobs.registry_path.exists());
     assert_eq!(media.active_admission_count_for_test(), 0);
 
@@ -187,7 +187,7 @@ fn snapshot_cancels_expired_active_remote_work_and_deletes_only_the_owned_spool(
         .create_imports(&media, vec![source.display().to_string()], 6_000)
         .unwrap();
     let job_id = &created[0].id;
-    jobs.ledger
+    jobs.ledger()
         .transition(job_id, RecordingJobStatus::Preprocessing, 6_001)
         .unwrap();
     let owned_spool = dir.join("remote-jobs").join(job_id);
@@ -198,7 +198,7 @@ fn snapshot_cancels_expired_active_remote_work_and_deletes_only_the_owned_spool(
         .snapshot(&media, 6_000 + PENDING_JOB_LIFETIME_MS)
         .unwrap()
         .is_empty());
-    let expired = jobs.ledger.get_job(job_id).unwrap().unwrap();
+    let expired = jobs.ledger().get_job(job_id).unwrap().unwrap();
     assert_eq!(expired.status, RecordingJobStatus::Cancelled);
     assert!(expired.cancellation_requested);
     assert!(source.is_file(), "external source must never be deleted");

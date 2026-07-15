@@ -6,16 +6,14 @@ use crate::{
     jobs::{RecordingJobStatus, RecordingRoute},
     server_connector::batch::CreateRecordingJobRequest,
 };
-use std::path::Path;
 
 impl RecordingJobs {
     pub(crate) fn completed_remote_transcripts(
         &self,
-        remote_jobs_directory: &Path,
     ) -> Result<CompletedRemoteTranscriptCatalog, JobCommandError> {
         let mut sessions = Vec::new();
         let mut omitted_invalid_result = false;
-        for record in self.ledger.list_jobs()?.into_iter().filter(|record| {
+        for record in self.ledger().list_jobs()?.into_iter().filter(|record| {
             matches!(
                 record.status,
                 RecordingJobStatus::Complete | RecordingJobStatus::Partial
@@ -25,16 +23,18 @@ impl RecordingJobs {
                 let output_path = record.output_path.as_deref().ok_or(())?;
                 let source_path = record.source_path.as_deref().ok_or(())?;
                 let prepared = self
-                    .ledger
+                    .ledger()
                     .get_prepared_remote_job(&record.job_id)
                     .map_err(|_| ())?
                     .ok_or(())?;
                 let request =
                     CreateRecordingJobRequest::decode_persisted(&prepared.create_request_json)
                         .map_err(|_| ())?;
-                let verified =
-                    remote::read_published_remote_transcript(output_path, remote_jobs_directory)
-                        .map_err(|_| ())?;
+                let verified = remote::read_published_remote_transcript(
+                    output_path,
+                    self.remote_jobs_directory(),
+                )
+                .map_err(|_| ())?;
                 if verified.result.session_id != request.metadata.session_id.as_str()
                     || verified.result.capture_manifest_sha256 != request.capture_manifest.sha256
                     || prepared.capture_manifest_sha256 != request.capture_manifest.sha256

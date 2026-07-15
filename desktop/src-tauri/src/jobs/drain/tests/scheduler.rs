@@ -18,23 +18,39 @@ fn retention_drain_removes_pruned_private_spools_before_acknowledging_cleanup() 
             )
             .unwrap();
     }
-    let drain = RemoteJobDrain {
+    let resources = Arc::new(RecordingJobResources::from_storage(
         ledger,
-        owner_namespace: OwnerNamespace::local("i-pruned-spool-test").unwrap(),
-        owned_live_directory: dir.join("recordings"),
+        dir.join("recordings"),
         remote_jobs_directory,
-    };
+    ));
+    let drain = RemoteJobDrain::from_resources_for_test(
+        Arc::clone(&resources),
+        OwnerNamespace::local("i-pruned-spool-test").unwrap(),
+    );
 
     assert!(drain.has_pending_work().unwrap());
-    assert!(drain.enforce_retention(2).unwrap());
+    let mutation = resources.mutation().lock().unwrap();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let retention = thread::spawn(move || {
+        completed_tx.send(drain.enforce_retention(2)).unwrap();
+    });
+    assert!(completed_rx
+        .recv_timeout(Duration::from_millis(50))
+        .is_err());
+    drop(mutation);
+    assert!(completed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap());
+    retention.join().unwrap();
     assert!(!owned_spool.exists());
-    assert!(drain
-        .ledger
+    assert!(resources
+        .ledger()
         .list_pending_remote_spool_cleanup()
         .unwrap()
         .is_empty());
 
-    drop(drain);
+    drop(resources);
     fs::remove_dir_all(dir).unwrap();
 }
 

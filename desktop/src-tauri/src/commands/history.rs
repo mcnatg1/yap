@@ -48,8 +48,7 @@ pub(crate) fn history_catalog(
         message,
     })?;
     let live = crate::live::recordings::list_history_sources().map_err(history_error)?;
-    let remote =
-        jobs.completed_remote_transcripts(&crate::paths::app_data_dir().join("remote-jobs"))?;
+    let remote = jobs.completed_remote_transcripts()?;
     Ok(build_history_catalog(live.saved, live.recoverable, remote))
 }
 

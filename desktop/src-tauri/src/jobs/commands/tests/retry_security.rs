@@ -22,14 +22,14 @@ fn cancellation_and_retry_follow_ledger_legality_and_preserve_external_files() {
     let admissions_before_illegal_dismiss = media.active_admission_count_for_test();
     assert!(jobs.dismiss(&media, &cancel_id, 6_002, || {}).is_err());
     assert_eq!(
-        jobs.ledger.get_job(&cancel_id).unwrap().unwrap().status,
+        jobs.ledger().get_job(&cancel_id).unwrap().unwrap().status,
         RecordingJobStatus::QueuedServer
     );
     assert_eq!(
         media.active_admission_count_for_test(),
         admissions_before_illegal_dismiss
     );
-    jobs.ledger
+    jobs.ledger()
         .fail_source_validation(&retry_id, "SOURCE_UNSAFE", 6_003)
         .unwrap();
 
@@ -114,7 +114,7 @@ fn create_and_cancel_notifications_observe_committed_ledger_state() {
     let created = mutate_then_notify(
         || jobs.create_imports(&media, vec![source.display().to_string()], 8_000),
         || {
-            assert_eq!(jobs.ledger.list_jobs().unwrap().len(), 1);
+            assert_eq!(jobs.ledger().list_jobs().unwrap().len(), 1);
         },
     )
     .unwrap();
@@ -123,7 +123,7 @@ fn create_and_cancel_notifications_observe_committed_ledger_state() {
         || jobs.cancel(&media, &job_id, 8_001, || {}),
         || {
             assert_eq!(
-                jobs.ledger.get_job(&job_id).unwrap().unwrap().status,
+                jobs.ledger().get_job(&job_id).unwrap().unwrap().status,
                 RecordingJobStatus::Cancelled
             );
         },
@@ -145,10 +145,10 @@ fn accepted_retry_notifies_only_after_atomic_preflight_returns_to_server_queue()
     crate::file_actions::register_native_selected_recording_job_source_at(
         &selected_source,
         &jobs.selection_registry_path,
-        &jobs.owned_dir,
+        jobs.owned_dir(),
     )
     .unwrap();
-    jobs.ledger
+    jobs.ledger()
         .insert_job(&NewRecordingJob {
             job_id: "job-accepted".into(),
             session_mode: SessionMode::Meeting,
@@ -175,7 +175,11 @@ fn accepted_retry_notifies_only_after_atomic_preflight_returns_to_server_queue()
     let retried = jobs
         .retry(&media, "job-accepted", 8_501, || {
             assert_eq!(
-                jobs.ledger.get_job("job-accepted").unwrap().unwrap().status,
+                jobs.ledger()
+                    .get_job("job-accepted")
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 RecordingJobStatus::QueuedServer
             );
         })
@@ -184,7 +188,7 @@ fn accepted_retry_notifies_only_after_atomic_preflight_returns_to_server_queue()
     assert_eq!(retried.status, RecordingJobStatus::QueuedServer);
     let renewed_expiry = 8_501 + PENDING_JOB_LIFETIME_MS;
     assert_eq!(
-        jobs.ledger
+        jobs.ledger()
             .get_job("job-accepted")
             .unwrap()
             .unwrap()
@@ -218,7 +222,7 @@ fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() 
         .unwrap()[0]
         .id
         .clone();
-    jobs.ledger
+    jobs.ledger()
         .fail_source_validation(&job_id, "INITIAL_FAILURE", 8_701)
         .unwrap();
     jobs.inject_projection_failures_for_test(vec![command_error(
@@ -248,7 +252,7 @@ fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() 
     )
     .unwrap();
     let event_snapshot = event_snapshot.into_inner().unwrap();
-    let committed = jobs.ledger.get_job(&job_id).unwrap().unwrap();
+    let committed = jobs.ledger().get_job(&job_id).unwrap().unwrap();
 
     assert_eq!(committed.status, RecordingJobStatus::Failed);
     assert_eq!(committed.attempt_count, 1);
@@ -278,7 +282,7 @@ fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() 
         &source,
         &general_registry
     ));
-    let restarted = jobs.ledger.get_job(&job_id).unwrap().unwrap();
+    let restarted = jobs.ledger().get_job(&job_id).unwrap().unwrap();
     assert_eq!(restarted.attempt_count, 1);
     assert_eq!(
         restarted.source_path.as_deref(),
@@ -293,7 +297,11 @@ fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() 
     );
     assert!(second_retry.playback_path.is_some());
     assert_eq!(
-        jobs.ledger.get_job(&job_id).unwrap().unwrap().attempt_count,
+        jobs.ledger()
+            .get_job(&job_id)
+            .unwrap()
+            .unwrap()
+            .attempt_count,
         2
     );
     assert_eq!(
@@ -301,7 +309,7 @@ fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() 
             source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
-            &jobs.owned_dir,
+            jobs.owned_dir(),
         )
         .unwrap(),
         canonical_source

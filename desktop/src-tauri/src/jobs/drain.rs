@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tauri::{Emitter, Manager};
@@ -26,7 +26,7 @@ use upload::{advance_upload_once, advance_upload_once_guarded};
 
 use crate::{
     audio::session::OwnerNamespace,
-    jobs::{remote, JobLedger, RecordingJobStatus},
+    jobs::{RecordingJobResources, RecordingJobStatus},
     server_connector::batch::{ApiError, BatchClientError},
     server_connector::{BatchConnectionLease, ServerConnector},
 };
@@ -152,25 +152,38 @@ impl BatchCommitGuard<'_> {
 }
 
 pub(crate) struct RemoteJobDrain {
-    ledger: JobLedger,
+    resources: Arc<RecordingJobResources>,
     owner_namespace: OwnerNamespace,
-    owned_live_directory: PathBuf,
-    remote_jobs_directory: PathBuf,
 }
 
 impl RemoteJobDrain {
-    pub(crate) fn open_default() -> Result<Self, String> {
+    pub(crate) fn from_resources(resources: Arc<RecordingJobResources>) -> Result<Self, String> {
         Ok(Self {
-            ledger: JobLedger::open_default().map_err(|error| error.to_string())?,
+            resources,
             owner_namespace: crate::install_identity::load_or_create()?,
-            owned_live_directory: crate::live::recordings::recordings_dir(),
-            remote_jobs_directory: crate::paths::app_data_dir().join("remote-jobs"),
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::jobs) fn from_resources_for_test(
+        resources: Arc<RecordingJobResources>,
+        owner_namespace: OwnerNamespace,
+    ) -> Self {
+        Self {
+            resources,
+            owner_namespace,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::jobs) fn resources_for_test(&self) -> &Arc<RecordingJobResources> {
+        &self.resources
     }
 
     fn has_pending_work(&self) -> Result<bool, String> {
         let active_job = self
-            .ledger
+            .resources
+            .ledger()
             .list_recoverable_jobs()
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -186,24 +199,31 @@ impl RemoteJobDrain {
             });
         Ok(active_job
             || self
-                .ledger
+                .resources
+                .ledger()
                 .has_remote_reconciliation_work()
                 .map_err(|error| error.to_string())?)
     }
 
     fn enforce_retention(&self, now_ms: u64) -> Result<bool, String> {
+        let _mutation = self
+            .resources
+            .mutation()
+            .lock()
+            .map_err(|_| "recording job mutation gate is unavailable".to_string())?;
         let expired_pending = self
-            .ledger
+            .resources
+            .ledger()
             .expire_pending_jobs(now_ms)
             .map_err(|error| error.to_string())?;
         let (expired_remote_job_ids, changed_remote_jobs) = self
-            .ledger
+            .resources
+            .ledger()
             .enforce_remote_retention(now_ms)
             .map_err(|error| error.to_string())?;
         let mut cleanup_error = None;
         for job_id in expired_remote_job_ids {
-            if let Err(error) = remote::reset_unattached_spool(&job_id, &self.remote_jobs_directory)
-            {
+            if let Err(error) = self.resources.reset_remote_spool(&job_id) {
                 cleanup_error.get_or_insert(error);
             }
         }
@@ -212,13 +232,15 @@ impl RemoteJobDrain {
         }
         let mut pruned_spools = 0_usize;
         for job_id in self
-            .ledger
+            .resources
+            .ledger()
             .list_pending_remote_spool_cleanup()
             .map_err(|error| error.to_string())?
         {
-            remote::reset_unattached_spool(&job_id, &self.remote_jobs_directory)?;
+            self.resources.reset_remote_spool(&job_id)?;
             if self
-                .ledger
+                .resources
+                .ledger()
                 .acknowledge_remote_spool_cleanup(&job_id)
                 .map_err(|error| error.to_string())?
             {
@@ -229,14 +251,19 @@ impl RemoteJobDrain {
     }
 
     fn fail_preprocessing_candidate(&self, updated_at_ms: u64) {
-        let candidate = self.ledger.list_recoverable_jobs().ok().and_then(|jobs| {
-            jobs.into_iter()
-                .find(|job| job.status == RecordingJobStatus::Preprocessing)
-        });
+        let candidate = self
+            .resources
+            .ledger()
+            .list_recoverable_jobs()
+            .ok()
+            .and_then(|jobs| {
+                jobs.into_iter()
+                    .find(|job| job.status == RecordingJobStatus::Preprocessing)
+            });
         let Some(candidate) = candidate else {
             return;
         };
-        let _ = self.ledger.record_remote_error(
+        let _ = self.resources.ledger().record_remote_error(
             &candidate.job_id,
             "PREPROCESSING_FAILED",
             "The selected recording could not be prepared for private-server transcription.",
@@ -251,20 +278,25 @@ impl RemoteJobDrain {
         error: &DrainStepError,
         updated_at_ms: u64,
     ) {
-        let candidate = self.ledger.list_recoverable_jobs().ok().and_then(|jobs| {
-            jobs.into_iter().find(|job| {
-                statuses.contains(&job.status)
-                    && job
-                        .next_attempt_at_ms
-                        .is_none_or(|retry_at| retry_at <= updated_at_ms)
-            })
-        });
+        let candidate = self
+            .resources
+            .ledger()
+            .list_recoverable_jobs()
+            .ok()
+            .and_then(|jobs| {
+                jobs.into_iter().find(|job| {
+                    statuses.contains(&job.status)
+                        && job
+                            .next_attempt_at_ms
+                            .is_none_or(|retry_at| retry_at <= updated_at_ms)
+                })
+            });
         let Some(candidate) = candidate else {
             return;
         };
         let (retry_at_ms, code, message) =
             remote_retry_plan(error, candidate.attempt_count, updated_at_ms);
-        let _ = self.ledger.record_remote_error(
+        let _ = self.resources.ledger().record_remote_error(
             &candidate.job_id,
             code,
             message,
@@ -339,9 +371,10 @@ async fn run(app: tauri::AppHandle) {
         let connector = app.state::<ServerConnector>();
         let runtime_state = app.state::<crate::runtime::RuntimeOrchestratorState>();
         let now = now_ms();
+        let drain = app.state::<RemoteJobDrain>();
         match advance_persisted_cancellation_once(
-            &app.state::<RemoteJobDrain>().ledger,
-            &app.state::<RemoteJobDrain>().remote_jobs_directory,
+            drain.resources.ledger(),
+            drain.resources.remote_jobs_directory(),
             &connector,
             now,
         )
@@ -372,9 +405,9 @@ async fn run(app: tauri::AppHandle) {
         let prepared = tauri::async_runtime::spawn_blocking(move || {
             let drain = prepare_app.state::<RemoteJobDrain>();
             prepare_next_queued_job(
-                &drain.ledger,
-                &drain.owned_live_directory,
-                &drain.remote_jobs_directory,
+                drain.resources.ledger(),
+                drain.resources.owned_live_directory(),
+                drain.resources.remote_jobs_directory(),
                 &drain.owner_namespace,
                 now,
                 SystemTime::now(),
@@ -409,8 +442,8 @@ async fn run(app: tauri::AppHandle) {
         };
         let drain = app.state::<RemoteJobDrain>();
         match advance_upload_with_lease(
-            &drain.ledger,
-            &drain.remote_jobs_directory,
+            drain.resources.ledger(),
+            drain.resources.remote_jobs_directory(),
             &connector,
             &lease,
             now,
@@ -435,8 +468,8 @@ async fn run(app: tauri::AppHandle) {
             continue;
         };
         match advance_processing_with_lease(
-            &drain.ledger,
-            &drain.remote_jobs_directory,
+            drain.resources.ledger(),
+            drain.resources.remote_jobs_directory(),
             &connector,
             &lease,
             now,

@@ -126,7 +126,7 @@ fn completed_remote_catalog_revalidates_the_immutable_result_before_history_proj
         .unwrap();
     let jobs = RecordingJobs::from_ledger(ledger, &dir);
 
-    let catalog = jobs.completed_remote_transcripts(&remote_jobs).unwrap();
+    let catalog = jobs.completed_remote_transcripts().unwrap();
     assert_eq!(catalog.sessions.len(), 1);
     assert_eq!(
         catalog.sessions[0].output_path,
@@ -135,7 +135,7 @@ fn completed_remote_catalog_revalidates_the_immutable_result_before_history_proj
     assert!(catalog.maintenance_warnings.is_empty());
 
     fs::write(&output, "tampered\n").unwrap();
-    let rejected = jobs.completed_remote_transcripts(&remote_jobs).unwrap();
+    let rejected = jobs.completed_remote_transcripts().unwrap();
     assert!(rejected.sessions.is_empty());
     assert_eq!(rejected.maintenance_warnings.len(), 1);
 

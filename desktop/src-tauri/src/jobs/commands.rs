@@ -3,7 +3,7 @@ use crate::{
     file_actions::{
         RecordingJobSourceAdmission, RecordingJobSourceError, ValidatedRecordingJobSource,
     },
-    jobs::{JobLedger, JobLedgerError, RecordingJobView},
+    jobs::{JobLedgerError, RecordingJobResources, RecordingJobView},
 };
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 use tauri::{Emitter, Manager};
@@ -67,13 +67,10 @@ impl From<JobLedgerError> for JobCommandError {
 
 #[doc(hidden)]
 pub struct RecordingJobs {
-    ledger: JobLedger,
-    mutation: Mutex<()>,
+    resources: Arc<RecordingJobResources>,
     playback: Mutex<HashMap<String, CachedPlayback>>,
     #[cfg(test)]
     projection_failures: Mutex<VecDeque<JobCommandError>>,
-    owned_dir: PathBuf,
-    remote_jobs_directory: PathBuf,
     registry_path: PathBuf,
     selection_registry_path: PathBuf,
 }

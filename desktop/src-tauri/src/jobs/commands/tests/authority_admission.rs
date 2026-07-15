@@ -42,7 +42,7 @@ fn authority_failed_create_stays_capability_free_until_explicit_retry() {
         .create_imports(&media, vec![source.display().to_string()], 1_502)
         .unwrap();
     let duplicate_authority_denied = open_and_reveal_are_denied(&jobs, &source, &general_registry);
-    let committed = jobs.ledger.get_job(&created[0].id).unwrap().unwrap();
+    let committed = jobs.ledger().get_job(&created[0].id).unwrap().unwrap();
 
     assert_eq!(
         committed.error_code.as_deref(),
@@ -62,7 +62,7 @@ fn authority_failed_create_stays_capability_free_until_explicit_retry() {
     let media = MediaOwner::new();
     let restart_snapshot = jobs.snapshot(&media, 1_503).unwrap();
     let restart_authority_denied = open_and_reveal_are_denied(&jobs, &source, &general_registry);
-    let restarted = jobs.ledger.get_job(&created[0].id).unwrap().unwrap();
+    let restarted = jobs.ledger().get_job(&created[0].id).unwrap().unwrap();
     assert_eq!(
         restarted.source_path.as_deref(),
         Some(canonical_source.as_path())
@@ -107,7 +107,7 @@ fn authority_failed_create_stays_capability_free_until_explicit_retry() {
             source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
-            &jobs.owned_dir,
+            jobs.owned_dir(),
         )
         .unwrap(),
         canonical_source
@@ -162,7 +162,7 @@ fn pre_native_picker_ledger_and_registry_cannot_reauthorize_on_restart() {
         source.display().to_string(),
         &dir.join("recording-playback-registry.json"),
         &jobs.registry_path,
-        &jobs.owned_dir,
+        jobs.owned_dir(),
     )
     .is_err());
     drop(media);
@@ -196,7 +196,7 @@ fn multi_create_commits_every_row_before_returning_injected_projection_outcomes(
             )
         },
         || {
-            let committed = jobs.ledger.list_recoverable_jobs().unwrap();
+            let committed = jobs.ledger().list_recoverable_jobs().unwrap();
             assert_eq!(committed.len(), 2);
             assert_eq!(
                 committed

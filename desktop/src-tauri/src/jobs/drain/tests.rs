@@ -13,8 +13,8 @@ use std::{
 use crate::{
     audio::session::OwnerNamespace,
     jobs::{
-        JobLedger, NewRecordingJob, RecordingJobStatus, RecordingRoute, SessionMode, SessionOrigin,
-        SourceOwnership,
+        JobLedger, NewRecordingJob, RecordingJobResources, RecordingJobStatus, RecordingRoute,
+        SessionMode, SessionOrigin, SourceOwnership,
     },
     server_connector::{
         batch::{ApiError, BatchApiClient, CreateRecordingJobRequest},

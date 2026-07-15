@@ -229,12 +229,15 @@ fn cancelled_inflight_create_is_recovered_before_its_local_tombstone_is_acknowle
     ledger
         .request_cancellation("job-cancelled-create", 1_720_000_000_201)
         .unwrap();
-    let pending_probe = RemoteJobDrain {
-        ledger: JobLedger::open(&database).unwrap(),
-        owner_namespace: OwnerNamespace::local("i-pending-probe").unwrap(),
-        owned_live_directory: owned_live.clone(),
-        remote_jobs_directory: remote_jobs.clone(),
-    };
+    let pending_probe_resources = Arc::new(RecordingJobResources::from_storage(
+        JobLedger::open(&database).unwrap(),
+        owned_live.clone(),
+        remote_jobs.clone(),
+    ));
+    let pending_probe = RemoteJobDrain::from_resources_for_test(
+        pending_probe_resources,
+        OwnerNamespace::local("i-pending-probe").unwrap(),
+    );
     assert!(pending_probe.has_pending_work().unwrap());
     drop(pending_probe);
     let connector = ServerConnector::new();

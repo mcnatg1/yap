@@ -21,7 +21,7 @@ impl RecordingJobs {
         paths: Vec<P>,
         now_ms: u64,
     ) -> Result<Vec<RecordingJobView>, JobCommandError> {
-        let _mutation = self.mutation.lock().map_err(|_| {
+        let _mutation = self.mutation().lock().map_err(|_| {
             command_error(
                 "JOB_STATE_UNAVAILABLE",
                 "Recording job state is unavailable.",
@@ -55,14 +55,14 @@ impl RecordingJobs {
         let mut new_sources = HashSet::new();
         for source in &sources {
             if self
-                .ledger
+                .ledger()
                 .find_recoverable_imported_job_by_source(&source.canonical_path)?
                 .is_none()
             {
                 new_sources.insert(source.canonical_path.clone());
             }
         }
-        let recoverable_count = self.ledger.list_recoverable_jobs()?.len();
+        let recoverable_count = self.ledger().list_recoverable_jobs()?.len();
         if recoverable_count.saturating_add(new_sources.len()) > MAX_RECORDING_JOBS {
             return Err(command_error(
                 "JOB_LIMIT_EXCEEDED",
@@ -74,7 +74,7 @@ impl RecordingJobs {
             crate::file_actions::register_native_selected_recording_job_source_at(
                 source,
                 &self.selection_registry_path,
-                &self.owned_dir,
+                self.owned_dir(),
             )
             .map_err(source_error)?;
         }
@@ -86,7 +86,7 @@ impl RecordingJobs {
                 continue;
             }
             if let Some(existing) = self
-                .ledger
+                .ledger()
                 .find_recoverable_imported_job_by_source(&source.canonical_path)?
             {
                 records_by_source.insert(source.canonical_path.clone(), existing);
@@ -119,7 +119,7 @@ impl RecordingJobs {
                 expires_at_ms: now_ms.checked_add(PENDING_JOB_LIFETIME_MS),
             });
         }
-        for record in self.ledger.insert_jobs(&new_jobs)? {
+        for record in self.ledger().insert_jobs(&new_jobs)? {
             let source_path = record
                 .source_path
                 .clone()

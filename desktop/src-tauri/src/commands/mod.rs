@@ -4,17 +4,20 @@ pub(crate) mod media_protocol;
 mod setup;
 
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    let job_resources = std::sync::Arc::new(
+        crate::jobs::RecordingJobResources::open_default()
+            .expect("recording job resources must open before commands are registered"),
+    );
+    let recording_jobs = crate::jobs::commands::RecordingJobs::from_default_resources(
+        std::sync::Arc::clone(&job_resources),
+    );
+    let remote_job_drain = crate::jobs::RemoteJobDrain::from_resources(job_resources)
+        .expect("remote recording drain must initialize before commands are registered");
     let builder = builder
         .manage(media_protocol::MediaOwner::new())
         .manage(crate::live::hotkey_commands::HotkeyEnrollmentGate::default())
-        .manage(
-            crate::jobs::commands::RecordingJobs::open_default()
-                .expect("recording job ledger must open before commands are registered"),
-        )
-        .manage(
-            crate::jobs::RemoteJobDrain::open_default()
-                .expect("remote recording drain must open before commands are registered"),
-        )
+        .manage(recording_jobs)
+        .manage(remote_job_drain)
         .manage(crate::server_connector::ServerConnector::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,

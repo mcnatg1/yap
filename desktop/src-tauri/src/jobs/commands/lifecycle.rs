@@ -14,14 +14,14 @@ impl RecordingJobs {
         media: &MediaOwner,
         now_ms: u64,
     ) -> Result<Vec<RecordingJobView>, JobCommandError> {
-        let _mutation = self.mutation.lock().map_err(|_| {
+        let _mutation = self.mutation().lock().map_err(|_| {
             command_error(
                 "JOB_STATE_UNAVAILABLE",
                 "Recording job state is unavailable.",
             )
         })?;
-        self.ledger.expire_pending_jobs(now_ms)?;
-        let (expired_remote_job_ids, _) = self.ledger.enforce_remote_retention(now_ms)?;
+        self.ledger().expire_pending_jobs(now_ms)?;
+        let (expired_remote_job_ids, _) = self.ledger().enforce_remote_retention(now_ms)?;
         for job_id in expired_remote_job_ids {
             self.remove_remote_spool_best_effort(&job_id, "retention");
         }
@@ -29,7 +29,7 @@ impl RecordingJobs {
         let mut recoverable_ids = HashSet::new();
         let mut authorized_paths = Vec::new();
         let mut recoverable_paths = Vec::new();
-        for record in self.ledger.list_recoverable_jobs()? {
+        for record in self.ledger().list_recoverable_jobs()? {
             recoverable_ids.insert(record.job_id.clone());
             if let Some(source_path) = record.source_path.clone() {
                 recoverable_paths.push(source_path);
@@ -44,9 +44,11 @@ impl RecordingJobs {
                     views.push(view);
                 }
                 Err(error) if error.code == "SOURCE_MISSING" || error.code == "SOURCE_UNSAFE" => {
-                    let failed =
-                        self.ledger
-                            .fail_source_validation(&record.job_id, &error.code, now_ms)?;
+                    let failed = self.ledger().fail_source_validation(
+                        &record.job_id,
+                        &error.code,
+                        now_ms,
+                    )?;
                     views.push(self.project_failed_capability_free(&failed, media));
                 }
                 Err(error) => return Err(error),
@@ -75,13 +77,13 @@ impl RecordingJobs {
         now_ms: u64,
         notify: impl FnOnce(),
     ) -> Result<RecordingJobView, JobCommandError> {
-        let mutation = self.mutation.lock().map_err(|_| {
+        let mutation = self.mutation().lock().map_err(|_| {
             command_error(
                 "JOB_STATE_UNAVAILABLE",
                 "Recording job state is unavailable.",
             )
         })?;
-        let record = self.ledger.request_cancellation(job_id, now_ms)?;
+        let record = self.ledger().request_cancellation(job_id, now_ms)?;
         self.release_playback(job_id, media);
         self.remove_all_job_authority_best_effort(record.source_path.as_deref(), "cancellation");
         self.remove_remote_spool_best_effort(job_id, "cancellation");
@@ -98,13 +100,13 @@ impl RecordingJobs {
         now_ms: u64,
         notify: impl FnOnce(),
     ) -> Result<RecordingJobView, JobCommandError> {
-        let mutation = self.mutation.lock().map_err(|_| {
+        let mutation = self.mutation().lock().map_err(|_| {
             command_error(
                 "JOB_STATE_UNAVAILABLE",
                 "Recording job state is unavailable.",
             )
         })?;
-        let current = self.ledger.get_job(job_id)?.ok_or_else(|| {
+        let current = self.ledger().get_job(job_id)?.ok_or_else(|| {
             command_error(
                 "JOB_NOT_FOUND",
                 format!("Recording job {job_id:?} was not found."),
@@ -132,12 +134,12 @@ impl RecordingJobs {
 
         let (record, changed) = match retry_kind {
             RetryKind::Accepted => (
-                self.ledger
+                self.ledger()
                     .accept_to_queued_server(job_id, now_ms, renewed_expiry(now_ms)?)?,
                 true,
             ),
             RetryKind::Retry => (
-                self.ledger.retry_to_queued_server(
+                self.ledger().retry_to_queued_server(
                     job_id,
                     now_ms,
                     Some(renewed_expiry(now_ms)?),
@@ -164,13 +166,13 @@ impl RecordingJobs {
         now_ms: u64,
         notify: impl FnOnce(),
     ) -> Result<RecordingJobView, JobCommandError> {
-        let mutation = self.mutation.lock().map_err(|_| {
+        let mutation = self.mutation().lock().map_err(|_| {
             command_error(
                 "JOB_STATE_UNAVAILABLE",
                 "Recording job state is unavailable.",
             )
         })?;
-        let record = self.ledger.dismiss_failed(job_id, now_ms)?;
+        let record = self.ledger().dismiss_failed(job_id, now_ms)?;
         self.release_playback(job_id, media);
         self.remove_all_job_authority_best_effort(record.source_path.as_deref(), "dismissal");
         self.remove_remote_spool_best_effort(job_id, "dismissal");

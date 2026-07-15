@@ -1,4 +1,3 @@
-use super::super::remote;
 use super::{
     command_error, log_registry_cleanup_failure, project_with_admission, source_error,
     CachedPlayback, JobCommandError, RecordingJobs,
@@ -15,7 +14,7 @@ impl RecordingJobs {
         &self,
         path: &Path,
     ) -> Result<ValidatedRecordingJobSource, JobCommandError> {
-        crate::file_actions::validate_recording_job_source_at(path, &self.owned_dir)
+        crate::file_actions::validate_recording_job_source_at(path, self.owned_dir())
             .map_err(source_error)
     }
 
@@ -72,7 +71,7 @@ impl RecordingJobs {
             media,
             &self.selection_registry_path,
             &self.registry_path,
-            &self.owned_dir,
+            self.owned_dir(),
         )
         .map_err(source_error)?;
         playback.insert(
@@ -99,7 +98,7 @@ impl RecordingJobs {
             Ok(view) => Ok(view),
             Err(error) => {
                 let failed =
-                    self.ledger
+                    self.ledger()
                         .fail_source_validation(&record.job_id, &error.code, now_ms)?;
                 Ok(self.project_failed_capability_free(&failed, media))
             }
@@ -171,7 +170,7 @@ impl RecordingJobs {
     }
 
     pub(super) fn remove_remote_spool_best_effort(&self, job_id: &str, action: &str) {
-        if let Err(error) = remote::reset_unattached_spool(job_id, &self.remote_jobs_directory) {
+        if let Err(error) = self.reset_remote_spool(job_id) {
             crate::stt::log_yap(&format!(
                 "owned remote recording cleanup after {action} remains pending: {error}"
             ));

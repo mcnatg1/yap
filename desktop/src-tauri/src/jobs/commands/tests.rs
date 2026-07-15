@@ -73,7 +73,7 @@ fn open_and_reveal_are_denied(
             source.display().to_string(),
             general_registry,
             &jobs.registry_path,
-            &jobs.owned_dir,
+            jobs.owned_dir(),
         )
         .is_err()
     };
