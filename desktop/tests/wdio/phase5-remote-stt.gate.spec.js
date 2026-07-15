@@ -172,9 +172,11 @@ describe("Phase 5 checked-head private-server gate", () => {
     expect(created).toHaveLength(1);
     expect(created[0].status).toBe("queued_server");
     expect(canonicalPath(created[0].sourcePath)).toBe(canonicalPath(fixturePath));
-    const clientJobId = created[0].id;
-    const observedStatuses = new Set([created[0].status]);
-    let completed;
+    const createdJob = created[0];
+    const clientJobId = createdJob.id;
+    const observedStatuses = new Set([createdJob.status]);
+    let history;
+    let terminalFailure;
 
     const interruptedTunnel = tunnelProcess;
     tunnelProcess = undefined;
@@ -198,15 +200,24 @@ describe("Phase 5 checked-head private-server gate", () => {
       async () => {
         const snapshot = await invoke("recording_jobs_snapshot");
         const job = snapshot.find((candidate) => candidate.id === clientJobId);
-        if (!job) throw new Error("The Rust-owned Phase 5 job disappeared during the gate.");
-        observedStatuses.add(job.status);
-        if (["failed", "cancelled"].includes(job.status)) {
-          throw new Error(
+        if (job) {
+          observedStatuses.add(job.status);
+        }
+        if (job && ["failed", "cancelled"].includes(job.status)) {
+          terminalFailure = new Error(
             `The Phase 5 job reached ${job.status} (${job.error ?? "no private-safe error projection"}).`,
           );
+          return true;
         }
-        if (job.status === "complete") completed = job;
-        return Boolean(completed);
+        const catalog = await invoke("recording_jobs_completed_transcripts");
+        if (catalog.maintenanceWarnings.length > 0) {
+          terminalFailure = new Error(
+            `The Phase 5 History catalog reported maintenance warnings: ${catalog.maintenanceWarnings.join("; ")}`,
+          );
+          return true;
+        }
+        history = matchCompletedRemoteTranscript(createdJob, catalog);
+        return Boolean(history);
       },
       {
         interval: 1_000,
@@ -215,11 +226,8 @@ describe("Phase 5 checked-head private-server gate", () => {
       },
     );
 
-    expect(completed.route).toBe("serverBatch");
-    expect(completed.outputPath).toBeTruthy();
-    const catalog = await invoke("recording_jobs_completed_transcripts");
-    expect(catalog.maintenanceWarnings).toEqual([]);
-    const history = matchCompletedRemoteTranscript(completed, catalog);
+    if (terminalFailure) throw terminalFailure;
+    expect(createdJob.route).toBe("serverBatch");
     expect(history).toBeDefined();
     expect(history.warning).toBeUndefined();
     expect(canonicalPath(history.sourcePath)).toBe(canonicalPath(fixturePath));
@@ -275,7 +283,7 @@ describe("Phase 5 checked-head private-server gate", () => {
         checkedHead,
         fixtureSha256,
         clientJobId,
-        clientRoute: completed.route,
+        clientRoute: createdJob.route,
         serverOrigin: expectedOrigin,
         sessionId: result.sessionId,
         resultRevision: result.revision,

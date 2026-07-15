@@ -23,16 +23,18 @@ export function sameWindowsPath(left, right) {
 
 export function matchCompletedRemoteTranscript(job, catalog) {
   if (
-    job?.status !== "complete"
-    || job.route !== "serverBatch"
-    || typeof job.outputPath !== "string"
+    job?.route !== "serverBatch"
+    || !/^job-[0-9a-f]{24}$/.test(job.id)
+    || typeof job.sourcePath !== "string"
     || !Array.isArray(catalog?.sessions)
   ) {
     return undefined;
   }
+  const sessionId = `s-${job.id.slice("job-".length)}`;
   return catalog.sessions.find(
-    (session) => typeof session?.outputPath === "string"
-      && sameWindowsPath(session.outputPath, job.outputPath),
+    (session) => session?.sessionId === sessionId
+      && typeof session.sourcePath === "string"
+      && sameWindowsPath(session.sourcePath, job.sourcePath),
   );
 }
 

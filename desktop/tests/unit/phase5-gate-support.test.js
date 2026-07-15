@@ -15,29 +15,43 @@ describe("Phase 5 native gate support", () => {
     expect(sameWindowsPath("C:\\Private\\Evidence", "\\\\?\\c:\\private\\evidence\\")).toBe(true);
   });
 
-  it("joins the public completed-job projection to its verified catalog entry by output", () => {
+  it("joins the created remote job to its terminal History entry by session and source", () => {
+    const createdJob = {
+      id: "job-0123456789abcdef01234567",
+      route: "serverBatch",
+      sourcePath: "C:\\fixture.wav",
+      status: "queued_server",
+    };
+    const historyEntry = {
+      name: "fixture.wav",
+      outputPath: "C:\\Yap\\remote-jobs\\job-0123456789abcdef01234567\\result-1\\transcript.txt",
+      sessionId: "s-0123456789abcdef01234567",
+      sourcePath: "\\\\?\\c:\\fixture.wav",
+    };
     const matched = matchCompletedRemoteTranscript(
-      {
-        id: "job-client-1",
-        outputPath: "C:\\Yap\\remote-jobs\\job-client-1\\result-1\\transcript.txt",
-        route: "serverBatch",
-        status: "complete",
-      },
+      createdJob,
       {
         maintenanceWarnings: [],
-        sessions: [{
-          name: "fixture.wav",
-          outputPath: "\\\\?\\c:\\yap\\remote-jobs\\job-client-1\\result-1\\transcript.txt",
-          sessionId: "s-client-1",
-          sourcePath: "C:\\fixture.wav",
-        }],
+        sessions: [historyEntry],
       },
     );
 
-    expect(matched?.sessionId).toBe("s-client-1");
+    expect(matched).toBe(historyEntry);
     expect(matchCompletedRemoteTranscript(
-      { outputPath: matched?.outputPath, route: "localFallback", status: "complete" },
-      { maintenanceWarnings: [], sessions: [matched] },
+      { ...createdJob, route: "localFallback" },
+      { maintenanceWarnings: [], sessions: [historyEntry] },
+    )).toBeUndefined();
+    expect(matchCompletedRemoteTranscript(
+      { ...createdJob, id: "job-not-a-minted-id" },
+      { maintenanceWarnings: [], sessions: [historyEntry] },
+    )).toBeUndefined();
+    expect(matchCompletedRemoteTranscript(
+      createdJob,
+      { maintenanceWarnings: [], sessions: [{ ...historyEntry, sessionId: "s-other" }] },
+    )).toBeUndefined();
+    expect(matchCompletedRemoteTranscript(
+      createdJob,
+      { maintenanceWarnings: [], sessions: [{ ...historyEntry, sourcePath: "C:\\other.wav" }] },
     )).toBeUndefined();
   });
 });
