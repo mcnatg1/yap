@@ -40,7 +40,7 @@
 
 ## Execution Order
 
-Land [the client audio foundation plan](2026-07-10-client-audio-foundation.md) first. Its session, track, gap, replay, and capture-commit types are the source contract consumed here. Contract-document work in Tasks 1-2 can be reviewed in parallel, but desktop code must rebase onto the landed client types instead of defining duplicates.
+The execution order required the [client audio foundation plan](../archived/2026-07-10-client-audio-foundation.md) first. Its session, track, gap, replay, and capture-commit types are the source contract consumed here. Contract-document work in Tasks 1-2 could be reviewed in parallel, but desktop code had to rebase onto the landed client types instead of defining duplicates.
 
 ## Governing Documents
 
@@ -50,8 +50,8 @@ Land [the client audio foundation plan](2026-07-10-client-audio-foundation.md) f
 - [ADR 0020: Meeting capture and diarization authority](../../adr/0020-meeting-capture-diarization-authority.md)
 - [Client recording state machine](../../specs/client-state-machine.md)
 - [Server tier MVP](../../specs/server-tier-mvp.md)
-- [Client hardening and storage design](../specs/2026-07-09-client-hardening-storage-design.md)
-- [Source-aware diarization design](../specs/2026-07-10-source-aware-diarization-design.md)
+- [Client hardening and storage design](../../archive/historical-designs/2026-07-09-client-hardening-storage-design.md)
+- [Source-aware diarization design](../../specs/source-aware-diarization.md)
 
 ---
 
@@ -755,7 +755,7 @@ git commit -m "Move recording jobs into Rust"
 - Modify: `docs/specs/client-state-machine.md`
 - Modify: `docs/specs/server-tier-mvp.md`
 - Modify: `docs/adr/0014-server-tier-compute-topology.md`
-- Modify: `docs/VOICE-OS-ARCHITECTURE.md`
+- Modify: former combined architecture document, now `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`
 
 - [ ] **Step 1: Add restart and partial-migration integration tests**
 
@@ -833,7 +833,7 @@ Mark Phase 3 contract, health, connector state, and durable ledger implemented. 
 - [ ] **Step 7: Commit**
 
 ```powershell
-git add desktop/src-tauri/tests desktop/tests/e2e/app.spec.ts desktop/tests/wdio/smoke.spec.js .github/workflows/ci.yml docs/specs/client-state-machine.md docs/specs/server-tier-mvp.md docs/adr/0014-server-tier-compute-topology.md docs/VOICE-OS-ARCHITECTURE.md
+git add desktop/src-tauri/tests desktop/tests/e2e/app.spec.ts desktop/tests/wdio/smoke.spec.js .github/workflows/ci.yml docs/specs/client-state-machine.md docs/specs/server-tier-mvp.md docs/adr/0014-server-tier-compute-topology.md docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md
 git commit -m "Verify the durable server boundary"
 ```
 

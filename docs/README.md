@@ -1,52 +1,92 @@
-# Yap documentation
+# Yap Documentation
 
-| Document | Purpose |
-|----------|---------|
-| [**VOICE-OS-ARCHITECTURE.md**](VOICE-OS-ARCHITECTURE.md) | **Master spec** — high/low pipeline charts, 7 layers, coverage matrix, agents, failure states, roadmap |
-| [**adr/README.md**](adr/README.md) | Architecture Decision Records (normative decisions) |
-| [**ADR-IMPLEMENTATION-STATUS.md**](ADR-IMPLEMENTATION-STATUS.md) | Living client/server ownership and implementation audit for every ADR |
-| [**specs/**](specs/) | Buildable implementation specs (IPC, error codes, lifecycle, acceptance) |
-| [**research/**](research/) | Pinned, non-normative external-source audits and selective reuse decisions |
-| [**runbooks/**](runbooks/) | Operational setup notes for local/server environments |
-| [../PRODUCT.md](../PRODUCT.md) | Product purpose and UX principles |
-| [../DESIGN.md](../DESIGN.md) | Visual and interaction design |
+This index separates current truth, accepted decisions/contracts, active work,
+completed evidence, historical rationale, operations, security, and provenance.
 
-**Start here:** [VOICE-OS-ARCHITECTURE.md](VOICE-OS-ARCHITECTURE.md) for the full picture; ADRs for *why*; specs for *how to build*. The canonical roadmap is client/server-shaped.
+If documents disagree, use this priority:
 
-**Canonical Phase 9 knowledge boundary:** [ADR 0022](adr/0022-google-okf-permission-safe-projections.md) pins Google OKF v0.1 as the curated file/Git format, requires a Postgres typed-relationship and pgvector retrieval baseline, and treats Neo4j as a benchmark-gated challenger. It is a roadmap decision, not authorization to install databases or create Phase 9 infrastructure before the identity and meeting-result prerequisites exist.
+1. executable code, machine-readable contracts, and observed runtime behavior;
+2. accepted ADRs and current normative specs;
+3. [current status](CURRENT-STATUS.md) and
+   [current architecture](architecture/CURRENT-ARCHITECTURE.md);
+4. active plans;
+5. completed implementation records;
+6. archived plans and historical designs.
 
-**Canonical server-priority amendment:** [ADR 0023](adr/0023-bounded-live-priority.md) keeps live work preferred while requiring one ready batch dispatch after a bounded live streak so accepted background work cannot starve.
+Unchecked boxes in a completed/archived plan are execution history, not current
+backlog.
 
-## Implementation specs
+## Current truth
 
-| Spec | Roadmap area | Status |
-|------|--------------|--------|
-| [client-state-machine.md](specs/client-state-machine.md) | Desktop client workflow | Phase 3 durable ownership plus Phase 5 loopback batch transitions implemented as a focused candidate; React is a typed projection |
-| [model-download-ux.md](specs/model-download-ux.md) | Local fallback setup | Implemented baseline; model licensing, hosted real-model/native CI, and production-release proof remain |
-| [local-audio-preprocessing-stack.md](specs/local-audio-preprocessing-stack.md) | Local audio preparation | Capture/timeline/recording plus Phase 5 strict canonical-WAV admission and PCM extraction implemented; general media conversion, Silero, meeting inference, and live transport remain |
-| [local-live-fallback-sidecar.md](specs/local-live-fallback-sidecar.md) | Local live fallback | Implemented baseline; model licensing, hosted real-model/native CI, performance, and production-release proof remain |
-| [local-llm-sidecar.md](specs/local-llm-sidecar.md) | Local LLM polish | Deferred draft; solo profile only |
-| [live-dictation-client-ux.md](specs/live-dictation-client-ux.md) | Live dictation client | Windows baseline implemented; visible-bounds island and safe shortcut-recorder/default UX remain |
-| [server-tier-mvp.md](specs/server-tier-mvp.md) | Server tier MVP | Phase 3 boundary, Phase 4 Cohere reference pool, and Phase 5 loopback batch candidate implemented; complete gate/auth/WSS/persistent deployment remain |
-| [2026-07-10-source-aware-diarization-design.md](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Capture foundation and meeting evidence | Capture/contract prerequisites implemented; speaker inference and server reconciliation not implemented |
-| [testing-strategy.md](specs/testing-strategy.md) | All | Living verification contract |
+- [Current status](CURRENT-STATUS.md)
+- [Current architecture](architecture/CURRENT-ARCHITECTURE.md)
+- [Phase 1–5 ownership and trust boundaries](architecture/boundaries/PHASE-1-5-OWNERSHIP.md)
+- [Roadmap](roadmap/ROADMAP.md)
+- [Changelog](../CHANGELOG.md)
 
-## Current execution boundary
+## Decisions and normative contracts
 
-The tooling-only PowerShell migration is implemented: repo-owned Windows scripts require PowerShell Core 7.4 or newer, executable selectors use `pwsh.exe`, and each Windows CI job validates its isolated runtime. A hash-pinned 7.4.17 compatibility lane parses all tracked scripts. This does not broaden the product architecture or start server inference.
+- [ADR index](adr/README.md)
+- [ADR implementation status](ADR-IMPLEMENTATION-STATUS.md)
+- [Client state machine](specs/client-state-machine.md)
+- [Live dictation client](specs/live-dictation-client-ux.md)
+- [Local live fallback](specs/local-live-fallback-sidecar.md)
+- [Model download UX](specs/model-download-ux.md)
+- [Audio preprocessing contract](specs/local-audio-preprocessing-stack.md)
+- [Source-aware diarization](specs/source-aware-diarization.md)
+- [Server tier MVP](specs/server-tier-mvp.md)
+- [Testing strategy](specs/testing-strategy.md)
 
-The [Server contract and durable connector](superpowers/plans/2026-07-10-server-contract-durable-connector.md) plan is the landed canonical Phase 3 implementation record: machine-readable contract, capability health service, connector state/retry, and SQLite job ledger. The Phase 4 private-ASR implementation adds a separate bounded reference router/pool and transient Cohere GB10 worker. The [Phase 5 remote STT implementation record](superpowers/plans/2026-07-14-phase5-remote-stt.md) now tracks the loopback-only durable batch candidate and its focused evidence; its one-time complete gate has not run. WSS/live, authentication, persistent service integration, external networking, and diarization remain gated.
+The [local LLM sidecar](specs/local-llm-sidecar.md) is an explicitly deferred,
+non-normative design draft. It is discoverable for future re-evaluation but is
+not current architecture, an active plan, or permission to add a runtime.
 
-The [Phase 4 private ASR node implementation record](superpowers/plans/2026-07-13-phase4-private-asr-node.md) pins the Cohere/NGC/Python 3.12 choices, executable and process-safety seams, and checked-head GB10 evidence. Its short licensed fixture is not long-recording or concurrency evidence.
+`server/openapi/openapi.json` and `server/openapi/live-events.schema.json` are
+the normative machine-readable wire contracts. A route in a contract is not an
+implementation claim; dynamic server capabilities and executable tests decide
+availability.
 
-The one-time Phase 3 implementation gate passed against exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05`. Its immutable GB10 archive (`be7f43d757821c3e74d0ae2809599f5a84b369115d24afce42fe6687b1bf12e1`) passed 50/50 ARM64/Python 3.12 checks, transient loopback health drove the command-line connector to `Ready`, a separate refusal invocation drove it to `Retrying`, and teardown left no Yap process or port-18765 listener. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` subsequently passed hosted CI run `29293287930` and disposable-Windows stock NSIS lifecycle run `29293291582`. This is not evidence for a persistent service, same-process native UI transition, upload, WSS, authentication, ASR, external listener, or firewall change.
+## Plans
 
-The [client audio foundation](superpowers/plans/2026-07-10-client-audio-foundation.md) is a landed implementation record. Its unchecked future inference/transport gates are not evidence that the capture foundation is absent.
+### Active
 
-## Runbooks
+- [Architecture Checkpoint A](plans/active/2026-07-15-architecture-checkpoint-a.md)
+- [CI actions and cache hardening](plans/active/2026-07-13-ci-actions-cache-hardening.md)
 
-| Runbook | Purpose |
-|---------|---------|
-| [dependency-audit-policy.md](runbooks/dependency-audit-policy.md) | Rust/Node audit expectations, ignored advisories, and warning policy |
-| [repo-housekeeping.md](runbooks/repo-housekeeping.md) | Repo layout rules, naming conventions, and tech debt ledger |
-| [yap-server-node-setup.md](runbooks/yap-server-node-setup.md) | Server node setup notes |
+### Completed implementation records
+
+- [Local Nemotron live transcription](plans/completed/2026-07-05-local-nemotron-live-transcription.md)
+- [Model download UX](plans/completed/2026-07-08-model-download-ux.md)
+- [Phase 3 server contract and durable connector](plans/completed/2026-07-10-server-contract-durable-connector.md)
+- [Phase 4 private ASR node](plans/completed/2026-07-13-phase4-private-asr-node.md)
+- [Phase 5 remote STT](plans/completed/2026-07-14-phase5-remote-stt.md)
+
+### Archived plans and historical designs
+
+The [plans index](plans/README.md) defines lifecycle rules. Superseded recipes
+live under [plans/archived](plans/archived/). Retired design snapshots live
+under [archive/historical-designs](archive/historical-designs/).
+They preserve rationale and provenance but are not current implementation
+instructions. Detailed historical task reports live under
+[archive/implementation-evidence](archive/implementation-evidence/); see the
+[archive index](archive/README.md).
+
+## Operations, research, security, and provenance
+
+- [Server-node setup](runbooks/yap-server-node-setup.md)
+- [Dependency audit policy](runbooks/dependency-audit-policy.md)
+- [Repository housekeeping](runbooks/repo-housekeeping.md)
+- [Research index](research/README.md)
+- [Public security posture](security/SECURITY-POSTURE.md)
+- [Third-party provenance](provenance/THIRD-PARTY.md)
+
+## Verification evidence
+
+- [Evidence policy and index](evidence/README.md)
+- [Checkpoint A findings](evidence/architecture-checkpoint-a/FINDINGS.md)
+- [Checkpoint A file inventory](evidence/architecture-checkpoint-a/FILE-INVENTORY.md)
+- [Checkpoint A verification](evidence/architecture-checkpoint-a/VERIFICATION.md)
+
+Private scans, scan identifiers, sensitive audio/transcript data, host paths,
+and raw machine evidence do not belong in this documentation tree, PRs, CI
+logs, or tracked test results.

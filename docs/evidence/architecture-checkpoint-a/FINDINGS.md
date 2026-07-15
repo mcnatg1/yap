@@ -133,18 +133,18 @@ register and invalidates checkpoint closure until resolved.
 The branch also removes speculative runtime orchestration state (`a1459b1`)
 instead of preserving a production-looking Phase 6 placeholder.
 
-## Remaining checkpoint work
+## Checkpoint closure work
 
-These items are required before closure, but are not unresolved product defects:
+These are closure controls, not accepted product defects:
 
-| Item | Required closure |
-| --- | --- |
-| Documentation truth | Replace Phase 5 candidate/queued-checkpoint claims with canonical merged-Phase-5/current-checkpoint documents; archive historical plans without rewriting them as current truth. |
-| File-size evidence | Publish the complete 250-line inspection inventory and cohesion reasons for every retained file above 350 lines. |
-| Link integrity | Repair and verify links after `git mv` documentation reclassification. |
-| Reviewability | Provide the ordered commit/slice index below and keep later documentation changes separate from product refactors. |
-| Final exact-head verification | Freeze the branch only after implementation, provenance, docs, and review settle; run the complete applicable checkpoint matrix exactly once. |
-| Hosted closure | Open a focused PR and require the checked head to be green. If hosted checks are unavailable, record equivalent local evidence and disclose the unavailable checks. |
+| Item | State | Evidence or required closure |
+| --- | --- | --- |
+| Documentation truth | Complete | Canonical status/architecture/roadmap/security/provenance docs describe merged Phase 5 and active Checkpoint A; historical plans/designs are separated. |
+| File-size evidence | Complete | The complete 250-line inspection inventory and every retained >350-line cohesion justification are in `FILE-INVENTORY.md`. |
+| Link integrity | Complete | Repository-local relative Markdown link audit passes after history-preserving moves. |
+| Reviewability | Complete | The ordered commit/slice index below separates product refactors, release/provenance closure, and documentation. |
+| Final exact-head verification | Pending | Freeze the branch only after final review settles; run the complete applicable checkpoint matrix exactly once. |
+| Hosted closure | Pending | Open a focused PR and require the checked head to be green. If hosted checks are unavailable, record equivalent local evidence and disclose the unavailable checks. |
 
 ## Ordered review slices
 

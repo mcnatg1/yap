@@ -13,7 +13,7 @@
 
 **Goal:** Build the next PR foundation for a snappy always-available live speaking overlay, configurable recording hotkey, microphone setup, and typed live state hooks without implementing cross-app text injection, full live STT streaming, Scribe, save-session audio, or the Phase 8 server connector.
 
-**Spec:** [../specs/2026-07-05-live-speaking-overlay-and-controls.md](../specs/2026-07-05-live-speaking-overlay-and-controls.md)
+**Historical design:** [Live speaking overlay and controls](../../archive/historical-designs/2026-07-05-live-speaking-overlay-and-controls.md)
 
 **Architecture:** Tauri Rust owns live session state and OS hooks. React renders a compact overlay and settings projection from typed snapshots. The overlay is a separate window/webview labeled `live-overlay`; capture is hotkey-gated or explicitly started; route state exposes `serverLive` as a future typed route, `localFallback`, `none`, or blocked. Without the Phase 8 connector, the app must not claim active server streaming.
 
@@ -63,7 +63,7 @@
 
 ```powershell
 cd C:\dev\cohere-transcribe-local
-rg -n "global hotkey|injection|overlay|live-overlay" docs/specs/live-dictation-client-ux.md docs/adr/0013-global-hotkey-injection.md docs/superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md
+rg -n "global hotkey|injection|overlay|live-overlay" docs/specs/live-dictation-client-ux.md docs/adr/0013-global-hotkey-injection.md docs/archive/historical-designs/2026-07-05-live-speaking-overlay-and-controls.md
 ```
 
 Expected: docs consistently distinguish overlay/hotkey foundation from injection.

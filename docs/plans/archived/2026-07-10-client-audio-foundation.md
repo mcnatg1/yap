@@ -38,7 +38,7 @@
 - [ADR 0020: Meeting capture and diarization authority](../../adr/0020-meeting-capture-diarization-authority.md)
 - [Client recording state machine](../../specs/client-state-machine.md)
 - [Local audio preprocessing stack](../../specs/local-audio-preprocessing-stack.md)
-- [Source-aware diarization design](../specs/2026-07-10-source-aware-diarization-design.md)
+- [Source-aware diarization design](../../specs/source-aware-diarization.md)
 
 ---
 
@@ -893,8 +893,8 @@ git commit -m "Surface committed and recoverable recordings"
 - Modify: `desktop/tests/e2e/app.spec.ts`
 - Modify: `desktop/tests/wdio/live-overlay.spec.js`
 - Modify: `docs/specs/local-audio-preprocessing-stack.md`
-- Modify: `docs/superpowers/specs/2026-07-10-source-aware-diarization-design.md`
-- Modify: `docs/VOICE-OS-ARCHITECTURE.md`
+- Modify: `docs/specs/source-aware-diarization.md`
+- Modify: former combined architecture document, now `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`
 
 - [ ] **Step 1: Add a four-hour synthetic boundedness test**
 
@@ -935,7 +935,7 @@ Mark the client-audio Phase 1 checklist complete only for track-aware contracts,
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add desktop/src-tauri/tests/audio_foundation.rs desktop/tests/e2e/app.spec.ts desktop/tests/wdio/live-overlay.spec.js docs/specs/local-audio-preprocessing-stack.md docs/superpowers/specs/2026-07-10-source-aware-diarization-design.md docs/VOICE-OS-ARCHITECTURE.md
+git add desktop/src-tauri/tests/audio_foundation.rs desktop/tests/e2e/app.spec.ts desktop/tests/wdio/live-overlay.spec.js docs/specs/local-audio-preprocessing-stack.md docs/specs/source-aware-diarization.md docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md
 git commit -m "Verify the client audio foundation"
 ```
 

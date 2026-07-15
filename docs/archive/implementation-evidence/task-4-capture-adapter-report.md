@@ -65,7 +65,7 @@ cargo test --locked --manifest-path .\desktop\src-tauri\Cargo.toml
 - `desktop/src-tauri/src/audio/mod.rs`
 - `desktop/src-tauri/src/live/devices.rs`
 - `desktop/src-tauri/src/live/runtime.rs`
-- `.superpowers/sdd/task-4-report.md`
+- `docs/archive/implementation-evidence/task-4-capture-adapter-report.md`
 
 ## Self-Review
 

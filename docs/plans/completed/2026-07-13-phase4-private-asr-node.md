@@ -1,18 +1,19 @@
 # Phase 4 Private ASR Node Implementation Record
 
-**Status:** Exact-head executable gate and hosted closure passed; final reviewed
-PR head and merge remain pending.
+**Status:** Completed, reviewed, gated, and merged. Exact executable candidate
+`309a2d427707e3483b2649f13940bd48dfaee836` passed the one-time local/native/
+server/GB10 gate; hosted closure passed before the final PR head became
+reachable from merged main.
 
 **Branch:** `feat/phase4-private-asr-node`
 
 **Canonical owner:** Server (`server/` and `infra/yap-server-node/`)
 
-**Merge/expiry target:** The focused Phase 4 private-ASR-node PR.
+**Merge/expiry target:** Satisfied by the focused Phase 4 private-ASR-node PR.
 
-**Delete/archive condition:** Archive this working record after the Phase 4 PR
-merges and its final checked-head gate evidence is preserved in the PR and ADR
-implementation audit. Delete it only if a later durable implementation record
-supersedes those links and evidence.
+**Retention:** This file is retained as a completed implementation record rather
+than an active plan. Delete it only if a later durable implementation record
+supersedes its PR, ADR, and checked-head evidence links.
 
 **Scope:** Prove one real private-server batch-ASR path on the DGX Spark GB10
 without connecting or widening the Phase 3 client-facing service boundary.

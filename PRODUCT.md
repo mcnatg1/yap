@@ -12,7 +12,7 @@ They usually arrive with files already on disk (MP3, M4A, WAV, MP4, and similar 
 
 ## Product Purpose
 
-Yap is a desktop transcription app (Tauri + React in `desktop/`). The current desktop implementation records and transcribes explicit live sessions locally with Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. Users can also import, review, and queue audio or video files, but official imported-file transcription still waits for the private organization-server connector; disconnected imports remain queued or blocked instead of receiving official-looking fallback output.
+Yap is a desktop transcription app (Tauri + React in `desktop/`). The current desktop implementation records and transcribes explicit live sessions locally with Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. The merged Phase 5 path also transcribes already-canonical mono PCM16/16 kHz WAV imports through the durable private-server contract and publishes only natively verified results. Disconnected imports remain queued or blocked instead of receiving official-looking fallback output. General audio/video decoding and conversion remain the target product experience but are not advertised as current executable support.
 
 The target product loop is files in, accurate transcripts out, with minimal friction between drop → durable queue → private server transcript → copy/export. Until that connected path lands, the implemented offline loop is explicit live capture → local transcript → history/playback/copy or reveal. The interface should make the current file and its transcript the center of attention; model names, auth paths, and runner details stay in secondary status unless something needs attention.
 

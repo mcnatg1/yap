@@ -1,6 +1,9 @@
 # Freeflow and Meetily donor audit
 
-**Status:** Accepted research baseline; no donor code incorporated by this audit
+**Status:** Historical donor-comparison baseline; no donor code was incorporated
+by this audit. Current direct adaptations and license evidence are recorded in
+[third-party provenance](../provenance/THIRD-PARTY.md), and current product
+status is in [CURRENT-STATUS.md](../CURRENT-STATUS.md).
 
 **As of:** Donor comparison performed 2026-07-12 at Yap
 `51931e5c79fe5efbeb03c83c5b3cb1d7b33ccb7e`; Yap baseline reconciled
@@ -51,7 +54,7 @@ use distinct identities such as `freeflow-mrinalwadhwa` and
 Donor-reported test counts and hosted workflow files are not treated as passing
 evidence. Only commands run against these pinned checkouts are reported above.
 
-## Current Yap baseline
+## Yap baseline at the audit date
 
 | Domain | Yap authority to preserve | Current gap donors may help shape |
 |--------|---------------------------|-----------------------------------|

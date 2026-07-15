@@ -1,6 +1,7 @@
 # Repo housekeeping
 
-This repo stays a staged monorepo through the MVP. Keep cleanup changes small, traceable, and tied to the current client/server plan.
+This repo stays a staged monorepo until the accepted Phase 10 split gate. Keep
+cleanup changes small, traceable, and tied to the current client/server plan.
 
 ## Layout rules
 
@@ -10,14 +11,16 @@ This repo stays a staged monorepo through the MVP. Keep cleanup changes small, t
 | `desktop/src-tauri/src/live/` | Live dictation runtime | Mic capture, overlay state, hotkey/live stream code |
 | `desktop/src-tauri/src/stt/` | Local STT fallback | Nemotron pins, shared artifact helpers, parity helpers |
 | `desktop/src-tauri/src/jobs/` | Durable imported-job authority | SQLite ledger, transitions, source/playback trust, restart recovery |
-| `desktop/src-tauri/src/server_connector/` | Server reachability boundary | Validated settings, bounded health/capability checks, retry cancellation |
-| `server/` | `yap-server` staging | Versioned contract, bounded tested health/router slice, and isolated Phase 4 reference worker; persistent or connected services require their phase gates |
+| `desktop/src-tauri/src/server_connector/` | Server contract boundary | Validated settings, bounded health/capability and batch adapters, generation-bound retry/cancellation |
+| `server/` | `yap-server` staging | Versioned contract, bounded health, gated durable loopback batch service, router, and isolated worker; authentication, external networking, and persistent production service require later gates |
 | `infra/yap-server-node/` | Server host bootstrap | Host scripts/env examples; no app code |
 | `docs/adr/` | Decisions | Why the architecture is this way |
-| `docs/specs/` | Build specs | What to implement next |
+| `docs/specs/` | Behavior contracts and labeled drafts | Current/future contract boundaries; a deferred draft is not an active plan |
 | `docs/research/` | External-source audits | Pin revisions, separate studied/adapted/copied status, and define selective reuse gates |
 | `docs/runbooks/` | Operations and maintenance | How to run, audit, clean, or recover things |
-| `docs/superpowers/` | Working implementation flow notes | Must name a canonical owner, merge/expiry target, and delete/archive condition |
+| `docs/plans/active/` | Current implementation flow | Must name a canonical owner, merge/expiry target, and closure condition |
+| `docs/plans/completed/` | Landed implementation records | Preserve checked evidence; do not use unchecked boxes as backlog |
+| `docs/plans/archived/` and `docs/archive/` | Superseded plans and historical designs/evidence | Preserve rationale without competing with current truth |
 
 ## Naming rules
 
@@ -37,11 +40,11 @@ Keep the folder name `desktop/` while this is a staged monorepo. Rename the repo
 
 | Priority | Item | Current state | Next action |
 |----------|------|---------------|-------------|
-| P1 | Production remote server processing remains deferred | The Phase 5 candidate connects durable loopback HTTP batch upload/drain, status, cancellation, result verification, and History projection to the isolated worker; its one-time complete gate is pending | Keep WSS/live, authentication, persistent service, external edge, and measured multi-worker capacity behind their explicit later gates |
+| P1 | Production remote server deployment remains deferred | The gated Phase 5 path connects durable loopback HTTP batch upload/drain, status, cancellation, result verification, and History projection to the isolated worker | Keep WSS/live, authentication, persistent service, external edge, and measured multi-worker capacity behind their explicit later gates |
 | P1 | CI parity clip is opt-in | Mock verbose JSON fixture protects timestamp contract in normal CI; real audio sidecar tests are ignored unless `YAP_PARITY_CLIP` is set | Add a licensed speech fixture later if real audio parity must run in CI |
 | P2 | ShadCN icon metadata now matches Phosphor | `components.json` declares Phosphor, and app imports Phosphor directly | Keep direct imports; do not add an icon adapter |
 | P2 | Active spec filenames use client/server names | Historical phase links were renamed to `local-live-fallback-sidecar.md`, `live-dictation-client-ux.md`, `server-tier-mvp.md`, and `local-llm-sidecar.md` | Leave ADR phase aliases intact unless an ADR is amended |
-| P2 | `server/` has a gated reference runtime | Health contract, live/batch router, immutable Phase 4 model/runtime lock, and one isolated transient worker have focused Python coverage | Keep persistent API/service integration, durable queues, and exposed capability behind their canonical phase gates |
+| P2 | `server/` has a gated loopback reference runtime | Health contract, durable batch service, bounded router, immutable model/runtime lock, and one isolated transient worker passed the Phase 5 gate | Keep authenticated live service, persistent supervision, external networking, and measured multi-worker capacity behind their canonical gates |
 | P3 | Local checkout path is historical | `C:\dev\cohere-transcribe-local` differs from repo/product name | Local-only; rename outside Git when convenient |
 
 ## Audit commands

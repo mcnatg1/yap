@@ -165,5 +165,5 @@ Reuse the same directory as the local STT weights (`YAP_MODELS_DIR` / `%APPDATA%
 ### References
 
 - Current Ollama polish: `desktop/src/polish.ts`
-- Architecture: [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md)
+- Architecture: [Current architecture](../architecture/CURRENT-ARCHITECTURE.md)
 - Agents: [ADR 0004](0004-background-diarization-okf-agents.md)

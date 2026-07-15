@@ -2,7 +2,10 @@
 
 **Date:** 2026-07-01
 **Author:** Architecture
-**Status:** Superseded as an execution plan by the canonical roadmap in [VOICE-OS-ARCHITECTURE.md](../../VOICE-OS-ARCHITECTURE.md) and the meeting decision in [ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md). Retained as historical rationale.
+**Status:** Superseded as an execution plan by the canonical
+[roadmap](../../roadmap/ROADMAP.md) and the meeting decision in
+[ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md). Retained as
+historical rationale.
 
 > **Knowledge-plan correction (2026-07-12):** [ADR 0022](../../adr/0022-google-okf-permission-safe-projections.md) supersedes this plan's claims that the original ADR 0010 frontmatter is unchanged and that the team profile should choose generically among Milvus/pgvector-class stores. Canonical Phase 9 now uses pinned Google OKF v0.1 plus the Yap Enterprise OKF profile, Postgres typed relationships, and a pgvector baseline. Neo4j is a benchmark-gated challenger. Do not implement the historical rows below as current storage or schema authority.
 
@@ -62,7 +65,7 @@ On-prem GPU is **not cloud** — it is org-owned hardware on an org-controlled L
 
 ## Phase roadmap additions
 
-Add the following phases to the master roadmap in `VOICE-OS-ARCHITECTURE.md`. Existing phase IDs (0–7e, 7+, A–D) are **unchanged**; the server-tier track uses phase numbers 8–12.
+Add the following phases to the then-current master roadmap, now preserved at `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`. Existing phase IDs (0–7e, 7+, A–D) are **unchanged**; the server-tier track uses phase numbers 8–12.
 
 | Phase | Track | Deliverable | ADR |
 |-------|-------|-------------|-----|
@@ -78,9 +81,9 @@ Add the following phases to the master roadmap in `VOICE-OS-ARCHITECTURE.md`. Ex
 
 | File | Change |
 |------|--------|
-| `docs/VOICE-OS-ARCHITECTURE.md` | (1) Add "Two deployment profiles" section. (2) Update pipeline charts to show thin-client shell + server tier. (3) Update master roadmap table with phases 8–12. (4) Update layer model to note server vs client boundary. (5) Update "Why it's a good idea" table for on-prem GPU rationale. (6) Update document map table. |
+| `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md` | Historical location of the former combined architecture document: (1) add "Two deployment profiles" section; (2) update pipeline charts to show thin-client shell + server tier; (3) update master roadmap table with phases 8–12; (4) update layer model to note server vs client boundary; (5) update "Why it's a good idea" table for on-prem GPU rationale; (6) update document map table. |
 | `docs/adr/README.md` | Add ADRs 0014–0018 to the index table. |
-| `docs/README.md` | No structural change required; it links to VOICE-OS-ARCHITECTURE.md which will be updated. |
+| `docs/README.md` | No structural change was required at execution time; it linked to the former combined architecture document. |
 
 ---
 
@@ -114,5 +117,5 @@ Add the following phases to the master roadmap in `VOICE-OS-ARCHITECTURE.md`. Ex
 - [x] Amend `docs/adr/0010-okf-conversation-schema.md`
 - [x] Amend `docs/adr/0011-vector-rag-retrieval.md`
 - [x] Amend `docs/adr/0012-mcp-server-surface.md`
-- [x] Update `docs/VOICE-OS-ARCHITECTURE.md`
+- [x] Update the former combined architecture document (now archived at `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`)
 - [x] Update `docs/adr/README.md` index

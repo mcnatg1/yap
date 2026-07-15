@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-15; the merged Phase 3 and Phase 4 evidence remains recorded below. Phase 4 final PR head `43f9c43f37e1893dbfe1565d3636fca1e4e3fedf` is reachable from merged main `7d967a5b9f1021fd995af77a421ebaa13d8f9925`. The Phase 5 branch now has an executable loopback durable-batch candidate with focused Rust, frontend, Python 3.12, API, and contract evidence. Its private diff review is complete and retained outside the repository; the one-time complete local/native/server/GB10 gate remains pending.
+**As of:** 2026-07-15; Phases 3–5 are merged and their checked-head evidence remains recorded below. Phase 5 PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the one-time complete local/native/server/GB10 gate and hosted checks, then merged as `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`. Architecture Checkpoint A is active and has not run its final gate.
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -22,12 +22,12 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 
 | ADR | Decision status / precedence | Owner | Score / 200 | Implemented evidence | Missing or blocking evidence | Next canonical gate or replacement |
 |-----|------------------------------|-------|------------:|----------------------|------------------------------|------------------------------------|
-| [0001](adr/0001-dual-stt-backends.md) | Live fallback vs official batch principle retained; model details amended by 0014/0019 | Shared | **85** | In-process pinned Nemotron live fallback, warm lifecycle, capability-aware connector state, durable imported-job ownership, and a Phase 5 candidate that drains loopback batch work through the isolated Cohere worker and publishes verified results | Phase 5 complete gate pending; no WSS/live, auth, persistent service, external edge, or measured production capacity | Complete the Phase 5 checked-head gate |
+| [0001](adr/0001-dual-stt-backends.md) | Live fallback vs official batch principle retained; model details amended by 0014/0019 | Shared | **150** | In-process pinned Nemotron live fallback plus the gated Phase 5 durable loopback batch path through the isolated Cohere worker with verified native result publication | No WSS/live, authentication, persistent production service, external edge, general media conversion, or measured production capacity | Retain the two-route policy while later phases harden transport, identity, media preparation, and deployment |
 | [0002](adr/0002-crispasr-unified-stt-runtime.md) | Historical; replaced by 0019 | Client | **0** | No tracked or wired CrispASR runtime | Entire retired runtime path absent by design | Do not revive; use 0019 |
-| [0003](adr/0003-long-term-voice-architecture.md) | Long-term principles retained; runtime and meeting details amended by 0013/0014/0019/0020 | Shared | **55** | Capture, local ASR, overlay, history, hotkeys, safe Windows clipboard delivery, and a focused Phase 5 loopback server-batch candidate cover early layers | No LID, gated/production server deployment, enrichment, OKF, agents, or KB | Follow the canonical remaining phases, not its historical phase map |
+| [0003](adr/0003-long-term-voice-architecture.md) | Long-term principles retained; runtime and meeting details amended by 0013/0014/0019/0020 | Shared | **55** | Capture, local ASR, overlay, history, hotkeys, safe Windows clipboard delivery, and the gated Phase 5 loopback server-batch path cover early layers | No LID, production server deployment, enrichment, OKF, agents, or KB | Follow the canonical remaining phases, not its historical phase map |
 | [0004](adr/0004-background-diarization-okf-agents.md) | Non-blocking background principles retained; diarization details superseded by 0020 | Shared | **45** | Independent bounded sinks, track/gap/chunk contracts, crash-safe recording, evidence/result types | No production speaker sink, worker, diarizer, alignment, OKF, or agents | Phase 8 uses 0020 authority; Phase 9 owns OKF/agents |
 | [0005](adr/0005-llama-server-agents.md) | Accepted target; team placement amended by 0014 | Shared | **20** | Development-only Polish flow exists | Polish still calls Ollama; no bundled llama-server, manager, model pin, health gate, or profiles | Implement only when local/server LLM product work is activated |
-| [0006](adr/0006-silero-agents-state-machine.md) | Accepted principles; routing amended by 0014/0019/0020 | Shared | **45** | Rust `RuntimeOrchestrator` skeleton, connector state/capability projection, single warm Nemotron lifecycle, and durable Phase 5 batch upload/server-processing job transitions | No Silero ONNX, production `vad_segments`, agent registry, LLM mutex/queue, or live-server transition | Later preprocessing, authenticated live transport, and LLM gates |
+| [0006](adr/0006-silero-agents-state-machine.md) | Accepted principles; routing amended by 0014/0019/0020 | Shared | **45** | Connector state/capability projection, single warm Nemotron lifecycle, and durable Phase 5 batch upload/server-processing transitions execute; the speculative unused orchestrator state was removed during Checkpoint A | No Silero ONNX, production `vad_segments`, agent registry, LLM mutex/queue, or live-server transition | Later preprocessing, authenticated live transport, and LLM gates |
 | [0007](adr/0007-forced-alignment-engine.md) | Accepted principle; exact engine requires revalidation | Shared | **10** | Aligned-word and revision contract placeholders exist | No aligner, overlap projection, benchmark, fixture, worker, or service | Phase 6 benchmark and implementation |
 | [0008](adr/0008-speechbrain-lid-gate.md) | Accepted behavior; runtime/placement unresolved | Shared | **0** | Only generic validated language hints exist | No LID model/runtime, probes, confidence gate, cache, picker, or tests | Phase 6 client confirmation plus server/solo runtime decision |
 | [0009](adr/0009-knowledge-worker-protocol.md) | Solo protocol retained historically; team transport superseded by 0017 | Shared | **10** | Capture/chunk prerequisites exist | No worker, socket protocol, lifecycle, backpressure events, quarantine, or stitcher | Team work follows 0017; solo worker remains deferred |
@@ -35,14 +35,14 @@ Scores are evidence-based estimates, not percentages. The owner column uses **Cl
 | [0011](adr/0011-vector-rag-retrieval.md) | Accepted retrieval principles; team projection amended by 0017/0022 | Server | **0** | None | No FTS/vector store, embeddings, chunker, RRF, calibration, citations, permission filtering, or graph projection | Phase 9 after authoritative OKF and access boundaries |
 | [0012](adr/0012-mcp-server-surface.md) | Accepted Phase 9 target; team hosting amended by 0017 | Server | **0** | None | No MCP runtime, tools/resources, transport, opt-in, authorization, or tests | Phase 9 after permission-filtered KB APIs |
 | [0013](adr/0013-global-hotkey-injection.md) | Accepted as amended 2026-07-14; Windows hotkey and safe-delivery implementation active | Client | **180** | Dual safe defaults, native-confirmed 15-second physical-chord enrollment with neutral/chord/release and modifier floors, normalization and reserved/conflict rejection, Cancel/per-action Reset, transactional registration rollback, one exact-bounds non-focusable island, clipboard-only delivery with Yap HWND ownership and visible paste guidance, focused native WDIO, stock installer contract, and a passing hosted disposable-Windows lifecycle | No macOS/Linux hotkey/clipboard adapters, broad real-app clipboard matrix, exact-field authority for safe direct insertion, or verified local real-model/hardware lifecycle on this machine | Expand native compatibility and hardware evidence without reintroducing synthesized input without exact-field authority |
-| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021/0023 | Shared | **100** | Versioned contracts, bounded loopback capability API, validated connector, durable desktop and server job state, strict already-canonical WAV-to-PCM preparation, bounded reconnect drain, immutable result publication, hardened host bootstrap, owner-fair router, immutable Cohere/NGC/Python 3.12 lock, and the Phase 4 GB10 worker whose exact-head WER `0.0` gate passed | Phase 5 complete gate pending; no general media conversion, persistent service, authenticated production owner/router, WSS/live pool, TLS/QUIC edge, long-recording benchmark, or multi-worker capacity result | Complete the Phase 5 checked-head gate, then retain later security/deployment gates |
+| [0014](adr/0014-server-tier-compute-topology.md) | Canonical server topology, amended by 0016/0019/0020/0021/0023 | Shared | **150** | Versioned contracts, bounded loopback capability API, validated connector, durable desktop/server job state, canonical-WAV preparation, reconnect drain, verified result publication, hardened bootstrap, owner-fair router, immutable Cohere/NGC/Python 3.12 lock, and the gated GB10 Phase 5 vertical slice | No general media conversion, persistent production service, authenticated owner/router, WSS/live pool, TLS/QUIC edge, long-recording benchmark, or measured multi-worker capacity | Preserve the gated batch baseline; complete later preprocessing, identity, live, capacity, and enterprise deployment gates |
 | [0015](adr/0015-two-pass-diarization-speaker-identity.md) | Superseded by 0020 | Server | **0** | No implementation of the retired ECAPA/VBx design | Entire retired design absent by intent | Do not implement; use 0020 |
 | [0016](adr/0016-auth-identity-bridge.md) | Canonical Phase 7 decision | Shared | **15** | Evidence/result contracts require provenance for named server assertions; Phase 5 uses an explicit SSH development boundary without treating it as application identity | No MSAL, credential storage, Yap-token validation, identity DB, grants, enrollment, deletion, or audit | Phase 7 after the private batch boundary passes its gate |
 | [0017](adr/0017-knowledge-base-compiler.md) | Canonical team KB/compiler decision; format/projection amended by 0022 | Server | **0** | None beyond repository documentation | No Lane 1 store, `yap-knowledge`, compiler, databases, permission inheritance, APIs, or IaC | Phase 9 after identity and result authority |
 | [0018](adr/0018-three-repo-topology.md) | Accepted eventual topology; staged monorepo retained through MVP | Shared | **45** | `desktop/`, `server/`, `infra/`, and `docs/` staging layout now contains an executable client/server batch boundary without premature repo extraction | No three-repo split, independent CI/CD/access controls, link migration, or cross-repo version policy | Split only at Phase 10 after deployable server/knowledge boundaries |
 | [0019](adr/0019-local-streaming-model-selection.md) | Canonical client fallback decision | Client | **180** | Pinned model revision/SHA artifacts, in-process sherpa Nemotron, warm lifecycle, setup controls, profiler, native tests, local release/packaging contracts, and a passing hosted stock-NSIS lifecycle | No completed client-model artifact license review, local-Nemotron use of the licensed speech/WER fixture, real-model CI accuracy smoke, or cross-platform evidence | Close local-model licensing, fixture accuracy, and cross-platform gates |
-| [0020](adr/0020-meeting-capture-diarization-authority.md) | Canonical meeting/capture/identity authority | Shared | **90** | Source-aware sessions/tracks, exact gaps, bounded sinks, crash-safe recording/recovery, strict canonical-WAV admission and immutable single-track PCM extraction for Phase 5, durable upload/reconnect, verified server result revisions, finite pending/completed retention, and naming restrictions | Phase 5 complete gate pending; no general media conversion, system loopback, meeting UX, speaker model, speaker reconciliation, contacts, or identity service | Complete Phase 5 transport evidence, then Phase 8 speaker inference/reconciliation |
-| [0021](adr/0021-http3-secure-edge-transport.md) | Accepted gated HTTP/3 edge target; the application remains loopback HTTP/1.1 | Shared | **0** | Transport-neutral job semantics now execute over the Phase 5 SSH-forwarded loopback batch candidate; live-carrier and TCP-fallback direction remain documented | No TLS/QUIC edge, UDP exposure, client HTTP/3 path, negotiated capability, authenticated live baseline, fallback drill, or transport benchmark | Complete Phase 5 batch and Phase 7 authenticated-live boundaries, then benchmark and security-gate the HTTP/3 edge |
+| [0020](adr/0020-meeting-capture-diarization-authority.md) | Canonical meeting/capture/identity authority | Shared | **100** | Source-aware sessions/tracks, exact gaps, bounded sinks, crash-safe recording/recovery, gated canonical-WAV upload/reconnect, verified server-authoritative result revisions, finite retention, and naming restrictions | No general media conversion, system loopback, meeting UX, speaker model, speaker reconciliation, contacts, or identity service | Phase 6 preserves the capture/result contracts; Phase 8 adds speaker inference/reconciliation |
+| [0021](adr/0021-http3-secure-edge-transport.md) | Accepted gated HTTP/3 edge target; the application remains loopback HTTP/1.1 | Shared | **0** | Transport-neutral job semantics execute over the gated Phase 5 SSH-forwarded loopback batch path; live-carrier and TCP-fallback direction remain documented | No TLS/QUIC edge, UDP exposure, client HTTP/3 path, negotiated capability, authenticated live baseline, fallback drill, or transport benchmark | Complete the Phase 7 authenticated baseline, then benchmark and security-gate the HTTP/3 edge |
 | [0022](adr/0022-google-okf-permission-safe-projections.md) | Canonical Phase 9 Google OKF and permission-safe projection boundary | Server | **0** | Decision, pinned upstream revision, enterprise profile, permission algebra, baseline/challenger boundary, generation protocol, and verification gates are documented | No Google OKF fixtures/validator, Yap profile compiler, `yap-knowledge`, Postgres relationship/permission ledger, pgvector baseline, virtual view, or Neo4j challenger benchmark | Implement after Phase 7 identity and Phase 8 result authority are available |
 | [0023](adr/0023-bounded-live-priority.md) | Accepted amendment to ADR 0014's priority rule | Server | **100** | The owner-fair router has focused regression coverage, and Phase 5 batch commits now enter it through one fixed development owner with durable surrounding job/cancellation/recovery state | No live target in the Phase 5 runtime, authenticated owner, persistent production service, or measured mixed-load tuning/capacity | Revalidate the bound with authenticated live work and production capacity evidence |
 
@@ -98,10 +98,11 @@ Before/after listener, firewall-policy, and service-unit observations matched;
 the run opened no port or persistent service and left no Phase 4 container or
 worker. Post-gate repository changes are evidence/status documentation only.
 
-A private post-remediation security review is complete; its scan artifacts
-remain local and are not repository or PR material. ADR 0014 remains at
-**100/200** because the checked reference worker is still not a connected,
-durable, authenticated, capacity-tested service.
+At the Phase 4 boundary ADR 0014 remained at **100/200** because that checked
+reference worker was not connected to a durable desktop/server job path. The
+later gated Phase 5 vertical slice supplies that connection and raises the
+current audit score to **150/200**; authentication, persistent production
+service, external edge, and measured capacity remain absent.
 
 Hosted closure ran on evidence-only PR head
 `7c7970ffb959209ba283918a4a200cc16c35fb1f`. CI run `29363957581` passed
@@ -115,10 +116,27 @@ used `%APPDATA%\com.mcnatg1.yap`, and silent uninstall preserved app data plus
 the stock product registry record. These hosted runs add no persistent service,
 external listener, firewall mutation, or production deployment claim.
 
-These Phase 3/4 checks do not activate later product gates. The current Phase 5
-branch adds a focused-evidence loopback upload/drain and connected batch result
-path, but its one-time complete gate has not run. There is still no meeting
-RTTM/diarization fixture suite, streaming pool, authenticated end-to-end test,
-persistent production service, external edge, or measured multi-worker
-capacity. Scores must be revised only when authoritative implementation and
-gate evidence changes.
+### Phase 5 checked-head evidence
+
+Exact PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the
+one-time local/native/server/GB10 matrix and merged as
+`b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`. The recorded matrix includes the
+frozen frontend build/audit, 32/32 release contracts, 271 frontend unit tests,
+23 Playwright tests, 165 portable Python 3.12 tests, 719 Rust library tests plus
+integration suites, connector integration, required native WDIO, zero Rust
+audit vulnerabilities, the Windows no-`glib` boundary, SSH-forward interruption
+and recovery, cancellation/restart/resource checks, GB10 Python 3.12.3 with
+NVIDIA Torch `2.13.0a0+8145d630e8.nv26.06`/CUDA 13.3/BF16, WER `0.0` against
+the `0.12` ceiling, and clean container/process/listener teardown.
+
+Hosted frontend, Rust, server, required native WDIO, and CodeQL analyses for
+Actions, JavaScript/TypeScript, Python, and Rust were green on that exact PR
+head. These checks do not activate later product gates: there is still no
+meeting RTTM/diarization fixture suite, live server pool, authenticated
+end-to-end service, persistent production service, external edge, or measured
+multi-worker capacity.
+
+Architecture Checkpoint A may reorganize and simplify the verified foundation,
+but its own completion/status claims wait for the final exact-head checkpoint
+gate. Scores change only when authoritative implementation and gate evidence
+changes.

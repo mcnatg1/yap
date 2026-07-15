@@ -342,4 +342,4 @@ Depends on ADR 0002 Phases 1–3 (CrispASR batch + live EN) being stable first.
 - [ADR 0002](0002-crispasr-unified-stt-runtime.md) — CrispASR sidecar
 - CrispASR aligners: `canary-ctc-aligner`, wav2vec2 GGUF repos under `cstr/`
 - Voice OS spec: Critical Path Isolation, Speaker Vault, agent roster (internal)
-- Readable synthesis: [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md)
+- Readable synthesis: [Current architecture](../architecture/CURRENT-ARCHITECTURE.md)

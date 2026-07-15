@@ -113,11 +113,11 @@ listener, or multi-worker capacity claim. Phase 5 reuses its isolated worker
 through the separate development batch runtime below; production deployment
 claims remain gated.
 
-## Phase 5 loopback batch candidate
+## Phase 5 loopback batch path
 
 Set `YAP_PHASE5_BATCH_ENABLED=1` only on Linux with a numeric loopback bind,
 private mode-0700 job storage, the immutable model lock, an already verified
-model directory, `YAP_PHASE5_CHECKED_HEAD` set to the full candidate SHA, and
+model directory, `YAP_PHASE5_CHECKED_HEAD` set to the full checked SHA, and
 `YAP_PHASE5_WORKER_IMAGE` set to the custom Yap image built and revision-labeled
 from that head. The pinned NVIDIA PyTorch image is the custom Dockerfile base;
 it is not directly runnable as Yap's worker. Startup inspects the custom image
@@ -137,8 +137,11 @@ or WSS/live transport is created. See the
 Use its foreground `phase5-batch-server.sh` launcher rather than reconstructing
 the environment ad hoc.
 
-This is an implemented candidate with focused test evidence. The one-time
-complete Phase 5 local/native/server/GB10 gate has not run.
+This path passed the one-time Phase 5 local/native/server/GB10 gate on exact PR
+head `4771d9be60562fa009ccecbcd3c7111b699883a5` and merged as
+`b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`. It remains a loopback development
+profile, not an authenticated, externally published, persistent production
+service.
 
 ## Local checks
 

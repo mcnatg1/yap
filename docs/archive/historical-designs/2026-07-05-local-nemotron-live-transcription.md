@@ -5,6 +5,10 @@
 **Scope:** Make live dictation real through one local fallback: Nemotron 3.5 ASR Streaming 0.6B INT8 via in-process `sherpa-onnx`. The client captures mic audio, streams it to the warm recognizer, saves live WAV/TXT output into Home history, and stays explicit that larger official recordings belong to the server path.
 **Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md), [../../adr/0019-local-streaming-model-selection.md](../../adr/0019-local-streaming-model-selection.md), [../../adr/0014-server-tier-compute-topology.md](../../adr/0014-server-tier-compute-topology.md)
 
+> **Archive notice (2026-07-15):** This preserves the implementation design,
+> not current backlog or status. Use [current status](../../CURRENT-STATUS.md)
+> and the canonical specs above for the merged system.
+
 > **Current truth (2026-07-14):** The in-process Nemotron path, live WAV/TXT history, native-confirmed bounded shortcut enrollment, and Windows clipboard-only delivery are implemented. Synthesized input is retired under ADR 0013. Remaining gates are client-model artifact licensing, local licensed speech/WER evidence, hosted real-model/native CI, measured performance, and cross-platform proof. The scope language below records the implementation slice rather than current backlog.
 
 ## Problem

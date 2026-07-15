@@ -1,8 +1,11 @@
 # Phase 5 Remote STT Implementation Record
 
-**Status:** Implementation in progress on the focused Phase 5 branch. Focused
-checks are running during development; the one-time complete Phase 5 gate has
-not run and no completion score or merge claim is authorized yet.
+**Status:** Completed, reviewed, gated, and merged. Exact PR head
+`4771d9be60562fa009ccecbcd3c7111b699883a5` passed the one-time complete
+Phase 5 matrix and hosted checks, then merged as
+`b6677631b2cc8283f0f6466622f2dfa7cfdb38f6` on 2026-07-15. The body below is
+the implementation/gate contract preserved as historical evidence, not active
+work.
 
 **Branch:** `feat/phase5-remote-stt`
 

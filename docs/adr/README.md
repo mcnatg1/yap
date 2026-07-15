@@ -29,7 +29,9 @@ Each ADR follows the [Nygard-style](https://cognitect.com/blog/2011/11/15/docume
 
 Keep ADRs focused on one decision (or one tightly related cluster). Prefer updating product or design docs for UX copy; use ADRs when the choice has lasting architectural impact.
 
-**Readable synthesis:** [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md) — layers, roadmap, two deployment profiles, hardening, viability assessment.
+**Readable synthesis:** [Current architecture](../architecture/CURRENT-ARCHITECTURE.md)
+describes the executing system; the [roadmap](../roadmap/ROADMAP.md) owns
+accepted future sequencing.
 
 **Implementation audit:** [ADR-IMPLEMENTATION-STATUS.md](../ADR-IMPLEMENTATION-STATUS.md) — current client/server ownership, executable evidence, gaps, and 0–200 scores. Decision acceptance does not imply implementation completeness.
 
@@ -45,7 +47,10 @@ Use ADRs in this order:
 1. A `Superseded` decision is historical and never authorizes implementation.
 2. A later explicit `Amends` or `Supersedes` clause wins over an earlier conflicting detail.
 3. ADRs 0014–0023 define the canonical client/server architecture and phase map. Earlier ADRs remain authoritative only for the principles or deployment profile their status names.
-4. [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md) is the readable roadmap and status synthesis; it cannot silently override an ADR.
+4. [Current architecture](../architecture/CURRENT-ARCHITECTURE.md),
+   [current status](../CURRENT-STATUS.md), and the
+   [roadmap](../roadmap/ROADMAP.md) are readable syntheses; they cannot silently
+   override an ADR.
 5. Build specs describe implementation. A `Draft` spec is not permission to ship a model, dependency, protocol, data-retention rule, or external surface absent an accepted ADR.
 
 Every implementation plan must list its applied ADRs, superseded details it intentionally ignores, deferred decisions, exact acceptance tests, and phase boundary. Exact model/runtime names in a principle-only or historical ADR are benchmark candidates rather than defaults.
@@ -80,4 +85,5 @@ Every implementation plan must list its applied ADRs, superseded details it inte
 
 **Build specs** (how, not why): [docs/specs/](../specs/) — STT sidecar, LLM sidecar, live UX, testing.
 
-**Readable synthesis (high/low pipeline charts + coverage matrix):** [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md)
+**Readable synthesis:** [Current architecture](../architecture/CURRENT-ARCHITECTURE.md)
+and [Phase 1–5 ownership](../architecture/boundaries/PHASE-1-5-OWNERSHIP.md)

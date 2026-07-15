@@ -1,8 +1,8 @@
 # Spec: Local Audio Preprocessing Stack
 
-**Status:** Accepted design contract; desktop capture/timeline/recording foundation verified 2026-07-11, with Phase 5 strict canonical-WAV admission, PCM extraction, and loopback batch transport implemented as a focused candidate on 2026-07-15
+**Status:** Accepted design contract; desktop capture/timeline/recording foundation verified 2026-07-11, with gated Phase 5 canonical-WAV admission, PCM extraction, and loopback batch transport merged 2026-07-15
 **Scope:** Desktop-side capture and deterministic preprocessing before local fallback or server upload.
-**Amended by:** [ADR 0020](../adr/0020-meeting-capture-diarization-authority.md) and the [Source-Aware Diarization Design](../superpowers/specs/2026-07-10-source-aware-diarization-design.md).
+**Amended by:** [ADR 0020](../adr/0020-meeting-capture-diarization-authority.md) and the [Source-Aware Diarization Design](source-aware-diarization.md).
 
 Yap should preprocess audio locally when the work is cheap, deterministic, and useful for both the local live fallback and the server path. The server owns heavy inference and enrichment. The desktop owns capture, preparation, chunk metadata, and retryable transport packaging.
 
@@ -48,7 +48,7 @@ Do not copy Meetily's local Whisper/Parakeet transcription router, old backend, 
 | `desktop/src-tauri/src/live/recordings.rs` | Validates committed capture manifests, projects canonical history, and owns recovery/deletion of partial and committed artifacts. | Add server-job linkage without changing capture identity. |
 | `desktop/src-tauri/src/audio/` | Track-aware frames, preprocessing, exact timeline gaps, independent bounded sink-port coordination, streaming recording, immutable sidecars/commits, and tested manifest contracts. | Add optional speaker inference and transport consumers without another recording contract. |
 | `desktop/src-tauri/src/jobs/` | Durable imported-job lifecycle, strict Phase 5 canonical-WAV admission and immutable PCM extraction/spool, reconnect drain, cancellation outbox, retention, and verified result catalog. | Keep general media conversion, live-capture transport, and Phase 6 preprocessing separate from imported-file authority. |
-| `desktop/src-tauri/src/runtime/` | Rust `RuntimeOrchestrator` state and route ownership. | Project batch state without duplicating durable job ownership. |
+| `desktop/src-tauri/src/runtime/` | Application-wide background-task lifecycle and shared setup/connector projection enums. | Keep durable jobs, connector generations, and live sessions in their domain owners. |
 | `server/` | Versioned contracts plus the Phase 5 loopback durable batch service, router, and isolated Cohere pool. | Add authenticated live and production deployment only at their later gates. |
 
 ## Verified Implementation Status
@@ -62,7 +62,7 @@ Implemented and connected in the production microphone path after required Nemot
 
 The live-capture evidence and server-transport ports are implemented and independently bounded, but their production consumers are currently `None`. Phase 5 instead admits already-canonical mono PCM16/16 kHz WAV files and extracts their PCM through `jobs/remote.rs`; it does not decode or resample general imported media and does not wire live microphone transport. Production capture does not yet run recording-only: `start_local` must construct the Nemotron stream and local-ASR adapter before it opens CPAL capture.
 
-Deferred: live-capture upload/WSS, application authentication, persistent/external service deployment, system loopback, Opus transport, an anonymous-speaker/diarization model, long-recording and multi-worker capacity evidence, hosted production-release proof, and per-OS real-model/native hardware CI. The Phase 5 imported-file loopback batch candidate and its verified result projection exist, but its one-time complete gate is pending.
+Deferred: live-capture upload/WSS, application authentication, persistent/external service deployment, system loopback, Opus transport, an anonymous-speaker/diarization model, long-recording and multi-worker capacity evidence, hosted production-release proof, and per-OS real-model/native hardware CI. The gated Phase 5 imported-file loopback batch path and its verified result projection exist.
 
 Pre-release timestamp-era recordings remain untouched and unindexed. There is no migration adapter or second fixture/recording contract for them.
 
@@ -229,8 +229,8 @@ Use the current live stream default as the starting point:
 - Live fallback still works without the server.
 - Larger recordings still queue/block without a server.
 - The Phase 5 loopback profile prepares and drains imported recordings through
-  one durable contract and publishes only verified immutable results; its full
-  checked-head gate remains pending.
+  one durable contract and publishes only verified immutable results; exact PR
+  head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed its checked-head gate.
 - Dictation remains independent from speaker evidence.
 - Current canonical single-microphone artifacts and settings remain readable; timestamp-era recordings remain untouched and unindexed.
 - Meeting capture streams to disk with bounded memory and no retained-PCM duration cap.

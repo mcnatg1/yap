@@ -6,7 +6,8 @@
 
 **Goal:** Keep the desktop client focused on one local live/offline fallback: Nemotron 3.5 ASR Streaming 0.6B INT8 via `sherpa-onnx`.
 
-**Spec:** [../specs/2026-07-05-local-nemotron-live-transcription.md](../specs/2026-07-05-local-nemotron-live-transcription.md)
+**Specs:** [Local live fallback](../../specs/local-live-fallback-sidecar.md) and
+[live dictation client](../../specs/live-dictation-client-ux.md).
 
 **Architecture:** React stays a view layer. Tauri Rust owns model setup, mic capture, resampling, the warm recognizer, live-session state, and local WAV/TXT save. The client does not keep a local Parakeet/CrispASR child or GPU routing path.
 

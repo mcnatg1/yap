@@ -1,6 +1,8 @@
 # CI Actions And Cache Hardening Implementation Plan
 
-> **Implementation status (2026-07-13):** Tasks 1-5 implemented and independently approved with 0 Critical/Important findings. Task 6 is active; keep public GitHub checks as the merge gate.
+> **Implementation status (2026-07-15):** Tasks 1-5 and the Task 6a cache-path
+> repair are implemented. Task 6 operational closure is active; keep public
+> GitHub checks as the merge gate and keep private review evidence outside Git.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:test-driven-development` for the release-contract changes and `superpowers:verification-before-completion` before opening or merging the PR.
 
@@ -123,7 +125,7 @@ assume its environment-specific default.
 
 - [x] Run the release-contract test until GREEN (20/20).
 - [x] Run workflow YAML parsing, `git diff --check`, and focused dependency-policy checks.
-- [x] Request an independent security/release-boundary review and resolve every Critical or Important finding (0 remaining).
+- [x] Request an independent security/release-boundary review and resolve every merge-blocking finding; retain private evidence outside Git.
 - [ ] Push a focused PR and require frontend, Rust, server, native WDIO, CodeQL, and release-contract checks to pass.
 - [ ] After merge, verify the post-merge `main` run creates the new canonical caches.
 - [ ] Delete obsolete PR-scoped caches and historical 2.24-GiB Cargo caches only after replacement caches exist; record before/after storage.

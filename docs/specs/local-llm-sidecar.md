@@ -1,10 +1,19 @@
 # Spec: Local LLM Sidecar
 
-**Status:** Deferred draft; solo/local sidecar only, with team LLM execution governed by ADR 0014
-**Implements:** [ADR 0005](../adr/0005-llama-server-agents.md), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (HOT/background mutex)
-**Scope:** Move Polish off the external Ollama dependency onto a bundled `llama-server` sidecar, and define the shared LLM client used by Polish today and Scribe/agents later.
+**Status:** Deferred, non-normative design draft; not an active plan or current
+runtime claim. Revalidate it before implementation.
+**Decision basis:** [ADR 0005](../adr/0005-llama-server-agents.md), [ADR 0006](../adr/0006-silero-agents-state-machine.md) (HOT/background mutex)
+**Scope:** Explore moving Polish off the external Ollama dependency onto a
+bundled `llama-server` sidecar and a possible shared LLM client for later
+approved Scribe/agent work.
 
-Pairs with the [STT sidecar spec](local-live-fallback-sidecar.md) — same lifecycle/manager pattern, different runtime.
+The [local STT fallback](local-live-fallback-sidecar.md) now runs in-process.
+Its model-integrity and shutdown invariants are relevant, but it does not supply
+a reusable sidecar-manager pattern.
+
+Nothing in this draft authorizes Phase 6 work, a bundled model, a new runtime,
+or a dependency change. An accepted phase plan must first revalidate model
+quality, licensing, memory, packaging, lifecycle, and current ownership.
 
 ---
 
@@ -16,14 +25,15 @@ Pairs with the [STT sidecar spec](local-live-fallback-sidecar.md) — same lifec
 - Pinned default GGUF for Polish/Scribe; first-run download + checksum.
 - Migrate `desktop/src/polish.ts` from Ollama `/api/chat` to OpenAI-compatible `/v1/chat/completions`.
 - `YAP_LLM_BACKEND=llama|ollama` flag; `YAP_LLM_BASE_URL` override.
-- Shared LLM client (TS) + manager (Rust) reused by Scribe in Phase 3.
+- Shared LLM client (TS) plus manager (Rust), with future consumers added only
+  by an accepted phase plan.
 
 ### Out of scope
 
 | Deferred | Where |
 |----------|-------|
-| Live Scribe wiring | Phase D / [live spec](live-dictation-client-ux.md) |
-| Background agents (Student…) | Phase 7d+ ([ADR 0006](../adr/0006-silero-agents-state-machine.md)) |
+| Live Scribe wiring | Unscheduled later work / [live spec](live-dictation-client-ux.md) |
+| Background agents (Student…) | Canonical Phase 9 or later ([ADR 0006](../adr/0006-silero-agents-state-machine.md)) |
 | Metal/CUDA offload | post-v1 (`-ngl 0` baseline) |
 | Embeddings for RAG | [ADR 0011](../adr/0011-vector-rag-retrieval.md) |
 
@@ -85,7 +95,7 @@ POST /v1/chat/completions
 
 ### 4.3 Token / latency budgets
 
-| Caller | Phase | max_tokens | temperature | Budget |
+| Caller | Draft slice | max_tokens | temperature | Budget |
 |--------|-------|-----------|-------------|--------|
 | Polish · light | A–B | 220 | 0.2 | none (user waits) |
 | Polish · clean | A–B | 220 | 0.3 | none |
@@ -136,9 +146,14 @@ Exhaustive `match` on the code enum.
 
 ---
 
-## 7. Lifecycle (Rust manager)
+## 7. Proposed lifecycle (Rust manager)
 
-Same rules as STT sidecar: lazy spawn on first Polish/Scribe use, `/health` ready gate (10 s), serialized HOT calls, auto-restart once, kill on app exit, logs at `%APPDATA%/com.mcnatg1.yap/logs/llama-server.log` on Windows. Idle: keep model warm while app open; unload on app background only if RAM pressure (later). Coexists with STT sidecar within the 16 GB budget ([ADR 0004 §9](../adr/0004-background-diarization-okf-agents.md)).
+A future manager would own lazy spawn on first Polish/Scribe use, a bounded
+`/health` ready gate, serialized HOT calls, one bounded restart, explicit app-
+exit termination, and private logs under canonical Tauri app data. It must
+coexist with the in-process local STT runtime inside a measured memory budget;
+the historical 16 GB estimate in [ADR 0004 §9](../adr/0004-background-diarization-okf-agents.md)
+is not current capacity evidence.
 
 ---
 
@@ -157,21 +172,21 @@ Pin llama.cpp version in repo; CI smoke-tests one chat completion per platform b
 
 ## 9. Acceptance criteria
 
-**Phase A — sidecar up**
+**Draft slice A — sidecar up**
 - [ ] First run downloads + verifies Polish GGUF with progress.
 - [ ] `/health` gates “Polish engine ready”.
 - [ ] Sidecar starts/stops with app; no orphan on exit.
 
-**Phase B — Polish migrated**
+**Draft slice B — Polish migrated**
 - [ ] All three tones produce non-empty output via `/v1/chat/completions`.
 - [ ] Output quality parity with current Ollama path on a fixed sample (manual spot-check).
 - [ ] `YAP_LLM_BACKEND=ollama` still works for dev.
 
-**Phase C — default cutover**
+**Draft slice C — default cutover**
 - [ ] Default `llama`; Ollama only via flag; docs updated to dev-only.
 - [ ] Error codes (§6) reachable and mapped to toasts.
 
-**Phase D — Scribe-ready (with Live MVP)**
+**Draft slice D — Scribe-ready (only when an accepted plan activates it)**
 - [ ] Streaming completion honors 400 ms budget; over-budget falls back to raw and stores dual-track.
 - [ ] Shared `llmClient` used by both Polish and Scribe (no duplicate fetch logic).
 

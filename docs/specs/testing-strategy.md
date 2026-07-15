@@ -1,6 +1,6 @@
 # Spec: Testing strategy
 
-**Status:** Living verification contract (updated 2026-07-14); future phase gates activate only when their fixtures exist
+**Status:** Living verification contract (updated 2026-07-15); future phase gates activate only when their fixtures exist
 **Scope:** Cross-cutting tests for the desktop runtime, track-aware audio contracts, local fallback, source-aware diarization, server contracts, and native UI.
 
 This is the shared reference the phase specs point to for their acceptance tests.
@@ -8,9 +8,10 @@ This is the shared reference the phase specs point to for their acceptance tests
 **Current activation:** deterministic generated-tone and contract fixtures exist.
 Phase 4 also has one committed, licensed LibriSpeech WAV with a locked golden
 transcript and a standard-library WER gate for the private Cohere worker. The
-Phase 5 candidate adds focused frontend, Rust, Python 3.12, API, contract,
-restart, reconnect, cancellation, retention, and result-publication coverage.
-Its complete local/native/server/GB10 gate has not run. The
+Phase 5 adds frontend, Rust, Python 3.12, API, contract, restart, reconnect,
+cancellation, retention, result-publication, native, and GB10 coverage; its
+one-time complete gate passed on exact PR head
+`4771d9be60562fa009ccecbcd3c7111b699883a5`. The
 desktop speech suite, meeting RTTM manifest, diarization benchmark harness,
 bundled llama-server, and per-OS real-model matrix described below do not exist
 yet. Their tables are target gates, not claims about active CI.
@@ -33,15 +34,14 @@ Keep unit/integration fast and offline. Accuracy + E2E run on the per-OS matrix.
 
 ### Phase 5 checked-head boundary
 
-Focused development suites may run repeatedly while the candidate changes. The
-complete Phase 5 local/native/server/GB10 matrix runs exactly once only after
-implementation, documentation, private security review, and focused review are
-ready on one frozen SHA. It must exercise a licensed, non-sensitive desktop
-import through preparation, SSH-forwarded loopback upload, the actual GB10
-worker, verified History publication, reconnect, cancellation, retry, retention,
-and clean process/listener/container teardown. Private audio, transcripts, host
-snapshots, and security-scan material are never repository, CI-artifact, or PR
-content.
+Focused development suites ran while the candidate changed. The complete
+Phase 5 local/native/server/GB10 matrix then ran once on frozen PR head
+`4771d9be60562fa009ccecbcd3c7111b699883a5`. It exercised a licensed,
+non-sensitive desktop import through preparation, SSH-forwarded loopback upload,
+the actual GB10 worker, verified History publication, reconnect, cancellation,
+retry, retention, and clean process/listener/container teardown. Private audio,
+transcripts, host snapshots, and security-scan material are never repository,
+CI-artifact, or PR content.
 
 The native vertical-slice gate owns one explicitly configured SSH alias and
 interrupts/restores that forward around the same durable client job; it never

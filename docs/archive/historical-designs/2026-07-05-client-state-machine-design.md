@@ -1,9 +1,15 @@
 # Client State Machine Design
 
-**Status:** Historical design record; typed React projection and Rust orchestrator skeleton landed
+**Status:** Historical design snapshot; superseded as current-state authority
 **Date:** 2026-07-05
 **Scope:** Phase 1/2 desktop workflow architecture, with hooks for Phase 3-8 server, preprocessing, and diarization.
 **Canonical build spec:** [../../specs/client-state-machine.md](../../specs/client-state-machine.md)
+
+> **Archive notice (2026-07-15):** Status statements below describe the system
+> at earlier checkpoints. Use [current architecture](../../architecture/CURRENT-ARCHITECTURE.md)
+> and [current status](../../CURRENT-STATUS.md) for the executing Phase 1–5
+> system. In particular, the speculative umbrella `RuntimeOrchestrator` was
+> later removed in favor of explicit connector, job, live, and lifecycle owners.
 
 > **Current truth (2026-07-12):** The statements below describe the pre-implementation starting point. Shared recording-job types and a Rust `RuntimeOrchestrator` skeleton now exist, while imported jobs still use a numeric React/localStorage queue. Durable Rust/SQLite ownership remains in the Phase 3 connector plan.
 

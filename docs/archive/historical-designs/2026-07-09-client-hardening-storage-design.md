@@ -8,9 +8,14 @@
 > [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
 > [client state-machine spec](../../specs/client-state-machine.md) as authority.
 
-**Status:** Reviewed design; scoped implementation landed on the hardening branch
+**Status:** Historical reviewed design; superseded as current-state authority
 **Date:** 2026-07-09
 **Scope:** Remaining desktop maintainability, storage, and native trust-boundary hardening on `hardening/yap-maintainability`.
+
+> **Archive notice (2026-07-15):** Later Phase 3–5 and Checkpoint A work changed
+> storage, migration, path, installer, and ownership boundaries. Use
+> [current architecture](../../architecture/CURRENT-ARCHITECTURE.md) and accepted
+> ADRs/specs for executable truth.
 
 > **Current truth (2026-07-12):** The quantitative bullets below are a pre-implementation snapshot, not current file sizes. `App.tsx` is now 457 lines and `src-tauri/src/lib.rs` is 17 lines; command ownership moved into focused modules. Rust now authorizes playback/open/reveal paths and the local verification suite passes. Durable imported-job ownership still waits for Phase 3, and the branch still requires a green PR/CI before merge.
 

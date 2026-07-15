@@ -7,10 +7,15 @@
 > [ADR 0013](../../adr/0013-global-hotkey-injection.md) and the
 > [canonical live spec](../../specs/live-dictation-client-ux.md) as authority.
 
-**Status:** Historical foundation design; baseline landed and native convergence remains
+**Status:** Historical foundation design; superseded as current-state authority
 **Date:** 2026-07-05
 **Scope:** Next PR for the live speaking UI/state/control foundation. This is the Phase 3/ADR 0013 bridge: build the always-available overlay, configurable hotkey, microphone setup, and typed live state contract before cross-app text injection. It does not implement the full audio thread, Scribe, save-session pipeline, or Phase 8 server streaming connector.
 **Canonical specs:** [../../specs/live-dictation-client-ux.md](../../specs/live-dictation-client-ux.md), [../../specs/client-state-machine.md](../../specs/client-state-machine.md)
+
+> **Archive notice (2026-07-15):** The converged tray-owned island, deliberate
+> shortcut enrollment, and safe delivery behavior subsequently landed. Use the
+> canonical specs and [current architecture](../../architecture/CURRENT-ARCHITECTURE.md),
+> not this original foundation scope, for current behavior.
 
 > **Current truth (2026-07-14):** Overlay, hotkeys, mic capture, local streaming, saved sessions, one visible-bounds island, native physical-chord enrollment, and Windows clipboard delivery subsequently landed. The original "next PR" exclusions below are historical.
 

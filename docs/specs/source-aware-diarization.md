@@ -3,7 +3,7 @@
 **Status:** Accepted design; client capture foundation implemented and verified 2026-07-11; model-specific diarization remains deferred
 **Date:** 2026-07-10
 **Scope:** Track-aware client audio contracts, local anonymous speaker evidence, and server-authoritative reconciliation for Yap meeting sessions.
-**Decision:** [ADR 0020](../../adr/0020-meeting-capture-diarization-authority.md)
+**Decision:** [ADR 0020](../adr/0020-meeting-capture-diarization-authority.md)
 
 ## Problem
 
@@ -271,7 +271,11 @@ The capture sidecar/commit protocol, hash-validated catalog, partial recovery, a
 
 Local embeddings and centroids are memory-only. They are discarded after local finalization. Server reconciliation recomputes them from retained audio.
 
-Before automatic upload, retry, or reconnect drain ships, pending jobs move from the frontend queue shell to a Rust-owned SQLite ledger as required by the existing client storage design. SQLite stores job and revision metadata, never WAV/Opus bytes, transcript bodies, credentials, or embeddings.
+The gated Phase 5 imported-file path moved pending jobs, retry, cancellation,
+remote origin/progress, and reconnect drain from the frontend queue shell into
+the Rust-owned SQLite ledger. SQLite stores job and result metadata plus
+verified artifact references, never WAV/Opus bytes, transcript bodies,
+credentials, or embeddings. Live meeting-track upload remains deferred.
 
 ### Recording commit protocol
 
@@ -285,7 +289,7 @@ A session is complete only when a valid commit manifest has been published:
 
 This protocol is implemented. Recording input streams through the writer; complete publication requires the immutable sidecar and commit, while failed or interrupted publication remains explicitly partial and recoverable.
 
-The implementation uses the strongest available file flush and atomic-replace primitives on each platform and documents any residual power-loss window. Fault-injection tests stop the process before and after every numbered boundary. A future SQLite transaction may reference a committed artifact or explicitly register a partial artifact; it cannot promote one implicitly.
+The implementation uses the strongest available file flush and atomic-replace primitives on each platform and documents any residual power-loss window. Fault-injection tests stop the process before and after every numbered boundary. The imported-job SQLite ledger references only its verified prepared artifacts. A future meeting-session transaction may reference a committed live artifact or explicitly register a partial artifact; it cannot promote one implicitly.
 
 Each transcript or future speaker result revision is written as its own immutable artifact through temporary-write, flush, and atomic-publish. It references the capture-manifest hash, its revision number, provenance, and optionally the prior result hash. Transcript revisions are implemented; speaker-result production remains deferred. A rebuildable result index may point to the latest verified revision, but it is not part of capture completeness. Crashing during result publication leaves the committed recording valid and the unfinished result absent or partial; it never rewrites the capture manifest.
 
@@ -439,9 +443,11 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - Implement unknown/candidate/stable-anonymous clustering and result revisions.
 - Persist only the anonymous timeline and provenance; discard embeddings.
 
-### Subsequent plans
+### Delivered transport prerequisite and subsequent plans
 
-- Canonical Phases 3–5: Rust-owned SQLite reconnect ledger and server transport.
+- Delivered Phases 3–5: Rust-owned SQLite reconnect ledger and bounded
+  loopback imported-file server transport/result publication. This does not
+  activate live meeting-track transport.
 - Server authoritative diarization and purpose-authorized identity.
 - OS contacts and roster suggestions without biometrics.
 - Windows system-loopback capture.
@@ -462,7 +468,11 @@ Client transient embedding and exemplar types must not implement ordinary persis
 - [x] No new inference framework was added.
 - [x] Rust, frontend unit, Playwright, and native WDIO checks are green; deterministic Rust contracts precede real-device evidence.
 
-Still deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release proof; and per-OS real-model/native hardware CI.
+Still deferred: live meeting-track upload/WSS/authentication, system loopback,
+Opus transport, an anonymous-speaker/diarization runtime and RTTM/DER benchmark,
+hosted production-release proof, and per-OS real-model/native hardware CI. The
+Rust-owned imported-job ledger, bounded loopback connector/upload/batch-ASR/
+result path, licensed speech/WER fixture, and hosted Phase 5 gate now exist.
 
 ## Acceptance For The Phase 8 Local Baseline Plan
 
