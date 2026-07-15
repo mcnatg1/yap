@@ -65,15 +65,12 @@ fn clearing_idle_warmup_drops_a_ready_model() {
 
     let dropped = Arc::new(AtomicBool::new(false));
     let warmup = SharedWarmup::new();
-    *warmup.state.lock().unwrap() = SharedWarmupState::Ready(DropSignal(Arc::clone(&dropped)));
+    warmup.seed_ready_for_test(DropSignal(Arc::clone(&dropped)));
 
     warmup.clear_idle().unwrap();
 
     assert!(dropped.load(Ordering::Acquire));
-    assert!(matches!(
-        *warmup.state.lock().unwrap(),
-        SharedWarmupState::Empty
-    ));
+    assert!(warmup.is_empty_for_test());
 }
 
 #[test]
@@ -115,10 +112,7 @@ fn clearing_idle_warmup_cancels_and_waits_for_a_loading_model() {
     );
     clearer.join().unwrap();
     assert!(dropped.load(Ordering::Acquire));
-    assert!(matches!(
-        *warmup.state.lock().unwrap(),
-        SharedWarmupState::Empty
-    ));
+    assert!(warmup.is_empty_for_test());
 }
 
 #[test]
