@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   assertRecordingRootEmpty,
   listRecordingArtifacts,
-} from "./task-8b-helpers.js";
+} from "./task-8b-artifacts.js";
 
 const execFileAsync = promisify(execFile);
 const mainWindowTitle = "Yap";

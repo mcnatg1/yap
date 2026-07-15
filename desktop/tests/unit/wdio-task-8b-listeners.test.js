@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   registerTask8bLifecycleListeners,
   waitForTask8bSavedEvent,
-} from "../wdio/task-8b-helpers.js";
+} from "../wdio/task-8b-lifecycle.js";
 
 
 describe("Task 8b transactional lifecycle listeners", () => {

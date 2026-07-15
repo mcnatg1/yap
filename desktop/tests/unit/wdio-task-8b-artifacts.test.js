@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { assertOwnedSavedSession } from "../wdio/task-8b-helpers.js";
+import { assertOwnedSavedSession } from "../wdio/task-8b-artifacts.js";
 import { installTask8bPrivateIsolationFixture } from "./wdio-task-8b-fixture.js";
 
 const {

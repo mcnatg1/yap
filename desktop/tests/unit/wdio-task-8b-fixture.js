@@ -5,7 +5,7 @@ import { afterEach } from "vitest";
 import {
   createWdioRunIsolation,
   removePrivateRunRootWhenReleased,
-} from "../wdio/task-8b-helpers.js";
+} from "../wdio/task-8b-isolation.js";
 
 function writeCanonicalBundle(recordingRoot, name = "live-s-18c13f2a28c8be80-d018-2") {
   const suffixes = [

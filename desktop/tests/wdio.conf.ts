@@ -3,13 +3,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  attachWdioRunIsolation,
   assertRecordingRootEmpty,
-  createWdioRunIsolation,
   listRecordingArtifacts,
+} from "./wdio/task-8b-artifacts.js";
+import {
+  attachWdioRunIsolation,
+  createWdioRunIsolation,
   removePrivateRunRootWhenReleased,
   resetPrivateRecordingRoot,
-} from "./wdio/task-8b-helpers.js";
+} from "./wdio/task-8b-isolation.js";
 
 const binaryName = process.platform === "win32" ? "yap-desktop.exe" : "yap-desktop";
 const testsRoot = path.dirname(fileURLToPath(import.meta.url));

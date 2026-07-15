@@ -15,7 +15,7 @@ import {
   attachWdioRunIsolation,
   createWdioRunIsolation,
   removePrivateRunRootWhenReleased,
-} from "../wdio/task-8b-helpers.js";
+} from "../wdio/task-8b-isolation.js";
 import { installTask8bPrivateIsolationFixture } from "./wdio-task-8b-fixture.js";
 
 const { privateIsolation } = installTask8bPrivateIsolationFixture();

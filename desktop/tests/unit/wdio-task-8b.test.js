@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MICROPHONE_PERMISSION_DENIED_PREFIX,
   classifyNativeReadiness,
-} from "../wdio/task-8b-helpers.js";
+} from "../wdio/task-8b-readiness.js";
 
 
 describe("Task 8b native readiness classification", () => {

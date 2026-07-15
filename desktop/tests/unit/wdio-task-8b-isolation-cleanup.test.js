@@ -16,9 +16,11 @@ import { describe, expect, it } from "vitest";
 import {
   assertRecordingRootEmpty,
   listRecordingArtifacts,
+} from "../wdio/task-8b-artifacts.js";
+import {
   removePrivateRunRootWhenReleased,
   resetPrivateRecordingRoot,
-} from "../wdio/task-8b-helpers.js";
+} from "../wdio/task-8b-isolation.js";
 import { installTask8bPrivateIsolationFixture } from "./wdio-task-8b-fixture.js";
 
 const { privateIsolation } = installTask8bPrivateIsolationFixture();
