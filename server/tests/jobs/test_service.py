@@ -193,10 +193,10 @@ def _published_result(job: dict[str, object]) -> dict[str, object]:
 
 class RecordingJobServiceTests(unittest.TestCase):
     def test_intake_duration_limit_matches_the_isolated_worker(self) -> None:
-        from yap_server.jobs.service import _MAX_JOB_PCM_BYTES
+        from yap_server.jobs.contract_values import MAX_JOB_PCM_BYTES
 
         self.assertEqual(
-            _MAX_JOB_PCM_BYTES,
+            MAX_JOB_PCM_BYTES,
             SAMPLE_RATE_HZ * 2 * MAX_AUDIO_SECONDS,
         )
 
@@ -295,7 +295,7 @@ class RecordingJobServiceTests(unittest.TestCase):
             self.assertEqual(invalid.exception.code, "INVALID_JOB")
 
     def test_result_model_provenance_matches_the_openapi_256_character_bound(self) -> None:
-        from yap_server.jobs.service import _validate_result_revision
+        from yap_server.jobs.result_contract import validate_result_revision
 
         projection = {
             "sessionId": "s-phase5-create",
@@ -305,7 +305,7 @@ class RecordingJobServiceTests(unittest.TestCase):
         result["modelProvenance"][0]["modelId"] = "m" * 257
 
         with self.assertRaises(ValueError):
-            _validate_result_revision(result, projection)
+            validate_result_revision(result, projection)
 
     def test_create_returns_and_replays_the_immutable_job_projection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
