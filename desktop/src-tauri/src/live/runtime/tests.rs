@@ -33,10 +33,7 @@ fn capture_loss_coordinator() -> (
 fn wait_for_recording_finalizing(runtime: &LiveRuntime) {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        if matches!(
-            *runtime.recording_finalization.state.lock().unwrap(),
-            RecordingFinalizationState::Finalizing
-        ) {
+        if runtime.recording_finalization.is_finalizing_for_test() {
             return;
         }
         assert!(

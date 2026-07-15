@@ -2,7 +2,7 @@
 use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Condvar, Mutex,
+    Arc, Mutex,
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use super::stream::{self, StreamMessage};
 
 mod asr_adapter;
 mod capture_worker;
+mod finalization;
 mod level_channel;
 mod lifecycle_gate;
 mod session_identity;
@@ -36,6 +37,7 @@ use asr_adapter::{
 #[cfg(test)]
 use capture_worker::*;
 use capture_worker::{run_capture_worker, CaptureWorkerContext};
+use finalization::{RecordingFinalization, StopCompletion};
 #[cfg(test)]
 use level_channel::publish_level;
 use level_channel::{level_channel, LatestLevelReceiver};
@@ -56,7 +58,7 @@ pub struct LiveRuntime {
     active_session: Arc<AtomicU64>,
     start_generation: Arc<AtomicU64>,
     recording_finalization: Arc<RecordingFinalization>,
-    stop_completion: Arc<StopCompletion>,
+    stop_completion: Arc<StopCompletion<LiveStopResult>>,
     transition: Arc<LifecycleGate>,
     model_warmup: Arc<SharedWarmup<LiveStreamEngine>>,
     model_mutation_active: Arc<AtomicBool>,
@@ -69,38 +71,6 @@ pub(crate) struct StartIntent(u64);
 pub struct LiveStopResult {
     pub stream: StreamFinishStatus,
     pub recording: Result<Option<RecordingFinalizeResult>, String>,
-}
-
-struct StopCompletion {
-    state: Mutex<StopCompletionState>,
-    completed: Condvar,
-}
-
-enum StopCompletionState {
-    Pending,
-    Finalizing,
-    Finalized(Box<LiveStopResult>),
-}
-
-impl StopCompletion {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(StopCompletionState::Pending),
-            completed: Condvar::new(),
-        }
-    }
-
-    fn reset(&self) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "live stop completion state became unavailable")?;
-        if matches!(*state, StopCompletionState::Finalizing) {
-            return Err("Previous live stop is still finalizing.".into());
-        }
-        *state = StopCompletionState::Pending;
-        Ok(())
-    }
 }
 
 struct LiveRuntimeInner {
@@ -117,98 +87,6 @@ struct LiveRuntimeInner {
     has_capture_for_test: bool,
     #[cfg(test)]
     has_stream_for_test: bool,
-}
-
-struct RecordingFinalization {
-    state: Mutex<RecordingFinalizationState>,
-    completed: Condvar,
-}
-
-enum RecordingFinalizationState {
-    Pending,
-    Finalizing,
-    Finalized(Box<Option<RecordingFinalizeResult>>),
-    Failed {
-        error: String,
-        session_id: Option<SessionId>,
-    },
-}
-
-impl RecordingFinalization {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(RecordingFinalizationState::Pending),
-            completed: Condvar::new(),
-        }
-    }
-
-    fn prepare_for_new_recording(&self) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "recording finalization state became unavailable")?;
-        if matches!(*state, RecordingFinalizationState::Finalizing) {
-            return Err("Previous live recording is still finalizing.".into());
-        }
-        *state = RecordingFinalizationState::Pending;
-        Ok(())
-    }
-}
-
-struct RecordingFinalizationLease<'a> {
-    finalization: &'a RecordingFinalization,
-    completed: bool,
-}
-
-impl<'a> RecordingFinalizationLease<'a> {
-    fn new(finalization: &'a RecordingFinalization) -> Self {
-        Self {
-            finalization,
-            completed: false,
-        }
-    }
-
-    fn finish(
-        mut self,
-        result: Result<Option<RecordingFinalizeResult>, String>,
-        session_id: Option<SessionId>,
-    ) -> Result<Option<RecordingFinalizeResult>, String> {
-        let mut state = self
-            .finalization
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *state = match &result {
-            Ok(result) => RecordingFinalizationState::Finalized(Box::new(result.clone())),
-            Err(error) => RecordingFinalizationState::Failed {
-                error: error.clone(),
-                session_id,
-            },
-        };
-        self.completed = true;
-        self.finalization.completed.notify_all();
-        result
-    }
-}
-
-impl Drop for RecordingFinalizationLease<'_> {
-    fn drop(&mut self) {
-        if self.completed {
-            return;
-        }
-        let mut state = self
-            .finalization
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if matches!(*state, RecordingFinalizationState::Finalizing) {
-            *state = RecordingFinalizationState::Failed {
-                error: "recording finalization interrupted before completion".into(),
-                session_id: None,
-            };
-        }
-        self.finalization.completed.notify_all();
-    }
 }
 
 /// Excludes live start/stop work while installed model files or enablement change.
@@ -586,42 +464,10 @@ impl LiveRuntime {
     }
 
     pub(crate) fn finish_stop(&self, stream: StreamFinishStatus) -> LiveStopResult {
-        let should_finalize = {
-            let mut state = self
-                .stop_completion
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            loop {
-                match &*state {
-                    StopCompletionState::Finalized(result) => return (**result).clone(),
-                    StopCompletionState::Pending => {
-                        *state = StopCompletionState::Finalizing;
-                        break true;
-                    }
-                    StopCompletionState::Finalizing => {
-                        state = self
-                            .stop_completion
-                            .completed
-                            .wait(state)
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    }
-                }
-            }
-        };
-        debug_assert!(should_finalize);
-        let result = LiveStopResult {
+        self.stop_completion.complete_with(|| LiveStopResult {
             stream,
             recording: self.finalize_recording(),
-        };
-        let mut state = self
-            .stop_completion
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *state = StopCompletionState::Finalized(Box::new(result.clone()));
-        self.stop_completion.completed.notify_all();
-        result
+        })
     }
 
     pub fn unload_if_idle(&self, threshold: Duration) {
@@ -650,55 +496,24 @@ impl LiveRuntime {
     }
 
     pub(crate) fn finalize_recording(&self) -> Result<Option<RecordingFinalizeResult>, String> {
-        let lease = {
-            let mut state = self
-                .recording_finalization
-                .state
-                .lock()
-                .map_err(|_| "recording finalization state became unavailable")?;
-            loop {
-                match &*state {
-                    RecordingFinalizationState::Finalized(result) => return Ok((**result).clone()),
-                    RecordingFinalizationState::Failed { error, .. } => return Err(error.clone()),
-                    RecordingFinalizationState::Pending => {
-                        *state = RecordingFinalizationState::Finalizing;
-                        break RecordingFinalizationLease::new(&self.recording_finalization);
-                    }
-                    RecordingFinalizationState::Finalizing => {
-                        state = self
-                            .recording_finalization
-                            .completed
-                            .wait(state)
-                            .map_err(|_| "recording finalization state became unavailable")?;
-                    }
+        self.recording_finalization
+            .finalize_with(|| match self.inner.lock() {
+                Ok(mut inner) => {
+                    let recording = inner.recording.take();
+                    let session_id = recording
+                        .as_ref()
+                        .map(|recording| recording.session_id().clone());
+                    (
+                        recording.map(|recording| recording.finalize()).transpose(),
+                        session_id,
+                    )
                 }
-            }
-        };
-        let (result, session_id) = match self.inner.lock() {
-            Ok(mut inner) => {
-                let recording = inner.recording.take();
-                let session_id = recording
-                    .as_ref()
-                    .map(|recording| recording.session_id().clone());
-                (
-                    recording.map(|recording| recording.finalize()).transpose(),
-                    session_id,
-                )
-            }
-            Err(_) => (Err("live runtime became unavailable".into()), None),
-        };
-        lease.finish(result, session_id)
+                Err(_) => (Err("live runtime became unavailable".into()), None),
+            })
     }
 
     pub(crate) fn recording_finalization_failure(&self) -> Option<(SessionId, String)> {
-        let state = self.recording_finalization.state.lock().ok()?;
-        match &*state {
-            RecordingFinalizationState::Failed {
-                error,
-                session_id: Some(session_id),
-            } => Some((session_id.clone(), error.clone())),
-            _ => None,
-        }
+        self.recording_finalization.failure()
     }
 
     fn ensure_recording_ready_to_start(&self) -> Result<(), String> {
