@@ -1,6 +1,6 @@
 # Yap Server Node Setup Runbook
 
-Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 3 provides health reachability and durable queued-job ownership. Phase 4 adds one transient, server-internal Cohere batch reference worker; Phase 5 is still required to send authorized desktop recordings through the contract.
+Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 3 provides health reachability and durable queued-job ownership. Phase 4 adds one transient, server-internal Cohere batch reference worker. The Phase 5 candidate now sends imported recordings through the durable loopback batch contract; its one-time complete gate is still pending.
 
 The first supported node profile is DGX Spark GB10. A later GB300-class node should keep the same server contract and change only host-specific config: NIC names, CIDRs, GPU/runtime sizing, and deployment capacity.
 
@@ -11,7 +11,7 @@ Keep three planes separate:
 | Plane | Purpose | Exposure |
 | --- | --- | --- |
 | Management | SSH, recovery, tunnels | Private Ethernet for demos; corporate LAN/VPN later |
-| App entrypoint | Future `yap-server` WSS + HTTP | One TLS endpoint, opened only after the router exists |
+| App entrypoint | Current loopback HTTP batch; future `yap-server` WSS + HTTPS | SSH-forwarded loopback during Phase 5 development; one managed TLS endpoint later |
 | Model/runtime internals | Ollama, VNC, dashboard, model pools, databases | Loopback, container network, or SSH tunnel only |
 
 Default rule: a Yap application service is never exposed to the public internet.
@@ -146,6 +146,157 @@ The gate verifies:
 This short fixture is a correctness gate, not a throughput or concurrency
 benchmark. Keep the image/model caches after the run unless a separate cleanup
 change is authorized.
+
+## Phase 5 Loopback Batch Development
+
+The Phase 5 batch candidate connects Yap's create/upload/commit/status/result
+contract to the isolated Cohere worker. It is a development profile, not an
+enterprise deployment:
+
+- the application service still binds only to server loopback;
+- Windows reaches it only through an explicitly started SSH local forward;
+- the desktop remains configured with `http://127.0.0.1:18765`;
+- SSH access is the temporary transport authorization boundary; the service
+  does not yet derive a tenant or owner from an Entra token;
+- no GB10 application firewall rule, TLS listener, DNS record, ZPA segment, or
+  persistent service is created; and
+- the worker remains a transient, non-root, networkless container selected by
+  the immutable runtime/model lock and an inspected custom Yap image whose
+  revision label matches the exact Phase 5 checked head. The pinned NVIDIA
+  PyTorch image is that custom image's base, not the service's direct worker.
+
+On the Linux node, use Python 3.12 and private mode-0700 job storage. Replace
+the angle-bracket paths only with a clean staged candidate and the already
+verified private model directory; do not place model files or job storage in
+Git. Build the repository's custom worker from the pinned NVIDIA base and bind
+its revision label to the exact candidate before starting the service:
+
+```bash
+release_root='/srv/yap-server/releases/<checked-head>'
+model_dir='/path/to/private/cohere-transcribe-03-2026'
+storage_dir='/srv/yap-server/private/phase5-jobs-<checked-head>'
+checked_head="$(git -C "$release_root" rev-parse HEAD)"
+worker_image="yap-phase5-asr:phase5-$checked_head"
+
+install -d -m 0700 "$storage_dir"
+docker build \
+  --pull \
+  --file "$release_root/server/runtime/asr/Dockerfile" \
+  --label "org.opencontainers.image.revision=$checked_head" \
+  --tag "$worker_image" \
+  "$release_root/server"
+
+cd "$release_root"
+YAP_CHECKED_HEAD="$checked_head" \
+YAP_PHASE5_WORKER_IMAGE="$worker_image" \
+YAP_PHASE5_MODEL_DIR="$model_dir" \
+YAP_PHASE5_STORAGE_DIR="$storage_dir" \
+bash infra/yap-server-node/phase5-batch-server.sh
+```
+
+The launcher refuses a dirty or different Git head, anything other than Python
+3.12, non-0700 storage, missing model inputs, or an absent worker reference.
+The runtime then verifies the custom image's exact revision label, ARM64
+architecture, repository digest shape, and immutable image ID before accepting
+batch traffic. Run it in the foreground so `Ctrl+C`, SSH loss, and `SIGTERM`
+take the same bounded cleanup path. Do not replace `worker_image` with
+`nvcr.io/nvidia/pytorch:26.06-py3`; that is only the digest-pinned Dockerfile
+base and does not contain Yap's entrypoint or locked overlay.
+
+For the one-time checked-head Phase 5 gate, run the Phase 4 inference gate on
+the same clean head first. Its generated
+`yap-phase4-asr:phase4-$checked_head` tag is the same reviewed custom Dockerfile
+and may be supplied as `YAP_PHASE5_WORKER_IMAGE` instead of rebuilding it. This
+reuse is valid only for that exact checked head; the Phase 5 runtime still
+inspects and executes its immutable image ID.
+
+The service and launcher refuse a non-numeric-loopback bind while Phase 5 batch
+mode is enabled; `localhost` is intentionally not accepted for private audio.
+It admits at most one running and two queued GPU jobs, eight concurrent HTTP
+request workers, 512 retained job records, one-MiB PCM chunks, and four hours
+of mono PCM16/16 kHz audio per job. Meeting intake requires a finite retention
+expiry after capture start. Expiry maintenance runs at startup and every 60
+seconds. An expired active job is cancelled, and destructive removal waits for
+commit/worker activity to reach a safe boundary. Cancelled and failed private
+audio is purged at that boundary; completed results retain the configured
+30-day default unless a shorter policy applies.
+
+From Windows, choose exactly one SSH transport for a rehearsal:
+
+```powershell
+# Direct private-Ethernet development
+$YapSshAlias = 'dgx-spark-eth'
+
+# Or an explicitly authorized Wi-Fi transport rehearsal
+# $YapSshAlias = 'dgx-spark-lan'
+
+ssh -o BatchMode=yes `
+  -o ExitOnForwardFailure=yes `
+  -o ServerAliveInterval=15 `
+  -o ServerAliveCountMax=3 `
+  -N -T `
+  -L 127.0.0.1:18765:127.0.0.1:18765 `
+  $YapSshAlias
+```
+
+Keep the forward in its own terminal so its lifecycle is visible. Never put
+the Wi-Fi/node address in Yap settings, never add alias failover, and never run
+both forwards against the same local port. In another PowerShell terminal:
+
+```powershell
+$health = Invoke-RestMethod http://127.0.0.1:18765/v1/health
+$health.service
+$health.apiVersion
+$health.capabilities
+```
+
+The batch rehearsal is valid only when `batchJobs` and `jobStatus` are `true`
+and `liveStreaming` is `false`. Use a licensed, non-sensitive recording. During
+the lifecycle check, interrupt the SSH forward once, verify the desktop keeps
+the immutable job queued/retrying without changing its configured origin, then
+restore the same forward and verify the same job reaches one server-authoritative
+result. Cancellation must remain cancelled across reconnect, and a user retry
+must create a new server job without changing the original source.
+
+For the one-time checked-head native gate, do not start the forward manually.
+The gate owns one explicit SSH alias, proves port 18765 is initially
+unreachable, starts the forward, imports the locked CC-BY-4.0 fixture, drops
+the forward around that same durable client job, observes `Retrying`, restores
+the same alias/origin, and waits for the verified History result. Its evidence
+directory is a new private path outside the repository and contains only
+non-content metadata and hashes:
+
+```powershell
+$CheckedHead = (git rev-parse HEAD).Trim()
+$EvidenceParent = Join-Path $env:LOCALAPPDATA 'Yap-private-gate-evidence'
+New-Item -ItemType Directory -Force -Path $EvidenceParent | Out-Null
+
+$env:YAP_CHECKED_HEAD = $CheckedHead
+$env:YAP_PHASE5_GATE_BASE_URL = 'http://127.0.0.1:18765'
+$env:YAP_PHASE5_GATE_SSH_ALIAS = 'dgx-spark-eth'
+$env:YAP_PHASE5_GATE_EVIDENCE_DIR = Join-Path $EvidenceParent $CheckedHead
+$env:YAP_PHASE5_GATE_TIMEOUT_MS = '2700000'
+
+Set-Location desktop
+pnpm test:phase5-gate
+```
+
+Use `dgx-spark-lan` only for the separately authorized Wi-Fi rehearsal. The
+gate never resolves or substitutes aliases and refuses an alias containing
+shell syntax. It also refuses to run from a dirty/different head, with a
+pre-existing local listener/forward, or with an evidence destination that
+already exists.
+
+After the rehearsal, stop the desktop, forward, and server process. Confirm no
+Yap listener or worker remains before treating cleanup as complete:
+
+```powershell
+Get-NetTCPConnection -LocalPort 18765 -ErrorAction SilentlyContinue
+ssh $YapSshAlias "ss -ltnp '( sport = :18765 )' || true; docker ps --format '{{.Names}}' | grep '^yap-phase4-asr-' || true"
+```
+
+Do not record private audio, transcripts, job storage, tokens, host snapshots,
+or security-scan output in Git, CI artifacts, PR comments, or public logs.
 
 ## Fresh Dedicated Node Bootstrap
 

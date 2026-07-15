@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from typing import BinaryIO, Callable, Protocol
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from yap_server.pools.model_lock import ModelPoolLock
 _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _LANGUAGE = re.compile(r"^[a-z]{2}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _IMMUTABLE_IMAGE = re.compile(r"^(?:sha256:[0-9a-f]{64}|.+@sha256:[0-9a-f]{64})$")
 _WORKER_MEMORY_LIMIT = "96g"
 _WORKER_CPU_LIMIT = "16"
@@ -36,6 +38,63 @@ class DuplicatePoolJob(ValueError):
 
 class WorkerExecutionError(RuntimeError):
     """Raised when the isolated GPU worker fails or returns invalid output."""
+
+
+def inspect_worker_image(
+    image: str,
+    checked_head: str,
+    *,
+    docker_binary: str = "docker",
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, object]:
+    if not image.strip() or _GIT_SHA.fullmatch(checked_head) is None:
+        raise ValueError("worker image and checked head are required")
+    completed = runner(
+        [docker_binary, "image", "inspect", image],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        stdin=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("could not inspect the checked-head worker image")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("worker image inspection returned invalid JSON") from error
+    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+        raise RuntimeError("worker image inspection returned an unexpected shape")
+    record = payload[0]
+    config = record.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if (
+        not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != checked_head
+    ):
+        raise RuntimeError("worker image revision label does not match the checked head")
+    image_id = record.get("Id")
+    architecture = record.get("Architecture")
+    repo_digests = record.get("RepoDigests")
+    if not isinstance(image_id, str) or not _IMMUTABLE_IMAGE.fullmatch(image_id):
+        raise RuntimeError("worker image ID is invalid")
+    if architecture != "arm64":
+        raise RuntimeError("worker image architecture is not ARM64")
+    if repo_digests is None:
+        repo_digests = []
+    if not isinstance(repo_digests, list) or not all(
+        isinstance(item, str) for item in repo_digests
+    ):
+        raise RuntimeError("worker image repository digests are invalid")
+    return {
+        "reference": image,
+        "id": image_id,
+        "architecture": architecture,
+        "repoDigests": repo_digests,
+        "revision": checked_head,
+    }
 
 
 @dataclass(frozen=True)
@@ -97,6 +156,10 @@ class ContainerBatchAsrWorker:
         self._docker_binary = docker_binary
         self._timeout_seconds = timeout_seconds
         self._runner = runner
+        self._shutdown = threading.Event()
+
+    def close(self) -> None:
+        self._shutdown.set()
 
     def build_command(self, job: BatchAsrJob) -> list[str]:
         return self._build_command(
@@ -178,6 +241,8 @@ class ContainerBatchAsrWorker:
         ]
 
     def run(self, job: BatchAsrJob) -> dict[str, object]:
+        if self._shutdown.is_set():
+            raise WorkerExecutionError("isolated ASR worker was cancelled")
         container_name = f"yap-phase4-asr-{uuid4().hex}"
         command = self._build_command(job, container_name=container_name)
         if self._runner is None:
@@ -186,6 +251,7 @@ class ContainerBatchAsrWorker:
                     command,
                     timeout_seconds=self._timeout_seconds,
                     output_limit_bytes=_MAX_WORKER_OUTPUT_BYTES,
+                    cancellation=self._shutdown,
                 )
             finally:
                 _force_remove_container(self._docker_binary, container_name)
@@ -265,6 +331,7 @@ def _run_bounded_process(
     *,
     timeout_seconds: float,
     output_limit_bytes: int,
+    cancellation: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -319,14 +386,26 @@ def _run_bounded_process(
     ]
     for reader in readers:
         reader.start()
-    try:
-        returncode = process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as error:
-        kill_process()
-        process.wait()
-        for reader in readers:
-            reader.join()
-        raise WorkerExecutionError("isolated ASR worker timed out") from error
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if cancellation is not None and cancellation.is_set():
+            kill_process()
+            process.wait()
+            for reader in readers:
+                reader.join()
+            raise WorkerExecutionError("isolated ASR worker was cancelled")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            kill_process()
+            process.wait()
+            for reader in readers:
+                reader.join()
+            raise WorkerExecutionError("isolated ASR worker timed out")
+        try:
+            returncode = process.wait(timeout=min(0.1, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
     for reader in readers:
         reader.join()
     if exceeded.is_set():
@@ -386,7 +465,12 @@ class BatchAsrPool:
             self._slots.release()
 
     def shutdown(self) -> None:
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        close_worker = getattr(self._worker, "close", None)
+        try:
+            if callable(close_worker):
+                close_worker()
+        finally:
+            self._executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _is_pinned_image(image: str) -> bool:

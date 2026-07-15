@@ -1,6 +1,6 @@
 # Spec: Client Recording State Machine
 
-**Status:** Accepted client workflow contract; Phase 3 durable imported-job ownership and connector state are implemented, while upload/server-processing transitions remain deferred
+**Status:** Accepted client workflow contract; Phase 3 durable imported-job ownership and connector state are implemented, and the Phase 5 candidate executes durable loopback batch upload/server-processing transitions with focused evidence while its one-time complete gate remains pending
 **Scope:** Desktop client workflow for the thin-client MVP, with explicit hooks for server STT, preprocessing, and diarization.
 
 This is the build contract for the client workflow. It replaces the cosmetic readiness-layer approach: the queue and runtime state must model the actual recording lifecycle.
@@ -217,10 +217,12 @@ Client cleanup changes should touch existing state owners before adding runtime 
 - `desktop/src-tauri/src/server_connector/` owns validated settings, bounded capability-health requests, generation safety, and retry cancellation.
 - `desktop/src-tauri/src/stt/dispatch.rs` now holds only shared busy/error projection state. Live transcription is owned by `live/runtime.rs` and `live/stream.rs`.
 
-Phase 3 adds only bounded health HTTP calls. It does not add job upload/drain,
-WSS transport, authenticated server processing, or a local Cohere fallback.
-Phase 4 adds an isolated, unconnected Cohere batch reference worker and bounded
-reference pool/router without widening the client-facing connector. The
+Phase 3 added only bounded health HTTP calls. Phase 4 added an isolated,
+unconnected Cohere batch reference worker and bounded reference pool/router.
+The Phase 5 candidate now widens the connector only for loopback development
+batch create/upload/commit/status/result/cancel, durable reconnect drain, and
+verified native result publication. It does not add WSS transport,
+authentication, a persistent/external service, or a local Cohere fallback. The
 source-aware capture/preprocessing foundation landed separately under
 `desktop/src-tauri/src/audio/`.
 

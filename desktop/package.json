@@ -20,6 +20,7 @@
     "test:desktop": "pnpm check:node && wdio run ./tests/wdio.conf.ts",
     "test:desktop:build": "pnpm check:node && node ./tests/scripts/tauri-wdio-build.mjs",
     "test:desktop:all": "pnpm test:desktop:build && pnpm test:desktop",
+    "test:phase5-gate": "pnpm test:desktop:build && pnpm check:node && wdio run ./tests/wdio.phase5-gate.conf.ts",
     "test:nsis:disposable": "pnpm check:node && pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tests/scripts/smoke-nsis.ps1"
   },
   "dependencies": {

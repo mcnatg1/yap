@@ -4,6 +4,7 @@
 **Status:** Accepted (roadmap - gated after the Phase 5 remote transport and Phase 7 authentication baselines)
 **Amends:** [ADR 0014](0014-server-tier-compute-topology.md)
 **Relates to:** [ADR 0001](0001-dual-stt-backends.md), [ADR 0016](0016-auth-identity-bridge.md), and [ADR 0020](0020-meeting-capture-diarization-authority.md)
+**Implementation status:** The Phase 5 candidate implements the transport-neutral durable batch contract over a manually SSH-forwarded loopback HTTP/1.1 development boundary. It does not implement authenticated WSS, TLS/QUIC, HTTP/3, UDP exposure, or an enterprise edge; its one-time complete gate is pending.
 
 ## Context
 
@@ -114,7 +115,9 @@ If HTTP/3 does not beat the authenticated fallback baseline under Yap's actual w
 ### Neutral
 
 - Phase 3 implementation and its loopback health service do not change.
-- Phase 5 owns the first real remote ASR/live transport; Phase 7 adds the authentication boundary required before HTTP/3 promotion.
+- Phase 5 owns the first durable remote batch transport. The authenticated WSS
+  baseline and Phase 7 authentication boundary remain prerequisites before
+  HTTP/3 promotion.
 - HTTP/3 does not change which side owns capture, recording, jobs, inference, diarization, or identity.
 
 ## Alternatives considered
@@ -138,7 +141,8 @@ Rejected. Live partials may tolerate loss, but source audio gaps, final results,
 ## Implementation sequence
 
 1. Retain and verify the Phase 3 loopback health service while finishing the connector, cancellation/retry, and Rust SQLite ledger work.
-2. Deliver the WSS live and durable HTTP batch paths in Phase 5, then apply the Phase 7 authentication boundary before transport promotion.
+2. Deliver the durable HTTP batch path in Phase 5, then establish authenticated
+   WSS together with the Phase 7 security boundary before transport promotion.
 3. Select a maintained HTTP/3 edge and Rust client candidate; pin versions and complete license/security review.
 4. Add local certificate, QUIC, UDP-blocked fallback, loss/jitter, migration, and restart fixtures without opening a broad LAN listener.
 5. Benchmark HTTP/3 WebSockets and a supported WebTransport candidate against the WSS baseline.

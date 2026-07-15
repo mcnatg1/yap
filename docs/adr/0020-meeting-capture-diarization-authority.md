@@ -5,6 +5,7 @@
 **Supersedes:** [ADR 0015](0015-two-pass-diarization-speaker-identity.md)
 **Supersedes diarization details in:** [ADR 0004](0004-background-diarization-okf-agents.md)
 **Amends:** [ADR 0006](0006-silero-agents-state-machine.md), [ADR 0007](0007-forced-alignment-engine.md), [ADR 0009](0009-knowledge-worker-protocol.md), [ADR 0014](0014-server-tier-compute-topology.md), [ADR 0016](0016-auth-identity-bridge.md), [ADR 0018](0018-three-repo-topology.md), and the [Local Audio Preprocessing Stack](../specs/local-audio-preprocessing-stack.md)
+**Implementation status:** Source-aware capture, immutable recording/evidence/result contracts, and the durable imported-job ledger are implemented. The Phase 5 candidate strictly admits already-canonical mono PCM16/16 kHz WAV input, extracts an immutable single-track PCM spool, adds durable loopback upload/reconnect, publishes verified server-authoritative results, and applies seven-day pending-source plus finite completed-result retention with focused evidence; its complete gate is pending. General media conversion, diarization, named identity, system loopback, server reconciliation of speaker evidence, and purpose grants remain unimplemented.
 
 ## Context
 
@@ -122,7 +123,7 @@ When disconnected:
 - reconnect creates a retryable, idempotent reconciliation job;
 - incomplete source audio can produce only a `partial` result.
 
-Logical chunk identity and byte identity are separate. The idempotency key contains schema version, owner namespace when server-bound, session ID, track ID, and sequence range. `content_sha256` identifies the bytes. Replaying the same key and hash is idempotent; replaying the same key with a different hash is a conflict; different keys with equal hashes are valid unless a higher-level deduplication policy says otherwise. The client rejects mixed-session frames, incompatible rates without an explicit conversion record, conflicting replays, and silent gaps. A Rust-owned durable job ledger is required before automatic reconnect drain ships.
+Logical chunk identity and byte identity are separate. The idempotency key contains schema version, owner namespace when server-bound, session ID, track ID, and sequence range. `content_sha256` identifies the bytes. Replaying the same key and hash is idempotent; replaying the same key with a different hash is a conflict; different keys with equal hashes are valid unless a higher-level deduplication policy says otherwise. The client rejects mixed-session frames, incompatible rates without an explicit conversion record, conflicting replays, and silent gaps. A Rust-owned durable job ledger is required before automatic reconnect drain ships. The Phase 5 candidate satisfies that prerequisite for its imported-file loopback batch path; it does not authorize live/meeting transport or authenticated ownership.
 
 ### 8. Separate contacts from biometric profiles
 

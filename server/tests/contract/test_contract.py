@@ -15,6 +15,7 @@ HTTP_OPERATIONS = {
     ("/v1/health", "get"): "getHealth",
     ("/v1/jobs", "post"): "createJob",
     ("/v1/jobs/{jobId}", "get"): "getJob",
+    ("/v1/jobs/{jobId}/result", "get"): "getJobResult",
     ("/v1/jobs/{jobId}", "delete"): "cancelJob",
     (
         "/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}",
@@ -29,6 +30,10 @@ PHASE_BOUNDARY = {
     ("/v1/jobs", "post"): ("Contract only", "Phase 5 upload intake"),
     ("/v1/jobs/{jobId}", "get"): ("Contract only", "Phase 5 job status"),
     ("/v1/jobs/{jobId}", "delete"): ("Contract only", "Phase 5 cancellation"),
+    ("/v1/jobs/{jobId}/result", "get"): (
+        "Contract only",
+        "Phase 5 result retrieval",
+    ),
     (
         "/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}",
         "put",
@@ -38,6 +43,19 @@ PHASE_BOUNDARY = {
         "Phase 5 upload commit",
     ),
     ("/v1/live", "get"): ("Event schema only", "Phase 5 WSS streaming"),
+}
+
+CURRENT_BEHAVIOR = {
+    ("/v1/jobs", "post"): "Implemented in the Phase 5 loopback batch runtime",
+    ("/v1/jobs/{jobId}", "get"): "Implemented in the Phase 5 loopback batch runtime",
+    ("/v1/jobs/{jobId}", "delete"): "Implemented in the Phase 5 loopback batch runtime",
+    ("/v1/jobs/{jobId}/result", "get"): "Implemented in the Phase 5 loopback batch runtime",
+    (
+        "/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}",
+        "put",
+    ): "Implemented in the Phase 5 loopback batch runtime",
+    ("/v1/jobs/{jobId}/commit", "post"): "Implemented in the Phase 5 loopback batch runtime",
+    ("/v1/live", "get"): "Contract only; capability remains false",
 }
 
 CHUNK_PATH = "/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}"
@@ -72,6 +90,13 @@ HTTP_SCHEMA_CONTRACTS: list[dict[str, Any]] = [
         "method": "delete",
         "request": None,
         "success": {"202": "#/components/schemas/RecordingJob"},
+        "errors": ["404", "501"],
+    },
+    {
+        "path": "/v1/jobs/{jobId}/result",
+        "method": "get",
+        "request": None,
+        "success": {"200": "#/components/schemas/TranscriptResultRevision"},
         "errors": ["404", "409", "501"],
     },
     {
@@ -197,6 +222,12 @@ CHUNK_IDENTITY_INVARIANTS = {
             "manifestChunk.replayKey.sequenceStart-sequenceEnd",
         ],
     },
+    "pcmFrameCount": {
+        "rule": "inclusive_range_length_equals_pcm16_frame_count",
+        "rangePath": "manifestChunk.replayKey.sequenceStart-sequenceEnd",
+        "byteLengthPath": "manifestChunk.contentIdentity.byteLength",
+        "formula": "sequenceEnd - sequenceStart + 1 == byteLength / 2",
+    },
     "contentIdentity": {
         "rule": "all_equal",
         "paths": [
@@ -272,7 +303,6 @@ BATCH_PROVENANCE_INVARIANTS = {
         "rule": "origin_matches_all_track_source_kinds",
         "cases": {
             "imported_file": "imported",
-            "live_capture": "captured",
         },
     },
     "importedPhysicalSourceHint": {
@@ -346,25 +376,25 @@ def make_job_request(origin: str, track_source: dict[str, Any]) -> dict[str, Any
         "displayName": "Provenance contract test",
         "metadata": {
             "sessionId": session_id,
-            "mode": "dictation",
+            "mode": "meeting",
             "origin": origin,
             "triggerMode": "toggle",
             "startedAtUtc": "2026-07-12T16:00:00Z",
             "utcOffsetMinutesAtStart": None,
             "localeHintBcp47": None,
             "countryCodeHint": None,
-            "preferredLanguagesBcp47": [],
+            "preferredLanguagesBcp47": ["en-US"],
             "appVersion": "0.1.0",
             "platform": "windows",
             "privacyPolicyVersion": "unconfigured",
-            "retentionExpiresAtUtc": None,
+            "retentionExpiresAtUtc": "2026-08-11T16:00:00Z",
         },
         "tracks": [
             {
                 "trackId": track_id,
                 "source": deepcopy(track_source),
                 "deviceId": None,
-                "originalSampleRateHz": 48000,
+                "originalSampleRateHz": 16000,
                 "originalChannels": 1,
             }
         ],
@@ -665,6 +695,11 @@ class ContractTests(unittest.TestCase):
             behavior, owner = PHASE_BOUNDARY[(path, method)]
             self.assertEqual(operation["x-yap-phase-3-behavior"], behavior)
             self.assertEqual(operation["x-yap-later-owner"], owner)
+            if (path, method) in CURRENT_BEHAVIOR:
+                self.assertEqual(
+                    operation["x-yap-current-behavior"],
+                    CURRENT_BEHAVIOR[(path, method)],
+                )
 
         schemas = document["components"]["schemas"]
         expected_components = {
@@ -755,6 +790,17 @@ class ContractTests(unittest.TestCase):
 
         job_request = schemas["CreateRecordingJobRequest"]
         replay_key = schemas["ChunkReplayKey"]
+        phase5_metadata = job_request["properties"]["metadata"]["allOf"][1][
+            "properties"
+        ]
+        self.assertEqual(phase5_metadata["mode"]["const"], "meeting")
+        self.assertEqual(phase5_metadata["origin"]["const"], "imported_file")
+        self.assertEqual(
+            phase5_metadata["retentionExpiresAtUtc"]["$ref"],
+            "#/components/schemas/UtcDateTime",
+        )
+        self.assertEqual(job_request["properties"]["tracks"]["maxItems"], 1)
+        self.assertEqual(job_request["properties"]["chunks"]["maxItems"], 4096)
         forbidden_ownership_fields = {
             "tenantId",
             "tenant_id",
@@ -869,12 +915,6 @@ class ContractTests(unittest.TestCase):
                 "openapi.json",
             ),
             (
-                "batch live capture",
-                make_job_request("live_capture", captured),
-                create_schema,
-                "openapi.json",
-            ),
-            (
                 "live start captured microphone",
                 make_live_start("live_capture", captured),
                 live_start_schema,
@@ -907,6 +947,12 @@ class ContractTests(unittest.TestCase):
             (
                 "batch live origin cannot claim imported track",
                 make_job_request("live_capture", imported),
+                create_schema,
+                "openapi.json",
+            ),
+            (
+                "batch live origin remains outside the Phase 5 profile",
+                make_job_request("live_capture", captured),
                 create_schema,
                 "openapi.json",
             ),

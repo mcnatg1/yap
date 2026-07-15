@@ -6,10 +6,11 @@ import logging
 import re
 import socket
 import sys
+import threading
 import time
 from functools import partial
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from ipaddress import ip_address
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ from uuid import uuid4
 from yap_server.api.health import health
 from yap_server.config import ServerSettings
 from yap_server.config.settings import ensure_bind_is_allowed
+from yap_server.jobs import JobServiceError, RecordingJobService
 
 
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
@@ -25,12 +27,21 @@ MAX_LOG_METHOD_CHARS = 16
 MAX_LOG_PATH_CHARS = 128
 REQUEST_IO_TIMEOUT_SECONDS = 2.0
 REQUEST_WALL_CLOCK_DEADLINE_SECONDS = 2.0
+MAX_CONCURRENT_REQUEST_THREADS = 8
+REQUEST_THREAD_ACQUIRE_TIMEOUT_SECONDS = 2.0
+MAINTENANCE_INTERVAL_SECONDS = 60.0
 _SUPPORTED_HTTP_VERSIONS = frozenset({"HTTP/1.0", "HTTP/1.1"})
 
 _REQUEST_LOGGER = logging.getLogger("yap_server.requests")
-_JOB_PATH = re.compile(r"^/v1/jobs/[^/]+$")
-_CHUNK_PATH = re.compile(r"^/v1/jobs/[^/]+/chunks/[^/]+/[0-9]+-[0-9]+$")
-_COMMIT_PATH = re.compile(r"^/v1/jobs/[^/]+/commit$")
+_PATH_ID = r"[A-Za-z0-9_-]+"
+_JOB_PATH = re.compile(rf"^/v1/jobs/(?P<job_id>{_PATH_ID})$")
+_RESULT_PATH = re.compile(rf"^/v1/jobs/(?P<job_id>{_PATH_ID})/result$")
+_CHUNK_PATH = re.compile(
+    rf"^/v1/jobs/(?P<job_id>{_PATH_ID})/chunks/"
+    rf"(?P<track_id>{_PATH_ID})/(?P<sequence_start>[0-9]+)-"
+    rf"(?P<sequence_end>[0-9]+)$"
+)
+_COMMIT_PATH = re.compile(rf"^/v1/jobs/(?P<job_id>{_PATH_ID})/commit$")
 
 
 def _allowed_methods(path: str) -> frozenset[str] | None:
@@ -40,6 +51,8 @@ def _allowed_methods(path: str) -> frozenset[str] | None:
         return frozenset({"POST"})
     if _JOB_PATH.fullmatch(path):
         return frozenset({"DELETE", "GET"})
+    if _RESULT_PATH.fullmatch(path):
+        return frozenset({"GET"})
     if _CHUNK_PATH.fullmatch(path):
         return frozenset({"PUT"})
     if _COMMIT_PATH.fullmatch(path):
@@ -92,11 +105,14 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         self,
         *args: Any,
         request_logger: logging.Logger,
+        job_service: RecordingJobService | None,
         **kwargs: Any,
     ) -> None:
         self._request_logger = request_logger
+        self._job_service = job_service
         self._request_id = f"req-{uuid4().hex}"
         self._request_logged = False
+        self._content_length: int | None = None
         self.requestline = ""
         self.request_version = ""
         self.command = ""
@@ -174,7 +190,14 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/v1/health":
-            self._send_json(HTTPStatus.OK, health())
+            self._send_json(
+                HTTPStatus.OK,
+                health(batch_jobs=self._job_service is not None),
+            )
+            return
+
+        if self._job_service is not None and path != "/v1/live":
+            self._dispatch_job_request(path)
             return
 
         self._send_error(
@@ -182,6 +205,208 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             code="NOT_IMPLEMENTED",
             message="This route is contract-only in Phase 3.",
         )
+
+    def _dispatch_job_request(self, path: str) -> None:
+        assert self._job_service is not None
+        try:
+            if path == "/v1/jobs" and self.command == "POST":
+                idempotency_key = self._required_header(
+                    "Idempotency-Key",
+                    code="IDEMPOTENCY_KEY_REQUIRED",
+                    message="Job creation requires exactly one idempotency key.",
+                )
+                payload = self._read_json_body()
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self._job_service.create(
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
+                return
+
+            chunk_match = _CHUNK_PATH.fullmatch(path)
+            if chunk_match is not None and self.command == "PUT":
+                if self.headers.get_content_type() != "application/octet-stream":
+                    raise JobServiceError(
+                        415,
+                        "UNSUPPORTED_MEDIA_TYPE",
+                        "Chunk uploads require application/octet-stream.",
+                    )
+                content_length = self._required_content_length()
+                plan = self._job_service.prepare_chunk_upload(
+                    chunk_match.group("job_id"),
+                    track_id=chunk_match.group("track_id"),
+                    sequence_start=int(chunk_match.group("sequence_start"), 10),
+                    sequence_end=int(chunk_match.group("sequence_end"), 10),
+                    idempotency_key=self._required_header("Idempotency-Key"),
+                    content_sha256=self._required_header("X-Yap-Content-SHA256"),
+                    audio_codec=self._required_header("X-Yap-Audio-Codec"),
+                    sample_rate_hz=self._integer_header("X-Yap-Sample-Rate-Hz"),
+                    channels=self._integer_header("X-Yap-Channels"),
+                    content_length=content_length,
+                )
+                receipt = self._job_service.accept_chunk(
+                    plan,
+                    self._read_exact_body(content_length),
+                )
+                status = (
+                    HTTPStatus.OK
+                    if receipt.get("disposition") == "replayed"
+                    else HTTPStatus.CREATED
+                )
+                self._send_json(status, receipt)
+                return
+
+            commit_match = _COMMIT_PATH.fullmatch(path)
+            if commit_match is not None and self.command == "POST":
+                payload = self._read_json_body()
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self._job_service.commit(commit_match.group("job_id"), payload),
+                )
+                return
+
+            result_match = _RESULT_PATH.fullmatch(path)
+            if result_match is not None and self.command == "GET":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self._job_service.get_result(result_match.group("job_id")),
+                )
+                return
+
+            job_match = _JOB_PATH.fullmatch(path)
+            if job_match is not None and self.command == "DELETE":
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self._job_service.cancel(job_match.group("job_id")),
+                )
+                return
+            if job_match is not None and self.command == "GET":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self._job_service.get(job_match.group("job_id")),
+                )
+                return
+        except JobServiceError as error:
+            self._send_error(
+                HTTPStatus(error.status),
+                code=error.code,
+                message=error.message,
+                retryable=error.retryable,
+            )
+            return
+        except KeyError:
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                code="JOB_NOT_FOUND",
+                message="Recording job not found.",
+            )
+            return
+        except TimeoutError:
+            self.close_connection = True
+            self._send_error(
+                HTTPStatus.REQUEST_TIMEOUT,
+                code="REQUEST_TIMEOUT",
+                message="The bounded request did not complete in time.",
+                retryable=True,
+            )
+            return
+        except ConnectionError:
+            self.close_connection = True
+            return
+        except OSError:
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                code="SERVER_STORAGE_ERROR",
+                message="Private recording storage could not complete the request.",
+                retryable=True,
+            )
+            return
+        except (TypeError, ValueError):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_REQUEST_BODY",
+                message="Request body does not match the operation contract.",
+            )
+            return
+
+        self._send_error(
+            HTTPStatus.NOT_IMPLEMENTED,
+            code="NOT_IMPLEMENTED",
+            message="This operation is not implemented in the Phase 5 batch slice.",
+        )
+
+    def _required_content_length(self) -> int:
+        if self._content_length is None:
+            raise JobServiceError(
+                400,
+                "CONTENT_LENGTH_REQUIRED",
+                "A bounded Content-Length is required.",
+            )
+        return self._content_length
+
+    def _read_exact_body(self, content_length: int) -> bytes:
+        body = self.rfile.read(content_length)
+        if len(body) != content_length:
+            self.close_connection = True
+            raise JobServiceError(
+                400,
+                "INCOMPLETE_REQUEST_BODY",
+                "Request body ended before Content-Length bytes were received.",
+            )
+        return body
+
+    def _read_json_body(self) -> Mapping[str, object]:
+        if self.headers.get_content_type() != "application/json":
+            raise JobServiceError(
+                415,
+                "UNSUPPORTED_MEDIA_TYPE",
+                "JSON operations require application/json.",
+            )
+        content_length = self._required_content_length()
+        try:
+            payload = json.loads(self._read_exact_body(content_length))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise JobServiceError(
+                400,
+                "INVALID_JSON",
+                "Request body is not valid JSON.",
+            ) from error
+        if not isinstance(payload, dict):
+            raise JobServiceError(
+                400,
+                "INVALID_REQUEST_BODY",
+                "Request body must be a JSON object.",
+            )
+        return payload
+
+    def _required_header(
+        self,
+        name: str,
+        *,
+        code: str = "INVALID_CHUNK_HEADERS",
+        message: str = "Every required chunk identity header must appear exactly once.",
+    ) -> str:
+        values = self.headers.get_all(name, [])
+        if len(values) != 1 or not values[0]:
+            raise JobServiceError(
+                400,
+                code,
+                message,
+            )
+        return values[0]
+
+    def _integer_header(self, name: str) -> int:
+        value = self._required_header(name)
+        try:
+            return int(value, 10)
+        except ValueError as error:
+            raise JobServiceError(
+                400,
+                "INVALID_CHUNK_HEADERS",
+                "Chunk numeric headers must be decimal integers.",
+            ) from error
 
     def _request_size_is_allowed(self) -> bool:
         if self.headers.get("Transfer-Encoding") is not None:
@@ -195,6 +420,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
 
         content_lengths = self.headers.get_all("Content-Length", [])
         if not content_lengths:
+            self._content_length = None
             return True
         if len(content_lengths) != 1:
             self.close_connection = True
@@ -225,6 +451,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
                 message="Request body exceeds the 1048576-byte limit.",
             )
             return False
+        self._content_length = content_length
         return True
 
     def _send_error(
@@ -233,6 +460,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         *,
         code: str,
         message: str,
+        retryable: bool = False,
         headers: Mapping[str, str] | None = None,
     ) -> None:
         self._send_json(
@@ -240,7 +468,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             {
                 "code": code,
                 "message": message,
-                "retryable": False,
+                "retryable": retryable,
                 "requestId": self._request_id,
             },
             headers=headers,
@@ -339,37 +567,125 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
 
 class _YapHTTPServer(HTTPServer):
     def handle_error(self, request: Any, client_address: Any) -> None:
+        del request, client_address
         if isinstance(sys.exc_info()[1], ConnectionError):
             return
-        super().handle_error(request, client_address)
+        _log_unhandled_request_failure(self)
+
+
+class _ThreadingYapHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = MAX_CONCURRENT_REQUEST_THREADS * 2
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._request_slots = threading.BoundedSemaphore(
+            MAX_CONCURRENT_REQUEST_THREADS
+        )
+        self._job_service_for_maintenance: object | None = None
+        self._next_maintenance_at = 0.0
+        super().__init__(*args, **kwargs)
+
+    def service_actions(self) -> None:
+        super().service_actions()
+        now = time.monotonic()
+        if now < self._next_maintenance_at:
+            return
+        self._next_maintenance_at = now + MAINTENANCE_INTERVAL_SECONDS
+        maintenance = getattr(self._job_service_for_maintenance, "prune_expired", None)
+        if callable(maintenance):
+            try:
+                maintenance()
+            except OSError:
+                # Retention remains pending and is retried on the next bounded
+                # maintenance interval. Do not let filesystem details escape
+                # through the server loop's default traceback handling.
+                pass
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(
+            timeout=REQUEST_THREAD_ACQUIRE_TIMEOUT_SECONDS
+        ):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        del request, client_address
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        _log_unhandled_request_failure(self)
+
+
+def _log_unhandled_request_failure(server: HTTPServer) -> None:
+    logger = getattr(server, "_request_error_logger", _REQUEST_LOGGER)
+    try:
+        logger.info(
+            json.dumps(
+                {"event": "http_request_failure", "status": 500},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        )
+    except Exception:
+        # Error reporting is itself an outer trust boundary. A broken logger
+        # must not restore BaseServer's exception traceback or leak request data.
+        pass
 
 
 class _IPv6HTTPServer(_YapHTTPServer):
     address_family = socket.AF_INET6
 
 
-def _server_type(host: str) -> type[HTTPServer]:
+class _IPv6ThreadingHTTPServer(_ThreadingYapHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def _server_type(host: str, *, threaded: bool) -> type[HTTPServer]:
     try:
         if ip_address(host).version == 6:
-            return _IPv6HTTPServer
+            return _IPv6ThreadingHTTPServer if threaded else _IPv6HTTPServer
     except ValueError:
         pass
-    return _YapHTTPServer
+    return _ThreadingYapHTTPServer if threaded else _YapHTTPServer
 
 
 def create_server(
     settings: ServerSettings,
     *,
     logger: logging.Logger | None = None,
+    job_service: RecordingJobService | None = None,
 ) -> HTTPServer:
     ensure_bind_is_allowed(settings.host)
+    request_logger = logger or _REQUEST_LOGGER
     handler = partial(
         _HealthRequestHandler,
-        request_logger=logger or _REQUEST_LOGGER,
+        request_logger=request_logger,
+        job_service=job_service,
     )
-    return _server_type(settings.host)((settings.host, settings.port), handler)
+    server = _server_type(
+        settings.host,
+        threaded=job_service is not None,
+    )((settings.host, settings.port), handler)
+    server._request_error_logger = request_logger
+    if isinstance(server, _ThreadingYapHTTPServer):
+        server._job_service_for_maintenance = job_service
+    return server
 
 
-def serve(settings: ServerSettings) -> None:
-    with create_server(settings) as server:
+def serve(
+    settings: ServerSettings,
+    *,
+    job_service: RecordingJobService | None = None,
+) -> None:
+    with create_server(settings, job_service=job_service) as server:
         server.serve_forever()

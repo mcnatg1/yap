@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/tooltip";
 import {
   isRecordingActive,
+  isRecordingCancellable,
   queuedServerMessage,
   type RecordingJobStatus,
   type RecordingJobView,
@@ -206,6 +207,9 @@ function UploadCard({
   const meta = statusMeta[item.status];
   const Icon = meta.icon;
   const isActive = isRecordingActive(item.status);
+  const isCancellable = isRecordingCancellable(item.status);
+  const canRemove = item.status === "failed" || isCancellable;
+  const removeLabel = isActive && isCancellable ? "Cancel recording" : "Remove file";
   const detail = item.status === "complete"
       ? "Saved"
       : item.status === "partial"
@@ -273,8 +277,8 @@ function UploadCard({
             <Tooltip>
               <TooltipTrigger asChild>
                 <AttachmentAction
-                  aria-label="Remove file"
-                  disabled={isActive}
+                  aria-label={removeLabel}
+                  disabled={!canRemove}
                   onClick={(event) => {
                     event.stopPropagation();
                     onRemove(item.id);
@@ -285,7 +289,7 @@ function UploadCard({
                   <Trash2 />
                 </AttachmentAction>
               </TooltipTrigger>
-              <TooltipContent>Remove file</TooltipContent>
+              <TooltipContent>{removeLabel}</TooltipContent>
             </Tooltip>
           )}
         </AttachmentActions>

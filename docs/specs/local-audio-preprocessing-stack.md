@@ -1,10 +1,10 @@
 # Spec: Local Audio Preprocessing Stack
 
-**Status:** Accepted design contract; desktop capture/timeline/recording foundation implemented and verified 2026-07-11
+**Status:** Accepted design contract; desktop capture/timeline/recording foundation verified 2026-07-11, with Phase 5 strict canonical-WAV admission, PCM extraction, and loopback batch transport implemented as a focused candidate on 2026-07-15
 **Scope:** Desktop-side capture and deterministic preprocessing before local fallback or server upload.
 **Amended by:** [ADR 0020](../adr/0020-meeting-capture-diarization-authority.md) and the [Source-Aware Diarization Design](../superpowers/specs/2026-07-10-source-aware-diarization-design.md).
 
-Yap should preprocess audio locally when the work is cheap, deterministic, and useful for both the local live fallback and the future server path. The server owns heavy inference and enrichment. The desktop owns capture, preparation, chunk metadata, and retryable transport packaging.
+Yap should preprocess audio locally when the work is cheap, deterministic, and useful for both the local live fallback and the server path. The server owns heavy inference and enrichment. The desktop owns capture, preparation, chunk metadata, and retryable transport packaging.
 
 ## Product Rule
 
@@ -47,8 +47,9 @@ Do not copy Meetily's local Whisper/Parakeet transcription router, old backend, 
 | `desktop/src-tauri/src/live/stream.rs` | Nemotron stream chunk constants and recognizer wrapper. | Keep ASR-specific chunking here; move transport-neutral chunk metadata elsewhere. |
 | `desktop/src-tauri/src/live/recordings.rs` | Validates committed capture manifests, projects canonical history, and owns recovery/deletion of partial and committed artifacts. | Add server-job linkage without changing capture identity. |
 | `desktop/src-tauri/src/audio/` | Track-aware frames, preprocessing, exact timeline gaps, independent bounded sink-port coordination, streaming recording, immutable sidecars/commits, and tested manifest contracts. | Add optional speaker inference and transport consumers without another recording contract. |
-| `desktop/src-tauri/src/runtime/` | Rust `RuntimeOrchestrator` state and route ownership. | Add the durable server-job lifecycle and connector states. |
-| `server/` | Server contract staging and route tests. | Receive the documented chunk/session format when connector work starts. |
+| `desktop/src-tauri/src/jobs/` | Durable imported-job lifecycle, strict Phase 5 canonical-WAV admission and immutable PCM extraction/spool, reconnect drain, cancellation outbox, retention, and verified result catalog. | Keep general media conversion, live-capture transport, and Phase 6 preprocessing separate from imported-file authority. |
+| `desktop/src-tauri/src/runtime/` | Rust `RuntimeOrchestrator` state and route ownership. | Project batch state without duplicating durable job ownership. |
+| `server/` | Versioned contracts plus the Phase 5 loopback durable batch service, router, and isolated Cohere pool. | Add authenticated live and production deployment only at their later gates. |
 
 ## Verified Implementation Status
 
@@ -59,9 +60,9 @@ Implemented and connected in the production microphone path after required Nemot
 - Bounded-memory streaming WAV persistence with no retained-PCM duration cap.
 - Immutable capture sidecar and commit publication, hash-validated catalog projection, and recover/delete handling for partial and committed recordings.
 
-The evidence and server-transport ports are implemented and independently bounded, but their production consumers are currently `None`. Production capture does not yet run recording-only: `start_local` must construct the Nemotron stream and local-ASR adapter before it opens CPAL capture.
+The live-capture evidence and server-transport ports are implemented and independently bounded, but their production consumers are currently `None`. Phase 5 instead admits already-canonical mono PCM16/16 kHz WAV files and extracts their PCM through `jobs/remote.rs`; it does not decode or resample general imported media and does not wire live microphone transport. Production capture does not yet run recording-only: `start_local` must construct the Nemotron stream and local-ASR adapter before it opens CPAL capture.
 
-Deferred: the Rust-owned SQLite server-job ledger; connector/upload/WSS/auth/inference; system loopback; Opus transport; an anonymous-speaker/diarization model; a real WER/model benchmark; hosted production-release proof; and per-OS real-model/native hardware CI.
+Deferred: live-capture upload/WSS, application authentication, persistent/external service deployment, system loopback, Opus transport, an anonymous-speaker/diarization model, long-recording and multi-worker capacity evidence, hosted production-release proof, and per-OS real-model/native hardware CI. The Phase 5 imported-file loopback batch candidate and its verified result projection exist, but its one-time complete gate is pending.
 
 Pre-release timestamp-era recordings remain untouched and unindexed. There is no migration adapter or second fixture/recording contract for them.
 
@@ -73,7 +74,7 @@ The desktop should own these before audio crosses a process or network boundary:
 - Permission/preflight errors.
 - Distinguish session mode, trigger gesture, session origin, and physical capture source.
 - Convert channels within one physical source to mono `f32`; never collapse microphone and system loopback into one authoritative track.
-- Resample to `16_000 Hz` for local fallback and to the server-requested rate when the server contract exists.
+- Resample to `16_000 Hz` for local fallback and the current Phase 5 imported-file batch contract; a future live contract may negotiate another supported rate explicitly.
 - Compute RMS/level for UI and diagnostics.
 - Optional bounded normalization/limiting that cannot clip or hide silence.
 - VAD/endpointing boundaries.
@@ -113,7 +114,7 @@ desktop/src-tauri/src/audio/
   manifest.rs     session/chunk manifest serialization
 ```
 
-Keep Tauri command wiring in `lib.rs` thin. Keep local ASR in `live/stream.rs`. Keep server connector code out until the contract spec is ready.
+Keep Tauri command wiring thin. Keep local ASR in `live/stream.rs`, durable imported-file preparation in `jobs/remote.rs`, and wire behavior in `server_connector/`; do not create a second recording or queue authority.
 
 ## Data Shapes
 
@@ -184,14 +185,16 @@ Session metadata uses UTC for the history/audit anchor and monotonic millisecond
 
 The real-time callback reports a full handoff through a preallocated per-track atomic loss accumulator rather than the already-full event queue. The coordinator drains the first dropped source position, dropped-frame count, and loss generation through atomic swap/compare-exchange before the next accepted frame and during finalization. Updates that race the drain remain in the next generation. Drained snapshots become deterministic `Gap` events. Callback code does not allocate, block, or write to disk.
 
-Transport payloads can be PCM first. Opus can wait until the server WSS/upload contract proves it needs the bandwidth savings.
+The Phase 5 imported-file transport uses canonical mono PCM16/16 kHz first. Opus can wait until the authenticated WSS/live or production upload profile proves it needs the bandwidth savings.
 
 ## VAD And Chunking
 
 Use the current live stream default as the starting point:
 
 - Local fallback continues to use the tuned Nemotron chunk size from ADR 0019.
-- Server upload chunks use bounded wall-clock windows plus VAD boundaries. Uninterrupted speech or VAD failure must not create an unbounded chunk.
+- Current Phase 5 imported-file chunks are exact bounded PCM sequence ranges of
+  at most one MiB. Phase 6 may align processing/transport windows to VAD hints,
+  but uninterrupted speech or VAD failure must never create an unbounded chunk.
 - Tail padding must avoid clipping final words.
 - Silence-only chunks may be skipped locally but represented in the manifest when needed for timestamps.
 - VAD failure must not delete source audio.
@@ -225,6 +228,9 @@ Use the current live stream default as the starting point:
 - Local preprocessing is deterministic and unit-testable without a microphone.
 - Live fallback still works without the server.
 - Larger recordings still queue/block without a server.
+- The Phase 5 loopback profile prepares and drains imported recordings through
+  one durable contract and publishes only verified immutable results; its full
+  checked-head gate remains pending.
 - Dictation remains independent from speaker evidence.
 - Current canonical single-microphone artifacts and settings remain readable; timestamp-era recordings remain untouched and unindexed.
 - Meeting capture streams to disk with bounded memory and no retained-PCM duration cap.

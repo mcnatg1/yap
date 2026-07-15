@@ -169,6 +169,23 @@ pub(crate) fn inspect_media_source(path: &Path) -> Result<MediaSourceFingerprint
     file_snapshot(&file)
 }
 
+pub(crate) fn open_unchanged_media_source(
+    path: &Path,
+    expected: &MediaSourceFingerprint,
+) -> Result<File, String> {
+    if !path.is_absolute() {
+        return Err("Recording preprocessing requires an absolute path.".into());
+    }
+    media_mime(path).ok_or_else(|| "Choose a supported audio or video file.".to_string())?;
+    let file = open_no_follow(path)
+        .map_err(|error| format!("Failed to open recording for preprocessing: {error}"))?;
+    let snapshot = file_snapshot(&file)?;
+    if &snapshot != expected {
+        return Err("Recording source changed before preprocessing began.".into());
+    }
+    Ok(file)
+}
+
 fn admission_metadata(length: u64, waveform_byte_limit: u64) -> (String, bool) {
     (length.to_string(), length <= waveform_byte_limit)
 }
@@ -1057,6 +1074,23 @@ mod tests {
         assert_eq!(request(&admission.url, "GET", None).status, 410);
         assert_eq!(request(&admission.url, "GET", None).status, 404);
         assert_eq!(owner.active_admission_count_for_test(), 0);
+    }
+
+    #[test]
+    fn preprocessing_opens_the_exact_validated_source_without_following_replacements() {
+        let directory = TestDirectory::new("preprocessing-source");
+        let path = directory.join("meeting.wav");
+        let original = directory.join("original.wav");
+        std::fs::write(&path, b"original bytes").unwrap();
+        let fingerprint = inspect_media_source(&path).unwrap();
+
+        let opened = open_unchanged_media_source(&path, &fingerprint).unwrap();
+        assert_eq!(opened.metadata().unwrap().len(), 14);
+        drop(opened);
+
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, b"replacement bytes").unwrap();
+        assert!(open_unchanged_media_source(&path, &fingerprint).is_err());
     }
 
     #[test]

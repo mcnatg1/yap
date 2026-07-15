@@ -67,6 +67,38 @@ describe("imported recording queue surface", () => {
       .not.toMatch(/queued_local_fallback|local_transcribing/);
   });
 
+  it("keeps cancellation reachable while a remote job is active", () => {
+    const item: RecordingJobView = {
+      id: "job-uploading",
+      name: "meeting.wav",
+      sourcePath: "C:/meeting.wav",
+      pipeline: createInitialPipelineState(),
+      route: "serverBatch",
+      sessionMode: "meeting",
+      sessionOrigin: "importedFile",
+      status: "uploading",
+    };
+
+    const html = renderToStaticMarkup(
+      <TooltipProvider>
+        <QueuePanel
+          legacyDiscardAllowed={false}
+          migrationPending={false}
+          onClear={vi.fn()}
+          onDiscardLegacyQueue={vi.fn()}
+          onRemove={vi.fn()}
+          onReveal={vi.fn()}
+          onRetryMigration={vi.fn()}
+          onSelect={vi.fn()}
+          queue={[item]}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(html).toContain('aria-label="Cancel recording"');
+    expect(html).not.toMatch(/aria-label="Cancel recording"[^>]*disabled/);
+  });
+
   it("offers confirmed legacy discard only when a migration failure allows it", () => {
     const renderFailure = (legacyDiscardAllowed: boolean) => renderToStaticMarkup(
       <TooltipProvider>

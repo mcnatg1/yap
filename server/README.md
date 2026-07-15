@@ -26,6 +26,7 @@ server/
   src/
     yap_server/
       api/
+      jobs/                  # Phase 5 durable loopback batch service/runtime
       workload_router/
       pools/                 # bounded Phase 4 reference worker and pool
       schemas/
@@ -47,21 +48,24 @@ Use `workload_router/` instead of vague `router/`. Use `schemas/` for API and me
 machine-readable wire contracts. Their presence does not mean every route is
 implemented:
 
-| Method | Path | Phase 3 behavior | Later owner |
-|--------|------|------------------|-------------|
-| `GET` | `/v1/health` | Implemented | Server process |
-| `POST` | `/v1/jobs` | Contract only | Phase 5 upload intake |
-| `GET` | `/v1/jobs/{jobId}` | Contract only | Phase 5 job status |
-| `DELETE` | `/v1/jobs/{jobId}` | Contract only | Phase 5 cancellation |
-| `PUT` | `/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}` | Contract only | Phase 5 resumable upload |
-| `POST` | `/v1/jobs/{jobId}/commit` | Contract only | Phase 5 upload commit |
-| `GET` upgrade | `/v1/live` | Event schema only | Phase 5 WSS streaming |
+| Method | Path | Default Phase 3 profile | Phase 5 loopback batch profile |
+|--------|------|-------------------------|--------------------------------|
+| `GET` | `/v1/health` | Implemented; all processing capabilities false | Implemented; batch/status true only after runtime startup succeeds |
+| `POST` | `/v1/jobs` | `501 NOT_IMPLEMENTED` | Durable create with canonical-request idempotency |
+| `GET` | `/v1/jobs/{jobId}` | `501 NOT_IMPLEMENTED` | Durable status |
+| `DELETE` | `/v1/jobs/{jobId}` | `501 NOT_IMPLEMENTED` | Idempotent cancellation with safe-boundary purge |
+| `GET` | `/v1/jobs/{jobId}/result` | `501 NOT_IMPLEMENTED` | Immutable completed result |
+| `PUT` | `/v1/jobs/{jobId}/chunks/{trackId}/{sequenceStart}-{sequenceEnd}` | `501 NOT_IMPLEMENTED` | Identity-checked resumable PCM upload |
+| `POST` | `/v1/jobs/{jobId}/commit` | `501 NOT_IMPLEMENTED` | Manifest-bound dispatch through the bounded router/pool |
+| `GET` upgrade | `/v1/live` | Event schema only | Still unimplemented; live capability remains false |
 
-Phase 3 health advertises `batchJobs`, `liveStreaming`, and `jobStatus` as
-`false`. Upload handlers, server-side job persistence, a WebSocket runtime,
-queue drain, authentication, token validation, and diarization are not present.
-The Phase 4 reference worker below is deliberately not exposed through those
-contract-only routes, so health reachability cannot imply connected ASR.
+The default Phase 3 profile advertises `batchJobs`, `liveStreaming`, and
+`jobStatus` as `false` and keeps every job route unavailable. The Phase 5
+profile is an explicit Linux/loopback development runtime: only after its
+private storage, immutable model lock, verified model directory, router, and
+pool initialize successfully do batch/status become true. A WebSocket runtime,
+authentication, token validation, diarization, persistent supervision, and an
+external application listener are not present.
 
 Contract JSON fields use camelCase. Immutable manifest and server enum values
 use snake_case. The React `RecordingJobView` values are an explicit projection,
@@ -103,21 +107,51 @@ Phase 3 health process into a production service:
   publishes results atomically only after listener, firewall, Yap service-unit,
   container, and worker-process read-back passes.
 
-The reference slice is not an upload endpoint, automatic desktop queue drain,
-authenticated session, persistent server process, external listener, or
-multi-worker capacity claim. Those remain separate Phase 5 and production
-deployment gates.
+The Phase 4 reference slice by itself is not an upload endpoint, automatic
+desktop queue drain, authenticated session, persistent server process, external
+listener, or multi-worker capacity claim. Phase 5 reuses its isolated worker
+through the separate development batch runtime below; production deployment
+claims remain gated.
+
+## Phase 5 loopback batch candidate
+
+Set `YAP_PHASE5_BATCH_ENABLED=1` only on Linux with a numeric loopback bind,
+private mode-0700 job storage, the immutable model lock, an already verified
+model directory, `YAP_PHASE5_CHECKED_HEAD` set to the full candidate SHA, and
+`YAP_PHASE5_WORKER_IMAGE` set to the custom Yap image built and revision-labeled
+from that head. The pinned NVIDIA PyTorch image is the custom Dockerfile base;
+it is not directly runnable as Yap's worker. Startup inspects the custom image
+and passes only its immutable image ID to Docker. The runtime provides durable
+create/upload/commit/status/result and cancellation handlers, a single running
+plus two queued GPU jobs, eight bounded HTTP workers, a 512-record cap,
+one-MiB chunks, and a four-hour mono PCM16/16 kHz job cap. It performs startup
+and periodic maintenance, purges cancelled/failed private audio at a safe
+lifecycle boundary, and retains completed results for the configured finite
+period.
+
+The Windows desktop reaches this profile only through an explicitly started
+SSH local forward to `127.0.0.1:18765`. No TLS endpoint, firewall opening, DNS,
+ZPA publication, service unit, automatic alias failover, authenticated owner,
+or WSS/live transport is created. See the
+[server-node runbook](../docs/runbooks/yap-server-node-setup.md#phase-5-loopback-batch-development).
+Use its foreground `phase5-batch-server.sh` launcher rather than reconstructing
+the environment ad hoc.
+
+This is an implemented candidate with focused test evidence. The one-time
+complete Phase 5 local/native/server/GB10 gate has not run.
 
 ## Local checks
 
 ```powershell
-$env:PYTHONPATH = "server/src"; python -m unittest discover -s server/tests -p "test_*.py"
+$env:PYTHONPATH = (Resolve-Path "server/src").Path
+uv run --isolated --no-project --python 3.12 --with pytest pytest server/tests
 ```
 
 Run only the wire-contract tests while editing the JSON documents:
 
 ```powershell
-$env:PYTHONPATH = "server/src"; python -m unittest server.tests.contract.test_contract -v
+$env:PYTHONPATH = (Resolve-Path "server/src").Path
+uv run --isolated --no-project --python 3.12 --with pytest pytest server/tests/contract/test_contract.py
 ```
 
 The clean-head GB10 gate is run from the private node, not from normal local or
@@ -152,8 +186,10 @@ non-loopback host is rejected unless the process explicitly sets
 `YAP_SERVER_ALLOW_PRIVATE_BIND=1`. Binding does not change firewall rules; the
 server-node runbook keeps port 18765 tunnel-only by default.
 
-Only `GET /v1/health` is implemented. Contract-only job, chunk, commit, and live
-routes return a stable `501 NOT_IMPLEMENTED` JSON error. Request bodies are
+In the default Phase 3 profile, only `GET /v1/health` is implemented. Job,
+chunk, commit, and live routes return a stable `501 NOT_IMPLEMENTED` JSON
+error; enabling the Linux-only Phase 5 profile activates the documented batch
+routes but not live transport. Request bodies are
 capped at 1 MiB before any body read. Each accepted request has a two-second
 wall-clock deadline, so slow-drip input cannot extend the single-request server
 indefinitely. The service accepts HTTP/1.0 and HTTP/1.1 only.

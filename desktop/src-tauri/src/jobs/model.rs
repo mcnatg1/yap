@@ -363,6 +363,7 @@ pub struct NewJobChunk {
     pub sequence_start: u64,
     pub sequence_end: u64,
     pub content_sha256: String,
+    pub content_byte_length: u64,
     pub artifact_path: PathBuf,
     pub upload_offset: u64,
     pub acknowledged_object_id: Option<String>,
@@ -378,10 +379,38 @@ pub struct JobChunkRecord {
     pub sequence_start: u64,
     pub sequence_end: u64,
     pub content_sha256: String,
+    pub content_byte_length: u64,
     pub artifact_path: PathBuf,
     pub upload_offset: u64,
     pub acknowledged_object_id: Option<String>,
     pub acknowledged_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPreparedRemoteJob {
+    pub create_request_json: String,
+    pub capture_manifest_path: PathBuf,
+    pub capture_manifest_sha256: String,
+    pub chunks: Vec<NewJobChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRemoteJobRecord {
+    pub job_id: String,
+    pub create_request_json: String,
+    pub capture_manifest_path: PathBuf,
+    pub capture_manifest_sha256: String,
+    pub server_job_id: Option<String>,
+    pub server_base_url: Option<String>,
+    pub server_cancellation_acknowledged_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedRemoteCancellationRecord {
+    pub server_base_url: String,
+    pub server_job_id: String,
+    pub create_request_json: String,
+    pub queued_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,7 +462,11 @@ pub(crate) const fn transition_policy(
             | S::BlockedServerUnavailable
             | S::BlockedSignInRequired
             | S::QueuedLocalFallback
-            | S::QueuedServer,
+            | S::QueuedServer
+            | S::Preprocessing
+            | S::Uploading
+            | S::ServerProcessing
+            | S::Saving,
             S::Cancelled,
         ) => TransitionPolicy::Cancellation,
         _ => TransitionPolicy::Forbidden,
@@ -641,6 +674,10 @@ mod tests {
             RecordingJobStatus::BlockedSignInRequired,
             RecordingJobStatus::QueuedLocalFallback,
             RecordingJobStatus::QueuedServer,
+            RecordingJobStatus::Preprocessing,
+            RecordingJobStatus::Uploading,
+            RecordingJobStatus::ServerProcessing,
+            RecordingJobStatus::Saving,
         ] {
             assert_eq!(
                 transition_policy(status, RecordingJobStatus::Cancelled),
@@ -650,11 +687,7 @@ mod tests {
         }
         for status in [
             RecordingJobStatus::Preflighting,
-            RecordingJobStatus::Preprocessing,
-            RecordingJobStatus::Uploading,
-            RecordingJobStatus::ServerProcessing,
             RecordingJobStatus::LocalTranscribing,
-            RecordingJobStatus::Saving,
             RecordingJobStatus::DiarizationQueued,
             RecordingJobStatus::DiarizationRunning,
             RecordingJobStatus::Complete,

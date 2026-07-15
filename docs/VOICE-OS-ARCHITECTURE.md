@@ -53,7 +53,7 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | Primary input | File imports + explicit live mic + global dictation hotkey; paste-last is optional and imports remain a queue shell | Same client inputs plus future connected server routes |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
-| STT runtime | **Nemotron INT8 sherpa fallback** + server health connector; remote transport deferred | Same client shell; heavier pools move server-side |
+| STT runtime | **Nemotron INT8 sherpa fallback** + Phase 5 loopback batch candidate; WSS/authenticated production transport deferred | Same client shell; heavier pools move server-side |
 | Polish | Development-only Ollama call today; bundled `llama-server` is deferred | Scribe + agents through a governed client/server LLM boundary |
 | Speakers | Plain dictation; optional anonymous meeting labels later | Revisioned diarization + purpose-authorized server identity + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Google OKF + compiler (team) | Permission-safe OKF graph/vector views + glossary agents + Q&A |
@@ -73,7 +73,7 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | Knowledge base | Future Google OKF Markdown with local SQLite retrieval | Future `yap-knowledge` Git + deterministic compiler + Postgres permissions/relationships + pgvector baseline; optional Neo4j challenger (Phase 9, ADR 0017/0022) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node; future HTTP/3 secure edge with HTTP/2 or HTTP/1.1 fallback |
 
-The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, local Nemotron fallback, durable imported-job ownership, and connector health/capability/retry state are implemented. Opus, WSS, upload/drain, authentication, and remote execution remain deferred. Server unavailability queues or blocks larger recordings instead of silently producing official-looking transcripts from the fallback.
+The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, local Nemotron fallback, durable imported-job ownership, and connector health/capability/retry state are implemented. The Phase 5 candidate adds strict admission and extraction of already-canonical mono PCM16/16 kHz WAV input, durable loopback HTTP batch upload/drain, cancellation, verified result publication, and History projection with focused evidence; its one-time complete gate is pending. General media decoding/resampling, Opus, WSS/live, authentication, persistent service deployment, and external application networking remain deferred. Server unavailability queues or blocks larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
@@ -117,7 +117,7 @@ flowchart TB
         UI["Transcribe · Live · History<br/>Polish dev-only · KB agents Phase 9"]
     end
 
-    Orch["RuntimeOrchestrator<br/>Nemotron + server health state now<br/>remote transport + bounded LLM deferred"]
+    Orch["RuntimeOrchestrator<br/>Nemotron + server health/batch state now<br/>WSS/auth + bounded LLM deferred"]
 
     subgraph Sidecars["Local runtimes — current + deferred"]
         CR["in-process sherpa-onnx<br/>Nemotron INT8 fallback"]
@@ -168,12 +168,14 @@ Imported and official recording jobs never run through local Nemotron. When the 
 
 ### Team / server profile — high-level
 
-Thin client shell + GB-class server node. The client connector currently owns
-only validated health/capability/retry state. A separate Phase 4 reference path
-now proves bounded router-to-pool dispatch and isolated Cohere GPU inference on
-the node, but it is not exposed through the connector. In the planned connected
-profile, Phase 5 transport will stream/upload audio and receive server results.
-See [ADR 0014](adr/0014-server-tier-compute-topology.md).
+Thin client shell + GB-class server node. The client connector owns validated
+health/capability/retry state and, in the Phase 5 development profile, durable
+batch create/upload/commit/status/result/cancel through an explicitly approved
+loopback origin. That candidate connects the Phase 4 router/pool and isolated
+Cohere worker without exposing an application port: Windows reaches server
+loopback only through a manually selected SSH forward. WSS/live, application
+authentication, persistent supervision, and the managed enterprise edge remain
+deferred. See [ADR 0014](adr/0014-server-tier-compute-topology.md).
 
 ```mermaid
 flowchart TB
@@ -183,15 +185,15 @@ flowchart TB
         UI["Transcribe · Live · History · KB agents"]
         Mic["Capture · VAD hints · track manifest<br/>mic now · system loopback later"]
         Hotkey["Global hotkey · inject (ADR 0013)"]
-        Conn["Server connector\nhealth/capability/retry now\nWSS + HTTPS jobs deferred"]
+        Conn["Server connector\nhealth + loopback batch now\nWSS + authenticated edge deferred"]
         LocalFB["Local fallback sidecar\n(offline / degraded)"]
     end
 
     subgraph Server["yap-server - GB-class node (org LAN/VPN)"]
         Edge["Secure transport edge\n(future HTTP/3 · TCP fallback · ADR 0021)"]
-        Router["Workload router\n(reference queues + pool dispatch now\nservice integration deferred)"]
-        ASR["Streaming ASR pool\n(WSS)"]
-        Batch["Cohere batch pool\n(single isolated worker proven\ncapacity deferred)"]
+        Router["Workload router\n(reference queues + Phase 5 batch dispatch now\nproduction service integration deferred)"]
+        ASR["DEFERRED streaming ASR pool\n(WSS)"]
+        Batch["Cohere batch pool\n(single isolated worker + dev batch path\ncapacity deferred)"]
         LLM["LLM pool\n(Scribe · agents · GPU)"]
         Diar["Diarization service\nserver reconciliation · ADR 0020"]
         KB["Google OKF compiler + permission-safe relationship/vector views\n(Postgres/pgvector baseline · ADR 0017/0022)"]
@@ -204,11 +206,11 @@ flowchart TB
     User --> UI
     UI --> Conn
     Mic --> Conn
-    Conn -->|"live stream + control"| Edge
-    Conn -->|"durable file upload"| Edge
-    Edge -->|"authenticated requests"| Router
-    Router -->|"bounded responses"| Edge
-    Edge -->|"live + batch responses"| Conn
+    Conn -->|"CURRENT: SSH-forwarded loopback HTTP batch"| Router
+    Conn -.->|"FUTURE: authenticated live + HTTPS"| Edge
+    Edge -.->|"authenticated requests"| Router
+    Router -.->|"bounded responses"| Edge
+    Edge -.->|"live + batch responses"| Conn
     Router --> ASR & Batch & LLM
     ASR & Batch --> Diar
     ASR -->|"tokens"| Router
@@ -268,8 +270,8 @@ flowchart TB
     subgraph L2Batch["L2 batch — server path · Yap recording quality"]
         Drop["File drop / queue"]
         LID["DEFERRED SpeechBrain LID gate · Phase 6"]
-        COH["GB-class Cohere worker proven\nPhase 5 job API deferred"]
-        Save["DEFERRED server result → .txt/history"]
+        COH["GB-class Cohere worker\nPhase 5 loopback batch candidate"]
+        Save["Verified server result → .txt/history"]
         ScribeB["Dev Ollama today<br/>target governed Scribe deferred"]
     end
 
@@ -437,7 +439,7 @@ Mic → bounded capture/preprocess → Nemotron INT8 (sherpa-onnx)
 
 ### Target fan-out beyond the implemented baseline
 
-The following includes deferred components. Today the production coordinator wires recording and local Nemotron ASR only; it does not run Silero, llama-server/Scribe, speaker inference, or server transport.
+The following includes deferred components. Today the production coordinator wires recording and local Nemotron ASR; the Phase 5 imported-file path separately prepares and drains durable loopback batch jobs. It does not run Silero, llama-server/Scribe, speaker inference, or WSS/live transport.
 
 ```
 Mic → optional AGC → Silero VAD                         [deferred]
@@ -572,7 +574,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 ## Runtime orchestration (summary)
 
-**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust boundary enforces the local Nemotron lifecycle and projects connector health/capabilities/retries. LLM scheduling, Silero, and remote server transport/processing are not wired:
+**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust boundary enforces the local Nemotron lifecycle and projects connector health/capabilities/retries. The Phase 5 candidate also owns durable loopback batch upload/server-processing transitions and verified result publication. LLM scheduling, Silero, and WSS/live server transport are not wired:
 
 | Rule | Limit |
 |------|--------|
@@ -607,7 +609,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Settings and controls | Ship usable dictation and paste-last defaults. Enter an explicit "Change shortcut" mode that records one physical primary-key chord, normalizes only that final chord, supports Cancel and Reset, and preserves the previous registration on failure. | Do not require users to type chord strings, accept bare printable/OS-reserved chords, capture outside deliberate recording mode, or log/store raw key events. |
 | Docs and code | Update the ADR/spec/product surface in the same phase as the code. | Do not ship behavior that contradicts the client/server split: live local fallback is allowed; official long recordings queue for server. |
 | Speaker privacy | Persist anonymous timelines and user labels; keep local embeddings transient. | Do not turn contact import, transcript renaming, or meeting attendance into passive voice enrollment. |
-| Server staging | Keep Phase 3 health/contract capabilities separate from the Phase 4 reference router/pool. The worker stays transient, pinned, non-root, networkless, and independently gated until Phase 5 connects it. | Do not advertise batch capability, expose a worker/model port, or mistake one isolated worker and short-fixture WER proof for a persistent multi-user service or capacity benchmark. |
+| Server staging | Keep the default Phase 3 health-only profile separate from the Phase 5 loopback batch profile. Advertise batch/status only after private storage, the immutable lock, verified models, router, and pool initialize. Keep the worker transient, pinned, non-root, and networkless. | Do not advertise live capability, expose a worker/model/application port, or mistake one isolated worker and focused batch candidate for a persistent authenticated multi-user service or capacity benchmark. |
 
 ---
 
@@ -620,7 +622,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Live dropouts | Recording is the priority sink; callback loss becomes an explicit timeline gap |
 | Short or noisy turns | Under 1.6 seconds is weak evidence; use calibrated score, margin, quality, and cumulative speech rather than a forced match |
 | Speaker-label churn | Stable IDs within a result revision; merges, splits, server reconciliation, and user corrections create explicit revisions |
-| Queue backlog | The Rust-owned durable ledger preserves backlog independently; automatic reconnect upload/drain remains deferred |
+| Queue backlog | The Rust-owned ledger preserves backlog; Phase 5 reconnect drain is bounded, origin-leased, cancellation-first, and resumable |
 
 ---
 
@@ -652,6 +654,7 @@ Yap (Tauri)  [yap-desktop]
 %APPDATA%/com.mcnatg1.yap/     Tauri app_data_dir on Windows
   models/                      pinned model cache
   live-recordings/             committed audio/transcript history
+  remote-jobs/                 Yap-owned immutable Phase 5 prep/results spool
   jobs.sqlite3                 durable imported-job ledger
   live-settings.json           client capture/overlay settings
   server-settings.json         validated server origin settings
@@ -668,13 +671,13 @@ Yap (Tauri)  [yap-desktop]
 
 ### Target team / server profile
 
-The hardened host bootstrap, machine-readable HTTP/live contracts, bounded loopback capability-health service, desktop health connector/state machine, and durable SQLite imported-job ledger exist. Upload/WSS transport, queue drain, server processing, pools, databases, secure transport edge, and the `yap-knowledge` repository below are deferred.
+The hardened host bootstrap, machine-readable HTTP/live contracts, bounded loopback service, desktop connector/state machine, durable SQLite imported-job ledger, and Phase 5 development batch path exist. The candidate validates and extracts immutable PCM from already-canonical WAV input, drains resumable jobs through the bounded router and isolated Cohere worker, and publishes verified server results. Its complete gate is pending. General media conversion, WSS/live, authentication, persistent supervision, multi-worker capacity, databases, secure transport edge, and the `yap-knowledge` repository below are deferred.
 
 ```
 yap-desktop (Tauri) — thin client shell
   ├─ Track-aware capture       VAD hints + source manifests + explicit gaps
   ├─ sherpa recognizer         Offline fallback only (Nemotron INT8)
-  └─ Server connector          health/config/retry implemented; [deferred] WSS + HTTPS jobs + HTTP/3 negotiation
+  └─ Server connector          health/config/retry + loopback batch; [deferred] WSS/authenticated edge + HTTP/3 negotiation
 
 yap-server (GB-class server node, org LAN/VPN)
   ├─ Secure transport edge      [future] HTTP/3 + HTTP/2 or HTTP/1.1 fallback (ADR 0021)
@@ -713,6 +716,7 @@ timeline
     3 : Server contract
     4 : GB-class server node
     5 : Remote STT and upload queue
+    A : Phase 1-5 architecture checkpoint
     6 : Preprocessing pipeline
     7 : Identity and access
     8 : Diarization and enrichment
@@ -727,7 +731,8 @@ timeline
 | **2** | desktop fallback | Local Nemotron INT8 live/offline fallback with explicit model downloads. | Phases 1-2; ADR 0001/0002/0019 |
 | **3** | contract | Server API/WSS contract, health, job/error model, client connector health state, and Rust-owned durable imported-job ledger. | Old Phase 8; server-tier spec |
 | **4** | server node | GB-class node boundary, bounded reference router/pool, immutable Cohere runtime/model lock, and transient GPU inference gate. | ADR 0014 |
-| **5** | remote STT | Connected-mode STT for long recordings, upload jobs, and server ASR routing. | Old Phase 5/8 |
+| **5** | remote STT | Durable imported-recording batch STT, reconnect upload/drain, verified results, and server ASR routing; authenticated WSS/live remains a later baseline. | Old Phase 5/8 |
+| **Checkpoint A** | Phase 1-5 foundation | Review the complete executable Phase 1-5 system, resolve correctness/security and duplicate-ownership findings, remove dead or speculative machinery, decompose mixed responsibilities, measure justified efficiency changes, and organize current/normative/historical documentation without adding Phase 6 functionality. | Post-Phase-5 architecture checkpoint |
 | **6** | preprocessing | Audio normalization, VAD/chunk manifests, LID, forced alignment, word timestamps, and retryable pipeline state. | ADR 0004/0007/0008/0009 |
 | **7** | identity/access | Entra/MSAL bridge, Yap API audience, purpose grants, tenant-scoped identity, and permission hooks. | Old Phase 9; ADR 0016/0020 |
 | **8** | meeting evidence | Local anonymous speaker evidence, timestamped result revisions, server reconciliation, and purpose-authorized named identity. | Old 7b/10; ADR 0020 |
@@ -742,8 +747,9 @@ timeline
 | **1** | Capture foundation, convergence client, and durable imported-job ledger implemented | History/playback/setup, source-aware production microphone capture, exact gaps, independent bounded sinks, streaming recording, immutable sidecar/commit, recovery/deletion, one exact-bounds tray island, safe physical shortcut recording/defaults, a Rust orchestrator projection, and the Rust-owned SQLite imported-job ledger exist. |
 | **2** | Implemented baseline; installer lifecycle verified | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Windows native WDIO, stock NSIS packaging contracts, and release-artifact contracts exist; implementation head `a721121315c7a4bf5510212196141f17e9b237bd` passed the stock lifecycle on a disposable Windows runner. Real-model/native release CI and measured latency/accuracy gates remain. |
 | **3** | Verified implementation | Contracts, loopback capability-health, connector/retry state, and the durable Rust ledger remain implemented. Exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05` passed the one-time local/native/server/GB10 gate; tunneled health projected `Ready`, refusal projected `Retrying`, and teardown was clean. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` then passed hosted CI and the disposable-Windows installer lifecycle. This still does not imply same-process native UI transition, persistent service, upload/WSS/auth/ASR, or inference. |
-| **4** | Exact-head reference slice and hosted closure verified; merge pending | Executable candidate `309a2d427707e3483b2649f13940bd48dfaee836` passed the one-time local/native/server/GB10 matrix. Its transient isolated ARM64 worker ran the locked Cohere revision on NVIDIA GB10 in CUDA/BF16 at WER `0.0`; immutable evidence confirmed matching before/after listener, firewall-policy, and service-unit observations plus complete container/worker teardown. Evidence-only PR head `7c7970ffb959209ba283918a4a200cc16c35fb1f` then passed hosted CI, CodeQL, and the disposable stock-NSIS lifecycle. No upload/drain, advertised batch capability, authenticated owner derivation, durable server queue, streaming pool, long-recording or multi-worker capacity result, service unit, persistent process, external listener, or firewall change exists. |
-| **5** | Planned | Remote long-recording transcription waits on upload/drain, WSS, authentication, and the node runtime. |
+| **4** | Merged and verified | Executable candidate `309a2d427707e3483b2649f13940bd48dfaee836` passed the one-time local/native/server/GB10 matrix. Its transient isolated ARM64 worker ran the locked Cohere revision on NVIDIA GB10 in CUDA/BF16 at WER `0.0`; immutable evidence confirmed matching before/after listener, firewall-policy, and service-unit observations plus complete container/worker teardown. Hosted closure passed before final PR head `43f9c43f37e1893dbfe1565d3636fca1e4e3fedf` became reachable from merged main `7d967a5b9f1021fd995af77a421ebaa13d8f9925`. This proves the isolated reference slice, not authenticated/persistent production service or capacity. |
+| **5** | Candidate implemented; focused evidence green; complete gate pending | Already-canonical mono PCM16/16 kHz WAV files are strictly validated and extracted into an immutable Yap-owned spool, durably created/uploaded/committed/resumed/cancelled through the approved loopback origin, processed through the bounded router and isolated Cohere worker, and published to History only after native result verification. Focused Rust, frontend, Python 3.12, API, and contract checks pass. The private review is complete and retained outside the repository; the one-time checked-head local/native/server/GB10 gate has not completed. General media conversion, WSS/live, authentication, persistent service, external networking, and measured multi-worker capacity remain later gates. |
+| **Checkpoint A** | Queued; do not start before Phase 5 merges | This is the first post-Phase-5 task. Run it on a separate `refactor/phase1-5-architecture-checkpoint` branch with parallel read-only review lenses and primary-agent-coordinated edits. Keep it out of the Phase 5 PR, preserve verified behavior, keep private security evidence private, and do not begin Phase 6 product work during the checkpoint. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
 | **8** | Capture prerequisites implemented; diarization deferred | ADR 0020 and the source-aware design are canonical. Track/timeline/recording prerequisites are implemented; the anonymous speaker model, real benchmark, result production, and server reconciliation are not. |
@@ -760,10 +766,10 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Capture persistence rule:** current `live-s-...` sessions use one canonical recording contract (`PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`) and are complete only after immutable sidecar/commit publication. Partial artifacts are recoverable/deletable. Pre-release timestamp-era recordings remain untouched and unindexed; no migration adapter or alternate fixture path is planned.
 
-**Deferred after the Phase 4 reference slice:** desktop upload/drain, WSS/live
-ASR, auth-derived server ownership, durable job processing, persistent model
-services, warm/multi-worker capacity benchmarks, and client result ingestion;
-the HTTP/3 secure edge and transport benchmark; system loopback; Opus transport;
+**Deferred after the Phase 5 batch candidate:** WSS/live ASR, auth-derived
+server ownership, persistent model services, warm/multi-worker capacity
+benchmarks, and production/external application deployment; the HTTP/3 secure
+edge and transport benchmark; system loopback; Opus transport;
 an anonymous-speaker/diarization model; long-recording/capacity benchmarks;
 hosted production-release workflow proof; and per-OS real-model/native hardware
 CI.
@@ -772,11 +778,12 @@ CI.
 
 **Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
 
-**Next execution order:** close the reviewed Phase 4 PR on a green exact PR
-head, then implement Phase 5 upload/drain and client-connected remote STT without
-advertising capabilities ahead of executable handlers. WSS/live ASR, auth,
-diarization, and the HTTP/3 edge remain gated by their canonical phases. ADR
-0021 does not authorize UDP exposure from the Phase 3 health boundary.
+**Next execution order:** finish the private Phase 5 review, freeze one checked
+candidate, run the complete local/native/server/GB10 gate exactly once, and
+merge only after the checked PR head is green. Then run Checkpoint A on its
+separate branch before Phase 6. WSS/live ASR, authentication, diarization, and
+the HTTP/3 edge remain gated by their canonical phases. ADR 0021 does not
+authorize UDP exposure from the loopback application boundary.
 
 ---
 
@@ -831,8 +838,11 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [x] Track-aware frames, manifests, content hashes, and explicit gaps
 - [x] Independent bounded recording, ASR, evidence, and transport sinks
 - [x] Crash-safe streaming recording, immutable capture sidecar/commit, and recover/delete lifecycle
-- [x] Rust-owned durable reconnect ledger (automatic drain remains Phase 5)
-- [ ] WSS/upload transport, automatic reconnect drain, and server processing
+- [x] Rust-owned durable reconnect ledger
+- [x] Loopback HTTP batch upload, cancellation-first reconnect drain, server
+  processing, and verified native result publication (Phase 5 candidate; full
+  gate pending)
+- [ ] Authenticated WSS/live transport and production application edge
 
 **Meeting evidence and diarization (Phase 8)**
 

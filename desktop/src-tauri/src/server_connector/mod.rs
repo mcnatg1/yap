@@ -1,3 +1,4 @@
+pub(crate) mod batch;
 mod client;
 pub mod config;
 mod state;
@@ -17,6 +18,18 @@ pub struct ServerConnector {
     client: reqwest::Client,
     inner: Mutex<ConnectorInner>,
     generation: AtomicU64,
+}
+
+pub(crate) struct BatchConnectionLease {
+    generation: u64,
+    base_url: String,
+    client: batch::BatchApiClient,
+}
+
+impl BatchConnectionLease {
+    pub(crate) fn client(&self) -> &batch::BatchApiClient {
+        &self.client
+    }
 }
 
 /// App-independent adapter over the production connector boundary.
@@ -176,6 +189,61 @@ impl ServerConnector {
             .lock()
             .expect("server connector poisoned")
             .snapshot()
+    }
+
+    pub(crate) fn batch_connection_lease(&self) -> Result<Option<BatchConnectionLease>, String> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let inner = self.inner.lock().expect("server connector poisoned");
+        let snapshot = inner.snapshot();
+        if inner.generation() != generation
+            || snapshot.state != runtime::state::ServerConnectorState::Ready
+            || !snapshot.capabilities.batch_jobs
+            || !snapshot.capabilities.job_status
+        {
+            return Ok(None);
+        }
+        let Some(base_url) = inner.configured_base_url(generation) else {
+            return Ok(None);
+        };
+        let client = batch::BatchApiClient::new(self.client.clone(), &base_url)
+            .map_err(|error| error.to_string())?;
+        let base_url = client.base_url_identity().to_owned();
+        Ok(Some(BatchConnectionLease {
+            generation,
+            base_url,
+            client,
+        }))
+    }
+
+    pub(crate) fn with_current_batch_lease<T>(
+        &self,
+        lease: &BatchConnectionLease,
+        commit: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        let inner = self.inner.lock().expect("server connector poisoned");
+        let snapshot = inner.snapshot();
+        let current = self.generation.load(Ordering::Acquire) == lease.generation
+            && inner.generation() == lease.generation
+            && inner.configured_base_url(lease.generation).as_deref()
+                == Some(lease.base_url.as_str())
+            && snapshot.state == runtime::state::ServerConnectorState::Ready
+            && snapshot.capabilities.batch_jobs
+            && snapshot.capabilities.job_status;
+        if !current {
+            return Err("Server connection changed before the batch response could commit.".into());
+        }
+        Ok(commit())
+    }
+
+    pub(crate) async fn refresh_for_job_drain(
+        &self,
+        app: &tauri::AppHandle,
+        runtime_state: &runtime::RuntimeOrchestratorState,
+    ) -> ServerConnectionSnapshot {
+        if self.synchronize_from_disk(runtime_state, app).is_err() {
+            return self.snapshot();
+        }
+        self.refresh(app, runtime_state).await
     }
 
     async fn refresh<R: tauri::Runtime>(
@@ -474,37 +542,41 @@ pub(crate) async fn set_server_settings(
         .base_url
         .as_deref()
         .is_some_and(|origin| config::origin_is_approved(origin).unwrap_or(false));
-    if requires_server_origin_confirmation(&current, &normalized, origin_is_approved) {
-        let origin = normalized
-            .base_url
-            .clone()
-            .expect("enabled normalized server settings have an origin");
-        if !confirm_server_origin(app.clone(), origin).await? {
-            return Err("Server connection change was cancelled.".into());
-        }
-        config::approve_origin(
-            normalized
+    let approval_origin =
+        if requires_server_origin_confirmation(&current, &normalized, origin_is_approved) {
+            let origin = normalized
                 .base_url
-                .as_deref()
-                .expect("enabled normalized server settings have an origin"),
-        )
-        .map_err(|error| error.to_string())?;
-    }
+                .clone()
+                .expect("enabled normalized server settings have an origin");
+            if !confirm_server_origin(app.clone(), origin.clone()).await? {
+                return Err("Server connection change was cancelled.".into());
+            }
+            Some(origin)
+        } else {
+            None
+        };
+
     let mut inner = connector.inner.lock().expect("server connector poisoned");
-    let generation_before = connector.generation.load(Ordering::Acquire);
-    let result = finish_settings_save_locked(&connector, &mut inner, config::save(&normalized));
-    if connector.generation.load(Ordering::Acquire) != generation_before {
-        let current = result
-            .as_ref()
-            .ok()
-            .cloned()
-            .or_else(|| config::load().ok());
-        if let Some(current) = current {
-            let generation = connector.generation.load(Ordering::Acquire);
-            inner.apply_server_settings(generation, current.enabled, current.base_url.clone());
+    let generation = connector.invalidate_locked(&mut inner);
+
+    // Revoke the old lease before either durable setting changes or approval
+    // publication. The candidate is saved first so an approval-write failure
+    // leaves the new origin configured but unauthorized, which fails closed.
+    let save_result = config::save(&normalized).and_then(|saved| {
+        if let Some(origin) = approval_origin.as_deref() {
+            config::approve_origin(origin)?;
         }
-        project_transition(&runtime_state, &app, &inner.snapshot());
-    }
+        Ok(saved)
+    });
+    let result = finish_settings_save_after_revocation(save_result);
+    let effective = result
+        .as_ref()
+        .ok()
+        .cloned()
+        .or_else(|| config::load().ok())
+        .unwrap_or(current);
+    inner.apply_server_settings(generation, effective.enabled, effective.base_url.clone());
+    project_transition(&runtime_state, &app, &inner.snapshot());
     result
 }
 
@@ -545,31 +617,62 @@ fn finish_settings_save(
     result: Result<config::ServerSettings, config::ConfigError>,
 ) -> Result<config::ServerSettings, String> {
     let mut inner = connector.inner.lock().expect("server connector poisoned");
-    finish_settings_save_locked(connector, &mut inner, result)
+    connector.invalidate_locked(&mut inner);
+    finish_settings_save_after_revocation(result)
 }
 
-fn finish_settings_save_locked(
-    connector: &ServerConnector,
-    inner: &mut ConnectorInner,
+fn finish_settings_save_after_revocation(
     result: Result<config::ServerSettings, config::ConfigError>,
 ) -> Result<config::ServerSettings, String> {
-    match result {
-        Ok(saved) => {
-            connector.invalidate_locked(inner);
-            Ok(saved)
-        }
-        Err(error) => {
-            if error.settings_may_have_changed() {
-                connector.invalidate_locked(inner);
-            }
-            Err(error.to_string())
-        }
-    }
+    result.map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_batch_connection_lease_cannot_commit_after_configuration_changes() {
+        let connector = ServerConnector::default();
+        connector.synchronize_settings_with(
+            &config::ServerSettings {
+                schema_version: config::CURRENT_SCHEMA_VERSION,
+                enabled: true,
+                base_url: Some("http://127.0.0.1:18765".into()),
+            },
+            |_| {},
+        );
+        let (generation, _) = connector
+            .begin_health_request_with(|_| {})
+            .expect("configured connector begins health request");
+        connector.accept_health_result_with(
+            generation,
+            client::HealthCheckResult::Ready {
+                api_version: "1".into(),
+                capabilities: ServerCapabilities {
+                    batch_jobs: true,
+                    live_streaming: false,
+                    job_status: true,
+                },
+            },
+            |_| {},
+            |_, _, _| tauri::async_runtime::spawn(async {}),
+        );
+        let lease = connector
+            .batch_connection_lease()
+            .unwrap()
+            .expect("ready batch-capable connector yields a lease");
+        connector.invalidate();
+
+        let committed = std::sync::atomic::AtomicBool::new(false);
+        assert!(connector
+            .with_current_batch_lease(&lease, || {
+                committed.store(true, Ordering::SeqCst);
+                ()
+            })
+            .is_err());
+        assert!(!committed.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn new_or_reenabled_server_origins_require_native_confirmation() {
@@ -759,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_publication_failure_does_not_invalidate_generation() {
+    fn pre_publication_failure_still_leaves_stale_leases_revoked() {
         let connector = ServerConnector::default();
         let result = Err(config::ConfigError::SaveIo(std::io::Error::other(
             "injected staging failure",
@@ -767,7 +870,7 @@ mod tests {
 
         let error = finish_settings_save(&connector, result).unwrap_err();
 
-        assert_eq!(connector.current(), 0);
+        assert_eq!(connector.current(), 1);
         assert!(error.starts_with("Could not save server settings:"));
     }
 
