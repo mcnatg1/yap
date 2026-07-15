@@ -1,4 +1,17 @@
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc, Arc, Condvar, Mutex,
+};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use tauri::Manager;
+
+use super::super::state::{LiveLevelView, LiveSessionState};
+use super::session_identity::active_session_matches;
+use super::worker::join_worker;
+
+const LEVEL_TICK: Duration = Duration::from_millis(50);
 
 pub(super) struct LatestLevelSender {
     shared: Arc<LatestLevelShared>,
@@ -6,6 +19,10 @@ pub(super) struct LatestLevelSender {
 
 pub(super) struct LatestLevelReceiver {
     shared: Arc<LatestLevelShared>,
+}
+
+pub(super) struct LevelWorker {
+    handle: Option<JoinHandle<()>>,
 }
 
 struct LatestLevelShared {
@@ -17,6 +34,45 @@ struct LatestLevelState {
     latest: Option<f32>,
     producers: usize,
     receiver_open: bool,
+}
+
+impl LevelWorker {
+    pub(super) fn new() -> Self {
+        Self { handle: None }
+    }
+
+    pub(super) fn start(
+        &mut self,
+        app: tauri::AppHandle,
+        level: LatestLevelReceiver,
+        session: u64,
+        active_session: Arc<AtomicU64>,
+    ) {
+        if let Some(handle) = self.handle.take() {
+            if let Err(error) = join_worker(handle) {
+                crate::stt::log_yap(&format!("live level worker shutdown failed: {error}"));
+            }
+        }
+        self.handle = Some(std::thread::spawn(move || {
+            let state = app.state::<LiveSessionState>();
+            while let Ok(value) = level.recv() {
+                if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
+                    break;
+                }
+                let view = state.update_level(value);
+                let level = LiveLevelView::from(&view);
+                super::super::events::emit_level(&app, &level);
+                std::thread::sleep(LEVEL_TICK);
+            }
+        }));
+    }
+
+    pub(super) fn shutdown(&mut self) -> Result<(), String> {
+        match self.handle.take() {
+            Some(handle) => join_worker(handle),
+            None => Ok(()),
+        }
+    }
 }
 
 impl LatestLevelReceiver {

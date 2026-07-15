@@ -3,13 +3,11 @@ use super::*;
 #[test]
 fn stream_crash_retires_runtime_handles() {
     let mut inner = LiveRuntimeInner::for_test();
-    inner.has_capture_for_test = true;
-    inner.has_stream_for_test = true;
+    inner.mark_resources_present_for_test();
 
     inner.mark_stream_crashed_for_test();
 
-    assert!(!inner.has_capture_for_test);
-    assert!(!inner.has_stream_for_test);
+    assert_eq!(inner.resources_present_for_test(), (false, false));
 }
 
 #[test]
@@ -73,8 +71,8 @@ fn cancellation_after_capture_handoff_keeps_the_recording_for_stop_cataloging() 
     let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
     {
         let mut inner = runtime.inner.lock().unwrap();
-        inner.session = 7;
-        inner.recording = Some(RecordingSinkHandle::spawn(
+        inner.set_session_for_test(7);
+        inner.set_recording_for_test(RecordingSinkHandle::spawn(
             directory.clone(),
             session_id.clone(),
             sink,

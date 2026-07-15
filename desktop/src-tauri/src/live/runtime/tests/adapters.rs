@@ -8,29 +8,25 @@ fn timed_out_recognizer_blocks_replacement_until_its_worker_is_reaped() {
     let worker = std::thread::spawn(move || {
         worker_released.wait();
     });
-    inner.stream = Some(SessionStream::from_worker_for_test(1, worker, false));
+    inner.set_stream_for_test(SessionStream::from_worker_for_test(1, worker, false));
 
     inner.retire_stream_detached_reader();
     assert_eq!(
-        inner.reap_retiring_stream(),
+        inner.reap_retiring_stream_for_test(),
         Err("Previous live transcription is still stopping.".into())
     );
 
     release_worker.wait();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while inner
-        .retiring_stream
-        .as_ref()
-        .is_some_and(|stream| !stream.is_finished())
-    {
+    while !inner.retiring_stream_is_finished_for_test() {
         assert!(
             Instant::now() < deadline,
             "retired recognizer did not finish"
         );
         std::thread::yield_now();
     }
-    assert_eq!(inner.reap_retiring_stream(), Ok(()));
-    assert!(inner.retiring_stream.is_none());
+    assert_eq!(inner.reap_retiring_stream_for_test(), Ok(()));
+    assert!(!inner.has_retiring_stream_for_test());
 }
 
 #[test]
@@ -41,7 +37,7 @@ fn idle_cleanup_does_not_join_a_still_stalled_recognizer() {
     let worker = std::thread::spawn(move || {
         worker_released.wait();
     });
-    inner.retiring_stream = Some(SessionStream::from_worker_for_test(1, worker, true));
+    inner.set_retiring_stream_for_test(SessionStream::from_worker_for_test(1, worker, true));
     let (done_tx, done_rx) = mpsc::channel();
     let cleanup = std::thread::spawn(move || {
         inner.retire_stream();
@@ -54,21 +50,17 @@ fn idle_cleanup_does_not_join_a_still_stalled_recognizer() {
     let mut inner = cleanup.join().unwrap();
 
     assert!(completed_without_joining.is_ok());
-    assert!(inner.retiring_stream.is_some());
+    assert!(inner.has_retiring_stream_for_test());
     let deadline = Instant::now() + Duration::from_secs(1);
-    while inner
-        .retiring_stream
-        .as_ref()
-        .is_some_and(|stream| !stream.is_finished())
-    {
+    while !inner.retiring_stream_is_finished_for_test() {
         assert!(
             Instant::now() < deadline,
             "retired recognizer did not finish"
         );
         std::thread::yield_now();
     }
-    assert_eq!(inner.reap_retiring_stream(), Ok(()));
-    assert!(inner.retiring_stream.is_none());
+    assert_eq!(inner.reap_retiring_stream_for_test(), Ok(()));
+    assert!(!inner.has_retiring_stream_for_test());
 }
 
 #[test]

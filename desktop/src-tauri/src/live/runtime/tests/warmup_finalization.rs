@@ -166,7 +166,11 @@ fn concurrent_recording_finalizers_share_one_cached_result_and_one_worker_finali
             sink,
             receiver,
         );
-    runtime.inner.lock().unwrap().recording = Some(recording);
+    runtime
+        .inner
+        .lock()
+        .unwrap()
+        .set_recording_for_test(recording);
     let barrier = Arc::new(Barrier::new(3));
     let left_runtime = runtime.clone();
     let left_barrier = Arc::clone(&barrier);
@@ -213,7 +217,11 @@ fn racing_stops_share_one_live_stop_result_and_one_recording_finalization() {
             sink,
             receiver,
         );
-    runtime.inner.lock().unwrap().recording = Some(recording);
+    runtime
+        .inner
+        .lock()
+        .unwrap()
+        .set_recording_for_test(recording);
     let barrier = Arc::new(Barrier::new(3));
     let left_runtime = runtime.clone();
     let left_barrier = Arc::clone(&barrier);
@@ -302,12 +310,16 @@ fn direct_stop_then_successful_finalize_allows_the_next_start() {
     std::fs::remove_dir_all(&directory).ok();
     let session_id = SessionId::new("s-direct-restart-success").unwrap();
     let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
-    runtime.inner.lock().unwrap().recording = Some(RecordingSinkHandle::spawn(
-        directory.clone(),
-        session_id,
-        sink,
-        receiver,
-    ));
+    runtime
+        .inner
+        .lock()
+        .unwrap()
+        .set_recording_for_test(RecordingSinkHandle::spawn(
+            directory.clone(),
+            session_id,
+            sink,
+            receiver,
+        ));
 
     assert!(runtime.ensure_recording_ready_to_start().is_err());
     assert_eq!(

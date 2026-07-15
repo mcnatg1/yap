@@ -4,8 +4,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use tauri::Manager;
 
@@ -14,7 +15,7 @@ use crate::audio::coordinator::{bounded_sink, SinkKind, RECORDING_QUEUE_CAPACITY
 use crate::audio::recording::{RecordingFinalizeResult, RecordingSinkHandle};
 use crate::audio::session::{SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode};
 
-use super::state::{LiveLevelView, LiveSessionState};
+use super::state::LiveSessionState;
 use super::stream::LiveStreamEngine;
 #[cfg(test)]
 use super::stream::{self, StreamMessage};
@@ -24,6 +25,7 @@ mod capture_worker;
 mod finalization;
 mod level_channel;
 mod lifecycle_gate;
+mod resources;
 mod session_identity;
 mod stream_session;
 mod warmup;
@@ -31,30 +33,34 @@ mod worker;
 
 #[cfg(test)]
 use asr_adapter::set_reaper_spawn_failure_for_test;
-use asr_adapter::{
-    AdapterDrainStatus, PendingAsrAdapter, SessionAsrAdapter, ASR_ADAPTER_DRAIN_TIMEOUT,
-};
+use asr_adapter::PendingAsrAdapter;
+#[cfg(test)]
+use asr_adapter::{AdapterDrainStatus, SessionAsrAdapter};
 #[cfg(test)]
 use capture_worker::*;
 use capture_worker::{run_capture_worker, CaptureWorkerContext};
 use finalization::{RecordingFinalization, StopCompletion};
+use level_channel::level_channel;
 #[cfg(test)]
 use level_channel::publish_level;
-use level_channel::{level_channel, LatestLevelReceiver};
 use lifecycle_gate::{LifecycleGate, OwnedLifecycleOperation};
+use resources::LiveRuntimeResources;
+#[cfg(test)]
+use resources::{
+    capture_install_is_current as should_install_capture, LiveRuntimeResources as LiveRuntimeInner,
+};
 use session_identity::{active_session_matches, CRASH_CLAIM_BIT};
 #[cfg(test)]
 use stream_session::should_accept_stream_samples;
+#[cfg(test)]
+use stream_session::SessionStream;
 pub use stream_session::StreamFinishStatus;
-use stream_session::{SessionStream, StreamFinisher};
+use stream_session::StreamFinisher;
 use warmup::SharedWarmup;
-use worker::join_worker;
-
-const LEVEL_TICK: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub struct LiveRuntime {
-    inner: Arc<Mutex<LiveRuntimeInner>>,
+    inner: Arc<Mutex<LiveRuntimeResources>>,
     active_session: Arc<AtomicU64>,
     start_generation: Arc<AtomicU64>,
     recording_finalization: Arc<RecordingFinalization>,
@@ -71,22 +77,6 @@ pub(crate) struct StartIntent(u64);
 pub struct LiveStopResult {
     pub stream: StreamFinishStatus,
     pub recording: Result<Option<RecordingFinalizeResult>, String>,
-}
-
-struct LiveRuntimeInner {
-    session: u64,
-    capture: Option<CaptureAdapter>,
-    stream: Option<SessionStream>,
-    retiring_stream: Option<SessionStream>,
-    pending_asr: Option<PendingAsrAdapter>,
-    asr_adapter: Option<SessionAsrAdapter>,
-    recording: Option<RecordingSinkHandle>,
-    level: Option<JoinHandle<()>>,
-    last_used: Instant,
-    #[cfg(test)]
-    has_capture_for_test: bool,
-    #[cfg(test)]
-    has_stream_for_test: bool,
 }
 
 /// Excludes live start/stop work while installed model files or enablement change.
@@ -123,7 +113,7 @@ impl Drop for ModelMutationLease {
 impl LiveRuntime {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(LiveRuntimeInner::new())),
+            inner: Arc::new(Mutex::new(LiveRuntimeResources::new())),
             active_session: Arc::new(AtomicU64::new(0)),
             start_generation: Arc::new(AtomicU64::new(0)),
             recording_finalization: Arc::new(RecordingFinalization::new()),
@@ -138,8 +128,7 @@ impl LiveRuntime {
         self.inner
             .lock()
             .expect("live runtime poisoned")
-            .capture
-            .is_some()
+            .is_capturing()
     }
 
     pub(crate) fn capture_start_intent(&self) -> StartIntent {
@@ -182,7 +171,7 @@ impl LiveRuntime {
         };
 
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        if inner.capture.is_some() {
+        if inner.is_capturing() {
             return Err("Stop live before changing local fallback.".to_string());
         }
         inner.retire_stream();
@@ -200,19 +189,16 @@ impl LiveRuntime {
     ) -> Result<Option<LocalCaptureStart>, LiveStartFailure> {
         let session = {
             let inner = self.inner.lock().expect("live runtime poisoned");
-            if inner.capture.is_some() {
+            if inner.is_capturing() {
                 return Ok(None);
             }
             drop(inner);
             self.ensure_recording_ready_to_start()
                 .map_err(|message| LiveStartFailure::new(0, message))?;
             let mut inner = self.inner.lock().expect("live runtime poisoned");
-            if inner.capture.is_some() {
+            let Some(session) = inner.begin_capture_session() else {
                 return Ok(None);
-            }
-            inner.session = inner.session.saturating_add(1);
-            inner.last_used = Instant::now();
-            let session = inner.session;
+            };
             self.active_session.store(session, Ordering::SeqCst);
             session
         };
@@ -306,13 +292,8 @@ impl LiveRuntime {
             }
         };
         let mut inner = self.inner.lock().expect("live runtime poisoned");
-        if !should_install_capture(
-            session,
-            inner.session,
-            self.active_session.load(Ordering::SeqCst),
-            inner.capture.is_some(),
-        ) {
-            inner.last_used = Instant::now();
+        if !inner.can_install_capture(session, self.active_session.load(Ordering::SeqCst)) {
+            inner.mark_used();
             drop(inner);
             if let Err(error) = capture.shutdown() {
                 crate::stt::log_yap(&format!("live capture shutdown failed: {error}"));
@@ -321,10 +302,10 @@ impl LiveRuntime {
             drop(level);
             return Ok(None);
         }
-        inner.capture = Some(capture);
-        inner.recording = Some(recording_handle);
-        inner.pending_asr = Some(pending_asr);
-        inner.start_level_worker(
+        inner.install_capture(
+            capture,
+            recording_handle,
+            pending_asr,
             app.clone(),
             level,
             session,
@@ -354,7 +335,9 @@ impl LiveRuntime {
         let session = start.session;
         let reused = self.run_start_lifecycle(intent, || {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
-            if !self.capture_session_is_current(&inner, session) {
+            if !inner
+                .capture_session_is_current(session, self.active_session.load(Ordering::Acquire))
+            {
                 return Ok(false);
             }
             if inner.reuse_stream(session)? {
@@ -382,24 +365,25 @@ impl LiveRuntime {
         let model_warmup = Arc::clone(&self.model_warmup);
         self.run_start_lifecycle(intent, move || {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
-            if !self.capture_session_is_current(&inner, session) {
+            if !inner
+                .capture_session_is_current(session, self.active_session.load(Ordering::Acquire))
+            {
                 return Ok(false);
             }
             if !inner.reuse_stream(session)? {
-                inner.install_stream(self.clone(), app, session, model.commit(), model_warmup)?;
+                inner.install_stream(
+                    app,
+                    session,
+                    model.commit(),
+                    model_warmup,
+                    Arc::clone(&self.active_session),
+                );
             }
             inner.start_pending_asr_adapter(session)?;
             Ok(true)
         })
         .unwrap_or(Ok(false))
         .map_err(|message| LiveStartFailure::new(session, message))
-    }
-
-    fn capture_session_is_current(&self, inner: &LiveRuntimeInner, session: u64) -> bool {
-        session != 0
-            && inner.session == session
-            && inner.capture.is_some()
-            && self.active_session.load(Ordering::Acquire) == session
     }
 
     pub fn request_warm(&self, _app: tauri::AppHandle) -> Result<bool, String> {
@@ -410,9 +394,7 @@ impl LiveRuntime {
             .inner
             .lock()
             .expect("live runtime poisoned")
-            .stream
-            .as_ref()
-            .is_some_and(SessionStream::is_running)
+            .has_running_stream()
         {
             return Ok(false);
         }
@@ -459,7 +441,7 @@ impl LiveRuntime {
             inner.retire_stream_detached_reader();
         }
         self.active_session.store(0, Ordering::SeqCst);
-        inner.last_used = Instant::now();
+        inner.mark_used();
         finish_status
     }
 
@@ -473,7 +455,7 @@ impl LiveRuntime {
     pub fn unload_if_idle(&self, threshold: Duration) {
         self.run_stop_lifecycle(|| {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
-            if inner.capture.is_none() && inner.last_used.elapsed() >= threshold {
+            if inner.is_idle_for(threshold) {
                 inner.retire_stream();
                 drop(inner);
                 let _ = self.model_warmup.clear_idle();
@@ -499,7 +481,7 @@ impl LiveRuntime {
         self.recording_finalization
             .finalize_with(|| match self.inner.lock() {
                 Ok(mut inner) => {
-                    let recording = inner.recording.take();
+                    let recording = inner.take_recording();
                     let session_id = recording
                         .as_ref()
                         .map(|recording| recording.session_id().clone());
@@ -521,8 +503,7 @@ impl LiveRuntime {
             .inner
             .lock()
             .map_err(|_| "live runtime became unavailable")?
-            .recording
-            .is_some();
+            .recording_is_present();
         if prior_recording {
             return Err("Previous live recording must be finalized before starting again.".into());
         }
@@ -533,7 +514,7 @@ impl LiveRuntime {
     #[cfg(test)]
     pub(crate) fn install_unavailable_recording_for_test(&self, session_id: SessionId) {
         let (sink, _receiver) = bounded_sink(SinkKind::Recording, 1);
-        self.inner.lock().unwrap().recording = Some(
+        self.inner.lock().unwrap().set_recording_for_test(
             RecordingSinkHandle::spawn_unavailable_for_test(sink, session_id),
         );
     }
@@ -541,9 +522,9 @@ impl LiveRuntime {
     #[cfg(test)]
     pub(crate) fn install_panicking_recording_for_test(&self, session_id: SessionId) {
         let (sink, receiver) = bounded_sink(SinkKind::Recording, 1);
-        self.inner.lock().unwrap().recording = Some(RecordingSinkHandle::spawn_panicking_for_test(
-            sink, receiver, session_id,
-        ));
+        self.inner.lock().unwrap().set_recording_for_test(
+            RecordingSinkHandle::spawn_panicking_for_test(sink, receiver, session_id),
+        );
     }
 
     pub fn handle_stream_crash(&self, app: tauri::AppHandle, session: u64, message: &str) {
@@ -596,213 +577,6 @@ impl Default for LiveRuntime {
     }
 }
 
-impl LiveRuntimeInner {
-    fn new() -> Self {
-        Self {
-            session: 0,
-            capture: None,
-            stream: None,
-            retiring_stream: None,
-            pending_asr: None,
-            asr_adapter: None,
-            recording: None,
-            level: None,
-            last_used: Instant::now(),
-            #[cfg(test)]
-            has_capture_for_test: false,
-            #[cfg(test)]
-            has_stream_for_test: false,
-        }
-    }
-
-    fn reuse_stream(&mut self, session: u64) -> Result<bool, String> {
-        self.reap_retiring_stream()?;
-        if let Some(stream) = self.stream.as_ref().filter(|stream| stream.is_running()) {
-            stream.retarget(session);
-            return Ok(true);
-        }
-        self.retire_stream();
-        Ok(false)
-    }
-
-    fn install_stream(
-        &mut self,
-        runtime: LiveRuntime,
-        app: tauri::AppHandle,
-        session: u64,
-        engine: LiveStreamEngine,
-        model_warmup: Arc<SharedWarmup<LiveStreamEngine>>,
-    ) -> Result<(), String> {
-        self.stream = Some(SessionStream::start(
-            engine,
-            session,
-            Arc::clone(&runtime.active_session),
-            app,
-            model_warmup,
-        ));
-        Ok(())
-    }
-
-    fn start_pending_asr_adapter(&mut self, session: u64) -> Result<(), String> {
-        self.cancel_asr_adapter()?;
-        let samples_tx = self
-            .stream
-            .as_ref()
-            .map(SessionStream::sender)
-            .ok_or_else(|| "Live stream is unavailable.".to_string())?;
-        let pending = self
-            .pending_asr
-            .take()
-            .ok_or_else(|| "Live pre-roll is unavailable.".to_string())?;
-        let adapter = pending.start(samples_tx, session);
-        self.asr_adapter = Some(adapter);
-        Ok(())
-    }
-
-    fn start_level_worker(
-        &mut self,
-        app: tauri::AppHandle,
-        level: LatestLevelReceiver,
-        session: u64,
-        active_session: Arc<AtomicU64>,
-    ) {
-        if let Some(handle) = self.level.take() {
-            if let Err(error) = join_worker(handle) {
-                crate::stt::log_yap(&format!("live level worker shutdown failed: {error}"));
-            }
-        }
-        let handle = std::thread::spawn(move || {
-            let state = app.state::<LiveSessionState>();
-            while let Ok(value) = level.recv() {
-                if !active_session_matches(active_session.load(Ordering::SeqCst), session) {
-                    break;
-                }
-                let view = state.update_level(value);
-                let level = LiveLevelView::from(&view);
-                super::events::emit_level(&app, &level);
-                std::thread::sleep(LEVEL_TICK);
-            }
-        });
-        self.level = Some(handle);
-    }
-
-    fn stop_capture(&mut self) -> (Vec<String>, Option<StreamFinishStatus>) {
-        let mut errors = Vec::new();
-        let mut adapter_status = None;
-        if let Some(capture) = self.capture.take() {
-            if let Err(error) = capture.shutdown() {
-                errors.push(error);
-            }
-        }
-        self.pending_asr.take();
-        if let Some(mut adapter) = self.asr_adapter.take() {
-            match adapter.drain_after_capture(ASR_ADAPTER_DRAIN_TIMEOUT) {
-                Ok(AdapterDrainStatus::Drained) => {}
-                Ok(AdapterDrainStatus::TimedOut | AdapterDrainStatus::TimedOutRetained) => {
-                    adapter_status = Some(StreamFinishStatus::TimedOut);
-                    if let Some(error) = adapter.take_cleanup_error() {
-                        errors.push(error);
-                    }
-                    if adapter.retains_cleanup_ownership() {
-                        self.asr_adapter = Some(adapter);
-                    }
-                }
-                Err(error) => {
-                    errors.push(error);
-                    adapter_status = Some(StreamFinishStatus::Disconnected);
-                    if adapter.retains_cleanup_ownership() {
-                        self.asr_adapter = Some(adapter);
-                    }
-                }
-            }
-        }
-        if let Some(handle) = self.level.take() {
-            if let Err(error) = join_worker(handle) {
-                errors.push(error);
-            }
-        }
-        #[cfg(test)]
-        {
-            self.has_capture_for_test = false;
-        }
-        (errors, adapter_status)
-    }
-
-    fn retire_stream(&mut self) {
-        if let Err(error) = self.cancel_asr_adapter() {
-            crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
-        }
-        if let Some(stream) = self.stream.take() {
-            if let Err(error) = stream.shutdown(true) {
-                crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
-            }
-        }
-        let retiring_finished = self
-            .retiring_stream
-            .as_ref()
-            .is_some_and(SessionStream::is_finished);
-        if retiring_finished {
-            let stream = self
-                .retiring_stream
-                .take()
-                .expect("finished retiring stream was present");
-            if let Err(error) = stream.shutdown(true) {
-                crate::stt::log_yap(&format!("retiring live stream shutdown failed: {error}"));
-            }
-        }
-        #[cfg(test)]
-        {
-            self.has_stream_for_test = false;
-        }
-    }
-
-    fn retire_stream_detached_reader(&mut self) {
-        if let Err(error) = self.cancel_asr_adapter() {
-            crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
-        }
-        if let Some(stream) = self.stream.take() {
-            stream.cancel_reader();
-            if self.retiring_stream.is_none() {
-                self.retiring_stream = Some(stream);
-            } else if let Err(error) = stream.shutdown(true) {
-                crate::stt::log_yap(&format!("extra retiring stream shutdown failed: {error}"));
-            }
-        }
-        #[cfg(test)]
-        {
-            self.has_stream_for_test = false;
-        }
-    }
-
-    fn stream_finisher(&self) -> Option<StreamFinisher> {
-        self.stream.as_ref().map(SessionStream::finisher)
-    }
-
-    fn reap_retiring_stream(&mut self) -> Result<(), String> {
-        let Some(stream) = self.retiring_stream.as_ref() else {
-            return Ok(());
-        };
-        if !stream.is_finished() {
-            return Err("Previous live transcription is still stopping.".into());
-        }
-        let stream = self
-            .retiring_stream
-            .take()
-            .expect("retiring stream was present");
-        stream.shutdown(true)
-    }
-
-    fn cancel_asr_adapter(&mut self) -> Result<(), String> {
-        if let Some(mut adapter) = self.asr_adapter.take() {
-            if let Err(error) = adapter.cancel_and_join() {
-                self.asr_adapter = Some(adapter);
-                return Err(error);
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 fn stop_after_capture_for_test(
     adapter: &mut SessionAsrAdapter,
@@ -830,30 +604,6 @@ fn spawn_stream_crash_handler(
 fn log_worker_shutdown_errors(errors: Vec<String>) {
     for error in errors {
         crate::stt::log_yap(&format!("live worker shutdown failed: {error}"));
-    }
-}
-
-fn should_install_capture(
-    requested_session: u64,
-    inner_session: u64,
-    active_session: u64,
-    has_capture: bool,
-) -> bool {
-    requested_session != 0
-        && requested_session == inner_session
-        && requested_session == active_session
-        && !has_capture
-}
-
-#[cfg(test)]
-impl LiveRuntimeInner {
-    fn for_test() -> Self {
-        Self::new()
-    }
-
-    fn mark_stream_crashed_for_test(&mut self) {
-        self.has_capture_for_test = false;
-        self.has_stream_for_test = false;
     }
 }
 
