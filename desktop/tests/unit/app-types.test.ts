@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { liveSettingsLocked, projectFallbackLifecycle, projectLiveOverlayAction } from "@/components/panels/app-sheets";
+import {
+  liveSettingsLocked,
+  projectFallbackLifecycle,
+  projectLiveOverlayAction,
+} from "@/components/settings/settings-lifecycle";
 import {
   createInitialPipelineState,
   deriveSetupState,

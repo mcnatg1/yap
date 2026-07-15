@@ -4,11 +4,13 @@ import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
 import { AppSidebar } from "@/components/app/app-sidebar";
-import { HelpSheet, projectAppModalState, SettingsSheet } from "@/components/panels/app-sheets";
+import { projectAppModalState } from "@/components/panels/app-modal-state";
 import { DropHero } from "@/components/panels/drop-hero";
+import { HelpSheet } from "@/components/panels/help-sheet";
 import { HistoryPanel } from "@/components/panels/history-panel";
 import { PolishPanel } from "@/components/panels/polish-panel";
 import { QueuePanel } from "@/components/panels/queue-panel";
+import { SettingsSheet } from "@/components/panels/settings-sheet";
 import { TranscriptPanel } from "@/components/panels/transcript-panel";
 import { WorkspaceHeader } from "@/components/panels/workspace-header";
 import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog";

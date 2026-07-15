@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { projectAppModalState } from "@/components/panels/app-sheets";
+import { projectAppModalState } from "@/components/panels/app-modal-state";
 import {
   isHistoryBodySearchPending,
   projectHistorySearchDisplay,
