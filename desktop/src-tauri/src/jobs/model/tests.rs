@@ -1,3 +1,4 @@
+use super::view::{PipelineStageStatus, RecordingPipelineState};
 use super::*;
 
 #[test]
