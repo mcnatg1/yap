@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { QueuePanel } from "@/components/panels/queue-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import { createInitialPipelineState, type RecordingJobView } from "@/lib/recording-job";
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -53,14 +53,6 @@ describe("imported recording queue surface", () => {
   });
 
   it("contains no local-batch compatibility path in the owned frontend surface", () => {
-    const ownedSources = [
-      source("../../src/App.tsx"),
-      source("../../src/components/panels/queue-panel.tsx"),
-      source("../../src/components/stacked-upload.tsx"),
-      source("../../src/lib/app-types.ts"),
-      source("../../src/lib/setup-model-state.ts"),
-    ].join("\n");
-
     expect(source("../../src/App.tsx")).not.toMatch(/startTranscribe|transcribeItems|runQueue/);
     expect(source("../../src/App.tsx")).toContain("useRecordingJobs");
     expect(source("../../src/hooks/use-imported-recording-queue.ts"))

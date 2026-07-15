@@ -6,8 +6,8 @@ import type {
   LiveInputDeviceView,
   LiveOverlayView,
   LiveSessionView,
-  WorkspaceView,
-} from "@/lib/app-types";
+} from "@/lib/live-session";
+import type { WorkspaceView } from "@/lib/workspace";
 
 export type SavedLiveSession = {
   captureCommitPath?: string | null;

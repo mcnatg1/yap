@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import type { RecordingJobView } from "@/lib/app-types";
+import type { RecordingJobView } from "@/lib/recording-job";
 
 type MorphRect = {
   height: number;

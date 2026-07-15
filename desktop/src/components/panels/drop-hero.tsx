@@ -3,7 +3,7 @@ import { CloudArrowUp as UploadCloud } from "@phosphor-icons/react/CloudArrowUp"
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { acceptedFormats } from "@/lib/app-types";
+import { acceptedFormats } from "@/lib/media-file";
 import { cn } from "@/lib/utils";
 
 export function DropHero({

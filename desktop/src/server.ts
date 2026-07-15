@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   ServerConnectionState,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
 
 export const SERVER_SETTINGS_SCHEMA_VERSION = 1 as const;
 

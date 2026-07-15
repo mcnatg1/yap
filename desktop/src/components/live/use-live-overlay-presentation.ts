@@ -9,7 +9,7 @@ import {
   successVisibleMs,
 } from "@/components/live/live-overlay-state";
 import { createNativeSurfaceSync } from "@/components/live/native-surface-sync";
-import type { LiveOverlayView } from "@/lib/app-types";
+import type { LiveOverlayView } from "@/lib/live-session";
 
 const setNativeOverlaySurface = createNativeSurfaceSync(async ({ surface }) => {
   if (!isTauri()) return;

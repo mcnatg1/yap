@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { LiveOverlayView } from "@/lib/app-types";
+import type { LiveOverlayView } from "@/lib/live-session";
 
 import {
   collapseGraceMs,

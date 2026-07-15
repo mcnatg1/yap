@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { isWorkspaceView, type RailAction, type WorkspaceView } from "@/lib/app-types";
+import { isWorkspaceView, type RailAction, type WorkspaceView } from "@/lib/workspace";
 import { developmentPolishAvailable } from "@/lib/product-features";
 
 export type WorkspaceNavigationState = {

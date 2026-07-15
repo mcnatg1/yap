@@ -31,13 +31,8 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type {
-  FallbackModelView,
-  LiveCaptureMode,
-  LiveInputDeviceView,
-  LiveSessionView,
-  LocalComputeTargetView,
-} from "@/lib/app-types";
+import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView } from "@/lib/live-session";
+import type { FallbackModelView, LocalComputeTargetView } from "@/lib/setup-model";
 
 export type SettingsSheetProps = {
   auth: string;

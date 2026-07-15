@@ -17,12 +17,12 @@ import { roundedMediaSecond, seekRatioFromBounds } from "@/components/playback/r
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
+import { formatElapsed } from "@/lib/display-format";
 import {
-  formatElapsed,
   isRecordingActive,
   isRecordingFinished,
   type RecordingJobView,
-} from "@/lib/app-types";
+} from "@/lib/recording-job";
 import { cn } from "@/lib/utils";
 
 export function RecordingPlayer({

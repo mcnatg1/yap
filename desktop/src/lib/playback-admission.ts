@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import type { PlaybackAdmission } from "@/lib/app-types";
+import type { PlaybackAdmission } from "@/lib/recording-job";
 import {
   maxPlaybackRestoreConcurrency,
   type ReleasePlayback,

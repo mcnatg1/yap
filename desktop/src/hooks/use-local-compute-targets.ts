@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
-import type { LocalComputeTargetView } from "@/lib/app-types";
+import type { LocalComputeTargetView } from "@/lib/setup-model";
 import { listLocalComputeTargets, setLocalComputeTarget } from "@/settings";
 
 const initialLocalComputeTargets: LocalComputeTargetView[] = [

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { TranscriptHistoryEntry } from "@/history-model";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
-import { isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
+import { isRecordingFinished, type RecordingJobView } from "@/lib/recording-job";
 import {
   projectHistoryPlaybackAdmission,
   type HistoryPlaybackAdmissions,

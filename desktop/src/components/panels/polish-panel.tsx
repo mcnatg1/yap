@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { basename, type RecordingJobView } from "@/lib/app-types";
+import { basename } from "@/lib/media-file";
+import type { RecordingJobView } from "@/lib/recording-job";
 import { developmentPolishAvailable } from "@/lib/product-features";
 import {
   polishToneHints,

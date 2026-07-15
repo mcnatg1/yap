@@ -14,7 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { LocalComputeTargetView } from "@/lib/app-types";
+import type { LocalComputeTargetView } from "@/lib/setup-model";
 
 export function SystemSettingsSection({
   busy,

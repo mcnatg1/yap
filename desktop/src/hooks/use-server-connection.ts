@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   serverConnectionLabel,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
 import {
   listenServerConnection,
   refreshServerConnection,

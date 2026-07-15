@@ -7,20 +7,22 @@ import {
 } from "@/components/settings/settings-lifecycle";
 import {
   createInitialPipelineState,
-  deriveSetupState,
-  deriveSetupStateFromFallbackModel,
-  isFallbackModelBusy,
   isRecordingActive,
   isRecordingCancellable,
   isRecordingFinished,
-  isWorkspaceView,
+} from "@/lib/recording-job";
+import {
+  deriveSetupState,
+  deriveSetupStateFromFallbackModel,
   fallbackModelLabel,
+  isFallbackModelBusy,
   serverConnectionLabel,
   setupStateLabel,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
+import { isWorkspaceView } from "@/lib/workspace";
 import { serverCanRouteImportedRecording, serverCanRouteLive } from "@/server";
 
-describe("client recording workflow projection", () => {
+describe("client workflow projections", () => {
   const baseFallbackModel = {
     id: "nemotron-3.5-asr-streaming-0.6b-1120ms-int8" as const,
     label: "Nemotron 3.5 ASR Streaming 0.6B INT8",

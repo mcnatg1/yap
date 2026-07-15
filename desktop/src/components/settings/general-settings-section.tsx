@@ -19,7 +19,7 @@ import {
   type LiveCaptureMode,
   type LiveInputDeviceView,
   type LiveSessionView,
-} from "@/lib/app-types";
+} from "@/lib/live-session";
 
 type LiveOverlayAction = {
   disabled: boolean;

@@ -1,8 +1,5 @@
-import type {
-  FallbackModelStatus,
-  FallbackModelView,
-  LiveSessionStatus,
-} from "@/lib/app-types";
+import type { LiveSessionStatus } from "@/lib/live-session";
+import type { FallbackModelStatus, FallbackModelView } from "@/lib/setup-model";
 
 export type FallbackLifecycleActionId =
   | "install"

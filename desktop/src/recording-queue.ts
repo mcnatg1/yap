@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import { audioExts, extension, type RecordingJobView } from "@/lib/app-types";
+import { audioExts, extension } from "@/lib/media-file";
+import type { RecordingJobView } from "@/lib/recording-job";
 
 export const legacyRecordingQueueKey = "yap.recordingQueue.v1";
 export const maxStoredQueueJobs = 200;

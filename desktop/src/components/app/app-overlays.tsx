@@ -6,7 +6,8 @@ import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog"
 import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import type { useSettingsControl } from "@/hooks/use-settings-control";
 import type { TranscriptHistoryEntry } from "@/history-model";
-import type { RailAction, RecordingJobView } from "@/lib/app-types";
+import type { RecordingJobView } from "@/lib/recording-job";
+import type { RailAction } from "@/lib/workspace";
 
 const unavailableHistoryRetry = () => undefined;
 

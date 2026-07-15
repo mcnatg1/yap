@@ -1,5 +1,5 @@
 import type { TranscriptHistoryEntry } from "@/history-model";
-import type { PlaybackAdmission, RecordingJobView } from "@/lib/app-types";
+import type { PlaybackAdmission, RecordingJobView } from "@/lib/recording-job";
 import {
   hasNativePlaybackRuntime,
   holdPlaybackAdmissionUntil,

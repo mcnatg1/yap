@@ -1,5 +1,5 @@
 import { transcriptPathIdentity, type TranscriptHistoryEntry } from "@/history-model";
-import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import { createInitialPipelineState, type RecordingJobView } from "@/lib/recording-job";
 
 export function historyEntryToRecordingJob(
   entry: TranscriptHistoryEntry,

@@ -23,13 +23,13 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { formatElapsed } from "@/lib/display-format";
 import {
-  formatElapsed,
   isRecordingActive,
   isRecordingFinished,
   queuedServerMessage,
   type RecordingJobView,
-} from "@/lib/app-types";
+} from "@/lib/recording-job";
 import { projectTranscriptText } from "@/lib/transcript-text";
 import { cn } from "@/lib/utils";
 

@@ -24,10 +24,8 @@ import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
 import { type TranscriptHistoryEntry } from "@/history-model";
-import {
-  isRecordingFinished,
-  workspaceCopy,
-} from "@/lib/app-types";
+import { isRecordingFinished } from "@/lib/recording-job";
+import { workspaceCopy } from "@/lib/workspace";
 import { fireAndReport } from "@/lib/fire-and-report";
 import { cn } from "@/lib/utils";
 

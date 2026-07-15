@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import { createInitialPipelineState, type RecordingJobView } from "@/lib/recording-job";
 import {
   currentPlaybackPaths,
   mergeHistoryPlaybackAdmissions,

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
+import { isRecordingFinished, type RecordingJobView } from "@/lib/recording-job";
 import {
   createPolishOperationOwner,
   createPolishSaveRequest,

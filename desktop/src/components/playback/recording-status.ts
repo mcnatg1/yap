@@ -1,4 +1,4 @@
-import type { RecordingJobStatus } from "@/lib/app-types";
+import type { RecordingJobStatus } from "@/lib/recording-job";
 
 export function recordingActivityLabel(status: RecordingJobStatus) {
   switch (status) {

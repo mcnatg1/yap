@@ -1,4 +1,4 @@
-import type { LiveCaptureMode, LiveOverlayView } from "@/lib/app-types";
+import type { LiveCaptureMode, LiveOverlayView } from "@/lib/live-session";
 
 type OverlayPhase = "idle" | "initializing" | "recording" | "processing" | "feedback";
 export type OverlaySurface = "collapsed" | "expanded" | Exclude<OverlayPhase, "idle"> | "success";

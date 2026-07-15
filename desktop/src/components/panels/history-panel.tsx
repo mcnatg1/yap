@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { groupHistoryByDay } from "@/lib/app-types";
+import { groupHistoryByDay } from "@/lib/display-format";
 import { historyRenderWindowSize, renderHistoryWindow } from "@/lib/history-render-window";
 
 export function HistoryPanel({

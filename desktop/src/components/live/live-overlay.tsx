@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef } from "react";
 import { LiveOverlayContent } from "@/components/live/live-overlay-views";
 import { useLiveOverlayPresentation } from "@/components/live/use-live-overlay-presentation";
 import { usePrefersReducedMotion } from "@/components/live/use-prefers-reduced-motion";
-import type { LiveOverlayView } from "@/lib/app-types";
+import type { LiveOverlayView } from "@/lib/live-session";
 import { cn } from "@/lib/utils";
 
 type LiveOverlayProps = {

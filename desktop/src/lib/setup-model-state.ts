@@ -2,7 +2,7 @@ import {
   deriveSetupStateFromFallbackModel,
   type FallbackModelView,
   type SetupState,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
 
 export function fallbackStatusText(view: FallbackModelView, enabled: boolean) {
   switch (view.status) {

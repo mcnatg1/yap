@@ -1,4 +1,4 @@
-import type { PlaybackAdmission } from "@/lib/app-types";
+import type { PlaybackAdmission } from "@/lib/recording-job";
 
 export const maxPlaybackRestoreConcurrency = 4;
 export const playbackAdmissionDeadlineMs = 10_000;

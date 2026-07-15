@@ -21,7 +21,7 @@ import {
   isUntrustedNativeLiveTranscriptHistoryEntry,
 } from "@/native-history";
 import type { TranscriptHistoryEntry } from "@/history-model";
-import { formatHistoryTime } from "@/lib/app-types";
+import { formatHistoryTime } from "@/lib/display-format";
 import { cn } from "@/lib/utils";
 
 type HistoryGroup = {
