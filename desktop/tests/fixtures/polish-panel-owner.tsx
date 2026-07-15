@@ -29,7 +29,6 @@ function PolishOwnerFixture() {
       <output aria-label="Save calls">{saveCalls}</output>
       <PolishPanel
         item={item}
-        onLoadText={async () => "Original transcript"}
         onPolished={(_outputPath, text) => setPolishedText(text)}
         onSave={async () => {
           setSaveCalls((count) => count + 1);

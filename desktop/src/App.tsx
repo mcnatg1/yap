@@ -313,7 +313,6 @@ export default function App() {
       {showPolish ? (
         <PolishPanel
           item={selectedItem}
-          onLoadText={loadTranscriptText}
           onOpenHelp={() => openWorkspace("help")}
           onPolished={(outputPath, text) => {
             rememberPolishedText(outputPath, text);
