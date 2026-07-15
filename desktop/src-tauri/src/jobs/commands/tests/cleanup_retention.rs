@@ -176,7 +176,7 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
         .create_imports(&media, vec![cancelled_source.display().to_string()], 8_200)
         .unwrap();
     jobs.cancel(&media, &cancelled[0].id, 8_201, || {}).unwrap();
-    assert!(crate::file_actions::openable_app_path_from_registries(
+    assert!(crate::recording_access::openable_app_path_from_registries(
         cancelled_source.display().to_string(),
         &general_registry,
         &jobs.registry_path,
@@ -192,7 +192,7 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
         .unwrap();
     jobs.dismiss(&media, &dismissed[0].id, 8_204, || {})
         .unwrap();
-    assert!(crate::file_actions::openable_app_path_from_registries(
+    assert!(crate::recording_access::openable_app_path_from_registries(
         dismissed_source.display().to_string(),
         &general_registry,
         &jobs.registry_path,
@@ -203,7 +203,7 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
     let general = jobs
         .create_imports(&media, vec![general_source.display().to_string()], 8_205)
         .unwrap();
-    crate::file_actions::register_general_playback_path_at_for_test(
+    crate::recording_access::register_general_playback_path_at_for_test(
         general_source.display().to_string(),
         &general_registry,
         jobs.owned_dir(),
@@ -214,7 +214,7 @@ fn terminal_job_authority_is_removed_without_harming_general_authority_or_bytes(
         .unwrap();
     jobs.dismiss(&media, &general[0].id, 8_207, || {}).unwrap();
     assert_eq!(
-        crate::file_actions::openable_app_path_from_registries(
+        crate::recording_access::openable_app_path_from_registries(
             general_source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
@@ -245,7 +245,7 @@ fn restart_snapshot_prunes_job_authority_left_by_a_terminal_commit() {
         let created = jobs
             .create_imports(&media, vec![source.display().to_string()], 8_300)
             .unwrap();
-        assert!(crate::file_actions::openable_app_path_from_registries(
+        assert!(crate::recording_access::openable_app_path_from_registries(
             source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
@@ -260,7 +260,7 @@ fn restart_snapshot_prunes_job_authority_left_by_a_terminal_commit() {
     let jobs = RecordingJobs::from_ledger(JobLedger::open(&database).unwrap(), &dir);
     let media = MediaOwner::new();
     assert!(jobs.snapshot(&media, 8_302).unwrap().is_empty());
-    assert!(crate::file_actions::openable_app_path_from_registries(
+    assert!(crate::recording_access::openable_app_path_from_registries(
         source.display().to_string(),
         &general_registry,
         &jobs.registry_path,

@@ -10,7 +10,7 @@ use crate::audio::evidence::ModelRevision;
 use crate::audio::recording::{self, PublishedTranscriptReceipt, RecordingFinalizeResult};
 use crate::audio::results::{ResultAuthority, ResultStatus, TranscriptResultRevision};
 use crate::audio::session::{SessionMode, SessionOrigin};
-use crate::{file_actions, live};
+use crate::live;
 
 const AUDIO_SAVE_FAILED_WARNING: &str = "Live audio could not be saved. Transcript was saved.";
 const TRANSCRIPT_DEGRADED_WARNING: &str = "Live transcript may be incomplete. Audio was saved.";
@@ -1734,7 +1734,7 @@ pub(crate) fn open_committed_live_transcript_from_dir(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "Yap recording is unavailable.".to_string())?;
-    if parent != owned_dir || !file_actions::is_transcript_path(std::path::Path::new(name)) {
+    if parent != owned_dir || !is_transcript_path(std::path::Path::new(name)) {
         return Err("Yap recording is not a canonical committed session artifact.".into());
     }
     let mut file = recording::open_regular_artifact(&owned_dir, name)?;
@@ -2593,11 +2593,17 @@ fn stable_path_string(path: &std::path::Path) -> String {
 }
 
 pub(crate) fn is_primary_live_transcript_path(path: &std::path::Path) -> bool {
-    file_actions::is_transcript_path(path)
+    is_transcript_path(path)
         && path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .is_some_and(|stem| stem.starts_with("live-s-"))
+}
+
+pub(crate) fn is_transcript_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
 }
 
 fn transcript_artifact_names(

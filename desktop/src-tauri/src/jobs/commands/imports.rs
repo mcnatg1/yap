@@ -71,7 +71,7 @@ impl RecordingJobs {
         }
 
         for source in &sources {
-            crate::file_actions::register_native_selected_recording_job_source_at(
+            crate::recording_access::register_native_selected_recording_job_source_at(
                 source,
                 &self.selection_registry_path,
                 self.owned_dir(),

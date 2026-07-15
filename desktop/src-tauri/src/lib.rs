@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod live;
 pub(crate) mod media_protocol;
 mod paths;
+pub(crate) mod recording_access;
 pub mod runtime;
 mod runtime_policy;
 pub mod server_connector;

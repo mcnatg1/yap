@@ -103,7 +103,7 @@ fn authority_failed_create_stays_capability_free_until_explicit_retry() {
     assert_eq!(retried.source_path.as_deref(), canonical_source.to_str());
     assert!(retried.playback_path.is_some());
     assert_eq!(
-        crate::file_actions::openable_app_path_from_registries(
+        crate::recording_access::openable_app_path_from_registries(
             source.display().to_string(),
             &general_registry,
             &jobs.registry_path,
@@ -158,7 +158,7 @@ fn pre_native_picker_ledger_and_registry_cannot_reauthorize_on_restart() {
     assert_eq!(snapshot[0].id, job_id);
     assert!(capability_free_failed(&snapshot[0]));
     assert_eq!(media.active_admission_count_for_test(), 0);
-    assert!(crate::file_actions::openable_app_path_from_registries(
+    assert!(crate::recording_access::openable_app_path_from_registries(
         source.display().to_string(),
         &dir.join("recording-playback-registry.json"),
         &jobs.registry_path,

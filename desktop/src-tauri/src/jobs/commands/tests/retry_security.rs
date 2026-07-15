@@ -84,7 +84,7 @@ fn restart_rejects_a_source_replaced_by_a_reparse_point() {
     let link_metadata = fs::symlink_metadata(&source).unwrap();
     assert!(
         link_metadata.file_type().is_symlink()
-            || crate::file_actions::metadata_is_reparse_point_for_test(&link_metadata),
+            || crate::recording_access::metadata_is_reparse_point_for_test(&link_metadata),
         "fixture must be a symlink or Windows reparse point"
     );
 
@@ -142,7 +142,7 @@ fn accepted_retry_notifies_only_after_atomic_preflight_returns_to_server_queue()
     let jobs = RecordingJobs::from_ledger(JobLedger::open_in_memory().unwrap(), &dir);
     let media = MediaOwner::new();
     let selected_source = jobs.validate_source(&source).unwrap();
-    crate::file_actions::register_native_selected_recording_job_source_at(
+    crate::recording_access::register_native_selected_recording_job_source_at(
         &selected_source,
         &jobs.selection_registry_path,
         jobs.owned_dir(),
@@ -305,7 +305,7 @@ fn authority_failed_retry_stays_capability_free_until_a_second_explicit_retry() 
         2
     );
     assert_eq!(
-        crate::file_actions::openable_app_path_from_registries(
+        crate::recording_access::openable_app_path_from_registries(
             source.display().to_string(),
             &general_registry,
             &jobs.registry_path,

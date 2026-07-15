@@ -48,14 +48,16 @@ pub(super) fn prepare_next_queued_job(
         .source_path
         .as_deref()
         .ok_or_else(|| "imported recording has no source path".to_string())?;
-    let validated =
-        crate::file_actions::validate_recording_job_source_at(source_path, owned_live_directory)
-            .map_err(|error| match error {
-                crate::file_actions::RecordingJobSourceError::Missing => {
-                    "imported recording source is missing".to_string()
-                }
-                crate::file_actions::RecordingJobSourceError::Unsafe(message) => message,
-            })?;
+    let validated = crate::recording_access::validate_recording_job_source_at(
+        source_path,
+        owned_live_directory,
+    )
+    .map_err(|error| match error {
+        crate::recording_access::RecordingJobSourceError::Missing => {
+            "imported recording source is missing".to_string()
+        }
+        crate::recording_access::RecordingJobSourceError::Unsafe(message) => message,
+    })?;
     let mut source = crate::media_protocol::open_unchanged_media_source(
         &validated.canonical_path,
         &validated.fingerprint,

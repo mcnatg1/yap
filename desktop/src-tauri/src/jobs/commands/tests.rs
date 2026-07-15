@@ -69,7 +69,7 @@ fn open_and_reveal_are_denied(
     general_registry: &Path,
 ) -> bool {
     let authorization_denied = || {
-        crate::file_actions::openable_app_path_from_registries(
+        crate::recording_access::openable_app_path_from_registries(
             source.display().to_string(),
             general_registry,
             &jobs.registry_path,

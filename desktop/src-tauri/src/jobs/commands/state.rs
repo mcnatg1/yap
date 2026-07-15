@@ -12,8 +12,8 @@ impl RecordingJobs {
     pub(crate) fn from_default_resources(resources: Arc<RecordingJobResources>) -> Self {
         Self::from_storage(
             resources,
-            crate::file_actions::recording_job_playback_registry_path(),
-            crate::file_actions::recording_job_selection_registry_path(),
+            crate::recording_access::recording_job_playback_registry_path(),
+            crate::recording_access::recording_job_selection_registry_path(),
         )
     }
 

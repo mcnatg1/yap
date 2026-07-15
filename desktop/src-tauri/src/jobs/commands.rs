@@ -1,9 +1,9 @@
 use crate::{
-    file_actions::{
-        RecordingJobSourceAdmission, RecordingJobSourceError, ValidatedRecordingJobSource,
-    },
     jobs::{JobLedgerError, RecordingJobResources, RecordingJobView},
     media_protocol::MediaOwner,
+    recording_access::{
+        RecordingJobSourceAdmission, RecordingJobSourceError, ValidatedRecordingJobSource,
+    },
 };
 use sha2::{Digest, Sha256};
 #[cfg(test)]

@@ -55,13 +55,13 @@ impl RecordingJobs {
             }
         }
         self.reconcile_playback(&recoverable_ids, media)?;
-        if let Err(error) = crate::file_actions::reconcile_recording_job_playback_paths_at(
+        if let Err(error) = crate::recording_access::reconcile_recording_job_playback_paths_at(
             &authorized_paths,
             &self.registry_path,
         ) {
             log_registry_cleanup_failure("snapshot reconciliation", &error);
         }
-        if let Err(error) = crate::file_actions::reconcile_recording_job_playback_paths_at(
+        if let Err(error) = crate::recording_access::reconcile_recording_job_playback_paths_at(
             &recoverable_paths,
             &self.selection_registry_path,
         ) {

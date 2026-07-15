@@ -3,9 +3,9 @@ use super::{
     CachedPlayback, JobCommandError, RecordingJobs,
 };
 use crate::{
-    file_actions::{RecordingJobSourceAdmission, ValidatedRecordingJobSource},
     jobs::{RecordingJobStatus, RecordingJobView},
     media_protocol::MediaOwner,
+    recording_access::{RecordingJobSourceAdmission, ValidatedRecordingJobSource},
 };
 use std::{collections::HashSet, path::Path};
 
@@ -14,7 +14,7 @@ impl RecordingJobs {
         &self,
         path: &Path,
     ) -> Result<ValidatedRecordingJobSource, JobCommandError> {
-        crate::file_actions::validate_recording_job_source_at(path, self.owned_dir())
+        crate::recording_access::validate_recording_job_source_at(path, self.owned_dir())
             .map_err(source_error)
     }
 
@@ -66,7 +66,7 @@ impl RecordingJobs {
         if let Some(stale) = playback.remove(&record.job_id) {
             media.release(&stale.playback_path);
         }
-        let admission = crate::file_actions::authorize_registered_recording_job_source_at(
+        let admission = crate::recording_access::authorize_registered_recording_job_source_at(
             &source,
             media,
             &self.selection_registry_path,
@@ -149,9 +149,10 @@ impl RecordingJobs {
         let Some(path) = path else {
             return;
         };
-        if let Err(error) =
-            crate::file_actions::remove_recording_job_playback_path_at(path, &self.registry_path)
-        {
+        if let Err(error) = crate::recording_access::remove_recording_job_playback_path_at(
+            path,
+            &self.registry_path,
+        ) {
             log_registry_cleanup_failure(action, &error);
         }
     }
@@ -161,7 +162,7 @@ impl RecordingJobs {
         let Some(path) = path else {
             return;
         };
-        if let Err(error) = crate::file_actions::remove_recording_job_playback_path_at(
+        if let Err(error) = crate::recording_access::remove_recording_job_playback_path_at(
             path,
             &self.selection_registry_path,
         ) {
