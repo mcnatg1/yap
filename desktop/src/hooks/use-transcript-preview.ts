@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
-import type { TranscriptHistoryEntry } from "@/history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 
 type PreviewTextLoader = (entry: TranscriptHistoryEntry) => Promise<string>;
 

@@ -4,21 +4,25 @@ import { toast } from "sonner";
 import {
   filterHiddenTranscriptHistory,
   hideTranscriptHistory,
-  isNativeLiveTranscriptHistoryEntry,
-  legacyTranscriptHistoryEntries,
-  pruneMissingHiddenTranscriptHistory,
-  readTranscriptHistory,
-  readHiddenTranscriptHistory,
-  readVisibleTranscriptHistory,
   recordVisibleTranscriptHistoryEntries,
-  reconcileNativeTranscriptHistoryEntries,
-  removeTranscriptHistory,
   transcriptPathIdentity,
+  type TranscriptHistoryEntry,
+} from "@/history-model";
+import {
+  pruneMissingHiddenTranscriptHistory,
+  readHiddenTranscriptHistory,
+  readTranscriptHistory,
+  readVisibleTranscriptHistory,
   writeHiddenTranscriptHistory,
   writeTranscriptHistory,
   type HistoryStorage,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/history-storage";
+import {
+  isNativeLiveTranscriptHistoryEntry,
+  legacyTranscriptHistoryEntries,
+  reconcileNativeTranscriptHistoryEntries,
+  removeTranscriptHistory,
+} from "@/native-history";
 import { resolveOwnedLiveTranscriptPaths } from "@/live";
 
 type TranscriptHistoryStoreOptions = {

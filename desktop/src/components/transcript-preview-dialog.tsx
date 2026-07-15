@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { TranscriptHistoryEntry } from "@/history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import { projectTranscriptText } from "@/lib/transcript-text";
 
 export function TranscriptPreviewDialog({

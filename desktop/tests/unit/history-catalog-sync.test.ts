@@ -13,12 +13,12 @@ import { createTranscriptHistoryStore } from "@/hooks/use-transcript-history";
 import {
   readTranscriptHistory,
   readVisibleTranscriptHistory,
-  savedSessionToTranscriptHistoryEntry,
   writeHiddenTranscriptHistory,
   writeTranscriptHistory,
   type HistoryStorage,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/history-storage";
+import type { TranscriptHistoryEntry } from "@/history-model";
+import { savedSessionToTranscriptHistoryEntry } from "@/native-history";
 
 function memoryStorage(): HistoryStorage {
   const values = new Map<string, string>();

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import type { TranscriptHistoryEntry } from "@/history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import { isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
 

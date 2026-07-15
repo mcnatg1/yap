@@ -5,8 +5,8 @@ import {
   recoverableLiveSessionActionIdentity,
   savedSessionToTranscriptHistoryEntry,
   savedLiveSessionActionIdentity,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/native-history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import {
   deleteRecoverableLiveSession,
   deleteSavedLiveSession,

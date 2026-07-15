@@ -1,4 +1,4 @@
-import type { TranscriptHistoryEntry } from "@/history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 
 export type HistoryEntryActions = {
   onCopy: (entry: TranscriptHistoryEntry) => void;

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
-import { transcriptPathIdentity } from "@/history";
+import { transcriptPathIdentity } from "@/history-model";
 import type { RecordingJobView } from "@/lib/app-types";
 import type { PolishSaveRequest } from "@/polish";
 

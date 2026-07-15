@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { TranscriptHistoryEntry } from "@/history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import type { RecordingJobView } from "@/lib/app-types";
 import {
   currentPlaybackPaths,

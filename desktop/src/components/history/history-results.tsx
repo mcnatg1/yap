@@ -19,8 +19,8 @@ import {
 import {
   isRecoverableTranscriptHistoryEntry,
   isUntrustedNativeLiveTranscriptHistoryEntry,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/native-history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import { formatHistoryTime } from "@/lib/app-types";
 import { cn } from "@/lib/utils";
 

@@ -33,8 +33,8 @@ import {
   isRecoverableTranscriptHistoryEntry,
   isUntrustedNativeLiveTranscriptHistoryEntry,
   recoverableLiveSessionActionIdentity,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/native-history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 
 export function HistoryActionMenu({
   actions,

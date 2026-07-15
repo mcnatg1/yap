@@ -6,7 +6,7 @@ import {
   normalizeHistorySearchQuery,
   type HistorySearchFailureState,
 } from "@/components/history/history-search";
-import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
+import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history-model";
 import {
   createPreviewSearchGenerationGuard,
   createPreviewSearchLoader,

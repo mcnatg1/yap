@@ -28,7 +28,7 @@ import { useTranscriptPreview } from "@/hooks/use-transcript-preview";
 import { useTranscriptText } from "@/hooks/use-transcript-text";
 import { useTranscriptHistory } from "@/hooks/use-transcript-history";
 import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
-import { type TranscriptHistoryEntry } from "@/history";
+import { type TranscriptHistoryEntry } from "@/history-model";
 import {
   isRecordingFinished,
   type RailAction,

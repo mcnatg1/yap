@@ -10,8 +10,8 @@ import {
 } from "@/hooks/use-history-actions";
 import {
   savedSessionToTranscriptHistoryEntry,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/native-history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import type { SavedLiveSession } from "@/live";
 
 function historyEntry(overrides: Partial<TranscriptHistoryEntry> = {}): TranscriptHistoryEntry {

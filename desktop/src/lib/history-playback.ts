@@ -1,4 +1,4 @@
-import { historyEntryPlaybackPath, type TranscriptHistoryEntry } from "@/history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import type { PlaybackAdmission, RecordingJobView } from "@/lib/app-types";
 import {
   hasNativePlaybackRuntime,
@@ -13,6 +13,7 @@ import {
   type ReleasePlayback,
   type RestorePlayback,
 } from "@/lib/playback-admission-queue";
+import { historyEntryPlaybackPath } from "@/native-history";
 
 export type RestoredHistoryPlaybackAdmission = {
   byteLength: number;

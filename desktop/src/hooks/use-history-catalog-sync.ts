@@ -9,8 +9,8 @@ import {
 } from "@/history-catalog";
 import {
   savedSessionToTranscriptHistoryEntry,
-  type TranscriptHistoryEntry,
-} from "@/history";
+} from "@/native-history";
+import type { TranscriptHistoryEntry } from "@/history-model";
 import { listenLiveSessionSaved, type SavedLiveSession } from "@/live";
 import { createRecordingJobsRefreshCoordinator } from "@/recording-jobs-refresh";
 import type { NativeHistoryReconciliation } from "@/hooks/use-transcript-history";

@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import type { SavedTranscriptSession } from "@/history";
+import type { SavedTranscriptSession } from "@/native-history";
 
 export type HistoryOrigin = "live" | "remote";
 
