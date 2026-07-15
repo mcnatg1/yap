@@ -306,11 +306,15 @@ pub fn status(install_state: &FallbackModelInstallState) -> nemotron::FallbackMo
         .unwrap_or_else(persisted_fallback_model_view)
 }
 
-pub async fn install(
+pub async fn install<M>(
     app: AppHandle,
     install_state: FallbackModelInstallState,
     force: bool,
-) -> Result<nemotron::FallbackModelView, SttCommandError> {
+    model_mutation: M,
+) -> Result<nemotron::FallbackModelView, SttCommandError>
+where
+    M: Send + 'static,
+{
     let initial_view = fallback_model_phase_view(
         true,
         nemotron::FallbackModelStatus::Downloading,
@@ -339,6 +343,7 @@ pub async fn install(
     let progress_state = install_state.clone();
     let worker_operation = operation.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _model_mutation = model_mutation;
         let mut progress =
             FallbackProgressEmitter::new(progress_app, progress_state, worker_operation.clone());
         settings::set_local_fallback_enabled(true).map_err(SttCommandError::from)?;

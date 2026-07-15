@@ -1,3 +1,4 @@
+use crate::live::runtime::LiveRuntime;
 use crate::{authorization, live, runtime_policy, stt};
 
 #[tauri::command]
@@ -30,11 +31,18 @@ pub(super) async fn fallback_model_install(
     app: tauri::AppHandle,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, LiveRuntime>,
     force: Option<bool>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     authorization::ensure_main_stt(&window)?;
-    ensure_fallback_setup_idle(&live_state)?;
-    stt::fallback_model::install(app, install_state.inner().clone(), force.unwrap_or(false)).await
+    let model_mutation = begin_fallback_model_mutation(&live_state, &live_runtime)?;
+    stt::fallback_model::install(
+        app,
+        install_state.inner().clone(),
+        force.unwrap_or(false),
+        model_mutation,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -52,9 +60,10 @@ pub(super) async fn fallback_model_verify(
     app: tauri::AppHandle,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, LiveRuntime>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     authorization::ensure_main_stt(&window)?;
-    ensure_fallback_setup_idle(&live_state)?;
+    ensure_fallback_setup_idle(&live_state, &live_runtime)?;
     stt::fallback_model::verify(app, install_state.inner().clone()).await
 }
 
@@ -63,9 +72,10 @@ pub(super) fn fallback_model_remove(
     window: tauri::WebviewWindow,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, LiveRuntime>,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     authorization::ensure_main_stt(&window)?;
-    ensure_fallback_setup_idle(&live_state)?;
+    let _model_mutation = begin_fallback_model_mutation(&live_state, &live_runtime)?;
     stt::fallback_model::remove(install_state.inner())
 }
 
@@ -74,10 +84,16 @@ pub(super) fn fallback_model_set_enabled(
     window: tauri::WebviewWindow,
     install_state: tauri::State<'_, stt::fallback_model::FallbackModelInstallState>,
     live_state: tauri::State<'_, live::LiveSessionState>,
+    live_runtime: tauri::State<'_, LiveRuntime>,
     enabled: bool,
 ) -> Result<stt::nemotron::FallbackModelView, stt::dispatch::SttCommandError> {
     authorization::ensure_main_stt(&window)?;
-    ensure_fallback_setup_idle(&live_state)?;
+    let _model_mutation = if enabled {
+        ensure_fallback_setup_idle(&live_state, &live_runtime)?;
+        None
+    } else {
+        Some(begin_fallback_model_mutation(&live_state, &live_runtime)?)
+    };
     stt::fallback_model::set_enabled(install_state.inner(), enabled)
 }
 
@@ -121,11 +137,24 @@ pub(super) fn set_local_compute_target(
 
 fn ensure_fallback_setup_idle(
     live_state: &live::LiveSessionState,
+    live_runtime: &LiveRuntime,
 ) -> Result<(), stt::dispatch::SttCommandError> {
-    if live::state::is_live_session_started(live_state.snapshot().status) {
+    if live::state::is_live_session_started(live_state.snapshot().status)
+        || live_runtime.is_active()
+    {
         return Err(live_setup_busy_error());
     }
     Ok(())
+}
+
+fn begin_fallback_model_mutation(
+    live_state: &live::LiveSessionState,
+    live_runtime: &LiveRuntime,
+) -> Result<live::runtime::ModelMutationLease, stt::dispatch::SttCommandError> {
+    ensure_fallback_setup_idle(live_state, live_runtime)?;
+    live_runtime
+        .begin_model_mutation()
+        .map_err(|_| live_setup_busy_error())
 }
 
 fn local_compute_targets() -> Vec<LocalComputeTargetView> {

@@ -45,6 +45,7 @@ pub struct LiveRuntime {
     stop_completion: Arc<StopCompletion>,
     transition: Arc<LifecycleGate>,
     model_warmup: Arc<SharedWarmup<LiveStreamEngine>>,
+    model_mutation_active: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy)]
@@ -218,6 +219,16 @@ struct LifecycleOperation<'a> {
     gate: &'a LifecycleGate,
 }
 
+struct OwnedLifecycleOperation {
+    gate: Arc<LifecycleGate>,
+}
+
+/// Excludes live start/stop work while installed model files or enablement change.
+pub(crate) struct ModelMutationLease {
+    runtime: LiveRuntime,
+    _operation: OwnedLifecycleOperation,
+}
+
 struct SharedWarmup<T> {
     state: Mutex<SharedWarmupState<T>>,
     changed: Condvar,
@@ -336,6 +347,13 @@ impl LifecycleGate {
         self.begin(LifecycleState::Stopping)
     }
 
+    fn begin_stop_owned(self: &Arc<Self>) -> OwnedLifecycleOperation {
+        self.acquire(LifecycleState::Stopping, None::<fn()>);
+        OwnedLifecycleOperation {
+            gate: Arc::clone(self),
+        }
+    }
+
     #[cfg(test)]
     fn begin_stop_with_wait_hook<F>(&self, on_wait: F) -> LifecycleOperation<'_>
     where
@@ -351,8 +369,16 @@ impl LifecycleGate {
     fn begin_with_wait_hook<F>(
         &self,
         next: LifecycleState,
-        mut on_wait: Option<F>,
+        on_wait: Option<F>,
     ) -> LifecycleOperation<'_>
+    where
+        F: FnOnce(),
+    {
+        self.acquire(next, on_wait);
+        LifecycleOperation { gate: self }
+    }
+
+    fn acquire<F>(&self, next: LifecycleState, mut on_wait: Option<F>)
     where
         F: FnOnce(),
     {
@@ -369,7 +395,6 @@ impl LifecycleGate {
                 .expect("live transition gate poisoned");
         }
         state.active = next;
-        LifecycleOperation { gate: self }
     }
 
     fn complete(&self) {
@@ -383,6 +408,22 @@ impl LifecycleGate {
 impl Drop for LifecycleOperation<'_> {
     fn drop(&mut self) {
         self.gate.complete();
+    }
+}
+
+impl Drop for OwnedLifecycleOperation {
+    fn drop(&mut self) {
+        self.gate.complete();
+    }
+}
+
+impl Drop for ModelMutationLease {
+    fn drop(&mut self) {
+        // A start requested during a long install must not run unexpectedly afterward.
+        self.runtime.cancel_pending_start();
+        self.runtime
+            .model_mutation_active
+            .store(false, Ordering::Release);
     }
 }
 
@@ -554,6 +595,36 @@ where
         self.changed.notify_all();
     }
 
+    fn clear_idle(&self) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            match &*state {
+                SharedWarmupState::Empty => return Ok(()),
+                SharedWarmupState::InUse => {
+                    return Err("Live model is still owned by a stream.".to_string())
+                }
+                SharedWarmupState::Loading { cancelled } => {
+                    cancelled.store(true, Ordering::Release);
+                    self.changed.notify_all();
+                    state = self
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                SharedWarmupState::Ready(_) | SharedWarmupState::Failed(_) => {
+                    let retired = std::mem::replace(&mut *state, SharedWarmupState::Empty);
+                    self.changed.notify_all();
+                    drop(state);
+                    drop(retired);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn is_loading_for_test(&self) -> bool {
         matches!(
@@ -595,6 +666,7 @@ impl LiveRuntime {
             stop_completion: Arc::new(StopCompletion::new()),
             transition: Arc::new(LifecycleGate::new()),
             model_warmup: Arc::new(SharedWarmup::new()),
+            model_mutation_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -624,6 +696,9 @@ impl LiveRuntime {
         intent: StartIntent,
         run: impl FnOnce() -> T,
     ) -> Option<T> {
+        if self.model_mutation_active.load(Ordering::Acquire) {
+            return None;
+        }
         let _operation = self.transition.begin_start();
         self.start_intent_is_current(intent).then(run)
     }
@@ -631,6 +706,25 @@ impl LiveRuntime {
     pub(crate) fn run_stop_lifecycle<T>(&self, run: impl FnOnce() -> T) -> T {
         let _operation = self.transition.begin_stop();
         run()
+    }
+
+    pub(crate) fn begin_model_mutation(&self) -> Result<ModelMutationLease, String> {
+        self.cancel_pending_start();
+        let operation = self.transition.begin_stop_owned();
+        self.model_mutation_active.store(true, Ordering::Release);
+        let lease = ModelMutationLease {
+            runtime: self.clone(),
+            _operation: operation,
+        };
+
+        let mut inner = self.inner.lock().expect("live runtime poisoned");
+        if inner.capture.is_some() {
+            return Err("Stop live before changing local fallback.".to_string());
+        }
+        inner.retire_stream();
+        drop(inner);
+        self.model_warmup.clear_idle()?;
+        Ok(lease)
     }
 
     pub(crate) fn start_local_capture(
@@ -845,6 +939,9 @@ impl LiveRuntime {
     }
 
     pub fn request_warm(&self, _app: tauri::AppHandle) -> Result<bool, String> {
+        if self.model_mutation_active.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         if self
             .inner
             .lock()
@@ -946,6 +1043,8 @@ impl LiveRuntime {
             let mut inner = self.inner.lock().expect("live runtime poisoned");
             if inner.capture.is_none() && inner.last_used.elapsed() >= threshold {
                 inner.retire_stream();
+                drop(inner);
+                let _ = self.model_warmup.clear_idle();
             }
         });
     }
@@ -958,6 +1057,7 @@ impl LiveRuntime {
             inner.retire_stream();
             self.active_session.store(0, Ordering::SeqCst);
             drop(inner);
+            let _ = self.model_warmup.clear_idle();
             let _ = self.finalize_recording();
             log_worker_shutdown_errors(shutdown_errors);
         });
@@ -3167,6 +3267,111 @@ mod tests {
         assert_eq!(lease.commit(), 7);
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         warmup.release_in_use();
+    }
+
+    #[test]
+    fn clearing_idle_warmup_drops_a_ready_model() {
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let warmup = SharedWarmup::new();
+        *warmup.state.lock().unwrap() = SharedWarmupState::Ready(DropSignal(Arc::clone(&dropped)));
+
+        warmup.clear_idle().unwrap();
+
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(matches!(
+            *warmup.state.lock().unwrap(),
+            SharedWarmupState::Empty
+        ));
+    }
+
+    #[test]
+    fn clearing_idle_warmup_cancels_and_waits_for_a_loading_model() {
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let warmup = Arc::new(SharedWarmup::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_dropped = Arc::clone(&dropped);
+        warmup
+            .request("clear-idle-loading-model", move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(DropSignal(worker_dropped))
+            })
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let clearing = Arc::clone(&warmup);
+        let (cleared_tx, cleared_rx) = mpsc::channel();
+        let clearer = std::thread::spawn(move || {
+            let result = clearing.clear_idle();
+            cleared_tx.send(result).unwrap();
+        });
+        assert!(cleared_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        release_tx.send(()).unwrap();
+
+        assert_eq!(
+            cleared_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(())
+        );
+        clearer.join().unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(matches!(
+            *warmup.state.lock().unwrap(),
+            SharedWarmupState::Empty
+        ));
+    }
+
+    #[test]
+    fn model_mutation_lease_invalidates_a_start_queued_behind_it() {
+        let runtime = LiveRuntime::new();
+        let mutation = runtime.begin_model_mutation().unwrap();
+        let intent = runtime.capture_start_intent();
+        let queued_runtime = runtime.clone();
+        let queued_gate = Arc::clone(&runtime.transition);
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let queued = std::thread::spawn(move || {
+            let _operation =
+                queued_gate.begin_start_with_wait_hook(|| waiting_tx.send(()).unwrap());
+            queued_runtime.start_intent_is_current(intent)
+        });
+        waiting_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        drop(mutation);
+
+        assert!(!queued.join().unwrap());
+        assert!(!runtime.model_mutation_active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn model_mutation_lease_rejects_new_start_work_without_waiting() {
+        let runtime = LiveRuntime::new();
+        let _mutation = runtime.begin_model_mutation().unwrap();
+        let intent = runtime.capture_start_intent();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_start = Arc::clone(&ran);
+
+        let result = runtime.run_start_lifecycle(intent, move || {
+            ran_in_start.store(true, Ordering::Release);
+        });
+
+        assert!(result.is_none());
+        assert!(!ran.load(Ordering::Acquire));
     }
 
     #[test]
