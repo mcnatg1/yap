@@ -293,22 +293,6 @@ pub(super) fn stop_live_overlay_session(
 }
 
 #[tauri::command]
-pub(super) fn list_saved_live_sessions(
-    window: tauri::WebviewWindow,
-) -> Result<live::recordings::SavedLiveSessionCatalog, String> {
-    file_actions::ensure_main_window(&window)?;
-    live::recordings::list_session_catalog()
-}
-
-#[tauri::command]
-pub(super) fn list_recoverable_live_sessions(
-    window: tauri::WebviewWindow,
-) -> Result<Vec<live::recordings::RecoverableLiveSession>, String> {
-    file_actions::ensure_main_window(&window)?;
-    live::recordings::list_recoverable_live_sessions()
-}
-
-#[tauri::command]
 pub(super) fn recover_live_session(
     window: tauri::WebviewWindow,
     session_id: String,

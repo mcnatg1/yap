@@ -47,12 +47,10 @@ pub(crate) fn history_catalog(
         code: "HISTORY_FORBIDDEN".into(),
         message,
     })?;
-    let live = crate::live::recordings::list_session_catalog().map_err(history_error)?;
-    let recoverable =
-        crate::live::recordings::list_recoverable_live_sessions().map_err(history_error)?;
+    let live = crate::live::recordings::list_history_sources().map_err(history_error)?;
     let remote =
         jobs.completed_remote_transcripts(&crate::paths::app_data_dir().join("remote-jobs"))?;
-    Ok(build_history_catalog(live, recoverable, remote))
+    Ok(build_history_catalog(live.saved, live.recoverable, remote))
 }
 
 fn history_error(message: String) -> JobCommandError {
@@ -227,5 +225,30 @@ mod tests {
             MAX_HISTORY_SESSIONS as u64
         );
         assert_eq!(catalog.sessions.last().unwrap().created_at_ms, 1);
+    }
+
+    #[test]
+    fn catalog_keeps_an_orphaned_recoverable_row_visible_by_name() {
+        let catalog = build_history_catalog(
+            SavedLiveSessionCatalog {
+                sessions: Vec::new(),
+                maintenance_warnings: Vec::new(),
+            },
+            vec![RecoverableLiveSession {
+                session_id: "orphan".into(),
+                name: "live-orphan".into(),
+                audio_partial_path: None,
+                journal_partial_path: None,
+                reason: "Interrupted".into(),
+                expires_at_ms: RECOVERY_WINDOW_MS,
+            }],
+            CompletedRemoteTranscriptCatalog {
+                sessions: Vec::new(),
+                maintenance_warnings: Vec::new(),
+            },
+        );
+
+        assert_eq!(catalog.sessions[0].source_path, "live-orphan");
+        assert_eq!(catalog.sessions[0].output_path, "live-orphan");
     }
 }

@@ -32,7 +32,8 @@ export function matchCompletedRemoteTranscript(job, catalog) {
   }
   const sessionId = `s-${job.id.slice("job-".length)}`;
   return catalog.sessions.find(
-    (session) => session?.sessionId === sessionId
+    (session) => session?.origin === "remote"
+      && session?.sessionId === sessionId
       && typeof session.sourcePath === "string"
       && sameWindowsPath(session.sourcePath, job.sourcePath),
   );

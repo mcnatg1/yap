@@ -102,15 +102,12 @@ async function installPlaybackBridge(
             status: "idle",
             visibility: "enabled",
           };
-          if (command === "list_input_devices" || command === "list_recoverable_live_sessions") return [];
+          if (command === "list_input_devices") return [];
           if (command === "list_local_compute_targets") return [{ id: "auto", label: "Auto", selected: true }];
-          if (command === "list_saved_live_sessions") return { maintenanceWarnings: [], sessions: [] };
+          if (command === "history_catalog") return { maintenanceWarnings: [], sessions: [] };
           if (command === "resolve_owned_live_transcript_paths") return [];
           if (command === "read_text_file" || command === "read_text_preview") return "";
           if (command === "recording_jobs_snapshot") return structuredClone(state.jobs);
-          if (command === "recording_jobs_completed_transcripts") {
-            return { maintenanceWarnings: [], sessions: [] };
-          }
           if (command === "recording_job_cancel") {
             const index = state.jobs.findIndex((job) => job.id === args.jobId);
             const [cancelled] = index >= 0 ? state.jobs.splice(index, 1) : [];

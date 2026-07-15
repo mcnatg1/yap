@@ -218,6 +218,12 @@ pub struct RecoverableLiveSession {
     pub expires_at_ms: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct LiveHistorySourceCatalog {
+    pub(crate) saved: SavedLiveSessionCatalog,
+    pub(crate) recoverable: Vec<RecoverableLiveSession>,
+}
+
 pub fn save_session_files(
     live_runtime: &live::runtime::LiveRuntime,
     view: &live::state::LiveSessionView,
@@ -431,16 +437,12 @@ fn combine_warning(base: Option<String>, next: impl AsRef<str>) -> Option<String
     }
 }
 
-pub fn list_session_files() -> Result<Vec<SavedLiveSession>, String> {
-    Ok(list_session_catalog()?.sessions)
-}
-
-pub fn list_session_catalog() -> Result<SavedLiveSessionCatalog, String> {
-    list_session_catalog_from_dir(&recordings_dir())
-}
-
-pub fn list_recoverable_live_sessions() -> Result<Vec<RecoverableLiveSession>, String> {
-    list_recoverable_live_sessions_from_dir(&recordings_dir())
+pub(crate) fn list_history_sources() -> Result<LiveHistorySourceCatalog, String> {
+    list_history_sources_from_dir_at_with_queue_observer(
+        &recordings_dir(),
+        OffsetDateTime::now_utc(),
+        || {},
+    )
 }
 
 pub fn recover_live_session(
@@ -503,10 +505,12 @@ fn list_session_files_from_dir_at(
     Ok(list_session_catalog_from_dir_at(dir, now)?.sessions)
 }
 
+#[cfg(test)]
 fn list_session_catalog_from_dir(dir: &std::path::Path) -> Result<SavedLiveSessionCatalog, String> {
     list_session_catalog_from_dir_at(dir, OffsetDateTime::now_utc())
 }
 
+#[cfg(test)]
 fn list_session_catalog_from_dir_at(
     dir: &std::path::Path,
     now: OffsetDateTime,
@@ -514,6 +518,7 @@ fn list_session_catalog_from_dir_at(
     list_session_catalog_from_dir_at_with_queue_observer(dir, now, || {})
 }
 
+#[cfg(test)]
 fn list_session_catalog_from_dir_at_with_queue_observer<F>(
     dir: &std::path::Path,
     now: OffsetDateTime,
@@ -522,21 +527,35 @@ fn list_session_catalog_from_dir_at_with_queue_observer<F>(
 where
     F: FnOnce(),
 {
+    Ok(list_history_sources_from_dir_at_with_queue_observer(dir, now, queued)?.saved)
+}
+
+fn list_history_sources_from_dir_at_with_queue_observer<F>(
+    dir: &std::path::Path,
+    now: OffsetDateTime,
+    queued: F,
+) -> Result<LiveHistorySourceCatalog, String>
+where
+    F: FnOnce(),
+{
     if !dir.exists() {
-        return Ok(SavedLiveSessionCatalog {
-            sessions: Vec::new(),
-            maintenance_warnings: Vec::new(),
+        return Ok(LiveHistorySourceCatalog {
+            saved: SavedLiveSessionCatalog {
+                sessions: Vec::new(),
+                maintenance_warnings: Vec::new(),
+            },
+            recoverable: Vec::new(),
         });
     }
 
     let _ownership = session_mutation_ownership_with_queue_observer(queued);
-    list_session_catalog_from_dir_at_while_owned(dir, now)
+    list_history_sources_from_dir_at_while_owned(dir, now)
 }
 
-fn list_session_catalog_from_dir_at_while_owned(
+fn list_history_sources_from_dir_at_while_owned(
     dir: &std::path::Path,
     now: OffsetDateTime,
-) -> Result<SavedLiveSessionCatalog, String> {
+) -> Result<LiveHistorySourceCatalog, String> {
     let pending = reconcile_pending_deletion_intents_while_owned(dir);
     let scan = recording::scan_recordings(dir)?;
     let recoverable = list_recoverable_live_sessions_from_scan(dir, &scan, now)?;
@@ -575,8 +594,9 @@ fn list_session_catalog_from_dir_at_while_owned(
             }
         })
         .collect::<Vec<_>>();
-    for recoverable in recoverable {
-        let session_id = crate::audio::session::SessionId::new(recoverable.session_id.clone())?;
+    for recoverable_session in &recoverable {
+        let session_id =
+            crate::audio::session::SessionId::new(recoverable_session.session_id.clone())?;
         if let Some(saved) = saved_recovered_session(dir, &session_id)? {
             sessions.push(saved);
         }
@@ -587,9 +607,12 @@ fn list_session_catalog_from_dir_at_while_owned(
             .cmp(&a.created_at_ms)
             .then_with(|| b.name.cmp(&a.name))
     });
-    Ok(SavedLiveSessionCatalog {
-        sessions,
-        maintenance_warnings,
+    Ok(LiveHistorySourceCatalog {
+        saved: SavedLiveSessionCatalog {
+            sessions,
+            maintenance_warnings,
+        },
+        recoverable,
     })
 }
 
@@ -1755,6 +1778,7 @@ fn validated_transcript_sha256(
         .map(str::to_string)
 }
 
+#[cfg(test)]
 fn list_recoverable_live_sessions_from_dir(
     dir: &Path,
 ) -> Result<Vec<RecoverableLiveSession>, String> {
@@ -2931,6 +2955,39 @@ mod tests {
         let sessions = list_session_files_from_dir(&dir).unwrap();
 
         assert!(sessions.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn native_history_sources_share_one_catalog_snapshot() {
+        let dir = test_dir("native-history-source-snapshot");
+        let committed_session = SessionId::new("s-history-committed").unwrap();
+        let mut committed = StreamingRecording::create(&dir, committed_session.clone()).unwrap();
+        committed.append_pcm16(&[1, 0]).unwrap();
+        committed.finalize().unwrap();
+
+        let partial_session = SessionId::new("s-history-partial").unwrap();
+        {
+            let mut partial = StreamingRecording::create(&dir, partial_session.clone()).unwrap();
+            partial.append_pcm16(&[1, 0]).unwrap();
+        }
+
+        let sources = list_history_sources_from_dir_at_with_queue_observer(
+            &dir,
+            OffsetDateTime::now_utc(),
+            || {},
+        )
+        .unwrap();
+
+        assert!(sources
+            .saved
+            .sessions
+            .iter()
+            .any(|session| session.session_id == committed_session.as_str()));
+        assert!(sources
+            .recoverable
+            .iter()
+            .any(|session| session.session_id == partial_session.as_str()));
         std::fs::remove_dir_all(dir).ok();
     }
 

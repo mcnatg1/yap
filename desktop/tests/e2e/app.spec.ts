@@ -59,7 +59,7 @@ async function installQueuedServerBridge(
           if (command === "plugin:event|listen") return ++callbackId;
           if (command === "plugin:event|unlisten") return undefined;
           if (command === "recording_jobs_snapshot") return [queuedJob];
-          if (command === "recording_jobs_completed_transcripts") {
+          if (command === "history_catalog") {
             return { maintenanceWarnings: [], sessions: [] };
           }
           if (command === "setup_status") return {
@@ -109,12 +109,8 @@ async function installQueuedServerBridge(
           if (command === "list_local_compute_targets") {
             return [{ id: "auto", label: "Auto", selected: true }];
           }
-          if (command === "list_saved_live_sessions") {
-            return { maintenanceWarnings: [], sessions: [] };
-          }
           if (
             command === "list_input_devices" ||
-            command === "list_recoverable_live_sessions" ||
             command === "resolve_owned_live_transcript_paths"
           ) return [];
           if (command === "read_text_file" || command === "read_text_preview") return "";
@@ -154,11 +150,10 @@ for (const scenario of [
     );
     expect(calls).not.toContain("start_transcribe");
     expect(calls).not.toContain("fallback_model_install");
-    expect(calls).toContain("recording_jobs_completed_transcripts");
+    expect(calls).toContain("history_catalog");
     expect(calls.filter((command) =>
       command.startsWith("recording_job") &&
-      command !== "recording_jobs_snapshot" &&
-      command !== "recording_jobs_completed_transcripts"
+      command !== "recording_jobs_snapshot"
     )).toEqual([]);
   });
 }
@@ -345,24 +340,34 @@ test("history keeps committed review actions separate from recoverable capture a
         invoke: async (command: string) => {
           if (command === "plugin:event|listen") return ++callbackId;
           if (command === "plugin:event|unlisten") return undefined;
-          if (command === "list_saved_live_sessions") {
+          if (command === "history_catalog") {
             return {
               maintenanceWarnings: [],
-              sessions: [{
-                ...committed,
-                createdAtMs: Date.parse(committedCreatedAt),
-              }],
+              sessions: [
+                {
+                  captureCommitPath: committed.captureCommitPath,
+                  createdAtMs: Date.parse(committedCreatedAt),
+                  name: committed.name,
+                  origin: "live",
+                  outputPath: committed.outputPath,
+                  recoveryState: null,
+                  sessionId: committed.sessionId,
+                  sourcePath: committed.sourcePath,
+                  warning: null,
+                },
+                {
+                  captureCommitPath: null,
+                  createdAtMs: Date.parse(recoverableCreatedAt),
+                  name: recoverable.name,
+                  origin: "live",
+                  outputPath: recoverable.outputPath,
+                  recoveryState: "recoverable",
+                  sessionId: recoverable.sessionId,
+                  sourcePath: recoverable.sourcePath,
+                  warning: recoverable.warning,
+                },
+              ],
             };
-          }
-          if (command === "list_recoverable_live_sessions") {
-            return [{
-              audioPartialPath: recoverable.sourcePath,
-              expiresAtMs: Date.parse(recoverableCreatedAt) + 24 * 60 * 60 * 1_000,
-              journalPartialPath: null,
-              name: recoverable.name,
-              reason: recoverable.warning,
-              sessionId: recoverable.sessionId,
-            }];
           }
           if (command === "setup_status") {
             return {
@@ -404,9 +409,6 @@ test("history keeps committed review actions separate from recoverable capture a
             };
           }
           if (command === "recording_jobs_snapshot") return [];
-          if (command === "recording_jobs_completed_transcripts") {
-            return { maintenanceWarnings: [], sessions: [] };
-          }
           if (command === "list_input_devices" || command === "resolve_owned_live_transcript_paths") return [];
           if (command === "list_local_compute_targets") return [{ id: "auto", label: "Auto", selected: true }];
           if (command === "read_text_file" || command === "read_text_preview") return "";

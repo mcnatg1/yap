@@ -711,6 +711,7 @@ describe("transcript history storage", () => {
       captureCommitPath: `C:/Yap/live-bounded-${index}.commit.json`,
       createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
       name: `live-bounded-${index}`,
+      origin: "live" as const,
       outputPath: `C:/Yap/live-bounded-${index}.txt`,
       sessionId: `bounded-${index}`,
       sourcePath: `C:/Yap/live-bounded-${index}.wav`,
@@ -728,6 +729,7 @@ describe("transcript history storage", () => {
       captureCommitPath: `C:/Yap/live-refresh-${index}.commit.json`,
       createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
       name: `live-refresh-${index}`,
+      origin: "live" as const,
       outputPath: `C:/Yap/live-refresh-${index}.txt`,
       sessionId: `refresh-${index}`,
       sourcePath: `C:/Yap/live-refresh-${index}.wav`,
@@ -742,7 +744,7 @@ describe("transcript history storage", () => {
     reconcileNativeTranscriptHistoryEntries([], [], []);
   });
 
-  it("keeps forged persisted native rows hide-only until native rehydration", () => {
+  it("keeps forged persisted native rows hide-only after native rehydration", () => {
     const row = {
       captureCommitPath: "C:/Yap/live-forged.commit.json",
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -760,16 +762,18 @@ describe("transcript history storage", () => {
     expect(canDeleteTranscriptHistoryEntry(persisted)).toBe(false);
     expect(savedLiveSessionActionIdentity(persisted)).toBeUndefined();
 
-    savedSessionToTranscriptHistoryEntry({
+    const native = savedSessionToTranscriptHistoryEntry({
       captureCommitPath: row.captureCommitPath,
       createdAtMs: Date.parse(row.createdAt),
       name: row.name,
+      origin: "live",
       outputPath: row.outputPath,
       sessionId: row.sessionId,
       sourcePath: row.sourcePath,
     });
     const rehydrated = readVisibleTranscriptHistory(storage)[0];
-    expect(canDeleteTranscriptHistoryEntry(rehydrated)).toBe(true);
+    expect(canDeleteTranscriptHistoryEntry(native)).toBe(true);
+    expect(canDeleteTranscriptHistoryEntry(rehydrated)).toBe(false);
     expect(JSON.stringify(rehydrated)).not.toContain("trusted");
   });
 });

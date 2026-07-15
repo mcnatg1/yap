@@ -170,8 +170,8 @@ describe("Yap desktop shell", () => {
     await browser.tauri.switchWindow("main");
 
     const commands = await browser.tauri.execute(async ({ core }) => ({
+      history: await core.invoke("history_catalog"),
       live: await core.invoke("live_status"),
-      recordings: await core.invoke("list_saved_live_sessions"),
       server: await core.invoke("server_connection_status"),
       setup: await core.invoke("setup_status"),
     }));
@@ -194,8 +194,8 @@ describe("Yap desktop shell", () => {
     expect(commands.server.retryAtMs === null || typeof commands.server.retryAtMs === "number").toBe(true);
     expect(typeof commands.live.status).toBe("string");
     expect(typeof commands.live.visibility).toBe("string");
-    expect(Array.isArray(commands.recordings.sessions)).toBe(true);
-    expect(Array.isArray(commands.recordings.maintenanceWarnings)).toBe(true);
+    expect(Array.isArray(commands.history.sessions)).toBe(true);
+    expect(Array.isArray(commands.history.maintenanceWarnings)).toBe(true);
   });
 
   it("reports an enforced CSP violation for a disallowed remote script", async () => {

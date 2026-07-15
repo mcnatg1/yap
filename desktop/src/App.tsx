@@ -16,8 +16,7 @@ import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useHistoryActions } from "@/hooks/use-history-actions";
 import { useRecordingJobs } from "@/hooks/use-imported-recording-queue";
-import { useLiveHistorySync } from "@/hooks/use-live-history-sync";
-import { useRemoteHistorySync } from "@/hooks/use-remote-history-sync";
+import { useHistoryCatalogSync } from "@/hooks/use-history-catalog-sync";
 import { useRecordingSelection } from "@/hooks/use-recording-selection";
 import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
@@ -188,7 +187,7 @@ export default function App() {
     selectQueueItem(selectedQueueId);
   }, [openWorkspace, pickImportedRecordings, selectQueueItem]);
   const recordingDrop = useRecordingDrop();
-  const onLiveSessionSaved = useCallback((entry: TranscriptHistoryEntry) => {
+  const onNativeTranscriptSaved = useCallback((entry: TranscriptHistoryEntry) => {
     selectHistoryEntry(entry);
     openWorkspace("home");
     setStatus("Ready");
@@ -196,29 +195,13 @@ export default function App() {
     if (entry.warning) {
       toast.warning(entry.warning);
     } else {
-      toast.success("Live transcript saved");
+      toast.success(entry.origin === "remote" ? "Server transcript saved" : "Live transcript saved");
     }
   }, [loadTranscriptText, openWorkspace, selectHistoryEntry]);
-  useLiveHistorySync({
+  useHistoryCatalogSync({
     captureNativeHistoryReconciliation,
-    onSaved: onLiveSessionSaved,
+    onSaved: onNativeTranscriptSaved,
     reconcileHiddenHistory,
-    recordVisibleHistoryEntries,
-  });
-  const onRemoteTranscriptSaved = useCallback((entry: TranscriptHistoryEntry) => {
-    selectHistoryEntry(entry);
-    openWorkspace("home");
-    setStatus("Ready");
-    void loadTranscriptText(entry.outputPath).catch(() => undefined);
-    if (entry.warning) {
-      toast.warning(entry.warning);
-    } else {
-      toast.success("Server transcript saved");
-    }
-  }, [loadTranscriptText, openWorkspace, selectHistoryEntry]);
-  useRemoteHistorySync({
-    onSaved: onRemoteTranscriptSaved,
-    recordVisibleHistoryEntries,
   });
   const historyActions = useHistoryActions({
     clearHistorySelectionIf,

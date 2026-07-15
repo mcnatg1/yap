@@ -10,20 +10,6 @@ export type LegacyQueueJob = {
   path: string;
 };
 
-export type CompletedRemoteTranscript = {
-  createdAtMs: number;
-  name: string;
-  outputPath: string;
-  sessionId: string;
-  sourcePath: string;
-  warning?: string | null;
-};
-
-export type CompletedRemoteTranscriptCatalog = {
-  maintenanceWarnings: string[];
-  sessions: CompletedRemoteTranscript[];
-};
-
 type LegacyQueueStorage = Pick<Storage, "getItem">;
 type LegacyQueueDiscardStorage = Pick<Storage, "removeItem">;
 
@@ -75,11 +61,6 @@ export function discardLegacyRecordingQueue(
 export async function recordingJobsSnapshot() {
   if (!isTauri()) return [];
   return invoke<RecordingJobView[]>("recording_jobs_snapshot");
-}
-
-export async function completedRemoteTranscripts() {
-  if (!isTauri()) return { maintenanceWarnings: [], sessions: [] };
-  return invoke<CompletedRemoteTranscriptCatalog>("recording_jobs_completed_transcripts");
 }
 
 export async function pickRecordingImports() {

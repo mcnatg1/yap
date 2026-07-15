@@ -93,15 +93,6 @@ pub(crate) fn recording_jobs_snapshot(
 }
 
 #[tauri::command]
-pub(crate) fn recording_jobs_completed_transcripts(
-    window: tauri::WebviewWindow,
-    jobs: tauri::State<'_, RecordingJobs>,
-) -> Result<CompletedRemoteTranscriptCatalog, JobCommandError> {
-    ensure_main(&window)?;
-    jobs.completed_remote_transcripts(&crate::paths::app_data_dir().join("remote-jobs"))
-}
-
-#[tauri::command]
 pub(crate) async fn recording_jobs_pick_imports(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,

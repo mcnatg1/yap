@@ -1,6 +1,7 @@
 export type TranscriptHistoryEntry = {
   captureCommitPath?: string;
   name: string;
+  origin?: "live" | "remote";
   sourcePath: string;
   outputPath: string;
   sessionId?: string;
@@ -13,6 +14,7 @@ export type SavedTranscriptSession = {
   captureCommitPath?: string | null;
   createdAtMs: number;
   name: string;
+  origin?: "live" | "remote";
   sourcePath: string;
   outputPath: string;
   sessionId: string;
@@ -57,11 +59,17 @@ function isHistoryEntry(value: unknown): value is TranscriptHistoryEntry {
     typeof entry.sourcePath === "string" &&
     typeof entry.outputPath === "string" &&
     typeof entry.createdAt === "string" &&
+    (entry.origin === undefined || entry.origin === "live" || entry.origin === "remote") &&
     (entry.sessionId === undefined || typeof entry.sessionId === "string") &&
     (entry.warning === undefined || typeof entry.warning === "string") &&
     (entry.captureCommitPath === undefined || typeof entry.captureCommitPath === "string") &&
     (entry.recoveryState === undefined || entry.recoveryState === "recoverable" || entry.recoveryState === "recovered")
   );
+}
+
+function withoutNativeHistoryOrigin(entry: TranscriptHistoryEntry): TranscriptHistoryEntry {
+  const { origin: _origin, ...storedEntry } = entry;
+  return storedEntry;
 }
 
 export function transcriptPathIdentity(path: string) {
@@ -120,7 +128,8 @@ export function readTranscriptHistory(storage: HistoryStorage | undefined = glob
   if (!storage) return [];
 
   try {
-    return normalizeTranscriptHistory(JSON.parse(storage.getItem(transcriptHistoryKey) ?? "[]"));
+    return normalizeTranscriptHistory(JSON.parse(storage.getItem(transcriptHistoryKey) ?? "[]"))
+      .map(withoutNativeHistoryOrigin);
   } catch {
     return [];
   }
@@ -160,6 +169,7 @@ function isCanonicalYapLiveHistoryEntry(entry: TranscriptHistoryEntry) {
 }
 
 function nativeHistoryProvenanceKey(entry: TranscriptHistoryEntry) {
+  if (entry.origin !== "live") return undefined;
   const sessionId = validHistorySessionId(entry);
   if (!sessionId || !isCanonicalYapLiveHistoryEntry(entry)) return undefined;
   return JSON.stringify([
@@ -227,7 +237,10 @@ export function readVisibleTranscriptHistory(storage: HistoryStorage | undefined
 }
 
 export function writeTranscriptHistory(entries: TranscriptHistoryEntry[], storage: HistoryStorage = globalThis.localStorage) {
-  storage.setItem(transcriptHistoryKey, JSON.stringify(normalizeTranscriptHistory(entries)));
+  const legacyEntries = entries
+    .filter((entry) => entry.origin === undefined)
+    .map(withoutNativeHistoryOrigin);
+  storage.setItem(transcriptHistoryKey, JSON.stringify(normalizeTranscriptHistory(legacyEntries)));
 }
 
 export function writeHiddenTranscriptHistory(outputPaths: string[], storage: HistoryStorage = globalThis.localStorage) {
@@ -356,12 +369,30 @@ export function reconcileNativeTranscriptHistoryEntries(
   const visibleNative = nativeEntries.filter(
     (entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)),
   );
+  const legacyEntries = legacyTranscriptHistoryEntries(current, nativeEntries);
   return normalizeTranscriptHistory([
     ...visibleNative,
-    ...current.filter(
-      (entry) => !isCanonicalYapLiveHistoryEntry(entry) && !isPreReleaseLiveHistoryEntry(entry),
-    ),
+    ...legacyEntries,
   ]);
+}
+
+export function legacyTranscriptHistoryEntries(
+  current: TranscriptHistoryEntry[],
+  nativeEntries: TranscriptHistoryEntry[],
+) {
+  const nativeOutputs = new Set(
+    nativeEntries.map((entry) => transcriptPathIdentity(entry.outputPath)),
+  );
+  const nativeSessions = new Set(
+    nativeEntries.flatMap((entry) => entry.sessionId ?? []),
+  );
+  return normalizeTranscriptHistory(current.filter((entry) => (
+    entry.origin === undefined
+    && !isCanonicalYapLiveHistoryEntry(entry)
+    && !isPreReleaseLiveHistoryEntry(entry)
+    && !nativeOutputs.has(transcriptPathIdentity(entry.outputPath))
+    && (!entry.sessionId || !nativeSessions.has(entry.sessionId))
+  )));
 }
 
 export function removeTranscriptHistory(entries: TranscriptHistoryEntry[], outputPath: string) {
@@ -455,6 +486,9 @@ export function savedSessionToTranscriptHistoryEntry(session: SavedTranscriptSes
     captureCommitPath: session.captureCommitPath ?? undefined,
     createdAt,
     name: session.name,
+    origin: session.origin ?? (
+      session.captureCommitPath || session.recoveryState ? "live" : undefined
+    ),
     outputPath: session.outputPath,
     sessionId: session.sessionId,
     sourcePath: session.sourcePath,

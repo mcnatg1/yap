@@ -212,7 +212,7 @@ describe("Phase 5 checked-head private-server gate", () => {
           );
           return true;
         }
-        const catalog = await invoke("recording_jobs_completed_transcripts");
+        const catalog = await invoke("history_catalog");
         if (catalog.maintenanceWarnings.length > 0) {
           terminalFailure = new Error(
             `The Phase 5 History catalog reported maintenance warnings: ${catalog.maintenanceWarnings.join("; ")}`,

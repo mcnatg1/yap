@@ -20,24 +20,10 @@ export type SavedLiveSession = {
   recoveryState?: "recoverable" | "recovered" | null;
 };
 
-export type SavedLiveSessionCatalog = {
-  maintenanceWarnings: string[];
-  sessions: SavedLiveSession[];
-};
-
 export type OwnedLiveTranscriptPathResolution = {
   requestedPath: string;
   canonicalPath?: string | null;
   missing: boolean;
-};
-
-export type RecoverableLiveSession = {
-  audioPartialPath?: string | null;
-  expiresAtMs: number;
-  journalPartialPath?: string | null;
-  name: string;
-  reason: string;
-  sessionId: string;
 };
 
 export type LiveLevelView = {
@@ -114,14 +100,6 @@ export function startLiveOverlaySession(activeCaptureMode?: LiveCaptureMode): Pr
 
 export function stopLiveOverlaySession(): Promise<LiveOverlayView> {
   return invoke<LiveOverlayView>("stop_live_overlay_session");
-}
-
-export function listSavedLiveSessions(): Promise<SavedLiveSessionCatalog> {
-  return invoke<SavedLiveSessionCatalog>("list_saved_live_sessions");
-}
-
-export function listRecoverableLiveSessions(): Promise<RecoverableLiveSession[]> {
-  return invoke<RecoverableLiveSession[]>("list_recoverable_live_sessions");
 }
 
 export function recoverLiveSession(

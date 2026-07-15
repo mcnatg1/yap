@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
+  filterHiddenTranscriptHistory,
   hideTranscriptHistory,
   isNativeLiveTranscriptHistoryEntry,
+  legacyTranscriptHistoryEntries,
   pruneMissingHiddenTranscriptHistory,
   readTranscriptHistory,
   readHiddenTranscriptHistory,
@@ -29,7 +31,7 @@ type TranscriptHistoryStoreOptions = {
 export type NativeHistoryReconciliation = (
   entries: TranscriptHistoryEntry[],
   warning: string,
-) => boolean;
+) => TranscriptHistoryEntry[] | undefined;
 
 export function createTranscriptHistoryStore({
   getCurrentHistory,
@@ -106,7 +108,7 @@ export function createTranscriptHistoryStore({
     let applied = false;
 
     return (entries, warning) => {
-      if (applied) return false;
+      if (applied) return undefined;
       applied = true;
 
       const acceptedAfterBaseline = getCurrentHistory().filter((entry) => {
@@ -126,22 +128,30 @@ export function createTranscriptHistoryStore({
           !entry.sessionId || !acceptedSessions.has(entry.sessionId)
         )),
       ];
-      const next = reconcileNativeTranscriptHistoryEntries(
-        readTranscriptHistory(storage),
-        mergedNativeEntries,
-        readHiddenTranscriptHistory(storage),
-      );
+      const legacyHistory = readTranscriptHistory(storage);
+      const hiddenHistory = readHiddenTranscriptHistory(storage);
       try {
-        writeTranscriptHistory(next, storage);
+        writeTranscriptHistory(
+          legacyTranscriptHistoryEntries(legacyHistory, mergedNativeEntries),
+          storage,
+        );
       } catch (error) {
         onWarning(warning, error);
-        return false;
+        return undefined;
       }
+      const next = reconcileNativeTranscriptHistoryEntries(
+        legacyHistory,
+        mergedNativeEntries,
+        hiddenHistory,
+      );
 
-      const visibleHistory = readVisibleTranscriptHistory(storage);
+      const visibleHistory = filterHiddenTranscriptHistory(
+        next,
+        hiddenHistory,
+      );
       pruneAcceptedNativeGenerations(visibleHistory);
       replaceHistory(visibleHistory);
-      return true;
+      return visibleHistory;
     };
   };
 
