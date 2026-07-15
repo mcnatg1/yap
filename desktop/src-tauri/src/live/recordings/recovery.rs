@@ -1,3 +1,11 @@
+use std::collections::BTreeSet;
+
+use super::deletion::{
+    admit_deletion_artifact, admit_expected_private_artifact_identity, deletion_intent_name,
+    push_maintenance_warning, resume_deletion_intent_while_owned, validate_deletion_intent,
+    write_deletion_intent_with_publication_barrier_while_owned, DeletionIntent,
+    DELETION_INTENT_SCHEMA_VERSION,
+};
 use super::*;
 
 #[cfg(test)]

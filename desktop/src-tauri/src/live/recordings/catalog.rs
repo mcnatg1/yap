@@ -5,6 +5,10 @@ use time::OffsetDateTime;
 
 use crate::audio::recording;
 
+use super::deletion::{
+    delete_committed_session_in_dir_with_publication_barrier_while_owned,
+    reconcile_pending_deletion_intents_while_owned,
+};
 use super::mutation_ownership::session_mutation_ownership_with_queue_observer;
 use super::recovery::{
     damaged_commit_warnings, list_recoverable_live_sessions_from_scan, saved_recovered_session,
@@ -12,9 +16,7 @@ use super::recovery::{
 use super::retention::committed_meeting_is_expired;
 use super::transcripts::stable_existing_path_string;
 use super::{
-    committed_at_ms, committed_session_output_path,
-    delete_committed_session_in_dir_with_publication_barrier_while_owned,
-    reconcile_pending_deletion_intents_while_owned, LiveHistorySourceCatalog, SavedLiveSession,
+    committed_at_ms, committed_session_output_path, LiveHistorySourceCatalog, SavedLiveSession,
     SavedLiveSessionCatalog,
 };
 
