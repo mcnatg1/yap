@@ -1,6 +1,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
-import { emitLiveOverlayLevel, LiveOverlay } from "@/components/live/live-overlay";
+import { LiveOverlay } from "@/components/live/live-overlay";
+import { emitLiveOverlayLevel } from "@/components/live/live-waveform";
 import {
   listenLiveLevel,
   listenLiveOverlaySession,
