@@ -1472,6 +1472,16 @@ test("provenance gate requires exact scoped review evidence and current local ha
 test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", async () => {
   const config = JSON.parse(await readRepoFile("desktop/src-tauri/tauri.conf.json"));
   const paths = await readRepoFile("desktop/src-tauri/src/paths.rs");
+  const migration = await readRepoFile("desktop/src-tauri/src/paths/legacy_migration.rs");
+  const migrationPlatform = await readRepoFile(
+    "desktop/src-tauri/src/paths/legacy_migration/platform.rs",
+  );
+  const migrationRecovery = await readRepoFile(
+    "desktop/src-tauri/src/paths/legacy_migration/recovery.rs",
+  );
+  const migrationTree = await readRepoFile(
+    "desktop/src-tauri/src/paths/legacy_migration/secure_tree.rs",
+  );
   const app = await readRepoFile("desktop/src-tauri/src/app.rs");
   const smoke = await readRepoFile("desktop/tests/scripts/smoke-nsis.ps1");
   assert.equal(config.identifier, "com.mcnatg1.yap");
@@ -1482,13 +1492,16 @@ test("NSIS uses stock Tauri behavior inside a disposable Windows boundary", asyn
     type: "offlineInstaller",
     silent: true,
   });
-  assert.match(paths, /\.legacy-migration\.lock/);
-  assert.match(paths, /MIGRATION_LOCK_TIMEOUT/);
-  assert.match(paths, /try_lock\(\)/);
-  assert.match(paths, /recover_migration_residue/);
-  assert.match(paths, /copy_tree_verified/);
-  assert.match(paths, /output\.sync_all\(\)/);
-  assert.match(paths, /trees_equal/);
+  assert.match(migration, /\.legacy-migration\.lock/);
+  assert.match(migration, /MIGRATION_LOCK_TIMEOUT/);
+  assert.match(migration, /try_lock\(\)/);
+  assert.match(migration, /MIGRATION_COMPLETION_FILE/);
+  assert.match(migrationRecovery, /recover_migration_residue/);
+  assert.match(migrationTree, /copy_tree_verified/);
+  assert.match(migrationTree, /output\.sync_all\(\)/);
+  assert.match(migrationTree, /trees_equal/);
+  assert.match(migrationPlatform, /rename_no_replace/);
+  assert.doesNotMatch(migrationPlatform, /MOVEFILE_REPLACE_EXISTING/);
   assert.match(app, /MessageBoxW/);
   assert.match(app, /Yap-startup-migration-error/);
   assert.doesNotMatch(JSON.stringify(config), /installerHooks|nsis-hooks\.nsh/);
