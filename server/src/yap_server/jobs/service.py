@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
@@ -14,12 +13,20 @@ import tempfile
 import threading
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
-import wave
 
 from yap_server.pools.batch_asr import (
     BatchAsrJob,
     PoolBackpressure,
     WorkerContainmentError,
+)
+from .artifacts import (
+    MAX_STATE_BYTES as _MAX_STATE_BYTES,
+    publish_json as _publish_json,
+    publish_wav as _publish_wav,
+    read_json_file as _read_json_file,
+    read_regular_file as _read_regular_file,
+    sha256_file as _sha256_file,
+    unlink_private_regular_file as _unlink_private_regular_file,
 )
 from .chunk_contract import (
     chunk_path as _chunk_path,
@@ -50,7 +57,6 @@ from .result_contract import (
 )
 
 
-_MAX_STATE_BYTES = 2 * 1024 * 1024
 _MAX_STORED_JOBS = 512
 _CANCELLATION_ACK_TIMEOUT_SECONDS = 2.0
 _JOB_DIRECTORY = re.compile(r"^job-[0-9a-f]{32}$")
@@ -1057,84 +1063,3 @@ class RecordingJobService:
                     "requestId": f"job-{job_id}",
                 }
                 self._purge_private_audio_locked(job_id)
-
-
-def _publish_wav(destination: Path, chunk_paths: list[Path]) -> None:
-    temporary = destination.with_suffix(".wav.part")
-    temporary.unlink(missing_ok=True)
-    try:
-        with wave.open(str(temporary), "wb") as output:
-            output.setnchannels(1)
-            output.setsampwidth(2)
-            output.setframerate(16000)
-            for path in chunk_paths:
-                output.writeframesraw(path.read_bytes())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _publish_json(destination: Path, payload: Mapping[str, object]) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            dir=destination.parent,
-            prefix=".result-",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-            json.dump(payload, temporary, ensure_ascii=True, separators=(",", ":"))
-            temporary.write("\n")
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_path, destination)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-
-
-def _read_json_file(path: Path) -> dict[str, object]:
-    body = _read_regular_file(path, _MAX_STATE_BYTES)
-    try:
-        value = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"persisted JSON is invalid: {path.name}") from error
-    if not isinstance(value, dict):
-        raise ValueError(f"persisted JSON must be an object: {path.name}")
-    return value
-
-
-def _unlink_private_regular_file(path: Path, label: str) -> None:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"{label} is unsafe")
-    path.unlink()
-
-
-def _read_regular_file(path: Path, maximum_bytes: int) -> bytes:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError as error:
-        raise ValueError(f"required persisted file is missing: {path.name}") from error
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > maximum_bytes
-    ):
-        raise ValueError(f"persisted file is unsafe or oversized: {path.name}")
-    return path.read_bytes()
