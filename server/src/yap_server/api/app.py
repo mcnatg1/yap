@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
-import socket
-import sys
-import threading
-import time
 from functools import partial
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
-from ipaddress import ip_address
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -20,17 +14,21 @@ from yap_server.api.health import health
 from yap_server.config import ServerSettings
 from yap_server.config.settings import ensure_bind_is_allowed
 from yap_server.jobs import JobServiceError, RecordingJobService
+from .http_server import (
+    MAX_CONCURRENT_REQUEST_THREADS,
+    ThreadingYapHTTPServer,
+    server_type,
+)
+from .request_io import (
+    BoundedRequestBody,
+    REQUEST_IO_TIMEOUT_SECONDS,
+    bounded_socket_reader,
+    request_deadline,
+)
 
 
-MAX_REQUEST_BODY_BYTES = 1024 * 1024
-_BODY_DRAIN_READ_BYTES = 64 * 1024
 MAX_LOG_METHOD_CHARS = 16
 MAX_LOG_PATH_CHARS = 128
-REQUEST_IO_TIMEOUT_SECONDS = 2.0
-REQUEST_WALL_CLOCK_DEADLINE_SECONDS = 2.0
-MAX_CONCURRENT_REQUEST_THREADS = 8
-REQUEST_THREAD_ACQUIRE_TIMEOUT_SECONDS = 2.0
-MAINTENANCE_INTERVAL_SECONDS = 60.0
 _SUPPORTED_HTTP_VERSIONS = frozenset({"HTTP/1.0", "HTTP/1.1"})
 
 _REQUEST_LOGGER = logging.getLogger("yap_server.requests")
@@ -80,23 +78,6 @@ def _sanitized_log_path(value: object) -> str:
         return ""
 
 
-class _DeadlineSocketReader(io.RawIOBase):
-    def __init__(self, connection: socket.socket, deadline: float) -> None:
-        super().__init__()
-        self._connection = connection
-        self._deadline = deadline
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> int:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("request wall-clock deadline exceeded")
-        self._connection.settimeout(min(REQUEST_IO_TIMEOUT_SECONDS, remaining))
-        return self._connection.recv_into(buffer)
-
-
 class _HealthRequestHandler(BaseHTTPRequestHandler):
     server_version = "yap-server"
     sys_version = ""
@@ -113,20 +94,17 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         self._job_service = job_service
         self._request_id = f"req-{uuid4().hex}"
         self._request_logged = False
-        self._content_length: int | None = None
-        self._body_bytes_read = 0
+        self._request_body = BoundedRequestBody(self)
         self.requestline = ""
         self.request_version = ""
         self.command = ""
         super().__init__(*args, **kwargs)
 
     def setup(self) -> None:
-        deadline = time.monotonic() + REQUEST_WALL_CLOCK_DEADLINE_SECONDS
+        deadline = request_deadline()
         super().setup()
         original_rfile = self.rfile
-        self.rfile = io.BufferedReader(
-            _DeadlineSocketReader(self.connection, deadline)
-        )
+        self.rfile = bounded_socket_reader(self.connection, deadline)
         original_rfile.close()
 
     def do_GET(self) -> None:
@@ -212,12 +190,12 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         assert self._job_service is not None
         try:
             if path == "/v1/jobs" and self.command == "POST":
-                idempotency_key = self._required_header(
+                idempotency_key = self._request_body.required_header(
                     "Idempotency-Key",
                     code="IDEMPOTENCY_KEY_REQUIRED",
                     message="Job creation requires exactly one idempotency key.",
                 )
-                payload = self._read_json_body()
+                payload = self._request_body.read_json()
                 self._send_json(
                     HTTPStatus.ACCEPTED,
                     self._job_service.create(
@@ -235,22 +213,22 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
                         "UNSUPPORTED_MEDIA_TYPE",
                         "Chunk uploads require application/octet-stream.",
                     )
-                content_length = self._required_content_length()
+                content_length = self._request_body.required_content_length()
                 plan = self._job_service.prepare_chunk_upload(
                     chunk_match.group("job_id"),
                     track_id=chunk_match.group("track_id"),
                     sequence_start=int(chunk_match.group("sequence_start"), 10),
                     sequence_end=int(chunk_match.group("sequence_end"), 10),
-                    idempotency_key=self._required_header("Idempotency-Key"),
-                    content_sha256=self._required_header("X-Yap-Content-SHA256"),
-                    audio_codec=self._required_header("X-Yap-Audio-Codec"),
-                    sample_rate_hz=self._integer_header("X-Yap-Sample-Rate-Hz"),
-                    channels=self._integer_header("X-Yap-Channels"),
+                    idempotency_key=self._request_body.required_header("Idempotency-Key"),
+                    content_sha256=self._request_body.required_header("X-Yap-Content-SHA256"),
+                    audio_codec=self._request_body.required_header("X-Yap-Audio-Codec"),
+                    sample_rate_hz=self._request_body.integer_header("X-Yap-Sample-Rate-Hz"),
+                    channels=self._request_body.integer_header("X-Yap-Channels"),
                     content_length=content_length,
                 )
                 receipt = self._job_service.accept_chunk(
                     plan,
-                    self._read_exact_body(content_length),
+                    self._request_body.read_exact(content_length),
                 )
                 status = (
                     HTTPStatus.OK
@@ -262,7 +240,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
 
             commit_match = _COMMIT_PATH.fullmatch(path)
             if commit_match is not None and self.command == "POST":
-                payload = self._read_json_body()
+                payload = self._request_body.read_json()
                 self._send_json(
                     HTTPStatus.ACCEPTED,
                     self._job_service.commit(commit_match.group("job_id"), payload),
@@ -339,139 +317,19 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             message="This operation is not implemented in the Phase 5 batch slice.",
         )
 
-    def _required_content_length(self) -> int:
-        if self._content_length is None:
-            raise JobServiceError(
-                400,
-                "CONTENT_LENGTH_REQUIRED",
-                "A bounded Content-Length is required.",
-            )
-        return self._content_length
-
-    def _read_exact_body(self, content_length: int) -> bytes:
-        body = self.rfile.read(content_length)
-        self._body_bytes_read += len(body)
-        if len(body) != content_length:
-            self.close_connection = True
-            raise JobServiceError(
-                400,
-                "INCOMPLETE_REQUEST_BODY",
-                "Request body ended before Content-Length bytes were received.",
-            )
-        return body
-
-    def _discard_unread_request_body(self) -> None:
-        if self._content_length is None:
-            return
-        remaining = max(0, self._content_length - self._body_bytes_read)
-        try:
-            while remaining:
-                body = self.rfile.read(min(remaining, _BODY_DRAIN_READ_BYTES))
-                if not body:
-                    self.close_connection = True
-                    return
-                consumed = len(body)
-                self._body_bytes_read += consumed
-                remaining -= consumed
-        except (OSError, TimeoutError, ValueError):
-            self.close_connection = True
-
-    def _read_json_body(self) -> Mapping[str, object]:
-        if self.headers.get_content_type() != "application/json":
-            raise JobServiceError(
-                415,
-                "UNSUPPORTED_MEDIA_TYPE",
-                "JSON operations require application/json.",
-            )
-        content_length = self._required_content_length()
-        try:
-            payload = json.loads(self._read_exact_body(content_length))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise JobServiceError(
-                400,
-                "INVALID_JSON",
-                "Request body is not valid JSON.",
-            ) from error
-        if not isinstance(payload, dict):
-            raise JobServiceError(
-                400,
-                "INVALID_REQUEST_BODY",
-                "Request body must be a JSON object.",
-            )
-        return payload
-
-    def _required_header(
-        self,
-        name: str,
-        *,
-        code: str = "INVALID_CHUNK_HEADERS",
-        message: str = "Every required chunk identity header must appear exactly once.",
-    ) -> str:
-        values = self.headers.get_all(name, [])
-        if len(values) != 1 or not values[0]:
-            raise JobServiceError(
-                400,
-                code,
-                message,
-            )
-        return values[0]
-
-    def _integer_header(self, name: str) -> int:
-        value = self._required_header(name)
-        try:
-            return int(value, 10)
-        except ValueError as error:
-            raise JobServiceError(
-                400,
-                "INVALID_CHUNK_HEADERS",
-                "Chunk numeric headers must be decimal integers.",
-            ) from error
-
     def _request_size_is_allowed(self) -> bool:
-        if self.headers.get("Transfer-Encoding") is not None:
-            self.close_connection = True
-            self._send_error(
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_REQUEST_BODY",
-                message="Transfer-encoded request bodies are not supported.",
-            )
-            return False
-
-        content_lengths = self.headers.get_all("Content-Length", [])
-        if not content_lengths:
-            self._content_length = None
-            return True
-        if len(content_lengths) != 1:
-            self.close_connection = True
-            self._send_error(
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_CONTENT_LENGTH",
-                message="Content-Length must appear exactly once.",
-            )
-            return False
-
         try:
-            content_length = int(content_lengths[0], 10)
-        except ValueError:
-            content_length = -1
-        if content_length < 0:
-            self.close_connection = True
+            self._request_body.capture_content_length()
+        except JobServiceError as error:
             self._send_error(
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_CONTENT_LENGTH",
-                message="Content-Length must be a non-negative integer.",
+                HTTPStatus(error.status),
+                code=error.code,
+                message=error.message,
+                retryable=error.retryable,
             )
             return False
-        if content_length > MAX_REQUEST_BODY_BYTES:
-            self.close_connection = True
-            self._send_error(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                code="REQUEST_TOO_LARGE",
-                message="Request body exceeds the 1048576-byte limit.",
-            )
-            return False
-        self._content_length = content_length
         return True
+
 
     def _send_error(
         self,
@@ -513,7 +371,7 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         # reset that discards an otherwise valid error response. Every declared
         # body is bounded before dispatch, so consume the bounded remainder at
         # the response boundary without allowing drain failures to mask it.
-        self._discard_unread_request_body()
+        self._request_body.discard_unread()
         body = json.dumps(
             payload,
             ensure_ascii=True,
@@ -589,100 +447,6 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
             )
 
 
-class _YapHTTPServer(HTTPServer):
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        del request, client_address
-        if isinstance(sys.exc_info()[1], ConnectionError):
-            return
-        _log_unhandled_request_failure(self)
-
-
-class _ThreadingYapHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-    request_queue_size = MAX_CONCURRENT_REQUEST_THREADS * 2
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._request_slots = threading.BoundedSemaphore(
-            MAX_CONCURRENT_REQUEST_THREADS
-        )
-        self._job_service_for_maintenance: object | None = None
-        self._next_maintenance_at = 0.0
-        super().__init__(*args, **kwargs)
-
-    def service_actions(self) -> None:
-        super().service_actions()
-        now = time.monotonic()
-        if now < self._next_maintenance_at:
-            return
-        self._next_maintenance_at = now + MAINTENANCE_INTERVAL_SECONDS
-        maintenance = getattr(self._job_service_for_maintenance, "prune_expired", None)
-        if callable(maintenance):
-            try:
-                maintenance()
-            except OSError:
-                # Retention remains pending and is retried on the next bounded
-                # maintenance interval. Do not let filesystem details escape
-                # through the server loop's default traceback handling.
-                pass
-
-    def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._request_slots.acquire(
-            timeout=REQUEST_THREAD_ACQUIRE_TIMEOUT_SECONDS
-        ):
-            self.shutdown_request(request)
-            return
-        try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._request_slots.release()
-            raise
-
-    def process_request_thread(self, request: Any, client_address: Any) -> None:
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._request_slots.release()
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        del request, client_address
-        if isinstance(sys.exc_info()[1], ConnectionError):
-            return
-        _log_unhandled_request_failure(self)
-
-
-def _log_unhandled_request_failure(server: HTTPServer) -> None:
-    logger = getattr(server, "_request_error_logger", _REQUEST_LOGGER)
-    try:
-        logger.info(
-            json.dumps(
-                {"event": "http_request_failure", "status": 500},
-                ensure_ascii=True,
-                separators=(",", ":"),
-            )
-        )
-    except Exception:
-        # Error reporting is itself an outer trust boundary. A broken logger
-        # must not restore BaseServer's exception traceback or leak request data.
-        pass
-
-
-class _IPv6HTTPServer(_YapHTTPServer):
-    address_family = socket.AF_INET6
-
-
-class _IPv6ThreadingHTTPServer(_ThreadingYapHTTPServer):
-    address_family = socket.AF_INET6
-
-
-def _server_type(host: str, *, threaded: bool) -> type[HTTPServer]:
-    try:
-        if ip_address(host).version == 6:
-            return _IPv6ThreadingHTTPServer if threaded else _IPv6HTTPServer
-    except ValueError:
-        pass
-    return _ThreadingYapHTTPServer if threaded else _YapHTTPServer
-
-
 def create_server(
     settings: ServerSettings,
     *,
@@ -696,12 +460,12 @@ def create_server(
         request_logger=request_logger,
         job_service=job_service,
     )
-    server = _server_type(
+    server = server_type(
         settings.host,
         threaded=job_service is not None,
     )((settings.host, settings.port), handler)
     server._request_error_logger = request_logger
-    if isinstance(server, _ThreadingYapHTTPServer):
+    if isinstance(server, ThreadingYapHTTPServer):
         server._job_service_for_maintenance = job_service
     return server
 
