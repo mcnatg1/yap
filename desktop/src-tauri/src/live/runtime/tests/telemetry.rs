@@ -74,10 +74,7 @@ fn stop_tail_silence_covers_final_silence_window() {
 #[test]
 fn stream_finisher_reports_backed_up_channel() {
     let (samples_tx, _samples_rx) = mpsc::sync_channel(0);
-    let finisher = StreamFinisher {
-        samples_tx,
-        session: 1,
-    };
+    let finisher = StreamFinisher::new(samples_tx, 1);
 
     let status = finisher.finish_session();
 
@@ -109,10 +106,7 @@ fn stream_finisher_waits_briefly_for_queue_space() {
             StreamMessage::Samples { .. } => panic!("expected finish message"),
         }
     });
-    let finisher = StreamFinisher {
-        samples_tx,
-        session: 42,
-    };
+    let finisher = StreamFinisher::new(samples_tx, 42);
 
     let status = finisher.finish_session();
 
@@ -131,10 +125,7 @@ fn stream_finisher_reports_completed_channel() {
         }
         StreamMessage::Samples { .. } => panic!("expected finish message"),
     });
-    let finisher = StreamFinisher {
-        samples_tx,
-        session: 42,
-    };
+    let finisher = StreamFinisher::new(samples_tx, 42);
 
     let status = finisher.finish_session();
 
@@ -148,10 +139,7 @@ fn stream_finisher_reports_completed_channel() {
 fn stream_finisher_reports_disconnected_channel() {
     let (samples_tx, samples_rx) = mpsc::sync_channel(1);
     drop(samples_rx);
-    let finisher = StreamFinisher {
-        samples_tx,
-        session: 1,
-    };
+    let finisher = StreamFinisher::new(samples_tx, 1);
 
     let status = finisher.finish_session();
 

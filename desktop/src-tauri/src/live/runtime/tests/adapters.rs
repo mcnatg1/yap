@@ -8,14 +8,7 @@ fn timed_out_recognizer_blocks_replacement_until_its_worker_is_reaped() {
     let worker = std::thread::spawn(move || {
         worker_released.wait();
     });
-    let (samples_tx, _samples_rx) = mpsc::sync_channel(1);
-    inner.stream = Some(SessionStream {
-        session: Arc::new(AtomicU64::new(1)),
-        samples_tx,
-        cancelled: Arc::new(AtomicBool::new(false)),
-        worker: Some(worker),
-        model_warmup: None,
-    });
+    inner.stream = Some(SessionStream::from_worker_for_test(1, worker, false));
 
     inner.retire_stream_detached_reader();
     assert_eq!(
@@ -28,8 +21,7 @@ fn timed_out_recognizer_blocks_replacement_until_its_worker_is_reaped() {
     while inner
         .retiring_stream
         .as_ref()
-        .and_then(|stream| stream.worker.as_ref())
-        .is_some_and(|worker| !worker.is_finished())
+        .is_some_and(|stream| !stream.is_finished())
     {
         assert!(
             Instant::now() < deadline,
@@ -49,14 +41,7 @@ fn idle_cleanup_does_not_join_a_still_stalled_recognizer() {
     let worker = std::thread::spawn(move || {
         worker_released.wait();
     });
-    let (samples_tx, _samples_rx) = mpsc::sync_channel(1);
-    inner.retiring_stream = Some(SessionStream {
-        session: Arc::new(AtomicU64::new(1)),
-        samples_tx,
-        cancelled: Arc::new(AtomicBool::new(true)),
-        worker: Some(worker),
-        model_warmup: None,
-    });
+    inner.retiring_stream = Some(SessionStream::from_worker_for_test(1, worker, true));
     let (done_tx, done_rx) = mpsc::channel();
     let cleanup = std::thread::spawn(move || {
         inner.retire_stream();
@@ -74,8 +59,7 @@ fn idle_cleanup_does_not_join_a_still_stalled_recognizer() {
     while inner
         .retiring_stream
         .as_ref()
-        .and_then(|stream| stream.worker.as_ref())
-        .is_some_and(|worker| !worker.is_finished())
+        .is_some_and(|stream| !stream.is_finished())
     {
         assert!(
             Instant::now() < deadline,
@@ -139,10 +123,7 @@ fn stalled_recognizer_times_out_stop_without_enqueuing_finish() {
     let port = adapter.sink();
     port.try_send(prepared_frame(0.25)).unwrap();
     port.close();
-    let finisher = StreamFinisher {
-        samples_tx,
-        session: 7,
-    };
+    let finisher = StreamFinisher::new(samples_tx, 7);
 
     let started = Instant::now();
     let status = stop_after_capture_for_test(&mut adapter, &finisher, Duration::from_millis(25));
@@ -178,10 +159,7 @@ fn reaper_spawn_failure_retains_adapter_ownership_and_reports_a_bounded_stop() {
     let port = adapter.sink();
     port.try_send(prepared_frame(0.25)).unwrap();
     port.close();
-    let finisher = StreamFinisher {
-        samples_tx,
-        session: 7,
-    };
+    let finisher = StreamFinisher::new(samples_tx, 7);
 
     set_reaper_spawn_failure_for_test();
     let started = Instant::now();
@@ -236,11 +214,7 @@ fn two_capture_sessions_use_fresh_asr_ports_and_finish_each_once_in_fifo_order()
     first_port.close();
     first.join_after_capture().unwrap();
     assert_eq!(
-        StreamFinisher {
-            samples_tx: samples_tx.clone(),
-            session: 1,
-        }
-        .finish_session(),
+        StreamFinisher::new(samples_tx.clone(), 1).finish_session(),
         StreamFinishStatus::Completed
     );
     assert_eq!(first_port.outcome().accepted_frames, 1);
@@ -257,11 +231,7 @@ fn two_capture_sessions_use_fresh_asr_ports_and_finish_each_once_in_fifo_order()
     second_port.close();
     second.join_after_capture().unwrap();
     assert_eq!(
-        StreamFinisher {
-            samples_tx,
-            session: 2,
-        }
-        .finish_session(),
+        StreamFinisher::new(samples_tx, 2).finish_session(),
         StreamFinishStatus::Completed
     );
     assert_eq!(second_port.outcome().accepted_frames, 1);

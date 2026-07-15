@@ -186,11 +186,7 @@ fn stop_finalizes_before_a_concurrent_start_activates_the_next_session() {
         old_adapter.join_after_capture().unwrap();
         old_adapter_drained_tx.send(()).unwrap();
         allow_old_finish_rx.recv().unwrap();
-        let status = StreamFinisher {
-            samples_tx: stop_samples_tx,
-            session: 1,
-        }
-        .finish_session();
+        let status = StreamFinisher::new(stop_samples_tx, 1).finish_session();
         assert_eq!(status, StreamFinishStatus::Completed);
         old_finish_acked_tx.send(()).unwrap();
     });
@@ -212,11 +208,7 @@ fn stop_finalizes_before_a_concurrent_start_activates_the_next_session() {
         new_port.close();
         new_adapter.join_after_capture().unwrap();
         assert_eq!(
-            StreamFinisher {
-                samples_tx: new_samples_tx,
-                session: 2,
-            }
-            .finish_session(),
+            StreamFinisher::new(new_samples_tx, 2).finish_session(),
             StreamFinishStatus::Completed
         );
         new_start_complete_tx.send(()).unwrap();

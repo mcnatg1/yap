@@ -1,6 +1,8 @@
+#[cfg(test)]
+use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc, Condvar, Mutex,
+    Arc, Condvar, Mutex,
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -13,11 +15,15 @@ use crate::audio::recording::{RecordingFinalizeResult, RecordingSinkHandle};
 use crate::audio::session::{SessionId, SessionMetadata, SessionMode, SessionOrigin, TriggerMode};
 
 use super::state::{LiveLevelView, LiveSessionState};
-use super::stream::{self, LiveStreamEngine, StreamMessage};
+use super::stream::LiveStreamEngine;
+#[cfg(test)]
+use super::stream::{self, StreamMessage};
 
 mod asr_adapter;
 mod capture_worker;
 mod level_channel;
+mod session_identity;
+mod stream_session;
 mod warmup;
 mod worker;
 
@@ -32,18 +38,15 @@ use capture_worker::{run_capture_worker, CaptureWorkerContext};
 #[cfg(test)]
 use level_channel::publish_level;
 use level_channel::{level_channel, LatestLevelReceiver};
+use session_identity::{active_session_matches, CRASH_CLAIM_BIT};
+#[cfg(test)]
+use stream_session::should_accept_stream_samples;
+pub use stream_session::StreamFinishStatus;
+use stream_session::{SessionStream, StreamFinisher};
 use warmup::SharedWarmup;
 use worker::join_worker;
 
-const TARGET_SAMPLE_RATE: u32 = 16_000;
 const LEVEL_TICK: Duration = Duration::from_millis(50);
-const STREAM_FINISH_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
-const STREAM_DRAIN_ON_STOP: Duration = Duration::from_millis(6000);
-const CRASH_CLAIM_BIT: u64 = 1 << 63;
-
-fn active_session_matches(active_session: u64, session: u64) -> bool {
-    session != 0 && (active_session == session || active_session == session | CRASH_CLAIM_BIT)
-}
 
 #[derive(Clone)]
 pub struct LiveRuntime {
@@ -236,14 +239,6 @@ struct OwnedLifecycleOperation {
 pub(crate) struct ModelMutationLease {
     runtime: LiveRuntime,
     _operation: OwnedLifecycleOperation,
-}
-
-struct SessionStream {
-    session: Arc<AtomicU64>,
-    samples_tx: mpsc::SyncSender<StreamMessage>,
-    cancelled: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    model_warmup: Option<Arc<SharedWarmup<LiveStreamEngine>>>,
 }
 
 pub(crate) struct LiveStartFailure {
@@ -930,7 +925,7 @@ impl LiveRuntimeInner {
     fn reuse_stream(&mut self, session: u64) -> Result<bool, String> {
         self.reap_retiring_stream()?;
         if let Some(stream) = self.stream.as_ref().filter(|stream| stream.is_running()) {
-            stream.session.store(session, Ordering::SeqCst);
+            stream.retarget(session);
             return Ok(true);
         }
         self.retire_stream();
@@ -945,33 +940,13 @@ impl LiveRuntimeInner {
         engine: LiveStreamEngine,
         model_warmup: Arc<SharedWarmup<LiveStreamEngine>>,
     ) -> Result<(), String> {
-        let (samples_tx, samples_rx) = mpsc::sync_channel::<StreamMessage>(1);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let stream_session = Arc::new(AtomicU64::new(session));
-
-        let worker = std::thread::spawn({
-            let active_session = Arc::clone(&runtime.active_session);
-            let stream_session = Arc::clone(&stream_session);
-            let cancelled = Arc::clone(&cancelled);
-            move || {
-                run_stream_worker(
-                    engine,
-                    samples_rx,
-                    stream_session,
-                    active_session,
-                    cancelled,
-                    app,
-                )
-            }
-        });
-
-        self.stream = Some(SessionStream {
-            session: stream_session,
-            samples_tx,
-            cancelled,
-            worker: Some(worker),
-            model_warmup: Some(model_warmup),
-        });
+        self.stream = Some(SessionStream::start(
+            engine,
+            session,
+            Arc::clone(&runtime.active_session),
+            app,
+            model_warmup,
+        ));
         Ok(())
     }
 
@@ -980,7 +955,7 @@ impl LiveRuntimeInner {
         let samples_tx = self
             .stream
             .as_ref()
-            .map(|stream| stream.samples_tx.clone())
+            .map(SessionStream::sender)
             .ok_or_else(|| "Live stream is unavailable.".to_string())?;
         let pending = self
             .pending_asr
@@ -1069,12 +1044,10 @@ impl LiveRuntimeInner {
                 crate::stt::log_yap(&format!("live stream worker shutdown failed: {error}"));
             }
         }
-        let retiring_finished = self.retiring_stream.as_ref().is_some_and(|stream| {
-            stream
-                .worker
-                .as_ref()
-                .is_none_or(std::thread::JoinHandle::is_finished)
-        });
+        let retiring_finished = self
+            .retiring_stream
+            .as_ref()
+            .is_some_and(SessionStream::is_finished);
         if retiring_finished {
             let stream = self
                 .retiring_stream
@@ -1095,7 +1068,7 @@ impl LiveRuntimeInner {
             crate::stt::log_yap(&format!("live ASR adapter shutdown failed: {error}"));
         }
         if let Some(stream) = self.stream.take() {
-            stream.cancelled.store(true, Ordering::Release);
+            stream.cancel_reader();
             if self.retiring_stream.is_none() {
                 self.retiring_stream = Some(stream);
             } else if let Err(error) = stream.shutdown(true) {
@@ -1116,11 +1089,7 @@ impl LiveRuntimeInner {
         let Some(stream) = self.retiring_stream.as_ref() else {
             return Ok(());
         };
-        if stream
-            .worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-        {
+        if !stream.is_finished() {
             return Err("Previous live transcription is still stopping.".into());
         }
         let stream = self
@@ -1141,39 +1110,6 @@ impl LiveRuntimeInner {
     }
 }
 
-impl SessionStream {
-    fn is_running(&self) -> bool {
-        self.worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-    }
-
-    fn finisher(&self) -> StreamFinisher {
-        StreamFinisher {
-            samples_tx: self.samples_tx.clone(),
-            session: self.session.load(Ordering::SeqCst),
-        }
-    }
-
-    fn shutdown(mut self, join_reader: bool) -> Result<(), String> {
-        self.cancelled.store(true, Ordering::SeqCst);
-        drop(self.samples_tx);
-        let result = if join_reader {
-            if let Some(handle) = self.worker.take() {
-                join_worker(handle)
-            } else {
-                Ok(())
-            }
-        } else {
-            Ok(())
-        };
-        if let Some(warmup) = self.model_warmup.take() {
-            warmup.release_in_use();
-        }
-        result
-    }
-}
-
 #[cfg(test)]
 fn stop_after_capture_for_test(
     adapter: &mut SessionAsrAdapter,
@@ -1186,71 +1122,6 @@ fn stop_after_capture_for_test(
             StreamFinishStatus::TimedOut
         }
         Err(_) => StreamFinishStatus::Disconnected,
-    }
-}
-
-struct StreamFinisher {
-    samples_tx: mpsc::SyncSender<StreamMessage>,
-    session: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamFinishStatus {
-    Completed,
-    BackedUp,
-    Disconnected,
-    NoStream,
-    TimedOut,
-}
-
-impl StreamFinishStatus {
-    fn should_retire_stream(self) -> bool {
-        !matches!(
-            self,
-            StreamFinishStatus::Completed | StreamFinishStatus::NoStream
-        )
-    }
-
-    pub(crate) fn should_report(self) -> bool {
-        !matches!(
-            self,
-            StreamFinishStatus::Completed | StreamFinishStatus::NoStream
-        )
-    }
-}
-
-impl StreamFinisher {
-    fn finish_session(&self) -> StreamFinishStatus {
-        let (done_tx, done_rx) = mpsc::channel();
-        let mut message = StreamMessage::Finish {
-            session: self.session,
-            done: done_tx,
-        };
-        let started = Instant::now();
-
-        loop {
-            match self.samples_tx.try_send(message) {
-                Ok(()) => {
-                    return match done_rx.recv_timeout(STREAM_DRAIN_ON_STOP) {
-                        Ok(status) => status,
-                        Err(mpsc::RecvTimeoutError::Timeout) => StreamFinishStatus::TimedOut,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            StreamFinishStatus::Disconnected
-                        }
-                    };
-                }
-                Err(mpsc::TrySendError::Full(returned)) => {
-                    if started.elapsed() >= STREAM_FINISH_ENQUEUE_TIMEOUT {
-                        return StreamFinishStatus::BackedUp;
-                    }
-                    message = returned;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return StreamFinishStatus::Disconnected;
-                }
-            }
-        }
     }
 }
 
@@ -1267,194 +1138,6 @@ fn log_worker_shutdown_errors(errors: Vec<String>) {
     for error in errors {
         crate::stt::log_yap(&format!("live worker shutdown failed: {error}"));
     }
-}
-
-fn run_stream_worker(
-    mut engine: LiveStreamEngine,
-    samples_rx: mpsc::Receiver<StreamMessage>,
-    stream_session: Arc<AtomicU64>,
-    active_session: Arc<AtomicU64>,
-    cancelled: Arc<AtomicBool>,
-    app: tauri::AppHandle,
-) {
-    let mut active_stream_session = 0;
-    let mut buffer = Vec::<f32>::with_capacity(stream::chunk_samples() * 2);
-    let mut profile = StreamProfile::default();
-
-    while !cancelled.load(Ordering::Relaxed) {
-        match samples_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(message) => process_stream_message(
-                &mut engine,
-                &mut buffer,
-                &mut profile,
-                &app,
-                &active_session,
-                &stream_session,
-                &mut active_stream_session,
-                message,
-            ),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_stream_message(
-    engine: &mut LiveStreamEngine,
-    buffer: &mut Vec<f32>,
-    profile: &mut StreamProfile,
-    app: &tauri::AppHandle,
-    active_session: &Arc<AtomicU64>,
-    stream_session: &Arc<AtomicU64>,
-    active_stream_session: &mut u64,
-    message: StreamMessage,
-) {
-    match message {
-        StreamMessage::Samples { session, samples } => {
-            if !should_accept_stream_samples(
-                session,
-                active_session.load(Ordering::SeqCst),
-                stream_session.load(Ordering::SeqCst),
-            ) {
-                return;
-            }
-            if *active_stream_session != session {
-                engine.reset();
-                buffer.clear();
-                *profile = StreamProfile::new(session);
-                *active_stream_session = session;
-            }
-            buffer.extend(samples);
-            drain_stream_buffer(engine, buffer, profile, app, false);
-        }
-        StreamMessage::Finish { session, done } => {
-            if *active_stream_session == session {
-                drain_stream_buffer(engine, buffer, profile, app, true);
-                let started = Instant::now();
-                let final_text = engine.finish();
-                profile.decode_elapsed += started.elapsed();
-                if let Some(text) = final_text {
-                    emit_stream_final(app, session, &text);
-                }
-                crate::stt::log_stt(&profile.summary());
-                engine.reset();
-                buffer.clear();
-                *active_stream_session = 0;
-                let _ = done.send(StreamFinishStatus::Completed);
-            } else {
-                let _ = done.send(StreamFinishStatus::NoStream);
-            }
-        }
-    }
-}
-
-fn drain_stream_buffer(
-    engine: &mut LiveStreamEngine,
-    buffer: &mut Vec<f32>,
-    profile: &mut StreamProfile,
-    app: &tauri::AppHandle,
-    flush_all: bool,
-) {
-    let chunk = stream::chunk_samples();
-    while buffer.len() >= chunk || (flush_all && !buffer.is_empty()) {
-        let take = if buffer.len() >= chunk {
-            chunk
-        } else {
-            buffer.len()
-        };
-        let samples = buffer.drain(..take).collect::<Vec<_>>();
-        profile.audio_samples += samples.len();
-        profile.chunks += 1;
-        let started = Instant::now();
-        let text = engine.accept_samples(&samples);
-        profile.decode_elapsed += started.elapsed();
-        if let Some(text) = text {
-            profile.mark_first_text();
-            emit_stream_partial(app, profile.session, &text);
-        }
-    }
-}
-
-fn emit_stream_partial(app: &tauri::AppHandle, session: u64, text: &str) {
-    if !active_session_matches(
-        app.state::<LiveRuntime>()
-            .active_session
-            .load(Ordering::SeqCst),
-        session,
-    ) {
-        return;
-    }
-    let state = app.state::<LiveSessionState>();
-    let view = state.update_partial(text);
-    super::events::emit_session(app, &view);
-}
-
-fn emit_stream_final(app: &tauri::AppHandle, session: u64, text: &str) {
-    if !active_session_matches(
-        app.state::<LiveRuntime>()
-            .active_session
-            .load(Ordering::SeqCst),
-        session,
-    ) {
-        return;
-    }
-    let state = app.state::<LiveSessionState>();
-    let view = state.update_final(text);
-    super::events::emit_session(app, &view);
-    std::thread::sleep(Duration::from_millis(180));
-    let view = state.return_to_listening();
-    super::events::emit_session(app, &view);
-}
-
-#[derive(Default)]
-struct StreamProfile {
-    session: u64,
-    started: Option<Instant>,
-    first_text: Option<Duration>,
-    decode_elapsed: Duration,
-    audio_samples: usize,
-    chunks: usize,
-}
-
-impl StreamProfile {
-    fn new(session: u64) -> Self {
-        Self {
-            session,
-            started: Some(Instant::now()),
-            ..Default::default()
-        }
-    }
-
-    fn mark_first_text(&mut self) {
-        if self.first_text.is_none() {
-            self.first_text = self.started.map(|started| started.elapsed());
-        }
-    }
-
-    fn summary(&self) -> String {
-        let audio_ms = self.audio_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64;
-        let first_text_ms = self
-            .first_text
-            .map(|duration| duration.as_millis().to_string())
-            .unwrap_or_else(|| "none".into());
-        format!(
-            "live nemotron profile session={} chunks={} audio_ms={} decode_ms={} first_text_ms={}",
-            self.session,
-            self.chunks,
-            audio_ms,
-            self.decode_elapsed.as_millis(),
-            first_text_ms
-        )
-    }
-}
-
-fn should_accept_stream_samples(
-    message_session: u64,
-    active_session: u64,
-    stream_session: u64,
-) -> bool {
-    active_session_matches(active_session, message_session) && message_session == stream_session
 }
 
 fn should_install_capture(

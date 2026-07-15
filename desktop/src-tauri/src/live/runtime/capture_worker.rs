@@ -15,7 +15,8 @@ use crate::audio::timeline::RecordingInput;
 
 use super::super::{events, state::LiveSessionState};
 use super::level_channel::{publish_level, LatestLevelSender};
-use super::{active_session_matches, spawn_stream_crash_handler, LiveRuntime};
+use super::session_identity::active_session_matches;
+use super::{spawn_stream_crash_handler, LiveRuntime};
 
 const CAPTURE_LOSS_FINAL_DRAIN_ATTEMPTS: usize = 64;
 pub(super) const CAPTURE_WORKER_FAILURE: &str = "Live capture worker stopped unexpectedly.";
