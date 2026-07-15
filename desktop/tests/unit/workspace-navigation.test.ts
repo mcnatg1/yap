@@ -85,4 +85,19 @@ describe("workspace navigation", () => {
       workspaceView: "home",
     });
   });
+
+  it("keeps Settings and Help under one mutually exclusive modal owner", () => {
+    expect(workspaceNavigationStateForAction(
+      state({ activeRail: "help", helpOpen: true }),
+      { type: "openWorkspace", action: "details" },
+    )).toMatchObject({ detailsOpen: true, helpOpen: false });
+    expect(workspaceNavigationStateForAction(
+      state({ activeRail: "details", detailsOpen: true }),
+      { type: "openWorkspace", action: "help" },
+    )).toMatchObject({ detailsOpen: false, helpOpen: true });
+    expect(workspaceNavigationStateForAction(
+      state({ activeRail: "help", helpOpen: true }),
+      { type: "showDetails" },
+    )).toMatchObject({ detailsOpen: true, helpOpen: false });
+  });
 });

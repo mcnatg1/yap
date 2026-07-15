@@ -63,17 +63,25 @@ export function workspaceNavigationStateForAction(
         helpOpen: false,
       };
     case "openWorkspace":
-      if (action.action === "details") return { ...state, activeRail: "details", detailsOpen: true };
-      if (action.action === "help") return { ...state, activeRail: "help", helpOpen: true };
+      if (action.action === "details") {
+        return { ...state, activeRail: "details", detailsOpen: true, helpOpen: false };
+      }
+      if (action.action === "help") {
+        return { ...state, activeRail: "help", detailsOpen: false, helpOpen: true };
+      }
       return { ...state, activeRail: action.action, workspaceView: action.action };
     case "setDetailsOpen":
-      return action.open ? { ...state, detailsOpen: true } : workspaceNavigationStateForAction(state, { type: "closeDetails" });
+      return action.open
+        ? { ...state, detailsOpen: true, helpOpen: false }
+        : workspaceNavigationStateForAction(state, { type: "closeDetails" });
     case "setHelpOpen":
-      return action.open ? { ...state, helpOpen: true } : workspaceNavigationStateForAction(state, { type: "closeHelp" });
+      return action.open
+        ? { ...state, detailsOpen: false, helpOpen: true }
+        : workspaceNavigationStateForAction(state, { type: "closeHelp" });
     case "setRailCollapsed":
       return { ...state, railCollapsed: action.collapsed };
     case "showDetails":
-      return { ...state, activeRail: "details", detailsOpen: true };
+      return { ...state, activeRail: "details", detailsOpen: true, helpOpen: false };
   }
 }
 

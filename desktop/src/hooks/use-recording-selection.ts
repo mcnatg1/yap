@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { TranscriptHistoryEntry } from "@/history-model";
+import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { isRecordingFinished, type RecordingJobView } from "@/lib/app-types";
+import {
+  projectHistoryPlaybackAdmission,
+  type HistoryPlaybackAdmissions,
+} from "@/lib/history-playback";
 import { historyEntryToRecordingJob } from "@/lib/history-utils";
 
 type ReviewMorphOrigin = {
@@ -10,6 +15,16 @@ type ReviewMorphOrigin = {
   top: number;
   width: number;
 };
+
+function withHistoryPlaybackAdmission(
+  item: RecordingJobView | undefined,
+  entry: TranscriptHistoryEntry | undefined,
+  admissions: HistoryPlaybackAdmissions,
+) {
+  if (!item || !entry || item.outputPath !== entry.outputPath) return item;
+  const admission = projectHistoryPlaybackAdmission(entry, admissions);
+  return admission ? { ...item, playbackPath: admission.playbackPath } : item;
+}
 
 export function useRecordingSelection({
   history,
@@ -27,7 +42,26 @@ export function useRecordingSelection({
     [],
   );
   const selectedHistoryEntry = history.find((entry) => entry.outputPath === selectedHistoryOutput);
-  const selectedHistoryItem = selectedHistoryEntry ? historyJob(selectedHistoryEntry) : undefined;
+  const selectedHistoryItemWithoutPlayback = selectedHistoryEntry
+    ? historyJob(selectedHistoryEntry)
+    : undefined;
+  const { historyPlaybackAdmissions } = useRegisteredPlayback(
+    queue,
+    history,
+    selectedHistoryEntry,
+  );
+  const selectedHistoryItem = useMemo(
+    () => withHistoryPlaybackAdmission(
+      selectedHistoryItemWithoutPlayback,
+      selectedHistoryEntry,
+      historyPlaybackAdmissions,
+    ),
+    [
+      historyPlaybackAdmissions,
+      selectedHistoryEntry,
+      selectedHistoryItemWithoutPlayback,
+    ],
+  );
   const selectedItem =
     queue.find((item) => item.id === selectedId) ??
     selectedHistoryItem ??

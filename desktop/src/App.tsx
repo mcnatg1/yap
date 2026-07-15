@@ -1,26 +1,21 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AppChrome } from "@/components/app/app-chrome";
+import { AppOverlays } from "@/components/app/app-overlays";
 import { AppSidebar } from "@/components/app/app-sidebar";
-import { projectAppModalState } from "@/components/panels/app-modal-state";
 import { DropHero } from "@/components/panels/drop-hero";
-import { HelpSheet } from "@/components/panels/help-sheet";
 import { HistoryPanel } from "@/components/panels/history-panel";
 import { PolishPanel } from "@/components/panels/polish-panel";
 import { QueuePanel } from "@/components/panels/queue-panel";
-import { SettingsSheet } from "@/components/panels/settings-sheet";
 import { TranscriptPanel } from "@/components/panels/transcript-panel";
 import { WorkspaceHeader } from "@/components/panels/workspace-header";
-import { TranscriptPreviewDialog } from "@/components/transcript-preview-dialog";
-import { TranscriptReviewDialog } from "@/components/transcript-review-dialog";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useHistoryActions } from "@/hooks/use-history-actions";
 import { useRecordingJobs } from "@/hooks/use-imported-recording-queue";
 import { useHistoryCatalogSync } from "@/hooks/use-history-catalog-sync";
 import { useRecordingSelection } from "@/hooks/use-recording-selection";
-import { useRegisteredPlayback } from "@/hooks/use-registered-playback";
 import { useRecordingDrop } from "@/hooks/use-recording-drop";
 import { useSettingsControl } from "@/hooks/use-settings-control";
 import { useTranscriptFileActions } from "@/hooks/use-transcript-file-actions";
@@ -31,35 +26,13 @@ import { useWorkspaceNavigation } from "@/hooks/use-workspace-navigation";
 import { type TranscriptHistoryEntry } from "@/history-model";
 import {
   isRecordingFinished,
-  type RailAction,
-  type RecordingJobView,
   workspaceCopy,
 } from "@/lib/app-types";
 import { fireAndReport } from "@/lib/fire-and-report";
 import { cn } from "@/lib/utils";
-import {
-  projectHistoryPlaybackAdmission,
-  type HistoryPlaybackAdmissions,
-} from "@/lib/history-playback";
-
-const unavailableHistoryRetry = () => undefined;
 
 function reportRecordingAction(action: () => unknown, message: string) {
   fireAndReport(action, (error) => toast.error(`${message}: ${error.message}`));
-}
-
-function withHistoryPlaybackAdmission(
-  item: RecordingJobView | undefined,
-  entry: TranscriptHistoryEntry | undefined,
-  admissions: HistoryPlaybackAdmissions,
-) {
-  if (!item || !entry || item.outputPath !== entry.outputPath) return item;
-  const admission = projectHistoryPlaybackAdmission(entry, admissions);
-  if (!admission) return item;
-  return {
-    ...item,
-    playbackPath: admission.playbackPath,
-  };
 }
 
 export default function App() {
@@ -107,52 +80,22 @@ export default function App() {
     reviewMorphOrigin,
     selectHistoryEntry,
     selectQueueItem,
-    selectedHistoryEntry,
-    selectedHistoryItem: selectedHistoryItemWithoutPlaybackMetadata,
+    selectedHistoryItem,
     selectedHistoryOutput,
     selectedId,
-    selectedItem: selectedItemWithoutPlaybackMetadata,
+    selectedItem,
   } = useRecordingSelection({ history, queue });
-  const {
-    historyPlaybackAdmissions,
-  } = useRegisteredPlayback(queue, history, selectedHistoryEntry);
-  const selectedHistoryItem = useMemo(
-    () => withHistoryPlaybackAdmission(
-      selectedHistoryItemWithoutPlaybackMetadata,
-      selectedHistoryEntry,
-      historyPlaybackAdmissions,
-    ),
-    [
-      historyPlaybackAdmissions,
-      selectedHistoryEntry,
-      selectedHistoryItemWithoutPlaybackMetadata,
-    ],
-  );
-  const selectedItem = useMemo(
-    () => selectedHistoryEntry
-      ? withHistoryPlaybackAdmission(
-          selectedItemWithoutPlaybackMetadata,
-          selectedHistoryEntry,
-          historyPlaybackAdmissions,
-        )
-      : selectedItemWithoutPlaybackMetadata,
-    [
-      historyPlaybackAdmissions,
-      selectedHistoryEntry,
-      selectedItemWithoutPlaybackMetadata,
-    ],
-  );
   const {
     activeRail,
     closeDetails,
     detailsOpen,
     helpOpen,
-    onDetailsOpenChange: setDetailsOpen,
-    onHelpOpenChange: setHelpOpen,
-    openWorkspace: navigateWorkspace,
+    onDetailsOpenChange,
+    onHelpOpenChange,
+    openWorkspace,
     railCollapsed,
     setRailCollapsed,
-    showDetails: showDetailsNavigation,
+    showDetails,
     workspaceView,
   } = useWorkspaceNavigation({
     onOpenDetails: () => void settingsRefreshRef.current(),
@@ -160,28 +103,6 @@ export default function App() {
       setStatus(isRecordingFinished(selectedItem?.status) ? "Transcript ready" : "Select a finished transcript first");
     },
   });
-  const setAppModal = useCallback((modal: "settings" | "help" | null) => {
-    const next = projectAppModalState(modal);
-    setDetailsOpen(next.detailsOpen);
-    setHelpOpen(next.helpOpen);
-  }, [setDetailsOpen, setHelpOpen]);
-  const openWorkspace = useCallback((action: RailAction) => {
-    if (action === "details") setAppModal("settings");
-    if (action === "help") setAppModal("help");
-    navigateWorkspace(action);
-  }, [navigateWorkspace, setAppModal]);
-  const showDetails = useCallback(() => {
-    setAppModal("settings");
-    showDetailsNavigation();
-  }, [setAppModal, showDetailsNavigation]);
-  const onDetailsOpenChange = useCallback((open: boolean) => {
-    if (open) setAppModal("settings");
-    else setDetailsOpen(false);
-  }, [setAppModal, setDetailsOpen]);
-  const onHelpOpenChange = useCallback((open: boolean) => {
-    if (open) setAppModal("help");
-    else setHelpOpen(false);
-  }, [setAppModal, setHelpOpen]);
   const addRecordings = useCallback(async () => {
     const selectedQueueId = await pickImportedRecordings();
     if (selectedQueueId === undefined) return;
@@ -395,71 +316,27 @@ export default function App() {
           {appWorkspace}
         </div>
       </SidebarInset>
-      <SettingsSheet
-        auth={settings.auth}
-        busy={settings.busy}
-        fallbackActionPending={settings.fallback.actionPending}
-        fallbackModel={settings.fallback.model}
-        liveBusy={settings.live.busy}
-        liveInputDevices={settings.live.inputDevices}
-        liveSettingsError={settings.live.settingsError}
-        liveView={settings.live.view}
-        localComputeTargets={settings.compute.targets}
-        onCancelFallbackInstall={() => void settings.fallback.cancelInstall()}
-        onInstallFallback={(options) => void settings.fallback.install(options)}
-        onOpenFallbackFolder={() => void settings.fallback.openFolder()}
-        onPreflightLiveInput={settings.live.preflightInput}
-        onResetLiveHotkey={settings.live.resetHotkey}
-        onResetLivePasteHotkey={settings.live.resetPasteHotkey}
-        onOpenChange={onDetailsOpenChange}
-        onRemoveFallback={() => void settings.fallback.remove()}
-        onSetInputDevice={settings.live.updateInputDevice}
-        onSetFallbackEnabled={(enabled) => void settings.fallback.setEnabled(enabled)}
-        onVerifyFallback={() => void settings.fallback.verify()}
-        onSetLiveCaptureMode={settings.live.updateCaptureMode}
-        onSetLiveHotkey={settings.live.updateHotkey}
-        onSetLiveOverlayEnabled={settings.live.updateOverlay}
-        onSetLivePasteHotkey={settings.live.updatePasteHotkey}
-        onSetLocalComputeTarget={(targetId) => void settings.compute.updateTarget(targetId)}
-        onSkipSetup={() => {
-          settings.skipSetup();
-          closeDetails();
-        }}
-        onStartLive={settings.live.start}
-        onStopLive={settings.live.stop}
-        open={detailsOpen}
-        serverLabel={settings.serverLabel}
+      <AppOverlays
+        closeDetails={closeDetails}
+        closeHistoryReview={closeHistoryReview}
+        closeTranscriptPreview={closeTranscriptPreview}
+        copyTranscript={copyTranscript}
+        detailsOpen={detailsOpen}
+        helpOpen={helpOpen}
+        historyJob={historyJob}
+        historyReviewOpen={workspaceView === "home" && Boolean(selectedHistoryItem)}
+        onDetailsOpenChange={onDetailsOpenChange}
+        onHelpOpenChange={onHelpOpenChange}
+        openAppPath={openAppPath}
+        openWorkspace={openWorkspace}
+        previewEntry={previewEntry}
+        previewText={previewText}
+        revealPath={revealPath}
+        reviewMorphOrigin={reviewMorphOrigin}
+        selectedHistoryItem={selectedHistoryItem}
+        settings={settings}
         status={status}
-      />
-      <HelpSheet
-        onOpenChange={onHelpOpenChange}
-        open={helpOpen}
-      />
-      <TranscriptReviewDialog
-        elapsedSeconds={0}
-        item={selectedHistoryItem}
-        morphOrigin={reviewMorphOrigin}
-        onCopy={copyTranscript}
-        onOpen={(path) => void openAppPath(path)}
-        onOpenChange={(open) => {
-          if (!open) closeHistoryReview();
-        }}
-        onOpenHelp={() => openWorkspace("help")}
-        onRetry={unavailableHistoryRetry}
-        onReveal={(path) => void revealPath(path)}
-        open={workspaceView === "home" && Boolean(selectedHistoryItem)}
-        running={false}
-        text={selectedHistoryItem?.outputPath ? transcriptText[selectedHistoryItem.outputPath] : undefined}
-      />
-      <TranscriptPreviewDialog
-        entry={previewEntry}
-        onCopy={(entry) => void copyTranscript(historyJob(entry))}
-        onOpen={(entry) => void openAppPath(entry.outputPath)}
-        onOpenChange={(open) => {
-          if (!open) closeTranscriptPreview();
-        }}
-        onReveal={(entry) => void revealPath(entry.outputPath)}
-        text={previewText}
+        transcriptText={transcriptText}
       />
     </SidebarProvider>
   );
