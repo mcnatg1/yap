@@ -35,6 +35,45 @@ fn navigation_guard<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
+fn log_lifecycle_shutdown_errors(errors: Vec<String>) {
+    for error in errors {
+        stt::log_yap(&format!("desktop background shutdown failed: {error}"));
+    }
+}
+
+fn start_owned_background_work(
+    app: &tauri::AppHandle,
+    lifecycle: &runtime::DesktopLifecycle,
+    live_runtime: live::runtime::LiveRuntime,
+) -> std::io::Result<()> {
+    let result = (|| {
+        lifecycle.spawn_periodic(
+            "live-model-idle-monitor",
+            std::time::Duration::from_secs(60),
+            move || live_runtime.unload_if_idle(std::time::Duration::from_secs(600)),
+        )?;
+        jobs::start_remote_job_drain(app, lifecycle)?;
+        let overlay_app = app.clone();
+        let mut recovery_ticks = 0_u8;
+        lifecycle.spawn_periodic(
+            "live-overlay-monitor",
+            std::time::Duration::from_millis(125),
+            move || {
+                live::overlay_window::follow_cursor_if_idle(&overlay_app);
+                recovery_ticks = recovery_ticks.saturating_add(1);
+                if recovery_ticks >= 16 {
+                    live::overlay_window::recover(&overlay_app);
+                    recovery_ticks = 0;
+                }
+            },
+        )
+    })();
+    if result.is_err() {
+        log_lifecycle_shutdown_errors(lifecycle.shutdown());
+    }
+    result
+}
+
 fn write_startup_migration_diagnostic(
     directory: &std::path::Path,
     detail: &str,
@@ -135,10 +174,7 @@ pub(crate) fn run() {
     let fallback_model_install_state = stt::fallback_model::FallbackModelInstallState::new();
     let live_runtime_for_monitor = live_runtime.clone();
     let live_runtime_for_exit = live_runtime.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        live_runtime_for_monitor.unload_if_idle(std::time::Duration::from_secs(600));
-    });
+    let desktop_lifecycle = runtime::DesktopLifecycle::new();
 
     let builder = tauri::Builder::default()
         .plugin(navigation_guard())
@@ -156,25 +192,12 @@ pub(crate) fn run() {
         .manage(live::actions::QuitCoordinator::new())
         .manage(fallback_model_install_state)
         .manage(runtime_state)
+        .manage(desktop_lifecycle)
         .setup(move |app| {
             live::shortcut_runtime::install(app, live_shortcuts)?;
             tray::install(app.handle())?;
-            jobs::start_remote_job_drain(app.handle());
-            {
-                let app = app.handle().clone();
-                std::thread::spawn(move || {
-                    let mut recovery_ticks = 0_u8;
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_millis(125));
-                        live::overlay_window::follow_cursor_if_idle(&app);
-                        recovery_ticks = recovery_ticks.saturating_add(1);
-                        if recovery_ticks >= 16 {
-                            live::overlay_window::recover(&app);
-                            recovery_ticks = 0;
-                        }
-                    }
-                });
-            }
+            let lifecycle = app.state::<runtime::DesktopLifecycle>();
+            start_owned_background_work(app.handle(), lifecycle.inner(), live_runtime_for_monitor)?;
             let startup_live = app.state::<live::LiveSessionState>().snapshot();
             if startup_live.visibility == live::state::LiveOverlayVisibility::Enabled {
                 let result = if startup_live.status == live::state::LiveSessionStatus::Idle {
@@ -236,6 +259,8 @@ pub(crate) fn run() {
                 }
             }
             tauri::RunEvent::Exit => {
+                let lifecycle = app_handle.state::<runtime::DesktopLifecycle>();
+                log_lifecycle_shutdown_errors(lifecycle.shutdown());
                 let quit = app_handle.state::<live::actions::QuitCoordinator>();
                 if !quit.exit_authorized() {
                     stt::log_yap("process exit reached degraded live shutdown fallback");

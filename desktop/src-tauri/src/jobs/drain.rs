@@ -293,11 +293,14 @@ fn remote_retry_plan(
     (retry_at_ms, error.code, error.user_message)
 }
 
-pub(crate) fn start(app: &tauri::AppHandle) {
+pub(crate) fn start(
+    app: &tauri::AppHandle,
+    lifecycle: &crate::runtime::DesktopLifecycle,
+) -> std::io::Result<()> {
     let app = app.clone();
-    std::mem::drop(tauri::async_runtime::spawn(async move {
+    lifecycle.spawn_async_task("remote-job-drain", async move {
         run(app).await;
-    }));
+    })
 }
 
 async fn run(app: tauri::AppHandle) {

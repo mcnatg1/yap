@@ -15,8 +15,11 @@ pub use model::{
 
 pub(crate) use drain::RemoteJobDrain;
 
-pub(crate) fn start_remote_job_drain(app: &tauri::AppHandle) {
-    drain::start(app);
+pub(crate) fn start_remote_job_drain(
+    app: &tauri::AppHandle,
+    lifecycle: &crate::runtime::DesktopLifecycle,
+) -> std::io::Result<()> {
+    drain::start(app, lifecycle)
 }
 
 fn remote_jobs_directory() -> std::path::PathBuf {
