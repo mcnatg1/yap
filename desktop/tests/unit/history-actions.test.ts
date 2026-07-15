@@ -54,15 +54,14 @@ function actionHarness(overrides: Partial<HistoryActionPorts> = {}) {
     clearHistorySelectionIf: vi.fn((path) => calls.push(`clear:${path}`)),
     forgetHistoryEntry: vi.fn((path) => {
       calls.push(`forget:${path}`);
-      return true;
     }),
     forgetTranscriptText: vi.fn((path) => calls.push(`text:${path}`)),
     recordVisibleHistoryEntries: vi.fn((entries, warning) => {
       calls.push(`record:${entries[0]?.outputPath}:${warning}`);
       return true;
     }),
-    rememberHiddenHistoryEntry: vi.fn((path) => {
-      calls.push(`hide:${path}`);
+    rememberHiddenHistoryEntry: vi.fn(async (entry) => {
+      calls.push(`hide:${entry.outputPath}`);
       return true;
     }),
     selectHistoryEntry: vi.fn((entry) => calls.push(`select:${entry.outputPath}`)),
@@ -86,10 +85,10 @@ function actionHarness(overrides: Partial<HistoryActionPorts> = {}) {
 }
 
 describe("history action ordering", () => {
-  it("hides locally before selection cleanup and success feedback", () => {
+  it("persists visibility before selection cleanup and success feedback", async () => {
     const { calls, ports, runtime } = actionHarness();
 
-    runHideHistoryEntry("C:/Yap/live-123.txt", ports, runtime);
+    await runHideHistoryEntry(historyEntry(), ports, runtime);
 
     expect(calls).toEqual([
       "hide:C:/Yap/live-123.txt",
@@ -99,17 +98,34 @@ describe("history action ordering", () => {
     ]);
   });
 
-  it("stops hide cleanup when the tombstone cannot be recorded", () => {
+  it("stops hide cleanup when the visibility preference cannot be recorded", async () => {
     const { calls, ports, runtime } = actionHarness({
-      rememberHiddenHistoryEntry: vi.fn(() => {
+      rememberHiddenHistoryEntry: vi.fn(async () => {
         calls.push("hide:failed");
         return false;
       }),
     });
 
-    runHideHistoryEntry("C:/Yap/live-123.txt", ports, runtime);
+    await runHideHistoryEntry(historyEntry(), ports, runtime);
 
     expect(calls).toEqual(["hide:failed"]);
+  });
+
+  it("finishes hide cleanup after visibility is durable when row persistence fails", async () => {
+    const { calls, ports, runtime } = actionHarness({
+      forgetHistoryEntry: vi.fn(() => {
+        calls.push("forget:failed");
+      }),
+    });
+
+    await runHideHistoryEntry(historyEntry(), ports, runtime);
+
+    expect(calls).toEqual([
+      "hide:C:/Yap/live-123.txt",
+      "forget:failed",
+      "clear:C:/Yap/live-123.txt",
+      "success:Hidden from history",
+    ]);
   });
 
   it("deletes the native saved session before local cleanup", async () => {
@@ -119,7 +135,6 @@ describe("history action ordering", () => {
 
     expect(calls).toEqual([
       "delete-saved:123|C:/Yap/live-123.txt|C:/Yap/live-123.commit.json",
-      "hide:C:/Yap/live-123.txt",
       "forget:C:/Yap/live-123.txt",
       "clear:C:/Yap/live-123.txt",
       "text:C:/Yap/live-123.txt",
@@ -127,11 +142,10 @@ describe("history action ordering", () => {
     ]);
   });
 
-  it("preserves the partial failure after native delete succeeds", async () => {
+  it("finishes device cleanup after native delete when local history persistence fails", async () => {
     const { calls, ports, runtime } = actionHarness({
-      rememberHiddenHistoryEntry: vi.fn(() => {
-        calls.push("hide:failed");
-        return false;
+      forgetHistoryEntry: vi.fn(() => {
+        calls.push("forget:failed");
       }),
     });
 
@@ -139,7 +153,10 @@ describe("history action ordering", () => {
 
     expect(calls).toEqual([
       "delete-saved:123|C:/Yap/live-123.txt|C:/Yap/live-123.commit.json",
-      "hide:failed",
+      "forget:failed",
+      "clear:C:/Yap/live-123.txt",
+      "text:C:/Yap/live-123.txt",
+      "success:Deleted from device",
     ]);
   });
 
@@ -157,7 +174,6 @@ describe("history action ordering", () => {
     const { calls, ports, runtime } = actionHarness({
       forgetHistoryEntry: vi.fn((path) => {
         calls.push(`forget-failed:${path}`);
-        return false;
       }),
     });
 
@@ -215,6 +231,29 @@ describe("history action ordering", () => {
     expect(calls).toEqual([
       "delete-recoverable:123|C:/Yap/live-123.wav.part",
       "forget:C:/Yap/live-123.wav.part",
+      "clear:C:/Yap/live-123.wav.part",
+      "text:C:/Yap/live-123.wav.part",
+      "success:Partial recording deleted",
+    ]);
+  });
+
+  it("finishes recoverable cleanup after native delete when row persistence fails", async () => {
+    const { calls, ports, runtime } = actionHarness({
+      forgetHistoryEntry: vi.fn(() => {
+        calls.push("forget:failed");
+      }),
+    });
+
+    await runDeleteRecoverableHistoryEntry(historyEntry({
+      captureCommitPath: undefined,
+      outputPath: "C:/Yap/live-123.wav.part",
+      recoveryState: "recoverable",
+      sourcePath: "C:/Yap/live-123.wav.part",
+    }), ports, runtime);
+
+    expect(calls).toEqual([
+      "delete-recoverable:123|C:/Yap/live-123.wav.part",
+      "forget:failed",
       "clear:C:/Yap/live-123.wav.part",
       "text:C:/Yap/live-123.wav.part",
       "success:Partial recording deleted",

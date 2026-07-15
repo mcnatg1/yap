@@ -3,16 +3,24 @@ import { toast } from "sonner";
 
 import {
   filterHiddenTranscriptHistory,
+  filterLegacyHiddenTranscriptHistory,
   hideTranscriptHistory,
   recordVisibleTranscriptHistoryEntries,
   transcriptPathIdentity,
   type TranscriptHistoryEntry,
 } from "@/history-model";
 import {
+  hideNativeHistoryEntry,
+  migrateHiddenNativeHistory,
+  nativeHistoryIdentity,
+} from "@/history-catalog";
+import {
+  compactHiddenTranscriptHistory,
   pruneMissingHiddenTranscriptHistory,
   readHiddenTranscriptHistory,
   readTranscriptHistory,
   readVisibleTranscriptHistory,
+  removeMigratedHiddenTranscriptHistory,
   writeHiddenTranscriptHistory,
   writeTranscriptHistory,
   type HistoryStorage,
@@ -44,6 +52,7 @@ export function createTranscriptHistoryStore({
   storage,
 }: TranscriptHistoryStoreOptions) {
   let acceptedNativeGeneration = 0;
+  let nativeVisibilityAuthorityReady = false;
   const acceptedNativeGenerationByOutput = new Map<
     string,
     { generation: number; sessionId: string }
@@ -69,10 +78,16 @@ export function createTranscriptHistoryStore({
     if (!entries.length) return false;
 
     const hiddenHistoryOutputs = readHiddenTranscriptHistory(storage);
+    const current = nativeVisibilityAuthorityReady
+      ? filterLegacyHiddenTranscriptHistory(getCurrentHistory(), hiddenHistoryOutputs)
+      : filterHiddenTranscriptHistory(getCurrentHistory(), hiddenHistoryOutputs);
+    const visibleEntries = nativeVisibilityAuthorityReady
+      ? filterLegacyHiddenTranscriptHistory(entries, hiddenHistoryOutputs)
+      : filterHiddenTranscriptHistory(entries, hiddenHistoryOutputs);
     const next = recordVisibleTranscriptHistoryEntries(
-      getCurrentHistory(),
-      entries,
-      hiddenHistoryOutputs,
+      current,
+      visibleEntries,
+      [],
     );
     if (next === getCurrentHistory()) return false;
     try {
@@ -146,13 +161,12 @@ export function createTranscriptHistoryStore({
       const next = reconcileNativeTranscriptHistoryEntries(
         legacyHistory,
         mergedNativeEntries,
-        hiddenHistory,
+        nativeVisibilityAuthorityReady ? [] : hiddenHistory,
       );
 
-      const visibleHistory = filterHiddenTranscriptHistory(
-        next,
-        hiddenHistory,
-      );
+      const visibleHistory = nativeVisibilityAuthorityReady
+        ? filterLegacyHiddenTranscriptHistory(next, hiddenHistory)
+        : filterHiddenTranscriptHistory(next, hiddenHistory);
       pruneAcceptedNativeGenerations(visibleHistory);
       replaceHistory(visibleHistory);
       return visibleHistory;
@@ -161,6 +175,9 @@ export function createTranscriptHistoryStore({
 
   return {
     captureNativeHistoryReconciliation,
+    confirmNativeVisibilityAuthority() {
+      nativeVisibilityAuthorityReady = true;
+    },
     recordVisibleHistoryEntries,
   };
 }
@@ -191,18 +208,30 @@ export function useTranscriptHistory() {
   }
   const {
     captureNativeHistoryReconciliation,
+    confirmNativeVisibilityAuthority,
     recordVisibleHistoryEntries,
   } = historyStoreRef.current;
 
   const reconcileHiddenHistory = useCallback(async () => {
     await pruneMissingHiddenTranscriptHistory(resolveOwnedLiveTranscriptPaths);
+    const hidden = compactHiddenTranscriptHistory();
+    const migration = await migrateHiddenNativeHistory(hidden);
+    removeMigratedHiddenTranscriptHistory(migration.migratedOutputPaths);
+    confirmNativeVisibilityAuthority();
     replaceHistory(readVisibleTranscriptHistory());
-  }, [replaceHistory]);
+  }, [confirmNativeVisibilityAuthority, replaceHistory]);
 
-  const rememberHiddenHistoryEntry = useCallback((outputPath: string) => {
-    const next = hideTranscriptHistory(readHiddenTranscriptHistory(), outputPath);
+  const rememberHiddenHistoryEntry = useCallback(async (entry: TranscriptHistoryEntry) => {
     try {
-      writeHiddenTranscriptHistory(next);
+      if (nativeHistoryIdentity(entry)) {
+        await hideNativeHistoryEntry(entry);
+      } else {
+        const next = hideTranscriptHistory(
+          readHiddenTranscriptHistory(),
+          entry.outputPath,
+        );
+        writeHiddenTranscriptHistory(next);
+      }
     } catch (error) {
       console.warn("Hidden transcript history could not be saved.", error);
       toast.warning("Hidden transcript history could not be saved.");
@@ -218,10 +247,8 @@ export function useTranscriptHistory() {
     } catch (error) {
       console.warn("Transcript history removal could not be saved.", error);
       toast.warning("Transcript history removal could not be saved.");
-      return false;
     }
     replaceHistory(next);
-    return true;
   }, [replaceHistory]);
 
   return {

@@ -16,12 +16,15 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
     let builder = builder
         .manage(media_protocol::MediaOwner::new())
         .manage(crate::live::hotkey_commands::HotkeyEnrollmentGate::default())
+        .manage(history::HistoryCatalogOwner::open_default())
         .manage(recording_jobs)
         .manage(remote_job_drain)
         .manage(crate::server_connector::ServerConnector::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
         history::history_catalog,
+        history::history_hide_native,
+        history::history_migrate_hidden_paths,
         crate::server_connector::server_connection_status,
         crate::server_connector::refresh_server_connection,
         crate::server_connector::server_settings,

@@ -71,6 +71,38 @@ export function writeHiddenTranscriptHistory(
   storage.setItem(hiddenTranscriptHistoryKey, JSON.stringify(normalizeHiddenTranscriptHistory(outputPaths)));
 }
 
+export function compactHiddenTranscriptHistory(
+  storage: HistoryStorage | undefined = globalThis.localStorage,
+) {
+  if (!storage) return [];
+  const persisted = storage.getItem(hiddenTranscriptHistoryKey);
+  const normalized = readHiddenTranscriptHistory(storage);
+  const encoded = JSON.stringify(normalized);
+  if (persisted !== null && persisted !== encoded) {
+    storage.setItem(hiddenTranscriptHistoryKey, encoded);
+  }
+  return normalized;
+}
+
+export function removeMigratedHiddenTranscriptHistory(
+  outputPaths: string[],
+  storage: HistoryStorage | undefined = globalThis.localStorage,
+) {
+  if (!storage) return [];
+  const migrated = new Set(
+    normalizeHiddenTranscriptHistory(outputPaths).map(transcriptPathIdentity),
+  );
+  const current = readHiddenTranscriptHistory(storage);
+  if (!migrated.size) return current;
+  const remaining = current.filter(
+    (outputPath) => !migrated.has(transcriptPathIdentity(outputPath)),
+  );
+  if (remaining.length !== current.length) {
+    writeHiddenTranscriptHistory(remaining, storage);
+  }
+  return remaining;
+}
+
 export async function pruneMissingHiddenTranscriptHistory(
   authorize: (outputPaths: string[]) => Promise<OwnedLiveTranscriptPathResolution[]>,
   storage: HistoryStorage | undefined = globalThis.localStorage,

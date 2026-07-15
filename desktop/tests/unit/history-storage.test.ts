@@ -5,11 +5,52 @@ import {
   maxTranscriptHistoryEntries,
 } from "@/history-model";
 import {
+  compactHiddenTranscriptHistory,
+  readHiddenTranscriptHistory,
   readTranscriptHistory,
   readVisibleTranscriptHistory,
+  removeMigratedHiddenTranscriptHistory,
 } from "@/history-storage";
 
 describe("transcript history persistence", () => {
+  it("compacts an oversized legacy tombstone value on disk", () => {
+    const values = new Map<string, string>([
+      ["yap.hiddenTranscriptHistory.v1", JSON.stringify(
+        Array.from({ length: 501 }, (_, index) => `hidden-${index}.txt`),
+      )],
+    ]);
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+
+    compactHiddenTranscriptHistory(storage);
+
+    expect(JSON.parse(values.get("yap.hiddenTranscriptHistory.v1") ?? "[]"))
+      .toHaveLength(500);
+  });
+
+  it("removes migrated native tombstones without dropping concurrent legacy entries", () => {
+    const values = new Map<string, string>([
+      ["yap.hiddenTranscriptHistory.v1", JSON.stringify([
+        "new-legacy.txt",
+        "C:/Yap/native.txt",
+        "old-legacy.txt",
+      ])],
+    ]);
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+
+    removeMigratedHiddenTranscriptHistory(["c:\\yap\\native.txt"], storage);
+
+    expect(readHiddenTranscriptHistory(storage)).toEqual([
+      "new-legacy.txt",
+      "old-legacy.txt",
+    ]);
+  });
+
   it("preserves warning metadata for partial live saves", () => {
     const storage = {
       getItem: () => JSON.stringify([{

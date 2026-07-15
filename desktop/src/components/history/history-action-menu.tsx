@@ -73,7 +73,7 @@ export function HistoryActionMenu({
                   Recover
                 </DropdownMenuItem>
               ) : null}
-              <DropdownMenuItem onSelect={() => actions.onHide(entry.outputPath)}>
+              <DropdownMenuItem onSelect={() => actions.onHide(entry)}>
                 <EyeSlash />
                 Hide
               </DropdownMenuItem>
@@ -88,7 +88,7 @@ export function HistoryActionMenu({
               ) : null}
             </DropdownMenuGroup>
           ) : hideOnly ? (
-            <DropdownMenuItem onSelect={() => actions.onHide(entry.outputPath)}>
+            <DropdownMenuItem onSelect={() => actions.onHide(entry)}>
               <EyeSlash />
               Hide
             </DropdownMenuItem>
@@ -113,7 +113,7 @@ export function HistoryActionMenu({
                 </DropdownMenuItem>
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => actions.onHide(entry.outputPath)}>
+              <DropdownMenuItem onSelect={() => actions.onHide(entry)}>
                 <EyeSlash />
                 Hide
               </DropdownMenuItem>

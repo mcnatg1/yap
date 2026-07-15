@@ -1,16 +1,24 @@
-//! Projects every native transcript source through one read-only history contract.
+//! Owns the native transcript catalog and its durable visibility policy.
+
+mod catalog;
+mod visibility;
 
 use std::collections::HashSet;
 
-use crate::{
-    jobs::commands::{CompletedRemoteTranscriptCatalog, JobCommandError, RecordingJobs},
-    live::recordings::{RecoverableLiveSession, SavedLiveSessionCatalog},
+use crate::jobs::commands::{JobCommandError, RecordingJobs};
+use catalog::{
+    collect_history_catalog, project_history_catalog, resolve_current_native_identity,
+    select_hidden_path_migration,
 };
+use visibility::HistoryVisibility;
 
 const RECOVERY_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_HISTORY_SESSIONS: usize = 500;
+const MAX_HISTORY_PATH_CHARS: usize = 32_768;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum HistoryOrigin {
     Live,
@@ -31,6 +39,24 @@ pub(crate) struct HistoryCatalogSession {
     warning: Option<String>,
 }
 
+impl HistoryCatalogSession {
+    fn identity(&self) -> NativeHistoryIdentity {
+        NativeHistoryIdentity {
+            origin: self.origin,
+            session_id: self.session_id.clone(),
+            output_path: self.output_path.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct NativeHistoryIdentity {
+    origin: HistoryOrigin,
+    session_id: String,
+    output_path: String,
+}
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HistoryCatalog {
@@ -38,216 +64,151 @@ pub(crate) struct HistoryCatalog {
     sessions: Vec<HistoryCatalogSession>,
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HiddenHistoryMigration {
+    migrated_output_paths: Vec<String>,
+}
+
+pub(crate) struct HistoryCatalogOwner {
+    visibility: HistoryVisibility,
+}
+
+impl HistoryCatalogOwner {
+    pub(crate) fn open_default() -> Self {
+        Self {
+            visibility: HistoryVisibility::open_default(),
+        }
+    }
+
+    fn project(&self, mut raw: HistoryCatalog) -> HistoryCatalog {
+        match self.visibility.hidden_identities() {
+            Ok(hidden) => project_history_catalog(raw, &hidden),
+            Err(error) => {
+                raw.maintenance_warnings.push(format!(
+                    "Hidden history preferences are unavailable: {error}"
+                ));
+                project_history_catalog(raw, &HashSet::new())
+            }
+        }
+    }
+
+    fn remember_hidden(&self, identities: &[NativeHistoryIdentity]) -> Result<(), String> {
+        self.visibility.hide_many(identities)
+    }
+}
+
 #[tauri::command]
 pub(crate) fn history_catalog(
     window: tauri::WebviewWindow,
     jobs: tauri::State<'_, RecordingJobs>,
+    owner: tauri::State<'_, HistoryCatalogOwner>,
 ) -> Result<HistoryCatalog, JobCommandError> {
-    crate::authorization::ensure_main(&window).map_err(|message| JobCommandError {
+    ensure_history_authorized(&window)?;
+    Ok(owner.project(load_raw_history_catalog(&jobs)?))
+}
+
+#[tauri::command]
+pub(crate) fn history_hide_native(
+    window: tauri::WebviewWindow,
+    jobs: tauri::State<'_, RecordingJobs>,
+    owner: tauri::State<'_, HistoryCatalogOwner>,
+    identity: NativeHistoryIdentity,
+) -> Result<(), JobCommandError> {
+    ensure_history_authorized(&window)?;
+    if !valid_native_identity(&identity) {
+        return Err(stale_history_identity_error());
+    }
+    let raw = load_raw_history_catalog(&jobs)?;
+    let Some(current) = resolve_current_native_identity(&raw, &identity) else {
+        return Err(stale_history_identity_error());
+    };
+    owner
+        .remember_hidden(std::slice::from_ref(&current))
+        .map_err(history_visibility_error)
+}
+
+#[tauri::command]
+pub(crate) fn history_migrate_hidden_paths(
+    window: tauri::WebviewWindow,
+    jobs: tauri::State<'_, RecordingJobs>,
+    owner: tauri::State<'_, HistoryCatalogOwner>,
+    output_paths: Vec<String>,
+) -> Result<HiddenHistoryMigration, JobCommandError> {
+    ensure_history_authorized(&window)?;
+    if output_paths.len() > MAX_HISTORY_SESSIONS {
+        return Err(JobCommandError {
+            code: "HISTORY_MIGRATION_TOO_LARGE".into(),
+            message: format!(
+                "Hidden history migration accepts at most {MAX_HISTORY_SESSIONS} paths."
+            ),
+        });
+    }
+    if output_paths.is_empty() {
+        owner
+            .remember_hidden(&[])
+            .map_err(history_visibility_error)?;
+        return Ok(HiddenHistoryMigration {
+            migrated_output_paths: Vec::new(),
+        });
+    }
+
+    let raw = load_raw_history_catalog(&jobs)?;
+    let (identities, migrated_output_paths) = select_hidden_path_migration(&raw, output_paths);
+    owner
+        .remember_hidden(&identities)
+        .map_err(history_visibility_error)?;
+    Ok(HiddenHistoryMigration {
+        migrated_output_paths,
+    })
+}
+
+fn ensure_history_authorized(window: &tauri::WebviewWindow) -> Result<(), JobCommandError> {
+    crate::authorization::ensure_main(window).map_err(|message| JobCommandError {
         code: "HISTORY_FORBIDDEN".into(),
         message,
-    })?;
+    })
+}
+
+fn valid_native_identity(identity: &NativeHistoryIdentity) -> bool {
+    !identity.session_id.is_empty()
+        && identity.session_id.len() <= 128
+        && identity
+            .session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !identity.output_path.is_empty()
+        && identity.output_path.chars().count() <= MAX_HISTORY_PATH_CHARS
+        && !identity.output_path.contains('\0')
+}
+
+fn stale_history_identity_error() -> JobCommandError {
+    JobCommandError {
+        code: "HISTORY_IDENTITY_STALE".into(),
+        message: "History identity is no longer current. Refresh history and try again.".into(),
+    }
+}
+
+fn history_visibility_error(message: String) -> JobCommandError {
+    JobCommandError {
+        code: "HISTORY_VISIBILITY_ERROR".into(),
+        message,
+    }
+}
+
+fn load_raw_history_catalog(jobs: &RecordingJobs) -> Result<HistoryCatalog, JobCommandError> {
     let live = crate::live::recordings::list_history_sources().map_err(history_error)?;
     let remote = jobs.completed_remote_transcripts()?;
-    Ok(build_history_catalog(live.saved, live.recoverable, remote))
+    Ok(collect_history_catalog(
+        live.saved,
+        live.recoverable,
+        remote,
+    ))
 }
 
 fn history_error(message: String) -> JobCommandError {
     JobCommandError {
         code: "HISTORY_CATALOG_ERROR".into(),
         message,
-    }
-}
-
-fn build_history_catalog(
-    live: SavedLiveSessionCatalog,
-    recoverable: Vec<RecoverableLiveSession>,
-    remote: CompletedRemoteTranscriptCatalog,
-) -> HistoryCatalog {
-    let mut sessions = live
-        .sessions
-        .into_iter()
-        .map(|session| HistoryCatalogSession {
-            capture_commit_path: session.capture_commit_path,
-            created_at_ms: session.created_at_ms,
-            name: session.name,
-            origin: HistoryOrigin::Live,
-            output_path: session.output_path,
-            recovery_state: session.recovery_state,
-            session_id: session.session_id,
-            source_path: session.source_path,
-            warning: session.warning,
-        })
-        .chain(recoverable.into_iter().map(|session| {
-            let artifact_path = session
-                .audio_partial_path
-                .or(session.journal_partial_path)
-                .unwrap_or_else(|| session.name.clone());
-            HistoryCatalogSession {
-                capture_commit_path: None,
-                created_at_ms: session.expires_at_ms.saturating_sub(RECOVERY_WINDOW_MS),
-                name: session.name,
-                origin: HistoryOrigin::Live,
-                output_path: artifact_path.clone(),
-                recovery_state: Some("recoverable".into()),
-                session_id: session.session_id,
-                source_path: artifact_path,
-                warning: Some(session.reason),
-            }
-        }))
-        .chain(
-            remote
-                .sessions
-                .into_iter()
-                .map(|session| HistoryCatalogSession {
-                    capture_commit_path: None,
-                    created_at_ms: session.created_at_ms,
-                    name: session.name,
-                    origin: HistoryOrigin::Remote,
-                    output_path: session.output_path,
-                    recovery_state: None,
-                    session_id: session.session_id,
-                    source_path: session.source_path,
-                    warning: session.warning,
-                }),
-        )
-        .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| {
-        right
-            .created_at_ms
-            .cmp(&left.created_at_ms)
-            .then_with(|| left.session_id.cmp(&right.session_id))
-            .then_with(|| left.origin.cmp(&right.origin))
-    });
-    sessions.truncate(MAX_HISTORY_SESSIONS);
-
-    let mut seen_warnings = HashSet::new();
-    let maintenance_warnings = live
-        .maintenance_warnings
-        .into_iter()
-        .chain(remote.maintenance_warnings)
-        .filter(|warning| seen_warnings.insert(warning.clone()))
-        .collect();
-    HistoryCatalog {
-        maintenance_warnings,
-        sessions,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        jobs::commands::{CompletedRemoteTranscript, CompletedRemoteTranscriptCatalog},
-        live::recordings::{RecoverableLiveSession, SavedLiveSession, SavedLiveSessionCatalog},
-    };
-
-    use super::{build_history_catalog, HistoryOrigin, MAX_HISTORY_SESSIONS, RECOVERY_WINDOW_MS};
-
-    #[test]
-    fn catalog_combines_native_sources_with_explicit_provenance() {
-        let catalog = build_history_catalog(
-            SavedLiveSessionCatalog {
-                sessions: vec![SavedLiveSession {
-                    session_id: "live-1".into(),
-                    name: "Live".into(),
-                    source_path: "live.wav".into(),
-                    output_path: "live.txt".into(),
-                    created_at_ms: 30,
-                    warning: None,
-                    capture_commit_path: Some("live.commit.json".into()),
-                    recovery_state: None,
-                }],
-                maintenance_warnings: vec!["shared warning".into()],
-            },
-            vec![RecoverableLiveSession {
-                session_id: "recover-1".into(),
-                name: "Recover".into(),
-                audio_partial_path: Some("recover.wav.part".into()),
-                journal_partial_path: None,
-                reason: "Interrupted".into(),
-                expires_at_ms: RECOVERY_WINDOW_MS + 20,
-            }],
-            CompletedRemoteTranscriptCatalog {
-                sessions: vec![CompletedRemoteTranscript {
-                    session_id: "remote-1".into(),
-                    name: "Remote".into(),
-                    source_path: "source.wav".into(),
-                    output_path: "remote.txt".into(),
-                    created_at_ms: 10,
-                    warning: None,
-                }],
-                maintenance_warnings: vec!["shared warning".into(), "remote warning".into()],
-            },
-        );
-
-        assert_eq!(catalog.sessions.len(), 3);
-        assert_eq!(catalog.sessions[0].origin, HistoryOrigin::Live);
-        assert_eq!(
-            catalog.sessions[1].recovery_state.as_deref(),
-            Some("recoverable")
-        );
-        assert_eq!(catalog.sessions[1].created_at_ms, 20);
-        assert_eq!(catalog.sessions[2].origin, HistoryOrigin::Remote);
-        assert_eq!(
-            catalog.maintenance_warnings,
-            ["shared warning", "remote warning"]
-        );
-    }
-
-    #[test]
-    fn catalog_is_bounded_to_the_newest_native_sessions() {
-        let remote_sessions = (0..=MAX_HISTORY_SESSIONS)
-            .map(|index| CompletedRemoteTranscript {
-                session_id: format!("remote-{index}"),
-                name: format!("Remote {index}"),
-                source_path: format!("source-{index}.wav"),
-                output_path: format!("remote-{index}.txt"),
-                created_at_ms: index as u64,
-                warning: None,
-            })
-            .collect();
-        let catalog = build_history_catalog(
-            SavedLiveSessionCatalog {
-                sessions: Vec::new(),
-                maintenance_warnings: Vec::new(),
-            },
-            Vec::new(),
-            CompletedRemoteTranscriptCatalog {
-                sessions: remote_sessions,
-                maintenance_warnings: Vec::new(),
-            },
-        );
-
-        assert_eq!(catalog.sessions.len(), MAX_HISTORY_SESSIONS);
-        assert_eq!(
-            catalog.sessions[0].created_at_ms,
-            MAX_HISTORY_SESSIONS as u64
-        );
-        assert_eq!(catalog.sessions.last().unwrap().created_at_ms, 1);
-    }
-
-    #[test]
-    fn catalog_keeps_an_orphaned_recoverable_row_visible_by_name() {
-        let catalog = build_history_catalog(
-            SavedLiveSessionCatalog {
-                sessions: Vec::new(),
-                maintenance_warnings: Vec::new(),
-            },
-            vec![RecoverableLiveSession {
-                session_id: "orphan".into(),
-                name: "live-orphan".into(),
-                audio_partial_path: None,
-                journal_partial_path: None,
-                reason: "Interrupted".into(),
-                expires_at_ms: RECOVERY_WINDOW_MS,
-            }],
-            CompletedRemoteTranscriptCatalog {
-                sessions: Vec::new(),
-                maintenance_warnings: Vec::new(),
-            },
-        );
-
-        assert_eq!(catalog.sessions[0].source_path, "live-orphan");
-        assert_eq!(catalog.sessions[0].output_path, "live-orphan");
     }
 }

@@ -249,6 +249,29 @@ describe("native history catalog synchronization", () => {
     expect(harness.current()).toEqual([]);
   });
 
+  it("leaves native visibility to the catalog after migration is confirmed", async () => {
+    const storage = memoryStorage();
+    const native = liveSession("native");
+    const legacy: TranscriptHistoryEntry = {
+      createdAt: "2026-07-10T00:00:00.000Z",
+      name: "Legacy",
+      outputPath: native.outputPath,
+      sourcePath: "C:/Legacy/source.wav",
+    };
+    writeTranscriptHistory([legacy], storage);
+    writeHiddenTranscriptHistory([native.outputPath], storage);
+    const harness = createStore(storage);
+    harness.store.confirmNativeVisibilityAuthority();
+    const prepared = await prepareHistoryCatalogReconciliation(
+      harness.store.captureNativeHistoryReconciliation,
+      async () => catalog([native]),
+    );
+
+    expect(prepared.apply(prepared.entries, "sync failed")).toEqual([
+      expect.objectContaining({ origin: "live", sessionId: "native" }),
+    ]);
+  });
+
   it("applies each captured catalog reconciliation only once", async () => {
     const storage = memoryStorage();
     const harness = createStore(storage);

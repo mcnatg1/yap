@@ -18,10 +18,10 @@ const historySaveWarning = "Transcript history could not be saved.";
 
 export type HistoryActionPorts = {
   clearHistorySelectionIf: (outputPath: string) => void;
-  forgetHistoryEntry: (outputPath: string) => boolean;
+  forgetHistoryEntry: (outputPath: string) => void;
   forgetTranscriptText: (outputPath: string) => void;
   recordVisibleHistoryEntries: (entries: TranscriptHistoryEntry[], warning: string) => boolean;
-  rememberHiddenHistoryEntry: (outputPath: string) => boolean;
+  rememberHiddenHistoryEntry: (entry: TranscriptHistoryEntry) => Promise<boolean>;
   selectHistoryEntry: (entry: TranscriptHistoryEntry) => void;
 };
 
@@ -47,14 +47,14 @@ const nativeHistoryActionRuntime: HistoryActionRuntime = {
 
 const staleHistoryIdentityMessage = "Recording identity is no longer current. Refresh history and try again.";
 
-export function runHideHistoryEntry(
-  outputPath: string,
+export async function runHideHistoryEntry(
+  entry: TranscriptHistoryEntry,
   ports: HistoryActionPorts,
   runtime: HistoryActionRuntime = nativeHistoryActionRuntime,
 ) {
-  if (!ports.rememberHiddenHistoryEntry(outputPath)) return;
-  if (!ports.forgetHistoryEntry(outputPath)) return;
-  ports.clearHistorySelectionIf(outputPath);
+  if (!await ports.rememberHiddenHistoryEntry(entry)) return;
+  ports.forgetHistoryEntry(entry.outputPath);
+  ports.clearHistorySelectionIf(entry.outputPath);
   runtime.showSuccess("Hidden from history");
 }
 
@@ -74,8 +74,7 @@ export async function runDeleteSavedHistoryEntry(
       identity.expectedOutputPath,
       identity.expectedCaptureCommitPath,
     );
-    if (!ports.rememberHiddenHistoryEntry(entry.outputPath)) return;
-    if (!ports.forgetHistoryEntry(entry.outputPath)) return;
+    ports.forgetHistoryEntry(entry.outputPath);
     ports.clearHistorySelectionIf(entry.outputPath);
     ports.forgetTranscriptText(entry.outputPath);
     runtime.showSuccess("Deleted from device");
@@ -119,7 +118,7 @@ export async function runDeleteRecoverableHistoryEntry(
   }
   try {
     await runtime.deleteRecoverableLiveSession(identity.sessionId, identity.expectedArtifactPath);
-    if (!ports.forgetHistoryEntry(entry.outputPath)) return;
+    ports.forgetHistoryEntry(entry.outputPath);
     ports.clearHistorySelectionIf(entry.outputPath);
     ports.forgetTranscriptText(entry.outputPath);
     runtime.showSuccess("Partial recording deleted");
@@ -132,8 +131,8 @@ export function useHistoryActions(ports: HistoryActionPorts) {
   const portsRef = useRef(ports);
   portsRef.current = ports;
 
-  const hideHistoryEntry = useCallback((outputPath: string) => {
-    runHideHistoryEntry(outputPath, portsRef.current);
+  const hideHistoryEntry = useCallback(async (entry: TranscriptHistoryEntry) => {
+    await runHideHistoryEntry(entry, portsRef.current);
   }, []);
 
   const deleteHistoryEntry = useCallback(async (entry: TranscriptHistoryEntry) => {

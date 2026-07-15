@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  filterLegacyHiddenTranscriptHistory,
   filterHiddenTranscriptHistory,
   hideTranscriptHistory,
   normalizeHiddenTranscriptHistory,
@@ -14,6 +15,16 @@ describe("transcript history model", () => {
     expect(normalizeHiddenTranscriptHistory(["a.txt", 42, "b.txt", "a.txt"])).toEqual([
       "a.txt",
       "b.txt",
+    ]);
+  });
+
+  it("bounds hidden transcript paths to the newest history window", () => {
+    const hidden = Array.from({ length: 501 }, (_, index) => `hidden-${index}.txt`);
+
+    expect(normalizeHiddenTranscriptHistory(hidden)).toEqual(hidden.slice(0, 500));
+    expect(hideTranscriptHistory(hidden.slice(0, 500), "newest.txt")).toEqual([
+      "newest.txt",
+      ...hidden.slice(0, 499),
     ]);
   });
 
@@ -57,5 +68,23 @@ describe("transcript history model", () => {
 
     expect(recordVisibleTranscriptHistoryEntries([], [hidden, visible], ["hidden.txt"]))
       .toEqual([visible]);
+  });
+
+  it("keeps native catalog rows outside the legacy compatibility tombstones", () => {
+    const legacy = {
+      createdAt: "2026-01-03T00:00:00.000Z",
+      name: "legacy",
+      outputPath: "same.txt",
+      sourcePath: "legacy.wav",
+    };
+    const native = {
+      ...legacy,
+      name: "native",
+      origin: "remote" as const,
+      sessionId: "remote-1",
+    };
+
+    expect(filterLegacyHiddenTranscriptHistory([legacy, native], ["same.txt"]))
+      .toEqual([native]);
   });
 });

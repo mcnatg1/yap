@@ -71,13 +71,15 @@ export function normalizeTranscriptHistory(value: unknown) {
 export function normalizeHiddenTranscriptHistory(value: unknown) {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
-  return value.filter((item): item is string => {
-    if (typeof item !== "string") return false;
-    const identity = transcriptPathIdentity(item);
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
-  });
+  return value
+    .filter((item): item is string => {
+      if (typeof item !== "string") return false;
+      const identity = transcriptPathIdentity(item);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    })
+    .slice(0, maxTranscriptHistoryEntries);
 }
 
 export function filterHiddenTranscriptHistory(entries: TranscriptHistoryEntry[], outputPaths: string[]) {
@@ -86,6 +88,19 @@ export function filterHiddenTranscriptHistory(entries: TranscriptHistoryEntry[],
   );
   if (!hidden.size) return entries;
   return entries.filter((entry) => !hidden.has(transcriptPathIdentity(entry.outputPath)));
+}
+
+export function filterLegacyHiddenTranscriptHistory(
+  entries: TranscriptHistoryEntry[],
+  outputPaths: string[],
+) {
+  const hidden = new Set(
+    normalizeHiddenTranscriptHistory(outputPaths).map(transcriptPathIdentity),
+  );
+  if (!hidden.size) return entries;
+  return entries.filter((entry) => (
+    entry.origin !== undefined || !hidden.has(transcriptPathIdentity(entry.outputPath))
+  ));
 }
 
 function historyPathBasename(path: string) {
