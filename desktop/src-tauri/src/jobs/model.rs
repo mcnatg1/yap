@@ -4,6 +4,7 @@ use std::{fmt, path::PathBuf};
 pub enum JobLedgerError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
+    OwnedSpoolCleanup(String),
     CorruptValue {
         field: &'static str,
         value: String,
@@ -39,6 +40,9 @@ impl fmt::Display for JobLedgerError {
         match self {
             Self::Sqlite(error) => write!(formatter, "job ledger database error: {error}"),
             Self::Io(error) => write!(formatter, "job ledger filesystem error: {error}"),
+            Self::OwnedSpoolCleanup(error) => {
+                write!(formatter, "owned remote spool cleanup failed: {error}")
+            }
             Self::CorruptValue { field, value } => {
                 write!(formatter, "job ledger has invalid {field} value {value:?}")
             }
@@ -400,6 +404,7 @@ pub struct PreparedRemoteJobRecord {
     pub create_request_json: String,
     pub capture_manifest_path: PathBuf,
     pub capture_manifest_sha256: String,
+    pub create_attempt_base_url: Option<String>,
     pub server_job_id: Option<String>,
     pub server_base_url: Option<String>,
     pub server_cancellation_acknowledged_at_ms: Option<u64>,

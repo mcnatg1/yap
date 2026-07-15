@@ -215,6 +215,25 @@ impl ServerConnector {
         }))
     }
 
+    pub(crate) fn persisted_cleanup_client(
+        &self,
+        base_url: &str,
+    ) -> Result<batch::BatchApiClient, String> {
+        // A durable cancellation record is a cleanup-only authority for its
+        // exact previously validated origin. It does not authorize new work
+        // and deliberately does not depend on the current settings generation.
+        batch::BatchApiClient::new(self.client.clone(), base_url).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn configured_batch_origin(&self) -> Result<Option<String>, String> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let inner = self.inner.lock().expect("server connector poisoned");
+        if inner.generation() != generation || !inner.current_configuration_initialized() {
+            return Err("Server settings are not initialized for remote cleanup.".into());
+        }
+        Ok(inner.configured_base_url(generation))
+    }
+
     pub(crate) fn with_current_batch_lease<T>(
         &self,
         lease: &BatchConnectionLease,

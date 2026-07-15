@@ -335,13 +335,73 @@ impl JobLedger {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT job_id, create_request_json, capture_manifest_path, capture_manifest_sha256, server_job_id, server_base_url, server_cancellation_acknowledged_at_ms FROM prepared_remote_jobs WHERE job_id = ?1",
+                "SELECT job_id, create_request_json, capture_manifest_path, capture_manifest_sha256, server_job_id, server_base_url, server_cancellation_acknowledged_at_ms, create_attempt_base_url FROM prepared_remote_jobs WHERE job_id = ?1",
                 [job_id],
                 raw_prepared_remote_job_from_row,
             )
             .optional()?
             .map(TryInto::try_into)
             .transpose()
+    }
+
+    pub fn begin_remote_create_attempt(
+        &self,
+        job_id: &str,
+        server_base_url: &str,
+        updated_at_ms: u64,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        validate_server_base_url(server_base_url)?;
+        let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: RecordingJobRecord = query_job(&transaction, job_id)?
+            .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?
+            .try_into()?;
+        if current.status != RecordingJobStatus::Uploading {
+            return Err(JobLedgerError::InvalidTransition {
+                from: current.status,
+                to: RecordingJobStatus::Uploading,
+            });
+        }
+        let existing: (Option<String>, Option<String>, Option<String>) = transaction
+            .query_row(
+                "SELECT server_job_id, server_base_url, create_attempt_base_url FROM prepared_remote_jobs WHERE job_id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(JobLedgerError::InvalidRecord(
+                "recording job has no prepared remote state",
+            ))?;
+        match (
+            existing.0.as_deref(),
+            existing.1.as_deref(),
+            existing.2.as_deref(),
+        ) {
+            (None, None, Some(attempt)) if attempt == server_base_url => return Ok(current),
+            (None, None, None) => {}
+            _ => {
+                return Err(JobLedgerError::InvalidRecord(
+                    "recording job already has a different server create attempt or binding",
+                ));
+            }
+        }
+        let changed = transaction.execute(
+            "UPDATE prepared_remote_jobs SET create_attempt_base_url = ?1 WHERE job_id = ?2 AND server_job_id IS NULL AND server_base_url IS NULL AND create_attempt_base_url IS NULL",
+            params![server_base_url, job_id],
+        )?;
+        if changed != 1 {
+            return Err(JobLedgerError::InvalidRecord(
+                "remote create attempt was not durably recorded",
+            ));
+        }
+        transaction.execute(
+            "UPDATE recording_jobs SET updated_at_ms = ?1 WHERE job_id = ?2",
+            params![updated_at_ms, job_id],
+        )?;
+        let updated = query_job(&transaction, job_id)?.expect("create-attempt job exists");
+        transaction.commit()?;
+        updated.try_into()
     }
 
     pub fn record_server_job_id(
@@ -359,44 +419,64 @@ impl JobLedger {
         let current: RecordingJobRecord = query_job(&transaction, job_id)?
             .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?
             .try_into()?;
-        if current.status != RecordingJobStatus::Uploading {
-            return Err(JobLedgerError::InvalidTransition {
-                from: current.status,
-                to: RecordingJobStatus::Uploading,
-            });
+        let binding_is_factual = current.status == RecordingJobStatus::Uploading
+            || (current.status == RecordingJobStatus::Cancelled && current.cancellation_requested);
+        if !binding_is_factual {
+            return Err(JobLedgerError::InvalidRecord(
+                "server response cannot bind this recording job state",
+            ));
         }
-        let existing: (Option<String>, Option<String>) = transaction
+        let existing: (Option<String>, Option<String>, Option<String>) = transaction
             .query_row(
-                "SELECT server_job_id, server_base_url FROM prepared_remote_jobs WHERE job_id = ?1",
+                "SELECT server_job_id, server_base_url, create_attempt_base_url FROM prepared_remote_jobs WHERE job_id = ?1",
                 [job_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or(JobLedgerError::InvalidRecord(
                 "recording job has no prepared remote state",
             ))?;
-        match (existing.0.as_deref(), existing.1.as_deref()) {
-            (Some(existing_job), Some(existing_url))
+        match (
+            existing.0.as_deref(),
+            existing.1.as_deref(),
+            existing.2.as_deref(),
+        ) {
+            (Some(existing_job), Some(existing_url), None)
                 if existing_job == server_job_id && existing_url == server_base_url =>
             {
                 return Ok(current);
             }
-            (Some(_), Some(_)) => {
+            (Some(_), Some(_), None) => {
                 return Err(JobLedgerError::InvalidRecord(
                     "recording job is already bound to a different server job or origin",
                 ));
             }
-            (None, None) => {}
+            (None, None, Some(attempt)) if attempt == server_base_url => {}
+            (None, None, Some(_)) => {
+                return Err(JobLedgerError::InvalidRecord(
+                    "server response origin differs from its durable create attempt",
+                ));
+            }
+            (None, None, None) => {
+                return Err(JobLedgerError::InvalidRecord(
+                    "server response has no durable create attempt",
+                ));
+            }
             _ => {
                 return Err(JobLedgerError::InvalidRecord(
-                    "recording job has an incomplete server binding",
+                    "recording job has an inconsistent server binding",
                 ));
             }
         }
-        transaction.execute(
-            "UPDATE prepared_remote_jobs SET server_job_id = ?1, server_base_url = ?2 WHERE job_id = ?3 AND server_job_id IS NULL AND server_base_url IS NULL",
+        let changed = transaction.execute(
+            "UPDATE prepared_remote_jobs SET server_job_id = ?1, server_base_url = ?2, create_attempt_base_url = NULL WHERE job_id = ?3 AND server_job_id IS NULL AND server_base_url IS NULL AND create_attempt_base_url = ?2",
             params![server_job_id, server_base_url, job_id],
         )?;
+        if changed != 1 {
+            return Err(JobLedgerError::InvalidRecord(
+                "server response binding was not durably recorded",
+            ));
+        }
         transaction.execute(
             "UPDATE recording_jobs SET updated_at_ms = ?1 WHERE job_id = ?2",
             params![updated_at_ms, job_id],
@@ -798,27 +878,13 @@ impl JobLedger {
                 if let Some((server_base_url, server_job_id, create_request_json)) =
                     detached_binding
                 {
-                    let inserted = transaction.execute(
-                        "INSERT OR IGNORE INTO detached_remote_cancellations (server_base_url, server_job_id, create_request_json, queued_at_ms) VALUES (?1, ?2, ?3, ?4)",
-                        params![
-                            server_base_url,
-                            server_job_id,
-                            create_request_json,
-                            updated_at_ms,
-                        ],
+                    enqueue_detached_cancellation(
+                        &transaction,
+                        &server_base_url,
+                        &server_job_id,
+                        &create_request_json,
+                        updated_at_ms,
                     )?;
-                    if inserted == 0 {
-                        let existing: String = transaction.query_row(
-                            "SELECT create_request_json FROM detached_remote_cancellations WHERE server_base_url = ?1 AND server_job_id = ?2",
-                            params![server_base_url, server_job_id],
-                            |row| row.get(0),
-                        )?;
-                        if existing != create_request_json {
-                            return Err(JobLedgerError::InvalidRecord(
-                                "detached server cancellation conflicts with an existing outbox entry",
-                            ));
-                        }
-                    }
                 }
                 transaction.execute("DELETE FROM job_chunks WHERE job_id = ?1", [job_id])?;
                 transaction.execute(
@@ -883,7 +949,7 @@ impl JobLedger {
     ) -> Result<Vec<PreparedRemoteJobRecord>, JobLedgerError> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT prepared.job_id, prepared.create_request_json, prepared.capture_manifest_path, prepared.capture_manifest_sha256, prepared.server_job_id, prepared.server_base_url, prepared.server_cancellation_acknowledged_at_ms FROM prepared_remote_jobs AS prepared JOIN recording_jobs AS job ON job.job_id = prepared.job_id WHERE job.status = 'cancelled' AND job.cancellation_requested = 1 AND prepared.server_job_id IS NOT NULL AND prepared.server_base_url IS NOT NULL AND prepared.server_cancellation_acknowledged_at_ms IS NULL ORDER BY job.updated_at_ms, prepared.job_id",
+            "SELECT prepared.job_id, prepared.create_request_json, prepared.capture_manifest_path, prepared.capture_manifest_sha256, prepared.server_job_id, prepared.server_base_url, prepared.server_cancellation_acknowledged_at_ms, prepared.create_attempt_base_url FROM prepared_remote_jobs AS prepared JOIN recording_jobs AS job ON job.job_id = prepared.job_id WHERE job.status = 'cancelled' AND job.cancellation_requested = 1 AND prepared.server_job_id IS NOT NULL AND prepared.server_base_url IS NOT NULL AND prepared.server_cancellation_acknowledged_at_ms IS NULL ORDER BY job.updated_at_ms, prepared.job_id",
         )?;
         let rows = statement.query_map([], raw_prepared_remote_job_from_row)?;
         rows.map(|row| {
@@ -891,6 +957,174 @@ impl JobLedger {
                 .and_then(TryInto::try_into)
         })
         .collect()
+    }
+
+    pub fn list_remote_create_attempts(
+        &self,
+    ) -> Result<Vec<PreparedRemoteJobRecord>, JobLedgerError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT prepared.job_id, prepared.create_request_json, prepared.capture_manifest_path, prepared.capture_manifest_sha256, prepared.server_job_id, prepared.server_base_url, prepared.server_cancellation_acknowledged_at_ms, prepared.create_attempt_base_url FROM prepared_remote_jobs AS prepared JOIN recording_jobs AS job ON job.job_id = prepared.job_id WHERE job.status = 'uploading' AND prepared.server_job_id IS NULL AND prepared.server_base_url IS NULL AND prepared.create_attempt_base_url IS NOT NULL ORDER BY job.updated_at_ms, prepared.job_id",
+        )?;
+        let rows = statement.query_map([], raw_prepared_remote_job_from_row)?;
+        rows.map(|row| {
+            row.map_err(JobLedgerError::from)
+                .and_then(TryInto::try_into)
+        })
+        .collect()
+    }
+
+    pub fn list_cancelled_remote_create_attempts(
+        &self,
+    ) -> Result<Vec<PreparedRemoteJobRecord>, JobLedgerError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT prepared.job_id, prepared.create_request_json, prepared.capture_manifest_path, prepared.capture_manifest_sha256, prepared.server_job_id, prepared.server_base_url, prepared.server_cancellation_acknowledged_at_ms, prepared.create_attempt_base_url FROM prepared_remote_jobs AS prepared JOIN recording_jobs AS job ON job.job_id = prepared.job_id WHERE job.status = 'cancelled' AND job.cancellation_requested = 1 AND prepared.server_job_id IS NULL AND prepared.server_base_url IS NULL AND prepared.create_attempt_base_url IS NOT NULL ORDER BY job.updated_at_ms, prepared.job_id",
+        )?;
+        let rows = statement.query_map([], raw_prepared_remote_job_from_row)?;
+        rows.map(|row| {
+            row.map_err(JobLedgerError::from)
+                .and_then(TryInto::try_into)
+        })
+        .collect()
+    }
+
+    pub fn detach_changed_remote_binding(
+        &self,
+        configured_origin: Option<&str>,
+        updated_at_ms: u64,
+        cleanup_owned_spool: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<Option<String>, JobLedgerError> {
+        if let Some(origin) = configured_origin {
+            validate_server_base_url(origin)?;
+        }
+        let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidate: Option<(String, String, String, String)> = transaction
+            .query_row(
+                "SELECT prepared.job_id, prepared.server_base_url, prepared.server_job_id, prepared.create_request_json FROM prepared_remote_jobs AS prepared JOIN recording_jobs AS job ON job.job_id = prepared.job_id WHERE prepared.server_job_id IS NOT NULL AND prepared.server_base_url IS NOT NULL AND prepared.server_cancellation_acknowledged_at_ms IS NULL AND job.status IN ('uploading', 'server_processing', 'saving', 'failed') AND (?1 IS NULL OR prepared.server_base_url <> ?1) ORDER BY job.updated_at_ms, prepared.job_id LIMIT 1",
+                [configured_origin],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((job_id, server_base_url, server_job_id, create_request_json)) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        validate_server_base_url(&server_base_url)?;
+        validate_opaque_identifier(&server_job_id, 128, "server job ID")?;
+        if !(2..=MAX_PREPARED_REQUEST_BYTES).contains(&create_request_json.len()) {
+            return Err(JobLedgerError::InvalidRecord(
+                "changed-origin cancellation request is outside the persisted contract",
+            ));
+        }
+        let current: RecordingJobRecord = query_job(&transaction, &job_id)?
+            .ok_or_else(|| JobLedgerError::NotFound(job_id.clone()))?
+            .try_into()?;
+        enqueue_detached_cancellation(
+            &transaction,
+            &server_base_url,
+            &server_job_id,
+            &create_request_json,
+            updated_at_ms,
+        )?;
+        cleanup_owned_spool(&job_id).map_err(JobLedgerError::OwnedSpoolCleanup)?;
+        let next_attempt_count = if current.status == RecordingJobStatus::Failed {
+            current.attempt_count
+        } else {
+            current
+                .attempt_count
+                .checked_add(1)
+                .ok_or(JobLedgerError::OutOfRange {
+                    field: "attempt_count",
+                    value: u64::MAX,
+                })?
+        };
+        let next_attempt_count = sqlite_integer(next_attempt_count, "attempt_count")?;
+        let changed = transaction.execute(
+            "UPDATE recording_jobs SET status = 'failed', attempt_count = ?1, next_attempt_at_ms = NULL, error_code = 'REMOTE_ORIGIN_CHANGED', error_message = 'The private-server origin changed before this request could finish. Retry the recording to start a new server job.', updated_at_ms = ?2 WHERE job_id = ?3",
+            params![next_attempt_count, updated_at_ms, job_id],
+        )?;
+        if changed != 1 {
+            return Err(JobLedgerError::InvalidRecord(
+                "changed-origin job was not durably failed",
+            ));
+        }
+        transaction.execute("DELETE FROM job_chunks WHERE job_id = ?1", [&job_id])?;
+        transaction.execute(
+            "DELETE FROM prepared_remote_jobs WHERE job_id = ?1",
+            [&job_id],
+        )?;
+        transaction.commit()?;
+        Ok(Some(job_id))
+    }
+
+    pub fn fail_abandoned_remote_create_attempt(
+        &self,
+        job_id: &str,
+        server_base_url: &str,
+        updated_at_ms: u64,
+        cleanup_owned_spool: impl FnOnce() -> Result<(), String>,
+    ) -> Result<RecordingJobRecord, JobLedgerError> {
+        validate_server_base_url(server_base_url)?;
+        let updated_at_ms = sqlite_integer(updated_at_ms, "updated_at_ms")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: RecordingJobRecord = query_job(&transaction, job_id)?
+            .ok_or_else(|| JobLedgerError::NotFound(job_id.into()))?
+            .try_into()?;
+        if current.status != RecordingJobStatus::Uploading {
+            return Err(JobLedgerError::InvalidTransition {
+                from: current.status,
+                to: RecordingJobStatus::Failed,
+            });
+        }
+        let attempt: (Option<String>, Option<String>, Option<String>) = transaction
+            .query_row(
+                "SELECT server_job_id, server_base_url, create_attempt_base_url FROM prepared_remote_jobs WHERE job_id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(JobLedgerError::InvalidRecord(
+                "abandoned create attempt has no prepared remote state",
+            ))?;
+        if attempt.0.is_some()
+            || attempt.1.is_some()
+            || attempt.2.as_deref() != Some(server_base_url)
+        {
+            return Err(JobLedgerError::InvalidRecord(
+                "abandoned create attempt no longer matches its cleanup origin",
+            ));
+        }
+        cleanup_owned_spool().map_err(JobLedgerError::OwnedSpoolCleanup)?;
+        let next_attempt_count =
+            current
+                .attempt_count
+                .checked_add(1)
+                .ok_or(JobLedgerError::OutOfRange {
+                    field: "attempt_count",
+                    value: u64::MAX,
+                })?;
+        let next_attempt_count = sqlite_integer(next_attempt_count, "attempt_count")?;
+        let changed = transaction.execute(
+            "UPDATE recording_jobs SET status = 'failed', attempt_count = ?1, next_attempt_at_ms = NULL, error_code = 'REMOTE_ORIGIN_CHANGED', error_message = 'The private-server origin changed before this request could finish. Retry the recording to start a new server job.', updated_at_ms = ?2 WHERE job_id = ?3 AND status = 'uploading'",
+            params![next_attempt_count, updated_at_ms, job_id],
+        )?;
+        if changed != 1 {
+            return Err(JobLedgerError::InvalidRecord(
+                "abandoned remote create attempt was not durably failed",
+            ));
+        }
+        transaction.execute("DELETE FROM job_chunks WHERE job_id = ?1", [job_id])?;
+        transaction.execute(
+            "DELETE FROM prepared_remote_jobs WHERE job_id = ?1",
+            [job_id],
+        )?;
+        let updated = query_job(&transaction, job_id)?.expect("abandoned create job exists");
+        transaction.commit()?;
+        updated.try_into()
     }
 
     pub fn list_detached_remote_cancellations(
@@ -1158,6 +1392,33 @@ impl JobLedger {
         Ok(job_ids)
     }
 
+    pub fn has_remote_reconciliation_work(&self) -> Result<bool, JobLedgerError> {
+        let connection = self.lock()?;
+        let pending: i64 = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM remote_spool_cleanup
+                UNION ALL
+                SELECT 1 FROM detached_remote_cancellations
+                UNION ALL
+                SELECT 1
+                FROM prepared_remote_jobs AS prepared
+                JOIN recording_jobs AS job ON job.job_id = prepared.job_id
+                WHERE
+                    (job.status = 'cancelled'
+                        AND job.cancellation_requested = 1
+                        AND prepared.server_cancellation_acknowledged_at_ms IS NULL
+                        AND (prepared.server_job_id IS NOT NULL OR prepared.create_attempt_base_url IS NOT NULL))
+                    OR (job.status = 'uploading' AND prepared.create_attempt_base_url IS NOT NULL)
+                    OR (job.status = 'failed'
+                        AND prepared.server_job_id IS NOT NULL
+                        AND prepared.server_cancellation_acknowledged_at_ms IS NULL)
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(pending != 0)
+    }
+
     pub fn acknowledge_remote_spool_cleanup(&self, job_id: &str) -> Result<bool, JobLedgerError> {
         let connection = self.lock()?;
         Ok(connection.execute(
@@ -1173,11 +1434,49 @@ impl JobLedger {
     }
 }
 
+fn enqueue_detached_cancellation(
+    connection: &Connection,
+    server_base_url: &str,
+    server_job_id: &str,
+    create_request_json: &str,
+    queued_at_ms: i64,
+) -> Result<(), JobLedgerError> {
+    validate_server_base_url(server_base_url)?;
+    validate_opaque_identifier(server_job_id, 128, "server job ID")?;
+    if !(2..=MAX_PREPARED_REQUEST_BYTES).contains(&create_request_json.len()) {
+        return Err(JobLedgerError::InvalidRecord(
+            "detached cancellation request is outside the persisted contract",
+        ));
+    }
+    let inserted = connection.execute(
+        "INSERT OR IGNORE INTO detached_remote_cancellations (server_base_url, server_job_id, create_request_json, queued_at_ms) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            server_base_url,
+            server_job_id,
+            create_request_json,
+            queued_at_ms,
+        ],
+    )?;
+    if inserted == 0 {
+        let existing: String = connection.query_row(
+            "SELECT create_request_json FROM detached_remote_cancellations WHERE server_base_url = ?1 AND server_job_id = ?2",
+            params![server_base_url, server_job_id],
+            |row| row.get(0),
+        )?;
+        if existing != create_request_json {
+            return Err(JobLedgerError::InvalidRecord(
+                "detached server cancellation conflicts with an existing outbox entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn prune_terminal_history(
     connection: &Connection,
     protected_job_id: Option<&str>,
 ) -> Result<usize, JobLedgerError> {
-    let terminal = "status IN ('complete', 'partial', 'cancelled') AND NOT (cancellation_requested = 1 AND EXISTS (SELECT 1 FROM prepared_remote_jobs AS pending_cancel WHERE pending_cancel.job_id = recording_jobs.job_id AND pending_cancel.server_job_id IS NOT NULL AND pending_cancel.server_cancellation_acknowledged_at_ms IS NULL))";
+    let terminal = "status IN ('complete', 'partial', 'cancelled') AND NOT (cancellation_requested = 1 AND EXISTS (SELECT 1 FROM prepared_remote_jobs AS pending_cancel WHERE pending_cancel.job_id = recording_jobs.job_id AND (pending_cancel.server_job_id IS NOT NULL OR pending_cancel.create_attempt_base_url IS NOT NULL) AND pending_cancel.server_cancellation_acknowledged_at_ms IS NULL))";
     let deleted = if let Some(protected_job_id) = protected_job_id {
         let candidates = format!(
             "{terminal} AND job_id <> ?1 AND job_id NOT IN (SELECT job_id FROM recording_jobs WHERE {terminal} AND job_id <> ?1 ORDER BY updated_at_ms DESC, job_id DESC LIMIT ?2)"
@@ -1581,6 +1880,7 @@ struct RawPreparedRemoteJob {
     server_job_id: Option<String>,
     server_base_url: Option<String>,
     server_cancellation_acknowledged_at_ms: Option<i64>,
+    create_attempt_base_url: Option<String>,
 }
 
 fn raw_prepared_remote_job_from_row(row: &Row<'_>) -> rusqlite::Result<RawPreparedRemoteJob> {
@@ -1592,6 +1892,7 @@ fn raw_prepared_remote_job_from_row(row: &Row<'_>) -> rusqlite::Result<RawPrepar
         server_job_id: row.get(4)?,
         server_base_url: row.get(5)?,
         server_cancellation_acknowledged_at_ms: row.get(6)?,
+        create_attempt_base_url: row.get(7)?,
     })
 }
 
@@ -1628,6 +1929,15 @@ impl TryFrom<RawPreparedRemoteJob> for PreparedRemoteJobRecord {
                 });
             }
         }
+        if let Some(create_attempt_base_url) = raw.create_attempt_base_url.as_deref() {
+            validate_server_base_url(create_attempt_base_url)?;
+            if raw.server_job_id.is_some() || raw.server_base_url.is_some() {
+                return Err(JobLedgerError::CorruptValue {
+                    field: "server_binding",
+                    value: "create attempt overlaps a completed server binding".into(),
+                });
+            }
+        }
         let capture_manifest_path = PathBuf::from(&raw.capture_manifest_path);
         if !capture_manifest_path.is_absolute() {
             return Err(JobLedgerError::CorruptValue {
@@ -1640,6 +1950,7 @@ impl TryFrom<RawPreparedRemoteJob> for PreparedRemoteJobRecord {
             create_request_json: raw.create_request_json,
             capture_manifest_path,
             capture_manifest_sha256: raw.capture_manifest_sha256,
+            create_attempt_base_url: raw.create_attempt_base_url,
             server_job_id: raw.server_job_id,
             server_base_url: raw.server_base_url,
             server_cancellation_acknowledged_at_ms: stored_optional_unsigned(
@@ -1820,6 +2131,7 @@ mod tests {
         assert_eq!(recovered.create_request_json, create_request_json);
         assert_eq!(recovered.capture_manifest_path, manifest_path);
         assert_eq!(recovered.server_job_id, None);
+        assert_eq!(recovered.create_attempt_base_url, None);
         assert_eq!(
             ledger.get_job("job-remote").unwrap().unwrap().status,
             RecordingJobStatus::Uploading
@@ -1870,11 +2182,31 @@ mod tests {
                 .unwrap();
 
             ledger
+                .begin_remote_create_attempt("job-progress", "http://127.0.0.1:18765", 103)
+                .unwrap();
+            assert_eq!(
+                ledger
+                    .get_prepared_remote_job("job-progress")
+                    .unwrap()
+                    .unwrap()
+                    .create_attempt_base_url
+                    .as_deref(),
+                Some("http://127.0.0.1:18765")
+            );
+            assert!(ledger
+                .record_server_job_id(
+                    "job-progress",
+                    "job-server-1",
+                    "http://127.0.0.1:18766",
+                    104,
+                )
+                .is_err());
+            ledger
                 .record_server_job_id(
                     "job-progress",
                     "job-server-1",
                     "http://127.0.0.1:18765",
-                    103,
+                    105,
                 )
                 .unwrap();
             ledger
@@ -1882,7 +2214,7 @@ mod tests {
                     "job-progress",
                     "job-server-1",
                     "http://127.0.0.1:18765",
-                    104,
+                    106,
                 )
                 .unwrap();
             assert!(ledger
@@ -1890,7 +2222,7 @@ mod tests {
                     "job-progress",
                     "job-server-conflict",
                     "http://127.0.0.1:18765",
-                    105,
+                    107,
                 )
                 .is_err());
             assert!(ledger
@@ -1898,9 +2230,17 @@ mod tests {
                     "job-progress",
                     "job-server-1",
                     "http://127.0.0.1:18766",
-                    105,
+                    107,
                 )
                 .is_err());
+            assert_eq!(
+                ledger
+                    .get_prepared_remote_job("job-progress")
+                    .unwrap()
+                    .unwrap()
+                    .create_attempt_base_url,
+                None
+            );
             assert!(ledger
                 .mark_remote_job_committed("job-progress", 106)
                 .is_err());
@@ -1999,6 +2339,9 @@ mod tests {
                 },
                 202,
             )
+            .unwrap();
+        ledger
+            .begin_remote_create_attempt("job-retry", "http://127.0.0.1:18765", 203)
             .unwrap();
         ledger
             .record_server_job_id(
@@ -2395,6 +2738,67 @@ mod tests {
     }
 
     #[test]
+    fn terminal_pruning_preserves_a_cancelled_create_attempt_until_remote_cleanup() {
+        let dir = temp_dir("cancelled-create-prune");
+        let source = dir.join("source.wav");
+        let manifest = dir.join("remote/job-create/capture-manifest.json");
+        let chunk = dir.join("remote/job-create/chunk.pcm");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&source, b"RIFF-source").unwrap();
+        fs::write(&manifest, b"{}").unwrap();
+        fs::write(&chunk, b"private audio").unwrap();
+        let ledger = JobLedger::open_in_memory().unwrap();
+        let mut job = imported_job_at("job-create", source);
+        job.status = RecordingJobStatus::QueuedServer;
+        job.route = Some(RecordingRoute::ServerBatch);
+        ledger.insert_job(&job).unwrap();
+        ledger
+            .transition("job-create", RecordingJobStatus::Preprocessing, 2)
+            .unwrap();
+        ledger
+            .attach_prepared_remote_job(
+                "job-create",
+                &NewPreparedRemoteJob {
+                    create_request_json: "{}".into(),
+                    capture_manifest_path: manifest,
+                    capture_manifest_sha256: "a".repeat(64),
+                    chunks: vec![chunk_at(chunk)],
+                },
+                3,
+            )
+            .unwrap();
+        ledger
+            .begin_remote_create_attempt("job-create", "http://127.0.0.1:18765", 4)
+            .unwrap();
+        ledger.request_cancellation("job-create", 5).unwrap();
+
+        for index in 0..MAX_TERMINAL_JOB_HISTORY {
+            let id = format!("later-terminal-{index:04}");
+            ledger.insert_job(&imported_job(&id)).unwrap();
+            ledger
+                .request_cancellation(&id, 1_000 + index as u64)
+                .unwrap();
+        }
+
+        assert!(ledger.get_job("job-create").unwrap().is_some());
+        let pending = ledger
+            .get_prepared_remote_job("job-create")
+            .unwrap()
+            .expect("cancelled create attempt remains recoverable");
+        assert_eq!(
+            pending.create_attempt_base_url.as_deref(),
+            Some("http://127.0.0.1:18765")
+        );
+        assert!(ledger
+            .list_pending_remote_spool_cleanup()
+            .unwrap()
+            .is_empty());
+
+        drop(ledger);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn reopening_legacy_database_prunes_preexisting_terminal_overflow_and_chunks() {
         let dir = temp_dir("terminal-reopen-prune");
         let path = dir.join("jobs.sqlite3");
@@ -2549,6 +2953,7 @@ mod tests {
                     ("server_job_id", "TEXT"),
                     ("server_base_url", "TEXT"),
                     ("server_cancellation_acknowledged_at_ms", "INTEGER"),
+                    ("create_attempt_base_url", "TEXT"),
                 ][..],
             ),
             (

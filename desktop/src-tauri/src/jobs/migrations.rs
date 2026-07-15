@@ -2,10 +2,11 @@ use crate::jobs::model::JobLedgerError;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::{path::Path, time::Duration};
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 const MIGRATION_1_SQL: &str = include_str!("../../migrations/0001_job_ledger.sql");
 const MIGRATION_2_SQL: &str = include_str!("../../migrations/0002_prepared_remote_jobs.sql");
 const MIGRATION_3_SQL: &str = include_str!("../../migrations/0003_remote_spool_cleanup.sql");
+const MIGRATION_4_SQL: &str = include_str!("../../migrations/0004_remote_create_attempt.sql");
 
 pub(super) fn open_file(path: &Path) -> Result<Connection, JobLedgerError> {
     open_file_with_migration_hook(path, || {})
@@ -51,15 +52,21 @@ fn migrate_with_hook(
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         CURRENT_SCHEMA_VERSION => {}
-        2 => transaction.execute_batch(MIGRATION_3_SQL)?,
+        3 => transaction.execute_batch(MIGRATION_4_SQL)?,
+        2 => {
+            transaction.execute_batch(MIGRATION_3_SQL)?;
+            transaction.execute_batch(MIGRATION_4_SQL)?;
+        }
         1 => {
             transaction.execute_batch(MIGRATION_2_SQL)?;
             transaction.execute_batch(MIGRATION_3_SQL)?;
+            transaction.execute_batch(MIGRATION_4_SQL)?;
         }
         0 => {
             transaction.execute_batch(MIGRATION_1_SQL)?;
             transaction.execute_batch(MIGRATION_2_SQL)?;
             transaction.execute_batch(MIGRATION_3_SQL)?;
+            transaction.execute_batch(MIGRATION_4_SQL)?;
         }
         unsupported => return Err(JobLedgerError::UnsupportedSchema(unsupported)),
     }
@@ -125,7 +132,7 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(foreign_keys, 1);
         assert_eq!(
             tables,
@@ -214,7 +221,7 @@ mod tests {
             [],
             |row| row.get(0),
         ).unwrap();
-        assert_eq!((version, table_count), (3, 5));
+        assert_eq!((version, table_count), (4, 5));
         drop(connection);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -250,8 +257,40 @@ mod tests {
             .unwrap();
         assert_eq!(
             (version, existing.as_str(), remote_table),
-            (3, "existing.wav", 1)
+            (4, "existing.wav", 1)
         );
+    }
+
+    #[test]
+    fn version_three_database_preserves_prepared_state_and_adds_create_attempt_origin() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure_connection(&connection, false).unwrap();
+        connection.execute_batch(MIGRATION_1_SQL).unwrap();
+        connection.execute_batch(MIGRATION_2_SQL).unwrap();
+        connection.execute_batch(MIGRATION_3_SQL).unwrap();
+        connection.execute(
+            "INSERT INTO recording_jobs (job_id, session_mode, session_origin, source_path, display_name, status, created_at_ms, updated_at_ms) VALUES ('existing', 'meeting', 'imported_file', 'C:/existing.wav', 'existing.wav', 'uploading', 1, 1)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO prepared_remote_jobs (job_id, create_request_json, capture_manifest_path, capture_manifest_sha256) VALUES ('existing', '{}', 'C:/manifest.json', ?1)",
+            ["a".repeat(64)],
+        ).unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let prepared: (String, Option<String>) = connection
+            .query_row(
+                "SELECT create_request_json, create_attempt_base_url FROM prepared_remote_jobs WHERE job_id = 'existing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(prepared, ("{}".into(), None));
     }
 
     #[test]

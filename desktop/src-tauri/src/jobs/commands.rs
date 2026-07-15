@@ -1022,6 +1022,13 @@ mod tests {
             .unwrap();
         let server_job_id = "job-0123456789abcdef0123456789abcdef";
         ledger
+            .begin_remote_create_attempt(
+                "job-completed-catalog",
+                "http://127.0.0.1:18765",
+                1_720_000_000_200,
+            )
+            .unwrap();
+        ledger
             .record_server_job_id(
                 "job-completed-catalog",
                 server_job_id,

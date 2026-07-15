@@ -93,10 +93,15 @@ impl From<BatchClientError> for DrainStepError {
 type DrainResult<T> = Result<T, DrainStepError>;
 
 enum BatchCommitGuard<'a> {
+    PersistedCleanup,
     #[cfg(test)]
     Unchecked,
     #[cfg(test)]
     StaleForTest,
+    #[cfg(test)]
+    StaleAfterForTest {
+        remaining_successes: &'a std::sync::atomic::AtomicUsize,
+    },
     Lease {
         connector: &'a ServerConnector,
         lease: &'a BatchConnectionLease,
@@ -106,10 +111,23 @@ enum BatchCommitGuard<'a> {
 impl BatchCommitGuard<'_> {
     fn commit<T>(&self, mutation: impl FnOnce() -> DrainResult<T>) -> DrainResult<T> {
         match self {
+            Self::PersistedCleanup => mutation(),
             #[cfg(test)]
             Self::Unchecked => mutation(),
             #[cfg(test)]
             Self::StaleForTest => Err(DrainStepError::transient_state("test stale lease")),
+            #[cfg(test)]
+            Self::StaleAfterForTest {
+                remaining_successes,
+            } => {
+                let remaining = remaining_successes.load(std::sync::atomic::Ordering::SeqCst);
+                if remaining == 0 {
+                    Err(DrainStepError::transient_state("test stale lease"))
+                } else {
+                    remaining_successes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    mutation()
+                }
+            }
             Self::Lease { connector, lease } => connector
                 .with_current_batch_lease(lease, mutation)
                 .map_err(DrainStepError::transient_state)?,
@@ -139,7 +157,7 @@ impl RemoteJobDrain {
     }
 
     fn has_pending_work(&self) -> Result<bool, String> {
-        Ok(self
+        let active_job = self
             .ledger
             .list_recoverable_jobs()
             .map_err(|error| error.to_string())?
@@ -153,17 +171,12 @@ impl RemoteJobDrain {
                         | RecordingJobStatus::ServerProcessing
                         | RecordingJobStatus::Saving
                 )
-            })
-            || !self
+            });
+        Ok(active_job
+            || self
                 .ledger
-                .list_pending_remote_cancellations()
-                .map_err(|error| error.to_string())?
-                .is_empty()
-            || !self
-                .ledger
-                .list_detached_remote_cancellations()
-                .map_err(|error| error.to_string())?
-                .is_empty())
+                .has_remote_reconciliation_work()
+                .map_err(|error| error.to_string())?)
     }
 
     fn enforce_retention(&self, now_ms: u64) -> Result<bool, String> {
@@ -310,20 +323,11 @@ async fn run(app: tauri::AppHandle) {
 
         let connector = app.state::<ServerConnector>();
         let runtime_state = app.state::<crate::runtime::RuntimeOrchestratorState>();
-        if connector.batch_connection_lease().ok().flatten().is_none() {
-            connector.refresh_for_job_drain(&app, &runtime_state).await;
-        }
-        let Some(lease) = connector.batch_connection_lease().ok().flatten() else {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        };
         let now = now_ms();
-
-        match advance_cancellation_with_lease(
+        match advance_persisted_cancellation_once(
             &app.state::<RemoteJobDrain>().ledger,
             &app.state::<RemoteJobDrain>().remote_jobs_directory,
             &connector,
-            &lease,
             now,
         )
         .await
@@ -340,6 +344,13 @@ async fn run(app: tauri::AppHandle) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
+        }
+        if connector.batch_connection_lease().ok().flatten().is_none() {
+            connector.refresh_for_job_drain(&app, &runtime_state).await;
+        }
+        if connector.batch_connection_lease().ok().flatten().is_none() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
         }
 
         let prepare_app = app.clone();
@@ -621,22 +632,38 @@ async fn advance_upload_once_guarded(
     {
         return Err("uploading job is bound to a different server origin".into());
     }
+    if prepared.server_job_id.is_none()
+        && prepared
+            .create_attempt_base_url
+            .as_deref()
+            .is_some_and(|origin| origin != client.base_url_identity())
+    {
+        return Err("uploading job has a create attempt at a different server origin".into());
+    }
 
     let Some(server_job_id) = prepared.server_job_id.as_deref() else {
         let idempotency_key = request.create_idempotency_key()?;
-        guard.ensure_current()?;
-        let projection = client.create(&idempotency_key, &request).await?;
-        validate_job_projection(&projection, &request, None, &["accepted", "uploading"])?;
         guard.commit(|| {
             ledger
-                .record_server_job_id(
+                .begin_remote_create_attempt(
                     &candidate.job_id,
-                    &projection.job_id,
                     client.base_url_identity(),
                     updated_at_ms,
                 )
                 .map_err(|error| DrainStepError::permanent(error.to_string()))
         })?;
+        guard.ensure_current()?;
+        let projection = client.create(&idempotency_key, &request).await?;
+        validate_job_projection(&projection, &request, None, &["accepted", "uploading"])?;
+        ledger
+            .record_server_job_id(
+                &candidate.job_id,
+                &projection.job_id,
+                client.base_url_identity(),
+                updated_at_ms,
+            )
+            .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+        guard.ensure_current()?;
         return Ok(true);
     };
 
@@ -661,18 +688,17 @@ async fn advance_upload_once_guarded(
         {
             return Err("server chunk receipt conflicts with durable upload identity".into());
         }
-        guard.commit(|| {
-            ledger
-                .acknowledge_remote_chunk(
-                    &candidate.job_id,
-                    &reference.replay_key.track_id,
-                    reference.replay_key.sequence_start,
-                    reference.replay_key.sequence_end,
-                    &reference.content_identity.sha256,
-                    updated_at_ms,
-                )
-                .map_err(|error| DrainStepError::permanent(error.to_string()))
-        })?;
+        ledger
+            .acknowledge_remote_chunk(
+                &candidate.job_id,
+                &reference.replay_key.track_id,
+                reference.replay_key.sequence_start,
+                reference.replay_key.sequence_end,
+                &reference.content_identity.sha256,
+                updated_at_ms,
+            )
+            .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+        guard.ensure_current()?;
         return Ok(true);
     }
 
@@ -702,29 +728,241 @@ async fn advance_upload_once_guarded(
             &["server_processing", "complete"],
         )?;
     }
-    guard.commit(|| {
-        ledger
-            .mark_remote_job_committed(&candidate.job_id, updated_at_ms)
-            .map_err(|error| DrainStepError::permanent(error.to_string()))
-    })?;
+    ledger
+        .mark_remote_job_committed(&candidate.job_id, updated_at_ms)
+        .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+    guard.ensure_current()?;
     Ok(true)
 }
 
-async fn advance_cancellation_with_lease(
+async fn advance_persisted_cancellation_once(
     ledger: &JobLedger,
     remote_jobs_directory: &Path,
     connector: &ServerConnector,
-    lease: &BatchConnectionLease,
     updated_at_ms: u64,
 ) -> DrainResult<bool> {
-    advance_cancellation_once_guarded(
+    if cleanup_next_owned_spool_once(ledger, remote_jobs_directory)? {
+        return Ok(true);
+    }
+    if let Some(origin) = next_persisted_cancellation_origin(ledger)? {
+        let client = connector
+            .persisted_cleanup_client(&origin)
+            .map_err(DrainStepError::permanent)?;
+        return advance_cancellation_once_guarded(
+            ledger,
+            remote_jobs_directory,
+            &client,
+            updated_at_ms,
+            &BatchCommitGuard::PersistedCleanup,
+        )
+        .await;
+    }
+
+    if recover_cancelled_create_attempt_once(
         ledger,
         remote_jobs_directory,
-        lease.client(),
+        connector,
         updated_at_ms,
-        &BatchCommitGuard::Lease { connector, lease },
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+
+    let configured_origin = match connector.configured_batch_origin() {
+        Ok(origin) => origin,
+        Err(_) => return Ok(false),
+    };
+    if detach_changed_remote_binding_once(
+        ledger,
+        remote_jobs_directory,
+        configured_origin.as_deref(),
+        updated_at_ms,
+    )? {
+        return Ok(true);
+    }
+    recover_abandoned_create_attempt_once(
+        ledger,
+        remote_jobs_directory,
+        connector,
+        configured_origin.as_deref(),
+        updated_at_ms,
     )
     .await
+}
+
+fn cleanup_next_owned_spool_once(
+    ledger: &JobLedger,
+    remote_jobs_directory: &Path,
+) -> DrainResult<bool> {
+    let pending = ledger
+        .list_pending_remote_spool_cleanup()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next();
+    let Some(job_id) = pending else {
+        return Ok(false);
+    };
+    cleanup_owned_spool_and_ack(
+        ledger,
+        remote_jobs_directory,
+        &job_id,
+        "owned spool cleanup lost its durable acknowledgement",
+    )?;
+    Ok(true)
+}
+
+fn next_persisted_cancellation_origin(ledger: &JobLedger) -> DrainResult<Option<String>> {
+    let pending_origin = ledger
+        .list_pending_remote_cancellations()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find_map(|candidate| candidate.server_base_url);
+    match pending_origin {
+        Some(origin) => Ok(Some(origin)),
+        None => Ok(ledger
+            .list_detached_remote_cancellations()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .map(|candidate| candidate.server_base_url)),
+    }
+}
+
+async fn recover_cancelled_create_attempt_once(
+    ledger: &JobLedger,
+    remote_jobs_directory: &Path,
+    connector: &ServerConnector,
+    updated_at_ms: u64,
+) -> DrainResult<bool> {
+    let cancelled_attempt = ledger
+        .list_cancelled_remote_create_attempts()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next();
+    let Some(cancelled_attempt) = cancelled_attempt else {
+        return Ok(false);
+    };
+    let origin = cancelled_attempt
+        .create_attempt_base_url
+        .as_deref()
+        .ok_or_else(|| {
+            DrainStepError::permanent("cancelled create cleanup omitted its persisted origin")
+        })?;
+    let client = connector
+        .persisted_cleanup_client(origin)
+        .map_err(DrainStepError::permanent)?;
+    let (request, projection) =
+        recreate_server_job_for_cleanup(&client, &cancelled_attempt).await?;
+    ledger
+        .record_server_job_id(
+            &cancelled_attempt.job_id,
+            &projection.job_id,
+            origin,
+            updated_at_ms,
+        )
+        .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+    cancel_server_job(&client, &projection.job_id, &request).await?;
+    remote::reset_unattached_spool(&cancelled_attempt.job_id, remote_jobs_directory)
+        .map_err(DrainStepError::permanent)?;
+    ledger
+        .acknowledge_server_cancellation(
+            &cancelled_attempt.job_id,
+            &projection.job_id,
+            updated_at_ms,
+        )
+        .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+    Ok(true)
+}
+
+fn detach_changed_remote_binding_once(
+    ledger: &JobLedger,
+    remote_jobs_directory: &Path,
+    configured_origin: Option<&str>,
+    updated_at_ms: u64,
+) -> DrainResult<bool> {
+    if let Some(job_id) = ledger
+        .detach_changed_remote_binding(configured_origin, updated_at_ms, |job_id| {
+            remote::reset_unattached_spool(job_id, remote_jobs_directory)
+        })
+        .map_err(|error| error.to_string())?
+    {
+        debug_assert!(!job_id.is_empty());
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn recover_abandoned_create_attempt_once(
+    ledger: &JobLedger,
+    remote_jobs_directory: &Path,
+    connector: &ServerConnector,
+    configured_origin: Option<&str>,
+    updated_at_ms: u64,
+) -> DrainResult<bool> {
+    let abandoned = ledger
+        .list_remote_create_attempts()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|candidate| candidate.create_attempt_base_url.as_deref() != configured_origin);
+    let Some(abandoned) = abandoned else {
+        return Ok(false);
+    };
+    let origin = abandoned
+        .create_attempt_base_url
+        .as_deref()
+        .ok_or_else(|| DrainStepError::permanent("create cleanup omitted its persisted origin"))?;
+    let client = connector
+        .persisted_cleanup_client(origin)
+        .map_err(DrainStepError::permanent)?;
+    let (request, projection) = recreate_server_job_for_cleanup(&client, &abandoned).await?;
+    cancel_server_job(&client, &projection.job_id, &request).await?;
+    ledger
+        .fail_abandoned_remote_create_attempt(&abandoned.job_id, origin, updated_at_ms, || {
+            remote::reset_unattached_spool(&abandoned.job_id, remote_jobs_directory)
+        })
+        .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+    Ok(true)
+}
+
+async fn recreate_server_job_for_cleanup(
+    client: &BatchApiClient,
+    candidate: &PreparedRemoteJobRecord,
+) -> DrainResult<(CreateRecordingJobRequest, RecordingJob)> {
+    let request = CreateRecordingJobRequest::decode_persisted(&candidate.create_request_json)?;
+    let idempotency_key = request.create_idempotency_key()?;
+    let projection = client.create(&idempotency_key, &request).await?;
+    validate_job_projection(
+        &projection,
+        &request,
+        None,
+        &[
+            "accepted",
+            "uploading",
+            "server_processing",
+            "complete",
+            "failed",
+            "cancelled",
+        ],
+    )?;
+    Ok((request, projection))
+}
+
+fn cleanup_owned_spool_and_ack(
+    ledger: &JobLedger,
+    remote_jobs_directory: &Path,
+    job_id: &str,
+    missing_acknowledgement: &'static str,
+) -> DrainResult<()> {
+    remote::reset_unattached_spool(job_id, remote_jobs_directory)
+        .map_err(DrainStepError::permanent)?;
+    let acknowledged = ledger
+        .acknowledge_remote_spool_cleanup(job_id)
+        .map_err(|error| DrainStepError::permanent(error.to_string()))?;
+    if !acknowledged {
+        return Err(DrainStepError::permanent(missing_acknowledgement));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -894,6 +1132,7 @@ async fn advance_processing_once_guarded(
         Some(server_job_id),
         &["server_processing", "complete", "failed", "cancelled"],
     )?;
+    guard.ensure_current()?;
     if projection.status == "server_processing" {
         return Ok(false);
     }
@@ -1116,14 +1355,18 @@ mod tests {
             JobLedger, NewRecordingJob, RecordingJobStatus, RecordingRoute, SessionMode,
             SessionOrigin, SourceOwnership,
         },
-        server_connector::batch::{ApiError, BatchApiClient, CreateRecordingJobRequest},
+        server_connector::{
+            batch::{ApiError, BatchApiClient, CreateRecordingJobRequest},
+            config::ServerSettings,
+            ServerConnector, ServerConnectorBoundary,
+        },
     };
 
     use super::{
-        advance_cancellation_once, advance_processing_once_guarded, advance_upload_once,
-        advance_upload_once_guarded, attach_prepared_remote_job_or_cleanup,
-        prepare_next_queued_job, remote_retry_plan, validate_result_revision, BatchCommitGuard,
-        DrainStepError, RemoteJobDrain,
+        advance_cancellation_once, advance_persisted_cancellation_once,
+        advance_processing_once_guarded, advance_upload_once, advance_upload_once_guarded,
+        attach_prepared_remote_job_or_cleanup, prepare_next_queued_job, remote_retry_plan,
+        validate_result_revision, BatchCommitGuard, DrainStepError, RemoteJobDrain,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -1153,6 +1396,7 @@ mod tests {
             remote_jobs_directory,
         };
 
+        assert!(drain.has_pending_work().unwrap());
         assert!(drain.enforce_retention(2).unwrap());
         assert!(!owned_spool.exists());
         assert!(drain
@@ -1162,6 +1406,45 @@ mod tests {
             .is_empty());
 
         drop(drain);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pending_owned_spool_cleanup_does_not_require_initialized_server_settings() {
+        let dir = temp_dir("pending-spool-cleanup");
+        let remote_jobs_directory = dir.join("remote-jobs");
+        let job_id = "job-0123456789abcdef01234567";
+        let owned_spool = remote_jobs_directory.join(job_id);
+        fs::create_dir_all(&owned_spool).unwrap();
+        fs::write(owned_spool.join("private.pcm"), b"private bytes").unwrap();
+        let ledger = JobLedger::open_in_memory().unwrap();
+        {
+            let connection = ledger.connection.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO remote_spool_cleanup (job_id, queued_at_ms) VALUES (?1, 1)",
+                    [job_id],
+                )
+                .unwrap();
+        }
+        let connector = ServerConnector::new();
+
+        let cleaned = tauri::async_runtime::block_on(advance_persisted_cancellation_once(
+            &ledger,
+            &remote_jobs_directory,
+            &connector,
+            2,
+        ))
+        .unwrap();
+
+        assert!(cleaned);
+        assert!(!owned_spool.exists());
+        assert!(ledger
+            .list_pending_remote_spool_cleanup()
+            .unwrap()
+            .is_empty());
+
+        drop(ledger);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1483,6 +1766,9 @@ mod tests {
             assert_eq!(create_error.detail, "test stale lease");
 
             ledger
+                .begin_remote_create_attempt("job-stale-pre-dispatch", &base_url, 1_720_000_000_300)
+                .unwrap();
+            ledger
                 .record_server_job_id(
                     "job-stale-pre-dispatch",
                     "job-0123456789abcdef0123456789abcdef",
@@ -1559,6 +1845,86 @@ mod tests {
     }
 
     #[test]
+    fn create_response_binding_is_durable_when_the_connector_changes_in_flight() {
+        let root = temp_dir("stale-create-response");
+        let database = root.join("jobs.sqlite3");
+        let source = root.join("source.wav");
+        let owned_live = root.join("live-recordings");
+        let remote_jobs = root.join("remote-jobs");
+        fs::create_dir_all(&owned_live).unwrap();
+        write_pcm_wav(&source, &vec![0_u8; 320]);
+        let ledger = JobLedger::open(&database).unwrap();
+        ledger
+            .insert_job(&queued_job("job-stale-create-response", source))
+            .unwrap();
+        let owner = OwnerNamespace::local("i-drain-test").unwrap();
+        prepare_next_queued_job(
+            &ledger,
+            &owned_live,
+            &remote_jobs,
+            &owner,
+            1_720_000_000_100,
+            UNIX_EPOCH + Duration::from_secs(1_720_000_000),
+        )
+        .unwrap();
+        let prepared = ledger
+            .get_prepared_remote_job("job-stale-create-response")
+            .unwrap()
+            .unwrap();
+        let request =
+            CreateRecordingJobRequest::decode_persisted(&prepared.create_request_json).unwrap();
+        let server_job_id = "job-0123456789abcdef0123456789abcdef";
+        let response = serde_json::json!({
+            "jobId": server_job_id,
+            "sessionId": request.metadata.session_id.as_str(),
+            "displayName": request.display_name,
+            "sessionMode": "meeting",
+            "sessionOrigin": "imported_file",
+            "status": "accepted",
+            "route": "server_batch",
+            "captureManifest": request.capture_manifest,
+            "createdAtUtc": "2026-07-14T21:00:00Z",
+            "updatedAtUtc": "2026-07-14T21:00:01Z"
+        });
+        let (base_url, observed, server) = start_json_server(vec![(202, response)]);
+        let client = BatchApiClient::new(
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            &base_url,
+        )
+        .unwrap();
+        let remaining_successes = std::sync::atomic::AtomicUsize::new(2);
+
+        let error = tauri::async_runtime::block_on(advance_upload_once_guarded(
+            &ledger,
+            &remote_jobs,
+            &client,
+            1_720_000_000_200,
+            &BatchCommitGuard::StaleAfterForTest {
+                remaining_successes: &remaining_successes,
+            },
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert_eq!(error.detail, "test stale lease");
+        let durable = ledger
+            .get_prepared_remote_job("job-stale-create-response")
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.server_job_id.as_deref(), Some(server_job_id));
+        assert_eq!(durable.server_base_url.as_deref(), Some(base_url.as_str()));
+        assert_eq!(durable.create_attempt_base_url, None);
+        assert_eq!(observed.lock().unwrap().len(), 1);
+
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn terminal_conflict_does_not_acknowledge_detached_cancellation() {
         let root = temp_dir("detached-cancel");
         let database = root.join("jobs.sqlite3");
@@ -1591,6 +1957,9 @@ mod tests {
                 "requestId": "req-detached-cancel"
             }),
         )]);
+        ledger
+            .begin_remote_create_attempt("job-detached-cancel", &base_url, 1_720_000_000_200)
+            .unwrap();
         ledger
             .record_server_job_id(
                 "job-detached-cancel",
@@ -1646,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn acknowledged_current_cancellation_removes_the_owned_spool() {
+    fn persisted_origin_cancellation_does_not_require_a_current_connector_lease() {
         let root = temp_dir("current-cancel");
         let database = root.join("jobs.sqlite3");
         let source = root.join("source.wav");
@@ -1689,6 +2058,9 @@ mod tests {
         });
         let (base_url, observed, server) = start_json_server(vec![(202, response)]);
         ledger
+            .begin_remote_create_attempt("job-current-cancel", &base_url, 1_720_000_000_200)
+            .unwrap();
+        ledger
             .record_server_job_id(
                 "job-current-cancel",
                 server_job_id,
@@ -1699,22 +2071,17 @@ mod tests {
         ledger
             .request_cancellation("job-current-cancel", 1_720_000_000_300)
             .unwrap();
-        let client = BatchApiClient::new(
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-            &base_url,
-        )
-        .unwrap();
+        let connector = ServerConnector::new();
 
         tauri::async_runtime::block_on(async {
-            assert!(
-                advance_cancellation_once(&ledger, &remote_jobs, &client, 1_720_000_000_400,)
-                    .await
-                    .unwrap()
-            );
+            assert!(advance_persisted_cancellation_once(
+                &ledger,
+                &remote_jobs,
+                &connector,
+                1_720_000_000_400,
+            )
+            .await
+            .unwrap());
         });
         server.join().unwrap();
 
@@ -1730,6 +2097,289 @@ mod tests {
         );
         assert!(observed.lock().unwrap()[0]
             .starts_with(&format!("DELETE /v1/jobs/{server_job_id} HTTP/1.1")));
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_inflight_create_is_recovered_before_its_local_tombstone_is_acknowledged() {
+        let root = temp_dir("cancelled-create-attempt");
+        let database = root.join("jobs.sqlite3");
+        let source = root.join("source.wav");
+        let owned_live = root.join("live-recordings");
+        let remote_jobs = root.join("remote-jobs");
+        fs::create_dir_all(&owned_live).unwrap();
+        write_pcm_wav(&source, &vec![0_u8; 320]);
+        let ledger = JobLedger::open(&database).unwrap();
+        ledger
+            .insert_job(&queued_job("job-cancelled-create", source.clone()))
+            .unwrap();
+        let owner = OwnerNamespace::local("i-drain-test").unwrap();
+        prepare_next_queued_job(
+            &ledger,
+            &owned_live,
+            &remote_jobs,
+            &owner,
+            1_720_000_000_100,
+            UNIX_EPOCH + Duration::from_secs(1_720_000_000),
+        )
+        .unwrap();
+        let prepared = ledger
+            .get_prepared_remote_job("job-cancelled-create")
+            .unwrap()
+            .unwrap();
+        let request =
+            CreateRecordingJobRequest::decode_persisted(&prepared.create_request_json).unwrap();
+        let server_job_id = "job-0123456789abcdef0123456789abcdef";
+        let projection = |status: &str| {
+            serde_json::json!({
+                "jobId": server_job_id,
+                "sessionId": request.metadata.session_id.as_str(),
+                "displayName": request.display_name,
+                "sessionMode": "meeting",
+                "sessionOrigin": "imported_file",
+                "status": status,
+                "route": "server_batch",
+                "captureManifest": request.capture_manifest,
+                "createdAtUtc": "2026-07-14T21:00:00Z",
+                "updatedAtUtc": "2026-07-14T21:00:01Z"
+            })
+        };
+        let (base_url, observed, server) = start_json_server(vec![
+            (202, projection("accepted")),
+            (202, projection("cancelled")),
+        ]);
+        ledger
+            .begin_remote_create_attempt("job-cancelled-create", &base_url, 1_720_000_000_200)
+            .unwrap();
+        ledger
+            .request_cancellation("job-cancelled-create", 1_720_000_000_201)
+            .unwrap();
+        let pending_probe = RemoteJobDrain {
+            ledger: JobLedger::open(&database).unwrap(),
+            owner_namespace: OwnerNamespace::local("i-pending-probe").unwrap(),
+            owned_live_directory: owned_live.clone(),
+            remote_jobs_directory: remote_jobs.clone(),
+        };
+        assert!(pending_probe.has_pending_work().unwrap());
+        drop(pending_probe);
+        let connector = ServerConnector::new();
+
+        tauri::async_runtime::block_on(async {
+            assert!(advance_persisted_cancellation_once(
+                &ledger,
+                &remote_jobs,
+                &connector,
+                1_720_000_000_300,
+            )
+            .await
+            .unwrap());
+        });
+        server.join().unwrap();
+
+        let acknowledged = ledger
+            .get_prepared_remote_job("job-cancelled-create")
+            .unwrap()
+            .unwrap();
+        assert_eq!(acknowledged.server_job_id.as_deref(), Some(server_job_id));
+        assert_eq!(
+            acknowledged.server_cancellation_acknowledged_at_ms,
+            Some(1_720_000_000_300)
+        );
+        assert!(!remote_jobs.join("job-cancelled-create").exists());
+        assert!(source.is_file(), "external source must never be deleted");
+        let requests = observed.lock().unwrap();
+        assert!(requests[0].starts_with("POST /v1/jobs HTTP/1.1"));
+        assert!(requests[1].starts_with(&format!("DELETE /v1/jobs/{server_job_id} HTTP/1.1")));
+
+        drop(requests);
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn abandoned_create_attempt_is_recovered_and_cancelled_at_its_persisted_origin() {
+        let root = temp_dir("abandoned-create-attempt");
+        let database = root.join("jobs.sqlite3");
+        let source = root.join("source.wav");
+        let owned_live = root.join("live-recordings");
+        let remote_jobs = root.join("remote-jobs");
+        fs::create_dir_all(&owned_live).unwrap();
+        write_pcm_wav(&source, &vec![0_u8; 320]);
+        let ledger = JobLedger::open(&database).unwrap();
+        ledger
+            .insert_job(&queued_job("job-abandoned-create", source.clone()))
+            .unwrap();
+        let owner = OwnerNamespace::local("i-drain-test").unwrap();
+        prepare_next_queued_job(
+            &ledger,
+            &owned_live,
+            &remote_jobs,
+            &owner,
+            1_720_000_000_100,
+            UNIX_EPOCH + Duration::from_secs(1_720_000_000),
+        )
+        .unwrap();
+        let prepared = ledger
+            .get_prepared_remote_job("job-abandoned-create")
+            .unwrap()
+            .unwrap();
+        let request =
+            CreateRecordingJobRequest::decode_persisted(&prepared.create_request_json).unwrap();
+        let server_job_id = "job-0123456789abcdef0123456789abcdef";
+        let projection = |status: &str| {
+            serde_json::json!({
+                "jobId": server_job_id,
+                "sessionId": request.metadata.session_id.as_str(),
+                "displayName": request.display_name,
+                "sessionMode": "meeting",
+                "sessionOrigin": "imported_file",
+                "status": status,
+                "route": "server_batch",
+                "captureManifest": request.capture_manifest,
+                "createdAtUtc": "2026-07-14T21:00:00Z",
+                "updatedAtUtc": "2026-07-14T21:00:01Z"
+            })
+        };
+        let (base_url, observed, server) = start_json_server(vec![
+            (202, projection("accepted")),
+            (202, projection("cancelled")),
+        ]);
+        ledger
+            .begin_remote_create_attempt("job-abandoned-create", &base_url, 1_720_000_000_200)
+            .unwrap();
+        let boundary = ServerConnectorBoundary::new();
+        boundary.configure(&ServerSettings::default());
+        let connector = boundary.downgrade().upgrade().unwrap();
+
+        tauri::async_runtime::block_on(async {
+            assert!(advance_persisted_cancellation_once(
+                &ledger,
+                &remote_jobs,
+                &connector,
+                1_720_000_000_300,
+            )
+            .await
+            .unwrap());
+        });
+        server.join().unwrap();
+
+        let failed = ledger.get_job("job-abandoned-create").unwrap().unwrap();
+        assert_eq!(failed.status, RecordingJobStatus::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("REMOTE_ORIGIN_CHANGED"));
+        assert!(ledger
+            .get_prepared_remote_job("job-abandoned-create")
+            .unwrap()
+            .is_none());
+        assert!(!remote_jobs.join("job-abandoned-create").exists());
+        assert!(source.is_file(), "external source must never be deleted");
+        let requests = observed.lock().unwrap();
+        assert!(requests[0].starts_with("POST /v1/jobs HTTP/1.1"));
+        assert!(requests[1].starts_with(&format!("DELETE /v1/jobs/{server_job_id} HTTP/1.1")));
+
+        drop(requests);
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_origin_detaches_and_cancels_an_existing_server_binding() {
+        let root = temp_dir("changed-origin-binding");
+        let database = root.join("jobs.sqlite3");
+        let source = root.join("source.wav");
+        let owned_live = root.join("live-recordings");
+        let remote_jobs = root.join("remote-jobs");
+        fs::create_dir_all(&owned_live).unwrap();
+        write_pcm_wav(&source, &vec![0_u8; 320]);
+        let ledger = JobLedger::open(&database).unwrap();
+        ledger
+            .insert_job(&queued_job("job-changed-origin", source.clone()))
+            .unwrap();
+        let owner = OwnerNamespace::local("i-drain-test").unwrap();
+        prepare_next_queued_job(
+            &ledger,
+            &owned_live,
+            &remote_jobs,
+            &owner,
+            1_720_000_000_100,
+            UNIX_EPOCH + Duration::from_secs(1_720_000_000),
+        )
+        .unwrap();
+        let prepared = ledger
+            .get_prepared_remote_job("job-changed-origin")
+            .unwrap()
+            .unwrap();
+        let request =
+            CreateRecordingJobRequest::decode_persisted(&prepared.create_request_json).unwrap();
+        let server_job_id = "job-0123456789abcdef0123456789abcdef";
+        let cancelled = serde_json::json!({
+            "jobId": server_job_id,
+            "sessionId": request.metadata.session_id.as_str(),
+            "displayName": request.display_name,
+            "sessionMode": "meeting",
+            "sessionOrigin": "imported_file",
+            "status": "cancelled",
+            "route": "server_batch",
+            "captureManifest": request.capture_manifest,
+            "createdAtUtc": "2026-07-14T21:00:00Z",
+            "updatedAtUtc": "2026-07-14T21:00:01Z"
+        });
+        let (old_origin, observed, server) = start_json_server(vec![(202, cancelled)]);
+        ledger
+            .begin_remote_create_attempt("job-changed-origin", &old_origin, 1_720_000_000_200)
+            .unwrap();
+        ledger
+            .record_server_job_id(
+                "job-changed-origin",
+                server_job_id,
+                &old_origin,
+                1_720_000_000_201,
+            )
+            .unwrap();
+        let boundary = ServerConnectorBoundary::new();
+        boundary.configure(&ServerSettings {
+            enabled: true,
+            base_url: Some("http://127.0.0.1:9".into()),
+            ..ServerSettings::default()
+        });
+        let connector = boundary.downgrade().upgrade().unwrap();
+
+        tauri::async_runtime::block_on(async {
+            assert!(advance_persisted_cancellation_once(
+                &ledger,
+                &remote_jobs,
+                &connector,
+                1_720_000_000_300,
+            )
+            .await
+            .unwrap());
+            assert!(advance_persisted_cancellation_once(
+                &ledger,
+                &remote_jobs,
+                &connector,
+                1_720_000_000_400,
+            )
+            .await
+            .unwrap());
+        });
+        server.join().unwrap();
+
+        let failed = ledger.get_job("job-changed-origin").unwrap().unwrap();
+        assert_eq!(failed.status, RecordingJobStatus::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("REMOTE_ORIGIN_CHANGED"));
+        assert!(ledger
+            .get_prepared_remote_job("job-changed-origin")
+            .unwrap()
+            .is_none());
+        assert!(ledger
+            .list_detached_remote_cancellations()
+            .unwrap()
+            .is_empty());
+        assert!(!remote_jobs.join("job-changed-origin").exists());
+        assert!(source.is_file(), "external source must never be deleted");
+        assert!(observed.lock().unwrap()[0]
+            .starts_with(&format!("DELETE /v1/jobs/{server_job_id} HTTP/1.1")));
+
         drop(ledger);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1806,6 +2456,9 @@ mod tests {
         assert!(validate_result_revision(&offset_timestamp, &request).is_err());
         let (base_url, observed, server) =
             start_json_server(vec![(200, projection), (200, result)]);
+        ledger
+            .begin_remote_create_attempt("job-drain-result", &base_url, 1_720_000_000_200)
+            .unwrap();
         ledger
             .record_server_job_id(
                 "job-drain-result",
