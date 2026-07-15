@@ -6,6 +6,7 @@ mod file_actions;
 mod install_identity;
 pub mod jobs;
 pub mod live;
+pub(crate) mod media_protocol;
 mod paths;
 pub mod runtime;
 mod runtime_policy;

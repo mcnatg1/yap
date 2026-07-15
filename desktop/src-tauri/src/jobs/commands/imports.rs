@@ -3,11 +3,11 @@ use super::{
     PENDING_JOB_LIFETIME_MS, PHASE5_REMOTE_IMPORT_EXTENSIONS,
 };
 use crate::{
-    commands::media_protocol::MediaOwner,
     jobs::{
         NewRecordingJob, RecordingJobStatus, RecordingJobView, RecordingRoute, SessionMode,
         SessionOrigin, SourceOwnership,
     },
+    media_protocol::MediaOwner,
 };
 use std::{
     collections::{HashMap, HashSet},

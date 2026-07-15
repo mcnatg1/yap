@@ -1,6 +1,5 @@
 mod history;
 mod live;
-pub(crate) mod media_protocol;
 mod setup;
 
 pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
@@ -14,7 +13,7 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
     let remote_job_drain = crate::jobs::RemoteJobDrain::from_resources(job_resources)
         .expect("remote recording drain must initialize before commands are registered");
     let builder = builder
-        .manage(media_protocol::MediaOwner::new())
+        .manage(crate::media_protocol::MediaOwner::new())
         .manage(crate::live::hotkey_commands::HotkeyEnrollmentGate::default())
         .manage(history::HistoryCatalogOwner::open_default())
         .manage(recording_jobs)

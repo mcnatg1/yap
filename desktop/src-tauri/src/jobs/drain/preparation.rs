@@ -56,7 +56,7 @@ pub(super) fn prepare_next_queued_job(
                 }
                 crate::file_actions::RecordingJobSourceError::Unsafe(message) => message,
             })?;
-    let mut source = crate::commands::media_protocol::open_unchanged_media_source(
+    let mut source = crate::media_protocol::open_unchanged_media_source(
         &validated.canonical_path,
         &validated.fingerprint,
     )?;

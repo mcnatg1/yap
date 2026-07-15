@@ -3,8 +3,8 @@ use super::{
     RetryKind,
 };
 use crate::{
-    commands::media_protocol::MediaOwner,
     jobs::{RecordingJobStatus, RecordingJobView},
+    media_protocol::MediaOwner,
 };
 use std::collections::HashSet;
 

@@ -48,7 +48,7 @@ pub(crate) struct RecordingJobSourceAdmission {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValidatedRecordingJobSource {
     pub(crate) canonical_path: std::path::PathBuf,
-    pub(crate) fingerprint: crate::commands::media_protocol::MediaSourceFingerprint,
+    pub(crate) fingerprint: crate::media_protocol::MediaSourceFingerprint,
 }
 
 pub(crate) const RECORDING_MEDIA_EXTENSIONS: &[&str] =
@@ -93,7 +93,7 @@ pub(crate) fn validate_recording_job_source_at(
         )
         .map_err(RecordingJobSourceError::Unsafe)?;
     }
-    let fingerprint = crate::commands::media_protocol::inspect_media_source(&canonical_path)
+    let fingerprint = crate::media_protocol::inspect_media_source(&canonical_path)
         .map_err(RecordingJobSourceError::Unsafe)?;
     Ok(ValidatedRecordingJobSource {
         canonical_path,
@@ -122,7 +122,7 @@ pub(crate) fn register_native_selected_recording_job_source_at(
 
 pub(crate) fn authorize_registered_recording_job_source_at(
     source: &ValidatedRecordingJobSource,
-    owner: &crate::commands::media_protocol::MediaOwner,
+    owner: &crate::media_protocol::MediaOwner,
     selection_registry_path: &std::path::Path,
     playback_registry_path: &std::path::Path,
     owned_dir: &std::path::Path,
@@ -196,7 +196,7 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[tauri::command]
 pub fn restore_recording_playback_path(
     window: tauri::WebviewWindow,
-    owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
+    owner: tauri::State<'_, crate::media_protocol::MediaOwner>,
     path: String,
 ) -> Result<RecordingPlaybackAdmission, String> {
     ensure_main_window(&window)?;
@@ -211,7 +211,7 @@ pub fn restore_recording_playback_path(
 #[tauri::command]
 pub fn release_recording_playback(
     window: tauri::WebviewWindow,
-    owner: tauri::State<'_, crate::commands::media_protocol::MediaOwner>,
+    owner: tauri::State<'_, crate::media_protocol::MediaOwner>,
     playback_path: String,
 ) -> Result<(), String> {
     ensure_main_window(&window)?;
@@ -722,7 +722,7 @@ where
 
 fn mint_playback_admission(
     path: &std::path::Path,
-    owner: &crate::commands::media_protocol::MediaOwner,
+    owner: &crate::media_protocol::MediaOwner,
 ) -> Result<RecordingPlaybackAdmission, String> {
     let admission = owner.admit(path, MAX_DECODED_WAVEFORM_BYTES)?;
     Ok(RecordingPlaybackAdmission {
@@ -1514,7 +1514,7 @@ mod tests {
         let dir = temp_test_dir("playback-admission-metadata");
         let media = dir.join("meeting.wav");
         std::fs::write(&media, b"RIFFdata").unwrap();
-        let owner = crate::commands::media_protocol::MediaOwner::new();
+        let owner = crate::media_protocol::MediaOwner::new();
 
         let admission = mint_playback_admission(&media.canonicalize().unwrap(), &owner).unwrap();
 
