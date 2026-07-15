@@ -451,7 +451,7 @@ impl RecordingJobs {
         Ok(created)
     }
 
-    fn completed_remote_transcripts(
+    pub(crate) fn completed_remote_transcripts(
         &self,
         remote_jobs_directory: &Path,
     ) -> Result<CompletedRemoteTranscriptCatalog, JobCommandError> {

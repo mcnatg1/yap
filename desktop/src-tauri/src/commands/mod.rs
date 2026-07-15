@@ -1,3 +1,4 @@
+mod history;
 mod live;
 pub(crate) mod media_protocol;
 mod setup;
@@ -17,6 +18,7 @@ pub(crate) fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         .manage(crate::server_connector::ServerConnector::new());
     builder.invoke_handler(tauri::generate_handler![
         setup::setup_status,
+        history::history_catalog,
         crate::server_connector::server_connection_status,
         crate::server_connector::refresh_server_connection,
         crate::server_connector::server_settings,
