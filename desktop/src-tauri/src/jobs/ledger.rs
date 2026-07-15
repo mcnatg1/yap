@@ -16,6 +16,14 @@ const MAX_TERMINAL_JOB_HISTORY: usize = 500;
 const MAX_PREPARED_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_PREPARED_CHUNKS: usize = 4096;
 
+struct StoredChunkAcknowledgement {
+    acknowledged_at_ms: Option<i64>,
+    acknowledged_object_id: Option<String>,
+    content_byte_length: i64,
+    content_sha256: String,
+    upload_offset: i64,
+}
+
 pub struct JobLedger {
     pub(super) connection: Mutex<Connection>,
 }
@@ -438,28 +446,34 @@ impl JobLedger {
             .ok_or(JobLedgerError::InvalidRecord(
                 "recording job has not been created on the server",
             ))?;
-        let chunk: Option<(String, i64, i64, Option<String>, Option<i64>)> = transaction
+        let chunk: Option<StoredChunkAcknowledgement> = transaction
             .query_row(
                 "SELECT content_sha256, content_byte_length, upload_offset, acknowledged_object_id, acknowledged_at_ms FROM job_chunks WHERE job_id = ?1 AND track_id = ?2 AND sequence_start = ?3 AND sequence_end = ?4",
                 params![job_id, track_id, sequence_start, sequence_end],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok(StoredChunkAcknowledgement {
+                        content_sha256: row.get(0)?,
+                        content_byte_length: row.get(1)?,
+                        upload_offset: row.get(2)?,
+                        acknowledged_object_id: row.get(3)?,
+                        acknowledged_at_ms: row.get(4)?,
+                    })
+                },
             )
             .optional()?;
-        let Some((stored_sha256, content_byte_length, upload_offset, object_id, acknowledged)) =
-            chunk
-        else {
+        let Some(chunk) = chunk else {
             return Err(JobLedgerError::InvalidRecord(
                 "chunk acknowledgement does not match a prepared replay range",
             ));
         };
-        if stored_sha256 != content_sha256 || content_byte_length <= 0 {
+        if chunk.content_sha256 != content_sha256 || chunk.content_byte_length <= 0 {
             return Err(JobLedgerError::InvalidRecord(
                 "chunk acknowledgement conflicts with prepared content",
             ));
         }
-        if acknowledged.is_some() {
-            if upload_offset == content_byte_length
-                && object_id.as_deref() == Some(server_job_id.as_str())
+        if chunk.acknowledged_at_ms.is_some() {
+            if chunk.upload_offset == chunk.content_byte_length
+                && chunk.acknowledged_object_id.as_deref() == Some(server_job_id.as_str())
             {
                 return Ok(current);
             }

@@ -357,7 +357,7 @@ fn inspect_pcm_wav(source: &mut File) -> Result<WavData, String> {
 }
 
 fn validate_pcm_data_bytes(data_bytes: u64) -> Result<(), String> {
-    if data_bytes == 0 || data_bytes % 2 != 0 {
+    if data_bytes == 0 || !data_bytes.is_multiple_of(2) {
         return Err("imported WAV audio must contain whole PCM16 samples".into());
     }
     if data_bytes > MAX_JOB_PCM_BYTES {

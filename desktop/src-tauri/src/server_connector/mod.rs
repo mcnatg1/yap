@@ -668,7 +668,6 @@ mod tests {
         assert!(connector
             .with_current_batch_lease(&lease, || {
                 committed.store(true, Ordering::SeqCst);
-                ()
             })
             .is_err());
         assert!(!committed.load(Ordering::SeqCst));

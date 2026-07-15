@@ -508,11 +508,11 @@ impl RecordingJobs {
         });
         Ok(CompletedRemoteTranscriptCatalog {
             sessions,
-            maintenance_warnings: omitted_invalid_result
-                .then(|| {
-                    vec!["A saved private-server transcript could not be verified and was omitted from history.".into()]
-                })
-                .unwrap_or_default(),
+            maintenance_warnings: if omitted_invalid_result {
+                vec!["A saved private-server transcript could not be verified and was omitted from history.".into()]
+            } else {
+                Vec::new()
+            },
         })
     }
 
