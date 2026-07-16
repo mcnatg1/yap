@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { makeTestToneWav } from "../fixtures/audio-fixture";
+
 const mediaDuration = 100.9;
 
 async function installPlaybackBridge(
@@ -8,6 +10,12 @@ async function installPlaybackBridge(
   restoreDelayMs = 0,
   durationSeconds = mediaDuration,
 ) {
+  const playbackWav = Buffer.from(makeTestToneWav({ durationMs: 100 }));
+  await page.route("http://127.0.0.1:43123/media/**", (route) => route.fulfill({
+    body: playbackWav,
+    contentType: "audio/wav",
+    status: 200,
+  }));
   await page.addInitScript(({ mediaDuration, paths, restoreDelayMs }) => {
     localStorage.removeItem("yap.recordingQueue.v1");
     Object.defineProperty(globalThis, "isTauri", { value: true });
@@ -181,16 +189,19 @@ test("lightweight seeking uses visible bounds, exact endpoints, ARIA, and releas
   await page.getByRole("button", { name: "Transcribe", exact: true }).click();
   const audio = page.locator("audio");
   const slider = page.getByRole("slider", { name: "Seek recording large.wav" });
+  await expect(audio).toHaveAttribute("src", /^http:\/\/127\.0\.0\.1:43123\/media\//);
   await audio.dispatchEvent("loadedmetadata");
+  await expect(slider).toHaveAttribute("aria-disabled", "false");
   const track = page.getByTestId("lightweight-seek-track");
+  await expect(track).toBeVisible();
   const sliderBox = await slider.boundingBox();
-  const trackBox = await track.boundingBox();
   expect(sliderBox).not.toBeNull();
-  expect(trackBox).not.toBeNull();
 
-  await page.mouse.click(sliderBox!.x + 1, trackBox!.y + trackBox!.height / 2);
+  await slider.click({ position: { x: 1, y: sliderBox!.height / 2 } });
   await expect.poll(() => audio.evaluate((element) => element.currentTime)).toBe(0);
-  await page.mouse.click(sliderBox!.x + sliderBox!.width - 1, trackBox!.y + trackBox!.height / 2);
+  await slider.click({
+    position: { x: sliderBox!.width - 1, y: sliderBox!.height / 2 },
+  });
   await expect.poll(() => audio.evaluate((element) => element.currentTime)).toBe(mediaDuration);
 
   await slider.focus();

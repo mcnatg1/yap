@@ -1,13 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { parsePlaywrightPort } from "./scripts/playwright-port.mjs";
 
-const configuredPort = process.env.YAP_PLAYWRIGHT_PORT ?? "4174";
-if (!/^\d+$/.test(configuredPort)) {
-  throw new Error("YAP_PLAYWRIGHT_PORT must be an integer TCP port.");
-}
-const testPort = Number(configuredPort);
-if (testPort < 1 || testPort > 65_535) {
-  throw new Error("YAP_PLAYWRIGHT_PORT must be between 1 and 65535.");
-}
+const testPort = parsePlaywrightPort(process.env.YAP_PLAYWRIGHT_PORT);
 const testUrl = `http://127.0.0.1:${testPort}`;
 
 export default defineConfig({
