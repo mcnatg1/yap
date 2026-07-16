@@ -9,9 +9,11 @@ If documents disagree, use this priority:
 2. accepted ADRs and current normative specs;
 3. [current status](CURRENT-STATUS.md) and
    [current architecture](architecture/CURRENT-ARCHITECTURE.md);
-4. active plans;
-5. completed implementation records;
-6. archived plans and historical designs.
+4. the [long-term Voice OS architecture frame](VOICE-OS-ARCHITECTURE.md) for
+   eventual-system intent, subject to accepted ADR precedence;
+5. active plans;
+6. completed implementation records;
+7. archived plans and historical designs.
 
 Unchecked boxes in a completed/archived plan are execution history, not current
 backlog.
@@ -23,6 +25,15 @@ backlog.
 - [Phase 1–5 ownership and trust boundaries](architecture/boundaries/PHASE-1-5-OWNERSHIP.md)
 - [Roadmap](roadmap/ROADMAP.md)
 - [Changelog](../CHANGELOG.md)
+
+## Long-term architecture frame
+
+- [Yap & Voice OS system architecture](VOICE-OS-ARCHITECTURE.md)
+
+This is the first-class readable frame for the eventual Voice OS system. It is
+not an archive and must not be silently redefined during cleanup. Executable
+behavior, accepted ADRs, current architecture/status, and the ordered roadmap
+still control implementation and completion claims.
 
 ## Decisions and normative contracts
 

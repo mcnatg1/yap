@@ -474,7 +474,7 @@ git commit -m "Add desktop hardening probes"
 
 **Files:**
 - Verify: `docs/archive/historical-designs/2026-07-09-client-hardening-storage-design.md`
-- Verify: former combined architecture document, now `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`
+- Verify: combined Voice OS architecture frame at `docs/VOICE-OS-ARCHITECTURE.md`
 
 **Interfaces:**
 - Decision: no SQLite until a trigger in the spec is met.
@@ -513,7 +513,7 @@ Expected: all pass.
 - [ ] **Step 3: Commit the integrated Tasks 3-5 and 8 slice**
 
 ```bash
-git add desktop/src desktop/src-tauri desktop/tests/unit docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md docs/adr docs/specs/live-dictation-client-ux.md docs/archive/historical-designs/2026-07-09-client-hardening-storage-design.md docs/plans/archived/2026-07-09-client-hardening-storage.md
+git add desktop/src desktop/src-tauri desktop/tests/unit docs/VOICE-OS-ARCHITECTURE.md docs/adr docs/specs/live-dictation-client-ux.md docs/archive/historical-designs/2026-07-09-client-hardening-storage-design.md docs/plans/archived/2026-07-09-client-hardening-storage.md
 git commit -m "Restore and harden transcript delivery"
 ```
 

@@ -7,13 +7,15 @@
 `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`.
 
 **Implementation review anchors:** `64539a0` (`refactor(release): decompose
-evidence ownership`) through `6e25cb7` (`fix(boundaries): serialize interactive
-admission`). The ordered slices below identify every intervening product and
-documentation boundary.
+evidence ownership`) through `6d55816` (`test(native): bound restart session
+teardown`). The ordered slices below identify every intervening product,
+documentation, and gate-readiness boundary.
 
-**Checkpoint state:** implementation review, focused verification, and
-documentation reconciliation are complete. The one-time complete checkpoint
-gate remains pending and has not run.
+**Checkpoint state:** implementation review, focused verification,
+documentation reconciliation, and the one-time local/native/server/GB10 gate
+are complete at `6d55816b0406a2365376d7b2d9a7da2afecf9118`. Evidence-only
+documentation, hosted exact-head checks, disposable-Windows NSIS, review, and
+merge remain pending.
 
 ## Review method
 
@@ -54,10 +56,10 @@ The added-lens conclusions are:
 | Lens | Checkpoint conclusion |
 | --- | --- |
 | Persisted compatibility | No schema or wire version was changed by the checkpoint. Existing SQLite migrations remain transactional; legacy migration and persisted JSON readers preserve the prior entry/source when new admission fails. |
-| Dependency and deterministic evidence | Release-contract imports and server pool contracts now point one way and have executable guards. Toolchain, dependency, cache, container, model, and fixture identities remain locked; the one-time integrated reproducibility proof is still final-gate work. |
+| Dependency and deterministic evidence | Release-contract imports and server pool contracts now point one way and have executable guards. Toolchain, dependency, cache, container, model, and fixture identities remain locked; the one-time integrated local/native/server/GB10 matrix passed at the exact implementation candidate. |
 | Failure observability | New overload/admission failures use stable user-safe errors, while logs and public evidence exclude audio, transcript, scan, host, and exploit details. |
 | Accessibility and local control | Native window geometry remains authoritative; keyboard/chord enrollment is deliberate; reduced motion is honored on first render and subsequent preference changes. |
-| Adversarial lifecycle drills | Focused restart, cancellation, partial-publication, identity replacement, queue overload, and resource-bound tests passed on their changed owners. Integrated restart/cancel/resource/teardown proof remains in the final matrix. |
+| Adversarial lifecycle drills | Focused and integrated restart, cancellation, partial-publication, identity replacement, queue overload, resource-bound, tunnel-recovery, and teardown proofs passed. Hosted disposable-installer lifecycle remains a PR check. |
 | Complexity movement | Every hand-written file at or above 250 lines was inspected. The 466-line shortcut owner was split by registration versus execution, shared bounded I/O retained domain-specific policy, and no replacement `utils`/`common`/`manager` catch-all was introduced. |
 
 ## Consolidated target architecture
@@ -135,11 +137,16 @@ or exploit detail.
 | Shortcut work admission | Shortcut events/actions use fixed-capacity queues and two fixed workers. Release events apply bounded backpressure, interaction completion has no cyclic queue dependency, and paste-last work no longer creates one thread per invocation. | `0836888`; 16 shortcut/state tests and 8 completion/injection tests |
 | Native import work admission | OS drop batches use one fixed worker, a one-batch backlog, and the existing 200-path product bound. File-picker selection has one active owner; overload returns a stable error instead of accumulating blocked workers or dialogs. | `73bc3ee`, `6e25cb7`; 26 job-command tests and 2 admission tests |
 | Server settings publication | One owner-scoped lease now spans normalization, origin confirmation, durable publication, lease revocation, and applied-state projection, preventing concurrent approval/save races. | `6e25cb7`; 74/74 connector tests |
+| Reviewed provenance drift | The executable provenance contract caught a stale hash after the reduced-motion repair; the reviewed derivative hash now matches the shipped source. | `764df62`; 33/33 release/provenance contract tests |
+| Browser test-server ownership | Playwright allocates an OS-selected loopback port per run, and playback authorization serves a deterministic routed WAV before interaction. Unrelated user listeners are no longer a test dependency. | `4fea6b8`; 23/23 Playwright tests while port 4174 remained independently occupied |
+| Native capture installation shape | Capture installation state is grouped in a small domain value object, satisfying warnings-denied strict Clippy without suppressing the argument-count finding or widening runtime ownership. | `297a97b`; strict all-target Clippy and full Rust tests |
+| Native warning wire contract | Phase 5 native automation asserts Tauri's canonical serialized `Option` value and leaves frontend normalization at the adapter boundary. | `cc66c11`; required native WDIO |
+| Restart-session teardown | Restart proof terminates the exact isolated app process, clears its remote session, and bounds launcher cleanup instead of hanging on a post-termination mock reset. | `6d55816`; required native WDIO restart evidence |
 
-No known correctness or security finding from the checkpoint reviews remains
-accepted without either a resolution or an explicit later-phase handoff below.
-The final gate may still discover a new finding; any such finding reopens this
-register and invalidates checkpoint closure until resolved.
+No known correctness or security finding from the checkpoint reviews or local
+gate remains accepted without either a resolution or an explicit later-phase
+handoff below. A hosted check or final review finding reopens this register and
+invalidates checkpoint closure until resolved.
 
 ## Resolved architecture and maintainability findings
 
@@ -167,11 +174,12 @@ These are closure controls, not accepted product defects:
 
 | Item | State | Evidence or required closure |
 | --- | --- | --- |
-| Documentation truth | Complete | Canonical status/architecture/roadmap/security/provenance docs describe merged Phase 5 and active Checkpoint A; historical plans/designs are separated. |
+| Documentation truth | Complete | Canonical status/architecture/roadmap/security/provenance docs describe merged Phase 5 and active Checkpoint A. The restored `docs/VOICE-OS-ARCHITECTURE.md` remains the first-class long-term frame, while genuinely superseded plans/designs stay separated. |
+| Voice OS status refresh | Owner review pending | The long-term target, diagrams, sequencing, and decisions were restored without substantive revision. Its dated implementation-status passages remain explicitly subordinate to current status/architecture and will change only after owner review. |
 | File-size evidence | Complete | The complete 250-line inspection inventory and every retained >350-line cohesion justification are in `FILE-INVENTORY.md`. |
 | Link integrity | Complete | Repository-local relative Markdown link audit passes after history-preserving moves. |
 | Reviewability | Complete | The ordered commit/slice index below separates product refactors, release/provenance closure, and documentation. |
-| Final exact-head verification | Pending | Freeze the branch only after final review settles; run the complete applicable checkpoint matrix exactly once. |
+| Local exact-head verification | Complete | The complete applicable local/native/server/GB10 matrix passed once at implementation candidate `6d55816b0406a2365376d7b2d9a7da2afecf9118`; private evidence stayed outside Git. |
 | Hosted closure | Pending | Open a focused PR and require the checked head to be green. If hosted checks are unavailable, record equivalent local evidence and disclose the unavailable checks. |
 
 ## Ordered review slices
@@ -193,7 +201,8 @@ diff:
 | 9 | `4211f55^..8809aae` | Bounded install identity and server pool-contract dependency direction. |
 | 10 | `678f76e^..a0caa500` | First-render accessibility, descriptor-bound server artifacts, and shared bounded Rust/Python file-reading owners. |
 | 11 | `0836888^..6e25cb7` | Fixed-capacity shortcut/import work and exclusive interactive command admission. |
-| 12 | subsequent evidence-only commits | Final documentation reconciliation and exact-head gate evidence; no new product behavior. |
+| 12 | `91a1adb^..6d55816` | Final review reconciliation, provenance refresh, deterministic browser/native harness repairs, strict lint/contract fixes, and the complete local gate. |
+| 13 | subsequent evidence-only commits | Local-gate and hosted checked-head evidence; no new product behavior. |
 
 Each span starts after the previous slice's reviewed endpoint. Reviewers can use
 `git diff <span>` or walk the commits inside a slice when a behavior-preserving

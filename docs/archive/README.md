@@ -4,7 +4,8 @@ Archived documents preserve rationale, provenance, and implementation evidence.
 They do not define current executable behavior.
 
 - [Historical designs](historical-designs/) contains superseded design
-  snapshots and the pre-Checkpoint-A all-in-one architecture narrative.
+  snapshots. The living long-term Voice OS frame remains
+  [first-class documentation](../VOICE-OS-ARCHITECTURE.md).
 - [Implementation evidence](implementation-evidence/) contains detailed task
   reports whose results are useful for forensic review but too narrow or stale
   for current status.

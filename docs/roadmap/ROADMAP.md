@@ -4,6 +4,10 @@ The roadmap is ordered. Each phase uses a separate branch and focused reviewed
 PR. Repository state, executable tests, and observed runtime behavior are the
 completion authority.
 
+The [Voice OS architecture](../VOICE-OS-ARCHITECTURE.md) is the long-term
+full-system frame. This roadmap is the ordered delivery authority when that
+frame contains alternate or historical sequencing.
+
 ## Delivered MVP foundation
 
 | Phase | Delivered boundary |

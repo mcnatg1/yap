@@ -894,7 +894,7 @@ git commit -m "Surface committed and recoverable recordings"
 - Modify: `desktop/tests/wdio/live-overlay.spec.js`
 - Modify: `docs/specs/local-audio-preprocessing-stack.md`
 - Modify: `docs/specs/source-aware-diarization.md`
-- Modify: former combined architecture document, now `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`
+- Modify: combined Voice OS architecture frame at `docs/VOICE-OS-ARCHITECTURE.md`
 
 - [ ] **Step 1: Add a four-hour synthetic boundedness test**
 
@@ -935,7 +935,7 @@ Mark the client-audio Phase 1 checklist complete only for track-aware contracts,
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add desktop/src-tauri/tests/audio_foundation.rs desktop/tests/e2e/app.spec.ts desktop/tests/wdio/live-overlay.spec.js docs/specs/local-audio-preprocessing-stack.md docs/specs/source-aware-diarization.md docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md
+git add desktop/src-tauri/tests/audio_foundation.rs desktop/tests/e2e/app.spec.ts desktop/tests/wdio/live-overlay.spec.js docs/specs/local-audio-preprocessing-stack.md docs/specs/source-aware-diarization.md docs/VOICE-OS-ARCHITECTURE.md
 git commit -m "Verify the client audio foundation"
 ```
 

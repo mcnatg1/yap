@@ -1,7 +1,7 @@
 # ADR implementation status
 
 **Status:** Living, non-normative implementation audit
-**As of:** 2026-07-15; Phases 3–5 are merged and their checked-head evidence remains recorded below. Phase 5 PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the one-time complete local/native/server/GB10 gate and hosted checks, then merged as `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`. Architecture Checkpoint A implementation/focused review and documentation reconciliation are complete; its final gate has not run.
+**As of:** 2026-07-15; Phases 3–5 are merged and their checked-head evidence remains recorded below. Phase 5 PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the one-time complete local/native/server/GB10 gate and hosted checks, then merged as `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`. Architecture Checkpoint A implementation and its one-time local/native/server/GB10 gate are complete at `6d55816b0406a2365376d7b2d9a7da2afecf9118`; hosted exact-head closure and merge remain.
 **Authority:** ADRs define decisions; current code and executable tests define implementation truth.
 
 An ADR can be accepted while its implementation score is zero. Superseded ADRs remain in the table for historical completeness, but a low score on a superseded decision is not backlog authorization.
@@ -136,7 +136,20 @@ meeting RTTM/diarization fixture suite, live server pool, authenticated
 end-to-end service, persistent production service, external edge, or measured
 multi-worker capacity.
 
-Architecture Checkpoint A has reorganized and hardened the verified foundation,
-but its own completion/status claims wait for the final exact-head checkpoint
-gate. The focused repairs above do not by themselves close any ADR's remaining
-platform, deployment, or product gates, so the scores remain unchanged.
+### Architecture Checkpoint A evidence
+
+Exact implementation candidate
+`6d55816b0406a2365376d7b2d9a7da2afecf9118` passed the one-time complete
+local/native/server/GB10 checkpoint matrix. The public-safe result includes
+33/33 release/provenance contracts, 277/277 frontend tests, 23/23 Playwright
+tests, 182 portable Python 3.12 tests with one platform skip, 797 Rust tests,
+warnings-denied all-target Clippy, 10/10 live connector checks, required native
+WDIO 13/13, zero dependency-audit vulnerabilities with 17 existing allowed
+target-all advisory warnings, the Windows no-`glib` boundary, WER `0.0` against
+the `0.12` ceiling on GB10, tunnel interruption/recovery, and clean owned
+container/process/listener teardown.
+
+Hosted CI/CodeQL and disposable-Windows NSIS still must pass on the final PR
+head before review and merge. Checkpoint A reorganizes and hardens the verified
+foundation but supplies none of the still-missing platform, deployment, or
+later-product evidence, so every ADR score remains unchanged.

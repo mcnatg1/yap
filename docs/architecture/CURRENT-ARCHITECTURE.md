@@ -1,8 +1,10 @@
 # Current Architecture
 
-This document describes the executable Phase 1–5 system. Accepted future work
-belongs in the [roadmap](../roadmap/ROADMAP.md) and ADRs, not in current-state
-claims.
+This document describes the executable Phase 1–5 system. The
+[Voice OS architecture](../VOICE-OS-ARCHITECTURE.md) remains the first-class
+long-term frame; accepted future work is sequenced by the
+[roadmap](../roadmap/ROADMAP.md) and ADRs, not promoted into current-state
+claims before it executes.
 
 ## System context
 
@@ -162,6 +164,9 @@ portable server supports Python 3.12 only. Windows automation requires
 PowerShell Core 7.4 or newer. Installer lifecycle tests run only in a
 disposable Windows environment.
 
-Focused suites protect each extraction. The full local/native/server/GB10
-matrix runs once only after an exact phase/checkpoint head is ready. Hosted CI
-then verifies that same PR head before merge.
+Focused suites protect each extraction. Browser automation allocates an
+OS-selected loopback port, and native restart automation terminates only its
+exact isolated app process before bounded session cleanup. The full
+local/native/server/GB10 matrix runs once only after an exact phase/checkpoint
+implementation head is ready. Hosted CI and disposable installer automation
+then verify the final PR head before merge.

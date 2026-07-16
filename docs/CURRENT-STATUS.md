@@ -13,6 +13,10 @@ This document is the canonical human-readable status summary. Executable code,
 machine-readable contracts, focused tests, and observed runtime behavior win if
 another document disagrees.
 
+The [Voice OS architecture](VOICE-OS-ARCHITECTURE.md) remains the long-term
+full-system frame of reference. Checkpoint cleanup does not retire or silently
+rewrite that target; this status document distinguishes what currently executes.
+
 ## Milestone status
 
 | Milestone | Status | Executable truth |
@@ -23,7 +27,7 @@ another document disagrees.
 | Phase 3: server boundary | Merged and gated | Machine contracts, loopback health/capabilities, connector state/retry, durable desktop job ledger, canonical app-data migration, stock NSIS, and disposable-Windows lifecycle proof exist. |
 | Phase 4: private ASR node | Merged and gated | A bounded router/pool and transient isolated Cohere worker ran on GB10 using the pinned Python 3.12 / NVIDIA PyTorch 26.06 stack. This is reference-worker proof, not a production service. |
 | Phase 5: remote STT | Merged and gated | Canonical WAV admission, immutable desktop spool, durable create/upload/commit/status/result/cancel, isolated private batch inference, verified native result publication, reconnect recovery, and History projection execute through the loopback development contract. |
-| Checkpoint A | Active; final gate pending | The implementation/focused review and canonical documentation reconciliation are complete, including bounded persisted-file and work-admission repairs. The one-time full gate has not run. No Phase 6 functionality is allowed. |
+| Checkpoint A | Active; local gate green | The implementation/focused review and canonical documentation reconciliation are complete. The one-time local/native/server/GB10 matrix passed at `6d55816b0406a2365376d7b2d9a7da2afecf9118`; hosted exact-head checks, disposable-Windows NSIS, review, and merge remain. No Phase 6 functionality is allowed. |
 | Phases 6–10 | Planned | Follow the accepted order in the [roadmap](roadmap/ROADMAP.md). Enterprise infrastructure remains an explicit IT/security handoff. |
 
 ## What executes now
@@ -66,8 +70,10 @@ The complete owner and trust-boundary map is
   DNS, enterprise certificate, ZPA policy, or production firewall rule exists.
 - Phase 6 preprocessing, Phase 8 speaker inference, and Phase 9 knowledge/agent
   behavior have not been pulled into the checkpoint.
-- The full Checkpoint A matrix has not run. Focused development evidence is
-  recorded in [checkpoint verification](evidence/architecture-checkpoint-a/VERIFICATION.md).
+- The one-time Checkpoint A local/native/server/GB10 matrix passed at the exact
+  implementation candidate. Hosted CI/CodeQL, disposable-Windows NSIS, final
+  review, and merge remain; details are in
+  [checkpoint verification](evidence/architecture-checkpoint-a/VERIFICATION.md).
 - Private security scans, scan identifiers, host paths, and detailed private
   findings are not repository or PR material.
 
@@ -84,8 +90,8 @@ and [verification record](evidence/architecture-checkpoint-a/VERIFICATION.md).
 
 ## Active next steps
 
-1. Freeze one exact checkpoint head.
-2. Run the complete applicable checkpoint matrix exactly once.
-3. Record immutable gate evidence without changing executable behavior.
-4. Open a focused PR; merge only the reviewed, green head.
+1. Commit the public-safe local-gate evidence without changing executable behavior.
+2. Open a focused PR and run hosted CI, CodeQL, and disposable-Windows NSIS.
+3. Resolve any review or hosted finding and recheck the exact PR head.
+4. Merge only the reviewed, green head.
 5. Begin Phase 6 only after Checkpoint A is merged.

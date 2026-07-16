@@ -381,14 +381,16 @@ owner's state but may not recreate its transition logic.
   contracts describe the composition and immutable evidence policy.
 - **Persisted state:** tracked fixtures/contracts only; generated results, scan
   material, private media, and machine-local evidence are ignored.
-- **Transient state:** local servers, WDIO app processes, browser contexts,
-  disposable installer environments, and GB10 containers.
+- **Transient state:** OS-assigned loopback test servers, exact isolated WDIO app
+  processes, browser contexts, disposable installer environments, and GB10
+  containers.
 - **Trust boundary:** toolchain versions, cache keys, process cleanup, artifact
   hashes, and checked-head identity.
 - **Dependencies/events:** focused suites feed the final matrix; hosted workflows
   validate the exact PR head.
-- **Failure/recovery:** runners fail closed on stale/partial evidence and clean up
-  owned processes/listeners.
+- **Failure/recovery:** runners fail closed on stale/partial evidence, avoid
+  inherited fixed-port assumptions, and clean up only their owned
+  processes/listeners.
 - **Cancellation:** harnesses terminate owned children and reject inherited
   evidence after a code change.
 - **Duplicate owner:** none after release-contract decomposition; the facade,

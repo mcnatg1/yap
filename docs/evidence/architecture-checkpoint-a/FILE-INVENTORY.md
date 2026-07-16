@@ -1,6 +1,6 @@
 # Architecture Checkpoint A File Inventory
 
-**Implementation anchor:** `6e25cb7b076a768c73e2a37f6d73645d777af3b0`
+**Implementation anchor:** `6d55816b0406a2365376d7b2d9a7da2afecf9118`
 
 **Inventory date:** 2026-07-15
 
@@ -9,13 +9,13 @@ checked-out files; module/import/symbol inspection for every listed file.
 
 ## Repository inventory
 
-The anchor contains 829 tracked files. The exhaustive path partition is:
+The anchor contains 833 tracked files. The exhaustive path partition is:
 
 | Area | Tracked files | Notes |
 | --- | ---: | --- |
 | Documentation (`docs/`) | 75 | ADRs, plans, specs, research, runbooks, evidence, canonical status/architecture, and tracked historical records. |
-| Desktop production (`desktop/src/` + `desktop/src-tauri/src/`) | 480 | 122 React/TypeScript files plus 358 Rust native files; Rust test submodules under `src` remain part of this path count. |
-| Desktop dedicated tests (`desktop/tests/` + `desktop/src-tauri/tests/`) | 107 | 101 unit/Playwright/WDIO/release/fixture files plus 6 Rust integration files. |
+| Desktop production (`desktop/src/` + `desktop/src-tauri/src/`) | 481 | 122 React/TypeScript files plus 359 Rust native files; Rust test submodules under `src` remain part of this path count. |
+| Desktop dedicated tests (`desktop/tests/` + `desktop/src-tauri/tests/`) | 110 | 104 unit/Playwright/WDIO/release/fixture files plus 6 Rust integration files. |
 | Desktop packaging/config/assets | 43 | Remaining tracked files under `desktop/`, including manifests, locks, icons, and packaging inputs. |
 | Server production (`server/src/`) | 41 | Python API, bounded I/O, job, router, and pool/runtime modules. |
 | Server tests | 52 | Portable contract/job/API/runtime/infra tests and licensed fixtures. |
@@ -85,7 +85,7 @@ records why no additional split is warranted now.
 
 | Owner group | Files (lines) | Inspection outcome |
 | --- | --- | --- |
-| App/runtime composition | `app.rs` (329); `live/runtime/resources.rs` (341) | App composes Tauri lifecycle and resources; resources holds one live-runtime resource set. Feature behavior is delegated. |
+| App/runtime composition | `app.rs` (329); `live/runtime/resources.rs` (342) | App composes Tauri lifecycle and resources; resources holds one live-runtime resource set. Capture installation arguments are grouped in a dedicated 17-line value object; feature behavior remains delegated. |
 | Connector configuration/state adapters | `server_connector/config/persistence.rs` (342); `server_connector/config.rs` (341); `server_connector/config/platform.rs` (306); `server_connector/core.rs` (291); `server_connector/desktop.rs` (263) | Atomic publication, validation/facade, platform no-follow I/O, stable policy/state, exclusive settings-save admission, and Tauri adaptation are separate one-way layers. The bounded persisted-file owner remains below this inventory threshold. No duplicate applied-config owner. |
 | Job migrations/ledger | `jobs/migrations.rs` (337); `jobs/ledger/remote_recovery.rs` (337); `jobs/ledger/row_mapping.rs` (268); `jobs/ledger/records.rs` (262); `jobs/ledger/remote_state.rs` (260); `jobs/ledger.rs` (258); `jobs/ledger/remote_progress.rs` (258); `jobs/ledger/retention.rs` (255) | Each file owns one schema, mapping, recovery, remote-state, progress, or retention surface under the SQLite ledger. |
 | Job commands/drain/model projection | `jobs/drain/recovery.rs` (326); `jobs/commands.rs` (330); `jobs/model/status.rs` (258) | Recovery policy, command facade/import-dispatch setup, and status projection delegate to extracted lifecycle, upload, scheduler, ledger, remote, and model owners. The native import dispatcher itself is below 250 lines. |
@@ -94,7 +94,7 @@ records why no additional split is warranted now.
 | Live actions/hotkeys | `live/shortcut_runtime/dispatcher.rs` (302); `live/shortcut_runtime.rs` (263); `live/hotkey_commands/enrollment.rs` (253); `live/hotkeys/parser.rs` (252) | Fixed-capacity input/action execution, OS registration/startup projection, deliberate enrollment policy, and pure physical-chord parsing are separate owners. The former 466-line mixed shortcut module was decomposed without introducing a generic helper layer. |
 | Recording/transcript lifecycle | `live/recordings/transcripts/revision.rs` (317); `file_actions/transcripts.rs` (312); `audio/recording/sidecar_validation.rs` (321); `audio/recording/artifact_admission.rs` (276); `audio/recording/artifact_io.rs` (272); `audio/recording/journal_state.rs` (270); `audio/recording/stream_finalize.rs` (268); `audio/recording/worker.rs` (278); `audio/recording/scan.rs` (252) | Revision, renderer-authorized file action, sidecar trust, admission, I/O, journal state, finalization, worker, and scanning are explicit one-reason modules. |
 | Audio contracts/timeline/coordinator | `audio/evidence.rs` (333); `audio/frame/chunk.rs` (287); `audio/frame/chunk/validation.rs` (267); `audio/manifest/envelope.rs` (281); `audio/manifest/window_support.rs` (265); `audio/evidence/wire.rs` (272); `audio/timeline/loss_accumulator.rs` (295); `audio/timeline/track.rs` (257); `audio/coordinator/lifecycle.rs` (258); `audio/capture/callback.rs` (251) | Domain envelope/wire validation, chunk policy, Windows support, bounded loss state, track state, coordinator lifecycle, and real-time callback remain separated around trust/performance boundaries. |
-| Media/path boundary | `media_protocol/source.rs` (301); `media_protocol/admission.rs` (273); `media_protocol/server.rs` (271); `paths/legacy_migration.rs` (306); `paths/legacy_migration/secure_tree.rs` (316) | Source leasing, admission, loopback streaming, migration orchestration, and secure tree traversal are distinct. |
+| Media/path boundary | `media_protocol/source.rs` (301); `media_protocol/admission.rs` (270); `media_protocol/server.rs` (271); `paths/legacy_migration.rs` (306); `paths/legacy_migration/secure_tree.rs` (316) | Source leasing, admission, loopback streaming, migration orchestration, and secure tree traversal are distinct. |
 | STT model lifecycle | `stt/fallback_model/operation.rs` (304); `stt/model/temp.rs` (286); `stt/fallback_model/progress.rs` (254) | Operation control, temp-artifact policy, and progress projection no longer share a model catch-all. |
 
 ### Desktop frontend production
@@ -121,7 +121,7 @@ records why no additional split is warranted now.
 | Connector/job native tests | `server_connector/config/tests/publication.rs` (342); `src-tauri/tests/server_connector.rs` (330); `jobs/commands/tests/retry_security.rs` (322); `jobs/drain/tests/upload.rs` (318); `jobs/commands/tests/cleanup_retention.rs` (312); `jobs/ledger/tests/remote_state.rs` (303); `jobs/ledger/tests.rs` (300); `jobs/commands/tests/authority_admission.rs` (300); `jobs/remote/tests.rs` (277); `jobs/drain/tests/cancellation.rs` (275); `jobs/ledger/tests/lifecycle_retention.rs` (264) | Dedicated configuration, protocol integration, authority, retry, cleanup, upload, ledger, and cancellation matrices. |
 | Live/model native tests | `stt/fallback_model/tests.rs` (329); `live/runtime/tests/warmup_finalization.rs` (331); `live/runtime/tests/lifecycle.rs` (276); `stt/nemotron/tests/catalog.rs` (259) | Model and live runtime tests are isolated from implementation owners despite residing under `src`. |
 | Frontend unit tests | `tests/unit/history-actions.test.ts` (336); `tests/unit/polish-save-owner.test.ts` (330); `tests/unit/history-catalog-sync.test.ts` (305); `tests/unit/playback-registry.test.ts` (292); `tests/unit/history-storage-prune.test.ts` (270); `tests/unit/workflow-projections.test.ts` (269) | Each suite targets one frontend adapter/projection authority. |
-| Native UI/Playwright/WDIO | `tests/wdio/live-overlay.hardware.spec.js` (340); `tests/wdio/live-overlay.spec.js` (324); `tests/wdio/smoke.spec.js` (320); `tests/wdio/live-overlay-window-fixture.js` (311); `tests/e2e/live-overlay.spec.ts` (310); `tests/wdio/phase5-remote-stt.gate.spec.js` (309); `tests/wdio/task-8b-isolation.js` (261) | Hardware-optional, hardware-independent native, browser, Phase 5, and isolation surfaces stay explicit; fixture code is not production. |
+| Native UI/Playwright/WDIO | `tests/wdio/live-overlay.hardware.spec.js` (340); `tests/wdio/smoke.spec.js` (335); `tests/wdio/live-overlay.spec.js` (324); `tests/wdio/live-overlay-window-fixture.js` (311); `tests/e2e/live-overlay.spec.ts` (310); `tests/wdio/phase5-remote-stt.gate.spec.js` (309); `tests/wdio/task-8b-isolation.js` (261); `tests/e2e/playback-authorization.spec.ts` (260) | Hardware-optional, hardware-independent native, browser, Phase 5, restart, playback-authorization, and isolation surfaces stay explicit; fixture code is not production. |
 | Release contracts | `tests/scripts/release-contract/cache-policy.mjs` (335); `tests/scripts/release-contract/artifact.contract.mjs` (320); `tests/scripts/assert-third-party-provenance.mjs` (297); `tests/scripts/release-contract/cache.contract.mjs` (268) | Cache policy, artifact contract, provenance verification, and cache tests are separate. The stable facade and CLI point down to these owners. |
 | Server contract/job/API/infra tests | `server/tests/contract/contract_schema_support.py` (325); `server/tests/jobs/test_service_result_recovery.py` (317); `server/tests/infra/test_server_node_setup.py` (315); `server/tests/jobs/test_service_cancellation_races.py` (314); `server/tests/jobs/test_service_processing.py` (306); `server/tests/jobs/test_service_upload.py` (279); `server/tests/api/api_fixtures.py` (274) | Contract fixture support and scenario suites are partitioned by result recovery, setup policy, cancellation, processing, upload, and HTTP fixture ownership. |
 | Hosted CI | `.github/workflows/ci.yml` (342) | Four explicit jobs (frontend, Rust, native WDIO, server) share immutable cache-policy contracts. It is below the threshold and mirrors required hosted check ownership. |
@@ -130,9 +130,10 @@ This list covers every hand-written production, test, script, and workflow file
 at or above 250 lines at the implementation anchor. Documentation
 classification moves preserve history; new canonical/evidence docs and focused
 owner modules account for the tracked-file increase from the initial 805-file
-review anchor to 829 files. Shared Rust/Python bounded-file readers and the
-native-import dispatcher are below 250 lines but are recorded because they own
-cross-cutting trust or resource boundaries.
+review anchor to 833 files. Shared Rust/Python bounded-file readers, the
+native-import dispatcher, capture-installation value object, and OS-assigned
+Playwright-port runner are below 250 lines but are recorded because they own
+cross-cutting trust, resource, or deterministic-harness boundaries.
 
 ## Decomposition summary
 
@@ -174,7 +175,7 @@ source-attribution records.
 ## Git object and tracked-artifact review
 
 At the anchor, `git count-objects -vH` reported four packs totaling 19.13 MiB,
-38 loose objects totaling 36.72 KiB, and no garbage. The largest historical
+102 loose objects totaling 137.86 KiB, and no garbage. The largest historical
 blobs are application icon source/ICNS assets (1,313,454–1,699,470 bytes), then
 `icon.ico` (372,526 bytes), historical `package-lock.json` blobs
 (303,111–315,331 bytes), the public app icon (280,685 bytes), and pnpm lockfile

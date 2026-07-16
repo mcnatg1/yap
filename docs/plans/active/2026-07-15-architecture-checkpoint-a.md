@@ -1,7 +1,8 @@
 # Architecture Checkpoint A Implementation Plan
 
-**Status:** Implementation and documentation reconciliation complete; the final
-exact-head gate remains pending after the merged Phase 5 baseline.
+**Status:** Implementation and the one-time local/native/server/GB10 gate are
+complete at `6d55816b0406a2365376d7b2d9a7da2afecf9118`; final evidence,
+hosted exact-head checks, disposable-Windows NSIS, review, and merge remain.
 
 **Branch:** `refactor/phase1-5-architecture-checkpoint`
 
@@ -70,9 +71,13 @@ removed rather than moved.
 - [x] Findings register, ordered review slices, file-size inspection, and retained
       cohesion justifications.
 - [x] Documentation classification, moved-reference repair, and current-state/
-      ADR reconciliation.
+      ADR reconciliation, with the long-term Voice OS architecture retained as
+      a first-class frame rather than a retired snapshot.
 - [x] Final focused diff review for correctness, security, accessibility,
       dependency direction, persisted compatibility, observability, and YAGNI.
+- [x] Freeze implementation candidate
+      `6d55816b0406a2365376d7b2d9a7da2afecf9118` and run the complete applicable
+      local/native/server/GB10 checkpoint matrix exactly once.
 
 The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.md),
 [ownership](../../architecture/boundaries/PHASE-1-5-OWNERSHIP.md), and
@@ -80,11 +85,14 @@ The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.
 
 ## Remaining slices
 
-- [ ] Freeze one exact head.
-- [ ] Run the complete applicable local/native/server/GB10 checkpoint matrix
-      exactly once and record immutable evidence.
+- [ ] Reconcile only the dated implementation-status passages in the restored
+      Voice OS frame after explicit owner review; do not silently revise its
+      long-term target, diagrams, sequencing, or decisions.
+- [ ] Commit the public-safe local-gate evidence without changing executable
+      behavior.
 - [ ] Open a focused PR; require hosted checks on the checked head, or disclose
       unavailable hosted checks with equivalent local evidence.
+- [ ] Run the stock NSIS lifecycle on the hosted disposable-Windows boundary.
 - [ ] Merge only after review and green exact-head evidence.
 
 ## One-time gate rule
@@ -106,6 +114,11 @@ surface being edited. Once frozen, the complete matrix must cover:
 Any executable change after that run invalidates the candidate and requires an
 explicit gate decision. Documentation-only evidence correction must still be
 reviewed and must not silently change the checked SHA claim.
+
+The complete integrated local/native/server/GB10 run passed once on
+`6d55816b0406a2365376d7b2d9a7da2afecf9118`. Hosted CI, CodeQL, and the
+disposable-Windows stock NSIS lifecycle run against the final documentation-only
+PR head; they do not relabel that head as the locally gated implementation.
 
 ## Prohibited scope
 

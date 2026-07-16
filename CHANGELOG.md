@@ -20,7 +20,14 @@ immutable evidence belong in phase/checkpoint evidence records.
   file-level provenance.
 - Added current architecture/status/roadmap/security/provenance/evidence docs and
   separated active, completed, archived, and historical plans/designs.
-- Full exact-head Checkpoint A gate and PR closure remain pending.
+- Restored `docs/VOICE-OS-ARCHITECTURE.md` as the first-class long-term system
+  frame; current-state documents and ADR precedence continue to bound executable
+  claims, and substantive target changes require explicit owner review.
+- Passed the one-time complete local/native/server/GB10 checkpoint matrix on
+  exact implementation candidate
+  `6d55816b0406a2365376d7b2d9a7da2afecf9118`.
+- Final public evidence, hosted CI/CodeQL, disposable-Windows NSIS, review, and
+  PR closure remain pending.
 
 ## 2026-07-15 — Phase 5 remote STT MVP
 

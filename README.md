@@ -82,6 +82,7 @@ an exact-head release boundary, not a routine local test.
 
 - [Current status](docs/CURRENT-STATUS.md)
 - [Current architecture](docs/architecture/CURRENT-ARCHITECTURE.md)
+- [Long-term Voice OS architecture frame](docs/VOICE-OS-ARCHITECTURE.md)
 - [Phase 1–5 ownership map](docs/architecture/boundaries/PHASE-1-5-OWNERSHIP.md)
 - [Roadmap](docs/roadmap/ROADMAP.md)
 - [ADR index and implementation status](docs/adr/README.md)

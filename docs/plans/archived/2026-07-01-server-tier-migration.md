@@ -65,7 +65,7 @@ On-prem GPU is **not cloud** — it is org-owned hardware on an org-controlled L
 
 ## Phase roadmap additions
 
-Add the following phases to the then-current master roadmap, now preserved at `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`. Existing phase IDs (0–7e, 7+, A–D) are **unchanged**; the server-tier track uses phase numbers 8–12.
+Add the following phases to the then-current master roadmap in `docs/VOICE-OS-ARCHITECTURE.md`. Existing phase IDs (0–7e, 7+, A–D) are **unchanged**; the server-tier track uses phase numbers 8–12.
 
 | Phase | Track | Deliverable | ADR |
 |-------|-------|-------------|-----|
@@ -81,9 +81,9 @@ Add the following phases to the then-current master roadmap, now preserved at `d
 
 | File | Change |
 |------|--------|
-| `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md` | Historical location of the former combined architecture document: (1) add "Two deployment profiles" section; (2) update pipeline charts to show thin-client shell + server tier; (3) update master roadmap table with phases 8–12; (4) update layer model to note server vs client boundary; (5) update "Why it's a good idea" table for on-prem GPU rationale; (6) update document map table. |
+| `docs/VOICE-OS-ARCHITECTURE.md` | Combined Voice OS architecture frame: (1) add "Two deployment profiles" section; (2) update pipeline charts to show thin-client shell + server tier; (3) update master roadmap table with phases 8–12; (4) update layer model to note server vs client boundary; (5) update "Why it's a good idea" table for on-prem GPU rationale; (6) update document map table. |
 | `docs/adr/README.md` | Add ADRs 0014–0018 to the index table. |
-| `docs/README.md` | No structural change was required at execution time; it linked to the former combined architecture document. |
+| `docs/README.md` | No structural change was required at execution time; it linked to the combined Voice OS architecture document. |
 
 ---
 
@@ -117,5 +117,5 @@ Add the following phases to the then-current master roadmap, now preserved at `d
 - [x] Amend `docs/adr/0010-okf-conversation-schema.md`
 - [x] Amend `docs/adr/0011-vector-rag-retrieval.md`
 - [x] Amend `docs/adr/0012-mcp-server-surface.md`
-- [x] Update the former combined architecture document (now archived at `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`)
+- [x] Update the combined Voice OS architecture frame at `docs/VOICE-OS-ARCHITECTURE.md`
 - [x] Update `docs/adr/README.md` index

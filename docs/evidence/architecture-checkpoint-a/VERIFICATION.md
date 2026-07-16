@@ -1,7 +1,7 @@
 # Architecture Checkpoint A Verification
 
 This record separates inherited merged-phase evidence, focused checkpoint
-development evidence, and the not-yet-run one-time checkpoint gate.
+development evidence, and the one-time checkpoint gate.
 
 ## Inherited Phase 5 baseline
 
@@ -44,7 +44,7 @@ rewrite Phase 5 merely because code was decomposed behavior-preservingly.
 Focused tests were run alongside the affected ownership/decomposition slices.
 The ordered commit review is in [FINDINGS.md](FINDINGS.md). Counts from older
 slices are not restated unless they were captured as immutable phase evidence;
-the final checkpoint matrix will revalidate the integrated head once.
+the final checkpoint matrix revalidated the integrated implementation head once.
 
 The release/provenance closure at implementation anchor `64539a0` recorded:
 
@@ -146,8 +146,8 @@ Recorded documentation checks on the reorganized tree:
 ```text
 relative Markdown links: BROKEN_COUNT=0
 relative Markdown heading anchors: BROKEN_ANCHOR_COUNT=0
-tracked-file inventory partition: 829/829
-hand-written >=250-line inventory coverage: 139/139
+tracked-file inventory partition: 833/833
+hand-written >=250-line inventory coverage: 140/140
 legacy working-note path references: 0
 current Phase 5 candidate/pending and queued-checkpoint claims: 0
 current-authority delivered-capability future-tense drift: 0
@@ -159,23 +159,94 @@ containing document and skips only external URLs, mail links, and same-document
 anchors. Historical command/path references affected by the moves were updated
 as well as rendered links.
 
-## Gate state
+The Voice OS frame was restored to `docs/VOICE-OS-ARCHITECTURE.md` after owner
+intent clarified that it is the eventual-system frame, not a retired design.
+Comparison with pre-move blob `f881a96926c10805f69536986a856d3b65803d73`
+found the same 894-line target body. The only three body-line differences repair
+obsolete `superpowers/specs` links to the canonical source-aware specification;
+the target architecture, diagrams, sequencing, and decisions were not revised.
+Its dated implementation-status passages remain marked subordinate to current
+status/architecture pending explicit owner review.
 
-**The complete Checkpoint A gate has not run.**
+## One-time checkpoint gate
 
-It will run exactly once only after:
+**Implementation candidate:**
+`6d55816b0406a2365376d7b2d9a7da2afecf9118`
 
-1. implementation/provenance owners are stable;
-2. canonical docs, ADR status, and historical classification are reconciled;
-3. moved links and public/private evidence boundaries pass focused checks;
-4. the final architecture/correctness/security/accessibility review has no
-   unresolved merge blocker; and
-5. one exact head is frozen.
+**Run date:** 2026-07-15
 
-The required matrix is defined in the active
-[checkpoint plan](../../plans/active/2026-07-15-architecture-checkpoint-a.md).
-After the run, record the exact SHA, commands, counts, environment/runtime
-identities, GB10 observations, cleanup results, and hosted check URLs here.
+**Result:** the one complete integrated local/native/server/GB10 checkpoint
+matrix passed.
 
-No status or ADR score may imply checkpoint completion before that evidence
-exists.
+Focused readiness checks before the freeze exposed stale provenance, fixed-port
+browser ownership, a mocked-media race, strict-lint shape issues, a native wire
+contract mismatch, and unbounded native-session teardown. Those findings were
+resolved before the candidate was frozen. The complete integrated run on
+`6d55816b0406a2365376d7b2d9a7da2afecf9118` is the checkpoint gate.
+
+### Local, browser, server, and native evidence
+
+- Node 24 / pnpm 11.7.0 frozen installation passed. The high-severity package
+  audit reported no known vulnerability; the release/provenance contract passed
+  **33/33**.
+- Vitest passed **277/277** tests in 44 files. The production build passed with
+  326 modules, and Playwright passed **23/23** using an OS-assigned loopback
+  server port.
+- Explicit Python 3.12 execution passed **182** portable server tests with one
+  platform skip.
+- Rust formatting and warnings-denied all-target Clippy passed. Full locked
+  `cargo test` passed **797** tests across eight result groups.
+- The live Python 3.12 loopback connector passed **10/10** and left no owned
+  process or listener. The Windows dependency tree kept `glib` unreachable.
+- Checksum-pinned `cargo-audit` 0.22.2 exited successfully with zero
+  vulnerabilities and 17 explicitly allowed target-all advisory warnings under
+  the existing policy. The audited tool archive SHA-256 was
+  `0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab`.
+- The native WDIO build passed. The required hardware-independent matrix passed
+  three specs and **13/13** tests. Restart coverage terminated the exact isolated
+  app process and bounded session teardown instead of relying on an unbounded
+  third-party cleanup path.
+- Final cleanup found no owned listener or process on ports 4445, 4455, 4456,
+  or 18765.
+
+### GB10 and Phase 5 vertical-slice evidence
+
+The immutable Phase 4 worker proof retained the locked model
+`CohereLabs/cohere-transcribe-03-2026` at revision
+`b1eacc2686a3d08ceaae5f24a88b1d519620bc09`. The public licensed fixture SHA-256
+was `5fceacff0315d49cb59fcc505bcecf1ed5f2f35c2897b1e65a59f30e5d922150`.
+The disposable ARM64 container reported:
+
+- NVIDIA GB10 compute capability 12.1;
+- Python 3.12.3;
+- NVIDIA Torch `2.13.0a0+8145d630e8.nv26.06`, CUDA 13.3, and BF16;
+- model load 23,214 ms and inference 1,864 ms;
+- WER `0.0` against the `0.12` ceiling; and
+- container image ID
+  `sha256:dc509f82362bb6908dc6eb2e43305bb10f3c79382862008a187122635f394a68`
+  with result SHA-256
+  `24a79e31d76b637a1baceb85e9d731814daae9d2fc66ca7d3f047c6b342f9812`.
+
+The isolated worker ran with container networking disabled. Post-run observation
+found no remaining gate container or worker.
+
+The native Phase 5 vertical slice passed one exact WDIO scenario through the
+documented contract. It observed server-authoritative publication, durable
+History visibility, `retrying` during an explicit SSH-forward interruption, and
+`ready` after restoration. The exact remote server, worker, local tunnel, and
+gate containers were stopped. Transcript/audio content, client/session identity,
+host paths, and private evidence remain outside Git and PR output.
+
+### Remaining checked-head closure
+
+The daily Windows profile was not used as an installer lifecycle environment.
+The final PR must run hosted CI and CodeQL plus the stock NSIS lifecycle on a
+disposable Windows runner. Those hosted checks, final review, and merge remain
+pending.
+
+Evidence/status commits after the implementation candidate are documentation
+only and must identify `6d55816b0406a2365376d7b2d9a7da2afecf9118` as the
+locally gated implementation. Any executable change after that SHA invalidates
+the candidate and requires an explicit new gate decision. ADR scores remain
+unchanged because the checkpoint hardens and reorganizes Phase 1–5 behavior; it
+does not supply any still-missing later product or enterprise capability.

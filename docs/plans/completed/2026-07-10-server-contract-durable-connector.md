@@ -755,7 +755,7 @@ git commit -m "Move recording jobs into Rust"
 - Modify: `docs/specs/client-state-machine.md`
 - Modify: `docs/specs/server-tier-mvp.md`
 - Modify: `docs/adr/0014-server-tier-compute-topology.md`
-- Modify: former combined architecture document, now `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`
+- Modify: combined Voice OS architecture frame at `docs/VOICE-OS-ARCHITECTURE.md`
 
 - [ ] **Step 1: Add restart and partial-migration integration tests**
 
@@ -833,7 +833,7 @@ Mark Phase 3 contract, health, connector state, and durable ledger implemented. 
 - [ ] **Step 7: Commit**
 
 ```powershell
-git add desktop/src-tauri/tests desktop/tests/e2e/app.spec.ts desktop/tests/wdio/smoke.spec.js .github/workflows/ci.yml docs/specs/client-state-machine.md docs/specs/server-tier-mvp.md docs/adr/0014-server-tier-compute-topology.md docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md
+git add desktop/src-tauri/tests desktop/tests/e2e/app.spec.ts desktop/tests/wdio/smoke.spec.js .github/workflows/ci.yml docs/specs/client-state-machine.md docs/specs/server-tier-mvp.md docs/adr/0014-server-tier-compute-topology.md docs/VOICE-OS-ARCHITECTURE.md
 git commit -m "Verify the durable server boundary"
 ```
 

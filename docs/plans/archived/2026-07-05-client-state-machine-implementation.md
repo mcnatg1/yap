@@ -578,7 +578,7 @@ Expected: new runtime tests pass.
 ### Task 5: Document Runtime-Orchestrator Follow-Up Work
 
 **Files:**
-- Modify: former combined architecture document, now `docs/archive/historical-designs/2026-07-15-voice-os-architecture-pre-checkpoint.md`
+- Modify: combined Voice OS architecture frame at `docs/VOICE-OS-ARCHITECTURE.md`
 - Modify: `docs/specs/client-state-machine.md`
 - Modify: `docs/specs/testing-strategy.md`
 
