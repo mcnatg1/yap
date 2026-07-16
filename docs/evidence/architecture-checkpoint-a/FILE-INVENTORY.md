@@ -164,7 +164,7 @@ extractions.
 | Native | `desktop/src-tauri/Cargo.toml` + `Cargo.lock`; Rust 1.96, Tauri 2, reqwest/rustls, Tokio, CPAL, sherpa-onnx, rusqlite, Windows APIs. |
 | Portable server | `server/pyproject.toml`; Python `>=3.12,<3.13`, with the service/contract path using the standard-library implementation surface. |
 | GPU worker | Digest-pinned `nvcr.io/nvidia/pytorch` base in `server/runtime/asr/Dockerfile`, hash-locked minimal overlay in `requirements.lock`, and immutable model/runtime identities in `server/model-pools.lock.json`. |
-| Reviewed source reuse | `third_party/reviewed-sources.json`, `desktop/THIRD_PARTY_NOTICES.md`, server runtime notices/licenses, and the executable provenance contract. |
+| Reviewed source reuse | `THIRD_PARTY_PROVENANCE.json`, `THIRD_PARTY_NOTICES.md`, server runtime notices/licenses, and the executable provenance contract. |
 
 License/provenance policy is summarized in
 [Third-party provenance](../../provenance/THIRD-PARTY.md). Upstream identities

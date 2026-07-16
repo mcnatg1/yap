@@ -46,7 +46,7 @@
         },
         {
           "path": "desktop/src/components/live/use-prefers-reduced-motion.ts",
-          "sha256": "2231e4a7aa7b70aca7e8f6d091995e62ad9842c581e331ffc0d3fc880b74bdf1"
+          "sha256": "2a4642e03c91fde270ce5344550c82bab1096cc72acc3843fccddb2974b0839d"
         },
         {
           "path": "desktop/src-tauri/src/audio/preprocess.rs",
