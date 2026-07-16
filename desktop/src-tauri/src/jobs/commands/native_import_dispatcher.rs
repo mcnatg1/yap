@@ -1,4 +1,11 @@
-use std::{path::PathBuf, sync::mpsc, thread};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+};
 
 use tauri::Manager;
 
@@ -13,6 +20,17 @@ type NativeImportReceiver = mpsc::Receiver<Vec<PathBuf>>;
 
 pub(crate) struct NativeImportDispatcher {
     batches: NativeImportSender,
+    selection: NativeImportSelectionGate,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct NativeImportSelectionGate {
+    active: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub(super) struct NativeImportSelectionLease {
+    active: Arc<AtomicBool>,
 }
 
 pub(crate) fn install_native_import_dispatcher(app: &tauri::App) -> std::io::Result<()> {
@@ -34,17 +52,45 @@ pub(crate) fn enqueue_native_import(app: &tauri::AppHandle, paths: Vec<PathBuf>)
     }
 }
 
+pub(super) fn begin_native_import_selection(
+    app: &tauri::AppHandle,
+) -> Result<NativeImportSelectionLease, JobCommandError> {
+    app.state::<NativeImportDispatcher>().selection.try_begin()
+}
+
 impl NativeImportDispatcher {
     fn spawn(app: tauri::AppHandle) -> std::io::Result<Self> {
         let (batches, receiver) = native_import_channel();
         let _worker = thread::Builder::new()
             .name("native-recording-imports".into())
             .spawn(move || run_native_imports(app, receiver))?;
-        Ok(Self { batches })
+        Ok(Self {
+            batches,
+            selection: NativeImportSelectionGate::default(),
+        })
     }
 
     fn enqueue(&self, paths: Vec<PathBuf>) -> Result<(), JobCommandError> {
         queue_native_import_batch(&self.batches, paths)
+    }
+}
+
+impl NativeImportSelectionGate {
+    pub(super) fn try_begin(&self) -> Result<NativeImportSelectionLease, JobCommandError> {
+        self.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                command_error("IMPORT_BUSY", "Another recording picker is already active.")
+            })?;
+        Ok(NativeImportSelectionLease {
+            active: Arc::clone(&self.active),
+        })
+    }
+}
+
+impl Drop for NativeImportSelectionLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
     }
 }
 

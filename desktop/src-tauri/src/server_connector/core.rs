@@ -1,7 +1,7 @@
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -18,6 +18,12 @@ pub struct ServerConnector {
     pub(super) client: reqwest::Client,
     pub(super) inner: Mutex<ConnectorInner>,
     pub(super) generation: AtomicU64,
+    settings_save_active: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub(super) struct SettingsSaveLease {
+    active: Arc<AtomicBool>,
 }
 
 pub(crate) struct BatchConnectionLease {
@@ -38,6 +44,7 @@ impl Default for ServerConnector {
             client: client::bounded_client().expect("bounded server connector client must build"),
             inner: Mutex::new(ConnectorInner::default()),
             generation: AtomicU64::new(0),
+            settings_save_active: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -45,6 +52,15 @@ impl Default for ServerConnector {
 impl ServerConnector {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(super) fn begin_settings_save(&self) -> Result<SettingsSaveLease, String> {
+        self.settings_save_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "A server settings update is already active.".to_string())?;
+        Ok(SettingsSaveLease {
+            active: Arc::clone(&self.settings_save_active),
+        })
     }
 
     #[cfg(test)]
@@ -253,6 +269,12 @@ impl ServerConnector {
         let base_url = inner.configured_base_url(generation)?;
         project(&inner.snapshot());
         Some(base_url)
+    }
+}
+
+impl Drop for SettingsSaveLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
     }
 }
 

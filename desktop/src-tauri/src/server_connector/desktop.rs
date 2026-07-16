@@ -170,6 +170,7 @@ pub(super) async fn save_settings(
     settings: config::ServerSettings,
 ) -> Result<config::ServerSettings, String> {
     crate::authorization::ensure_main(&window)?;
+    let _save = connector.begin_settings_save()?;
     let normalized = config::normalize_settings(&settings, allow_insecure_private_server())
         .map_err(|error| error.to_string())?;
     let current = config::load().map_err(|error| error.to_string())?;

@@ -26,11 +26,14 @@ mod native_import_dispatcher;
 mod playback;
 mod state;
 
+use native_import_dispatcher::begin_native_import_selection;
 pub(crate) use native_import_dispatcher::{
     enqueue_native_import, install_native_import_dispatcher,
 };
 #[cfg(test)]
-use native_import_dispatcher::{native_import_channel, queue_native_import_batch};
+use native_import_dispatcher::{
+    native_import_channel, queue_native_import_batch, NativeImportSelectionGate,
+};
 
 const PENDING_JOB_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_RECORDING_JOBS: usize = 200;
@@ -103,6 +106,7 @@ pub(crate) async fn recording_jobs_pick_imports(
     app: tauri::AppHandle,
 ) -> Result<Vec<RecordingJobView>, JobCommandError> {
     ensure_main(&window)?;
+    let _selection = begin_native_import_selection(&app)?;
     #[cfg(feature = "wdio")]
     if let Some(paths) = wdio_picker_override()? {
         return import_native_paths(&app, paths);

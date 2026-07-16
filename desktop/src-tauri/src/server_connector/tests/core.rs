@@ -145,3 +145,17 @@ fn settings_changes_advance_the_connector_generation() {
     assert_eq!(connector.invalidate(), 1);
     assert_eq!(connector.current(), 1);
 }
+
+#[test]
+fn server_settings_save_has_one_end_to_end_owner() {
+    let connector = ServerConnector::default();
+
+    let first = connector.begin_settings_save().unwrap();
+    assert_eq!(
+        connector.begin_settings_save().unwrap_err(),
+        "A server settings update is already active."
+    );
+
+    drop(first);
+    assert!(connector.begin_settings_save().is_ok());
+}
