@@ -123,6 +123,25 @@ async function waitForProcessExit(processId, timeoutMs = 10_000) {
   throw new Error(`Native Yap process ${processId} remained alive after ${timeoutMs}ms.`);
 }
 
+async function stopRestartSession(session, processId) {
+  console.info(`[Task 7 restart] stop process=${processId ?? "unknown"}`);
+  if (processId && isProcessAlive(processId)) {
+    process.kill(processId, "SIGTERM");
+    await waitForProcessExit(processId);
+  }
+  if (processId) {
+    console.info(`[Task 7 restart] stopped process=${processId}`);
+    session.sessionId = undefined;
+    // The standalone service always attempts a remote mock reset during cleanup.
+    // This proof intentionally terminated the only remote session and installs no
+    // mocks, so keep that impossible post-termination command local and bounded.
+    session.overwriteCommand("execute", async () => undefined);
+  }
+  console.info(`[Task 7 restart] cleanup start process=${processId ?? "unknown"}`);
+  await cleanupWdioSession(session);
+  console.info(`[Task 7 restart] cleanup complete process=${processId ?? "unknown"}`);
+}
+
 function writeEmptyWaveFile(filePath) {
   const wave = Buffer.alloc(44);
   wave.write("RIFF", 0, "ascii");
@@ -283,8 +302,7 @@ describe("Yap desktop shell", () => {
         `[Task 7 restart] processA=${firstProcessId} job=${created[0].id} status=${created[0].status}`,
       );
 
-      await cleanupWdioSession(firstSession);
-      await waitForProcessExit(firstProcessId);
+      await stopRestartSession(firstSession, firstProcessId);
       firstSession = undefined;
 
       secondSession = await startWdioSession(
@@ -307,13 +325,10 @@ describe("Yap desktop shell", () => {
       );
     } finally {
       if (secondSession) {
-        await cleanupWdioSession(secondSession);
-        if (secondProcessId) await waitForProcessExit(secondProcessId);
+        await stopRestartSession(secondSession, secondProcessId);
       }
       if (firstSession) {
-        if (firstProcessId && !isProcessAlive(firstProcessId)) firstSession.sessionId = undefined;
-        await cleanupWdioSession(firstSession);
-        if (firstProcessId) await waitForProcessExit(firstProcessId);
+        await stopRestartSession(firstSession, firstProcessId);
       }
     }
   });
