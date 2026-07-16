@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
-import hashlib
 from pathlib import Path
 import threading
 from typing import Callable, Mapping, Protocol, Sequence
@@ -13,6 +12,7 @@ from yap_server.pools.batch_contract import (
     PoolBackpressure,
 )
 from .artifacts import (
+    PcmChunkSource,
     publish_wav as _publish_wav,
     sha256_file as _sha256_file,
 )
@@ -256,19 +256,19 @@ class RecordingJobService:
                 raise ValueError("commit chunk count does not match job creation")
             ordered_chunks = _validated_single_track_chunks(chunks)
             job_root = self._storage_root / "jobs" / job_id
-            chunk_paths = [
-                _chunk_path(job_root, _mapping(chunk.get("replayKey"), "replayKey"))
-                for chunk in ordered_chunks
-            ]
-            for chunk, path in zip(ordered_chunks, chunk_paths, strict=True):
+            chunk_sources: list[PcmChunkSource] = []
+            for chunk in ordered_chunks:
                 content = _mapping(chunk.get("contentIdentity"), "contentIdentity")
-                if not path.is_file():
-                    raise ValueError("every declared chunk must be uploaded before commit")
-                body = path.read_bytes()
-                if len(body) != content.get("byteLength") or (
-                    hashlib.sha256(body).hexdigest() != content.get("sha256")
-                ):
-                    raise ValueError("an uploaded chunk no longer matches its identity")
+                chunk_sources.append(
+                    PcmChunkSource(
+                        path=_chunk_path(
+                            job_root,
+                            _mapping(chunk.get("replayKey"), "replayKey"),
+                        ),
+                        byte_length=int(content["byteLength"]),
+                        sha256=str(content["sha256"]),
+                    )
+                )
             language_bcp47 = _selected_language(creation, self._supported_languages)
             self._committing.add(job_id)
 
@@ -277,7 +277,7 @@ class RecordingJobService:
         commit_error: BaseException | None = None
         try:
             input_path = job_root / "input.wav"
-            _publish_wav(input_path, chunk_paths)
+            _publish_wav(input_path, chunk_sources)
             input_sha256 = _sha256_file(input_path)
             worker_job = BatchAsrJob(
                 job_id=job_id,
