@@ -8,7 +8,7 @@ use super::{
 use crate::server_connector::batch::TranscriptResultRevision;
 use std::{
     fs,
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -171,11 +171,29 @@ fn read_bounded_regular_artifact(
     if !opened.is_file() || metadata_is_link_or_reparse(&opened) || opened.len() != metadata.len() {
         return Err(format!("opened {label} differs from its owned path"));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
+    let bytes = read_bounded_to_end(&mut file, maximum_bytes)
         .map_err(|error| format!("failed to read {label}: {error}"))?;
     if bytes.len() != metadata.len() as usize {
         return Err(format!("{label} changed while it was read"));
+    }
+    Ok(bytes)
+}
+
+pub(super) fn read_bounded_to_end(
+    reader: &mut impl Read,
+    maximum_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let read_limit = u64::try_from(maximum_bytes)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read limit is out of range"))?;
+    let mut bytes = Vec::with_capacity(maximum_bytes.min(64 * 1024));
+    reader.take(read_limit).read_to_end(&mut bytes)?;
+    if bytes.len() > maximum_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "artifact exceeded its declared read limit",
+        ));
     }
     Ok(bytes)
 }
@@ -267,8 +285,7 @@ fn verify_published_remote_result(
         }
         let mut file = open_no_follow_read(&path)
             .map_err(|error| format!("failed to open published result artifact: {error}"))?;
-        let mut actual = Vec::with_capacity(expected.len());
-        file.read_to_end(&mut actual)
+        let actual = read_bounded_to_end(&mut file, expected.len())
             .map_err(|error| format!("failed to read published result artifact: {error}"))?;
         if actual != expected {
             return Err("published result artifact conflicts with its immutable content".into());

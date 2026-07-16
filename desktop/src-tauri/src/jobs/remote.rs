@@ -11,7 +11,7 @@ pub(super) use result::{publish_remote_result, read_published_remote_transcript}
 pub(super) use spool::reset_unattached_spool;
 
 #[cfg(test)]
-use result::validate_published_result_contract;
+use result::{read_bounded_to_end, validate_published_result_contract};
 #[cfg(test)]
 use wav::{validate_pcm_data_bytes, MAX_WAV_CONTAINER_OVERHEAD_BYTES};
 
