@@ -181,14 +181,16 @@ owner's state but may not recreate its transition logic.
   `server_connector/desktop.rs`.
 - **Authoritative owner:** `server_connector/state.rs` for connection state and
   generations; `config/*` for validated persisted configuration.
-- **Persisted state:** server configuration and approved origin.
+- **Persisted state:** server configuration and approved origin, each admitted
+  through bounded no-follow regular-file I/O before schema validation.
 - **Transient state:** in-flight health request, retry schedule, generation, and
   latest capability snapshot.
 - **Trust boundary:** untrusted origin/configuration and bounded HTTP response.
 - **Dependencies/events:** core policy -> health/batch clients -> connector
   state -> typed frontend events.
 - **Failure/recovery:** stale generation responses are discarded; typed offline
-  reasons schedule bounded retry.
+  reasons schedule bounded retry. Oversized, linked/reparse, or future-schema
+  configuration fails without replacing the existing entry.
 - **Cancellation:** reconfiguration cancels the old in-flight generation;
   shutdown joins polling.
 - **Duplicate owner:** none; frontend hook projects snapshots.
@@ -298,14 +300,16 @@ owner's state but may not recreate its transition logic.
 - **Authoritative owner:** desktop `server_connector/config/*`, live settings,
   and STT settings for their domains; server `ServerSettings` for process config.
 - **Persisted state:** atomic app-data configuration with a generation/origin;
+  persisted JSON is limited to 64 KiB and server URL input to 2,048 bytes;
   server environment is process input.
 - **Transient state:** renderer draft and validation errors.
 - **Trust boundary:** malformed persisted data, confirmation of new origins,
   allowed loopback bind, and secret/private-value logging.
 - **Dependencies/events:** validated configuration feeds connector/runtime
   creation; UI receives redacted projections.
-- **Failure/recovery:** invalid config fails visibly without applying a partial
-  generation.
+- **Failure/recovery:** invalid, oversized, linked/reparse, or incompatible
+  config fails visibly without applying a partial generation or overwriting the
+  prior entry.
 - **Cancellation:** a new generation retires old in-flight connector work.
 - **Duplicate owner:** renderer draft is not applied state.
 

@@ -58,8 +58,12 @@ removed rather than moved.
 - [x] Dedicated large test-harness partitioning.
 - [x] Release contract one-way dependency repair and catch-all removal.
 - [x] Exact attributed FreeFlow derivative set and pinned upstream/license closure.
+- [x] Persisted connector configuration bounds and platform no-follow storage/
+      lock handling with focused failure-path verification.
 - [x] Findings register, ordered review slices, file-size inspection, and retained
       cohesion justifications.
+- [x] Documentation classification, moved-reference repair, and current-state/
+      ADR reconciliation.
 
 The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.md),
 [ownership](../../architecture/boundaries/PHASE-1-5-OWNERSHIP.md), and
@@ -67,10 +71,6 @@ The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.
 
 ## Remaining slices
 
-- [ ] Finish documentation classification and current-state reconciliation.
-- [ ] Repair and verify every moved-document reference.
-- [ ] Reconcile ADR implementation scores/claims against merged Phase 5 and the
-      reviewed checkpoint architecture.
 - [ ] Run a final focused diff review for correctness, security, accessibility,
       dependency direction, persisted compatibility, observability, and YAGNI.
 - [ ] Freeze one exact head.

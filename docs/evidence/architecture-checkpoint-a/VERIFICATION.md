@@ -66,6 +66,29 @@ Additional focused checks on that slice passed:
   installer contract owner rather than a six-line aggregator; and
 - `git diff --check`.
 
+The persisted connector-configuration hardening at `d4e482a` recorded:
+
+```powershell
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml `
+  server_connector::config::tests
+# PASS: 39/39
+```
+
+That focused matrix covers the unchanged schema/default behavior plus:
+
+- 64 KiB limits for settings, origin approval, destination snapshots, and
+  staged atomic writes;
+- a 2,048-byte server URL admission limit before URL parsing;
+- oversized-load/save preservation with no partial or recovery artifacts;
+- opened-handle regular-file/no-follow policy, including unconditional Windows
+  reparse-point flag/attribute contract coverage;
+- settings-lock no-follow behavior; and
+- existing cross-process locking, future-schema preservation, publication
+  reconciliation, concurrency, and durability failure paths.
+
+Rust formatting and `git diff --check` passed after the responsibility and test
+files were decomposed below the checkpoint's 350-line threshold.
+
 Documentation-only work used focused link/reference, classification, Markdown
 diff, and stale-claim checks. It did not trigger unrelated product suites.
 

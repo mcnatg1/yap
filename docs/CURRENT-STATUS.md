@@ -81,10 +81,9 @@ and [verification record](evidence/architecture-checkpoint-a/VERIFICATION.md).
 
 ## Active next steps
 
-1. Finish canonical documentation and link reconciliation.
-2. Review the final diff for ownership, accessibility, failure observability,
+1. Review the final diff for ownership, accessibility, failure observability,
    persisted compatibility, and dependency direction.
-3. Freeze one exact checkpoint head.
-4. Run the complete applicable checkpoint matrix exactly once.
-5. Open a focused PR; merge only that checked, green head.
-6. Begin Phase 6 only after Checkpoint A is merged.
+2. Freeze one exact checkpoint head.
+3. Run the complete applicable checkpoint matrix exactly once.
+4. Open a focused PR; merge only that checked, green head.
+5. Begin Phase 6 only after Checkpoint A is merged.

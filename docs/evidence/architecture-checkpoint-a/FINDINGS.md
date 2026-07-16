@@ -6,9 +6,10 @@
 **Baseline:** merged Phase 5 commit
 `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`.
 
-**Implementation review anchor:** `64539a0` (`refactor(release): decompose
-evidence ownership`). Documentation commits after that anchor do not change the
-reviewed product behavior unless this register says otherwise.
+**Implementation review anchors:** `64539a0` (`refactor(release): decompose
+evidence ownership`) and `d4e482a` (`fix(connector): bound persisted
+configuration`). Documentation commits between those anchors do not change the
+reviewed product behavior.
 
 **Checkpoint state:** implementation review and focused verification are in
 progress. The one-time complete checkpoint gate has not run.
@@ -110,6 +111,7 @@ or exploit detail.
 | Request and response boundaries | Desktop and server validate bounded contract data at the transport edge before domain mutation. | `7556cac`, `cf01d34`, `483a95b`; contract tests |
 | Release evidence import cycle | The stable release facade, CLI adapter, contract policy, Git fixture, and process access now form a one-way dependency graph. Direct CLI execution no longer stalls on top-level await. | `64539a0`; 33/33 focused release-contract tests |
 | Upstream provenance identity | The reviewed source is identified as `zachlatta/freeflow`; every current attributed local derivative is hashed and tied to the pinned MIT upstream. | `64539a0`; reviewed-upstream provenance contract |
+| Persisted connector configuration | Settings, origin approval, publication snapshots, and lock files now use a shared 64 KiB bound and platform no-follow regular-file opens. URL admission rejects inputs above 2,048 bytes before parsing. Oversized or linked existing state fails closed without replacement or recovery-artifact leakage. | `d4e482a`; 39/39 focused connector-configuration tests |
 
 No known correctness or security finding from the checkpoint reviews remains
 accepted without either a resolution or an explicit later-phase handoff below.
@@ -126,7 +128,7 @@ register and invalidates checkpoint closure until resolved.
 | Live island rendering, presentation timing, waveform, motion preference, and native-surface synchronization | `components/live/*` | Visual concerns are independently testable while the native window remains authoritative. |
 | Recording stream, durability, recovery, deletion, history, and transcript publication | `audio/recording/*`, `live/recordings/*`, `commands/history/*`, and `file_actions/*` | Mutation and catalog ownership are explicit; unrelated test harnesses are split. |
 | Capture callback, worker processing, timeline loss, coordinator, stream finalization, and runtime control | `audio/capture/*`, `audio/timeline/*`, `audio/coordinator/*`, and `live/runtime/*` | Callback work stays bounded; lifecycle and state owners no longer share a catch-all runtime file. |
-| Connector configuration, core policy, desktop adapter, health client, state, and batch protocol | `server_connector/config/*`, `core.rs`, `desktop.rs`, `client.rs`, `state.rs`, and `batch/*` | Persistence and transport are below stable policy/state interfaces with no facade-to-CLI cycle. |
+| Connector configuration, core policy, desktop adapter, health client, state, and batch protocol | `server_connector/config/*`, `core.rs`, `desktop.rs`, `client.rs`, `state.rs`, and `batch/*` | Bounded/no-follow persisted-file I/O, atomic publication, validation, transport, and applied state have separate owners below stable policy/state interfaces. |
 | Fallback model download, operation, progress, artifact integrity, and Nemotron lifecycle | `stt/model/*`, `stt/fallback_model/*`, and `stt/nemotron/*` | Download orchestration no longer owns model-specific lifecycle or integrity policy. |
 | Release artifact contract, process execution, workflow policy, Git fixture, and cache policy | `release-artifact/*` and `release-contract/*` | The former large mixed contract and replacement `context.mjs` catch-all were decomposed around real owners. |
 
@@ -160,7 +162,9 @@ diff:
 | 4 | `00c878e^..6e780c5` | Live model/ASR/stream lifecycle, connector configuration, STT model lifecycle, contract trust boundaries, shortcut/action ownership. |
 | 5 | `4fb68f0^..1a59e29` | Final recording/playback/server lifecycle splits and dedicated scenario-test partitioning. |
 | 6 | `64539a0^..64539a0` | Release-evidence dependency repair and exact third-party provenance reconciliation. |
-| 7 | subsequent documentation commits | Canonical status/architecture, inventory, plan/spec archival, link repair, and final evidence only. |
+| 7 | `1139f48^..b0f7fd4` | Canonical status/architecture, inventory, plan/spec archival, and link repair. |
+| 8 | `d4e482a^..d4e482a` | Persisted connector configuration bounds, no-follow storage/lock handling, and focused failure-path tests. |
+| 9 | subsequent evidence-only commits | Final review reconciliation and exact-head gate evidence; no new product behavior. |
 
 Each span starts after the previous slice's reviewed endpoint. Reviewers can use
 `git diff <span>` or walk the commits inside a slice when a behavior-preserving

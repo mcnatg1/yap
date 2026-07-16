@@ -1,6 +1,6 @@
 # Architecture Checkpoint A File Inventory
 
-**Implementation anchor:** `64539a0`
+**Implementation anchor:** `d4e482a`
 
 **Inventory date:** 2026-07-15
 
@@ -9,12 +9,12 @@ checked-out files; module/import/symbol inspection for every listed file.
 
 ## Repository inventory
 
-The anchor contains 805 tracked files. Path-based counts are:
+The anchor contains 821 tracked files. Path-based counts are:
 
 | Area | Tracked files | Notes |
 | --- | ---: | --- |
-| Documentation and root product docs | 63 | Includes ADRs, plans, specs, research, runbooks, and two tracked historical implementation reports. |
-| Desktop production tree | 474 | React/TypeScript and Rust native files; Rust test submodules under `src` are included in this path count. |
+| Documentation and root product docs | 77 | Includes ADRs, plans, specs, research, runbooks, evidence, canonical status/architecture, and tracked historical implementation reports. |
+| Desktop production tree | 476 | React/TypeScript and Rust native files; Rust test submodules under `src` are included in this path count. |
 | Desktop dedicated test tree | 106 | Unit, Playwright, WDIO, release contracts, fixtures, and Rust integration tests. |
 | Server production tree | 40 | Python API, job, router, and pool/runtime modules. |
 | Server tests | 50 | Portable contract/job/API/runtime/infra tests. |
@@ -79,7 +79,7 @@ records why no additional split is warranted now.
 | Owner group | Files (lines) | Inspection outcome |
 | --- | --- | --- |
 | App/runtime composition | `app.rs` (333); `live/runtime/resources.rs` (341) | App composes Tauri lifecycle and resources; resources holds one live-runtime resource set. Feature behavior is delegated. |
-| Connector configuration/state adapters | `server_connector/config/persistence.rs` (342); `server_connector/config.rs` (340); `server_connector/core.rs` (269); `server_connector/desktop.rs` (262) | Persistence, validation/facade, stable policy, and Tauri adapter are separate one-way layers. No duplicate applied-config owner. |
+| Connector configuration/state adapters | `server_connector/config/persistence.rs` (342); `server_connector/config.rs` (341); `server_connector/config/platform.rs` (306); `server_connector/core.rs` (269); `server_connector/desktop.rs` (262) | Atomic publication, validation/facade, platform no-follow I/O, stable policy, and Tauri adapter are separate one-way layers. The 51-line bounded persisted-file owner is below this inventory threshold. No duplicate applied-config owner. |
 | Job migrations/ledger | `jobs/migrations.rs` (337); `jobs/ledger/remote_recovery.rs` (337); `jobs/ledger/row_mapping.rs` (268); `jobs/ledger/records.rs` (262); `jobs/ledger/remote_state.rs` (260); `jobs/ledger.rs` (258); `jobs/ledger/remote_progress.rs` (258); `jobs/ledger/retention.rs` (255) | Each file owns one schema, mapping, recovery, remote-state, progress, or retention surface under the SQLite ledger. |
 | Job commands/drain | `jobs/drain/recovery.rs` (326); `jobs/commands.rs` (319) | Recovery policy and command facade delegate to extracted lifecycle, upload, scheduler, ledger, and remote modules. |
 | Remote preparation/results | `jobs/remote/result.rs` (278); `jobs/remote/preparation.rs` (266) | Result trust validation and source-to-spool preparation are separate artifact boundaries. |
@@ -120,8 +120,10 @@ records why no additional split is warranted now.
 | Hosted CI | `.github/workflows/ci.yml` (342) | Four explicit jobs (frontend, Rust, native WDIO, server) share immutable cache-policy contracts. It is below the threshold and mirrors required hosted check ownership. |
 
 This list covers every hand-written production, test, script, and workflow file
-at or above 250 lines at the implementation anchor. Files moved only for
-documentation classification do not change this inventory.
+at or above 250 lines at the implementation anchor. Documentation
+classification moves preserve history; new canonical/evidence docs and the two
+small connector files account for the tracked-file increase from the initial
+805-file review anchor.
 
 ## Decomposition summary
 
@@ -160,7 +162,7 @@ source-attribution records.
 ## Git object and tracked-artifact review
 
 At the anchor, `git count-objects -vH` reported three packs totaling 18.55 MiB,
-165 loose objects totaling 188.72 KiB, and no garbage. The largest historical
+295 loose objects totaling 654.88 KiB, and no garbage. The largest historical
 blobs are application icon source/packaging assets (about 1.25–1.62 MiB each),
 followed by historical `package-lock.json` blobs (about 0.30 MiB) and pnpm
 lockfile revisions (about 0.25–0.26 MiB).

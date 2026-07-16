@@ -121,7 +121,7 @@ Phase 5 runtime actually initializes. Live streaming remains false and
 | Desktop SQLite job ledger | Transactional migration and replay preserve one job identity and accepted remote progress. |
 | Recording commit/sidecar/transcript | Only hash-valid, atomically published lineage becomes complete History truth. |
 | Prepared spool/chunks | Only verified Yap-owned paths are cleaned; external sources are preserved. |
-| Connector configuration | Atomic publication creates a new generation; old responses are stale. |
+| Connector configuration | Bounded no-follow regular-file admission precedes schema validation; atomic publication creates a new generation and old responses are stale. |
 | Server job/chunk/result state | Idempotency survives process restart; interrupted processing becomes explicit retryable terminal state. |
 | Deletion intent/quarantine | Destructive work revalidates identity and resumes without following replacement paths. |
 

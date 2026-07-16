@@ -42,6 +42,10 @@ certification, production authorization, or substitute for enterprise review.
 - Desktop configuration validates/approves origins and binds in-flight work to
   a configuration generation. Stale-origin responses cannot mutate current
   job state.
+- Persisted connector settings and origin approval use a 64 KiB admission
+  bound, no-follow regular-file opens (including Windows reparse rejection),
+  and no-follow lock files. Server URL input is limited to 2,048 bytes before
+  parsing.
 - HTTP requests/responses, headers, bodies, chunks, files, jobs, retries,
   workers, queues, durations, retention, and transcript/model metadata are
   bounded and contract-validated.
