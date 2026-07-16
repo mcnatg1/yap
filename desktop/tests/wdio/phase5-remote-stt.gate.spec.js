@@ -232,7 +232,7 @@ describe("Phase 5 checked-head private-server gate", () => {
     if (terminalFailure) throw terminalFailure;
     expect(createdJob.route).toBe("serverBatch");
     expect(history).toBeDefined();
-    expect(history.warning).toBeUndefined();
+    expect(history.warning).toBeNull();
     expect(canonicalPath(history.sourcePath)).toBe(canonicalPath(fixturePath));
 
     const transcriptPath = canonicalPath(history.outputPath);
