@@ -22,8 +22,15 @@ use tauri_plugin_dialog::DialogExt;
 mod catalog;
 mod imports;
 mod lifecycle;
+mod native_import_dispatcher;
 mod playback;
 mod state;
+
+pub(crate) use native_import_dispatcher::{
+    enqueue_native_import, install_native_import_dispatcher,
+};
+#[cfg(test)]
+use native_import_dispatcher::{native_import_channel, queue_native_import_batch};
 
 const PENDING_JOB_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_RECORDING_JOBS: usize = 200;

@@ -20,6 +20,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 mod authority_admission;
 mod catalog_imports;
 mod cleanup_retention;
+mod native_import_queue;
 mod retry_security;
 mod snapshot_limits;
 

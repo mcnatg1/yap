@@ -193,6 +193,7 @@ pub(crate) fn run() {
         .manage(desktop_lifecycle)
         .setup(move |app| {
             live::shortcut_runtime::install(app, live_shortcuts)?;
+            jobs::commands::install_native_import_dispatcher(app)?;
             tray::install(app.handle())?;
             let lifecycle = app.state::<runtime::DesktopLifecycle>();
             start_owned_background_work(app.handle(), lifecycle.inner(), live_runtime_for_monitor)?;
@@ -221,12 +222,7 @@ pub(crate) fn run() {
                 event: tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
                 ..
             } if label == authorization::MAIN_WINDOW_LABEL => {
-                let app = app_handle.clone();
-                std::thread::spawn(move || {
-                    if let Err(error) = jobs::commands::import_native_paths(&app, paths) {
-                        jobs::commands::emit_native_import_error(&app, &error);
-                    }
-                });
+                jobs::commands::enqueue_native_import(app_handle, paths);
             }
             tauri::RunEvent::WindowEvent {
                 label,
