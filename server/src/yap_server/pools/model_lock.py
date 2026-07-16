@@ -8,9 +8,12 @@ import re
 import stat
 from typing import Any
 
+from yap_server.bounded_file import read_regular_text
+
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
+_MAX_MODEL_LOCK_BYTES = 2 * 1024 * 1024
 
 
 class ModelArtifactError(RuntimeError):
@@ -81,7 +84,10 @@ def _sha256(value: Any, field: str) -> str:
 
 
 def load_model_pool_lock(path: Path) -> ModelPoolLock:
-    payload = _mapping(json.loads(path.read_text(encoding="utf-8")), "root")
+    payload = _mapping(
+        json.loads(read_regular_text(path, _MAX_MODEL_LOCK_BYTES)),
+        "root",
+    )
     if payload.get("schemaVersion") != 1:
         raise ValueError("unsupported model-pool lock schema")
 
