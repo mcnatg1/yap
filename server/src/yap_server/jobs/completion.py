@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 from typing import Callable
 
-from yap_server.pools.batch_asr import WorkerContainmentError
+from yap_server.pools.batch_contract import WorkerContainmentError
 
 from .artifacts import publish_json
 from .contract_values import (

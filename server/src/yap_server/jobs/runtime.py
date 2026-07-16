@@ -14,13 +14,12 @@ from typing import Mapping, Protocol
 
 from yap_server.jobs.service import RecordingJobService
 from yap_server.pools.batch_asr import (
-    BatchAsrJob,
     BatchAsrPool,
     ContainerBatchAsrWorker,
-    PoolBackpressure,
     inspect_worker_image,
     reconcile_owned_containers,
 )
+from yap_server.pools.batch_contract import BatchAsrJob, PoolBackpressure
 from yap_server.pools.model_lock import load_model_pool_lock, verify_model_artifacts
 from yap_server.workload_router import (
     RouterBackpressure,

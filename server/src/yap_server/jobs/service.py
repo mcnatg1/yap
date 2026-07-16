@@ -8,7 +8,7 @@ import threading
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
-from yap_server.pools.batch_asr import (
+from yap_server.pools.batch_contract import (
     BatchAsrJob,
     PoolBackpressure,
 )
