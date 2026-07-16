@@ -14,6 +14,7 @@ use super::super::{
     state::{LiveCaptureMode, LiveSessionState},
 };
 use super::asr_adapter::PendingAsrAdapter;
+use super::capture_installation::CaptureInstallation;
 use super::capture_worker::{run_capture_worker, CaptureWorkerContext};
 use super::level_channel::level_channel;
 use super::{LiveRuntime, LiveStartFailure, StartIntent};
@@ -145,15 +146,15 @@ impl LiveRuntime {
             drop(level);
             return Ok(None);
         }
-        inner.install_capture(
+        inner.install_capture(CaptureInstallation {
             capture,
-            recording_handle,
+            recording: recording_handle,
             pending_asr,
-            app.clone(),
+            app: app.clone(),
             level,
             session,
-            Arc::clone(&self.active_session),
-        );
+            active_session: Arc::clone(&self.active_session),
+        });
         drop(inner);
 
         let state = app.state::<LiveSessionState>();

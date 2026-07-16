@@ -16,6 +16,7 @@ use super::stream::LiveStreamEngine;
 use super::stream::{self, StreamMessage};
 
 mod asr_adapter;
+mod capture_installation;
 mod capture_worker;
 mod control;
 mod finalization;

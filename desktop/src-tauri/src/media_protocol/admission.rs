@@ -148,11 +148,8 @@ impl MediaRegistry {
         let expired = self
             .entries
             .iter()
-            .filter_map(|(token, entry)| {
-                entry
-                    .is_expired(now, idle_ttl, max_ttl)
-                    .then(|| token.clone())
-            })
+            .filter(|(_, entry)| entry.is_expired(now, idle_ttl, max_ttl))
+            .map(|(token, _)| token.clone())
             .collect::<Vec<_>>();
         for token in expired {
             self.remove(&token);

@@ -8,7 +8,8 @@ use super::super::stream::LiveStreamEngine;
 use super::asr_adapter::{
     AdapterDrainStatus, PendingAsrAdapter, SessionAsrAdapter, ASR_ADAPTER_DRAIN_TIMEOUT,
 };
-use super::level_channel::{LatestLevelReceiver, LevelWorker};
+use super::capture_installation::CaptureInstallation;
+use super::level_channel::LevelWorker;
 use super::stream_session::{SessionStream, StreamFinishStatus, StreamFinisher};
 use super::warmup::SharedWarmup;
 
@@ -76,16 +77,16 @@ impl LiveRuntimeResources {
         )
     }
 
-    pub(super) fn install_capture(
-        &mut self,
-        capture: CaptureAdapter,
-        recording: RecordingSinkHandle,
-        pending_asr: PendingAsrAdapter,
-        app: tauri::AppHandle,
-        level: LatestLevelReceiver,
-        session: u64,
-        active_session: Arc<AtomicU64>,
-    ) {
+    pub(super) fn install_capture(&mut self, installation: CaptureInstallation) {
+        let CaptureInstallation {
+            capture,
+            recording,
+            pending_asr,
+            app,
+            level,
+            session,
+            active_session,
+        } = installation;
         self.capture = Some(capture);
         self.recording = Some(recording);
         self.pending_asr = Some(pending_asr);
