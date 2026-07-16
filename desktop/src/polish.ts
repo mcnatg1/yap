@@ -2,7 +2,7 @@ import { polishNumGpuLayers } from "@/settings";
 import {
   developmentPolishAvailable,
 } from "@/lib/product-features";
-import type { RecordingJobView } from "@/lib/app-types";
+import type { RecordingJobView } from "@/lib/recording-job";
 
 const defaultPolishModel = "gemma4:e2b-it-q4_K_M";
 

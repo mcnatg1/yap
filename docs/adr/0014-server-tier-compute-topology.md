@@ -8,7 +8,7 @@
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) (track-aware capture, optional local anonymous evidence, and server-authoritative reconciliation replace the ADR 0015 profile split)
 **Amended by:** [ADR 0021](0021-http3-secure-edge-transport.md) (HTTP/3 is the gated future client-facing edge; the bounded application service remains private with TCP fallback)
 **Amended by:** [ADR 0023](0023-bounded-live-priority.md) (interactive live work remains preferred, but a ready batch job must run after a bounded live-dispatch streak)
-**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, the desktop connector/state machine, and the durable SQLite imported-job ledger exist. Phase 4 implements a bounded in-memory reference router and one transient, isolated Cohere GPU batch pool whose exact-head local/native/server/GB10 gate passed. The Phase 5 candidate adds durable loopback HTTP create/upload/commit/status/result/cancel, reconnect drain, restart-safe server job state, and verified native History publication with focused evidence; its one-time complete gate remains pending. WSS/live, authenticated sessions, persistent supervision, external application networking, long-recording and multi-worker capacity, and the TLS/QUIC edge are not implemented.
+**Implementation status:** Client capture/local fallback, machine-readable HTTP/live contracts, the bounded loopback capability-health service, desktop connector state, and the durable SQLite imported-job ledger exist. Phase 4 supplied the bounded router and transient isolated Cohere worker. Phase 5 connected them to durable loopback create/upload/commit/status/result/cancel, reconnect/restart recovery, and verified native History publication; exact PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the one-time local/native/server/GB10 gate and merged. WSS/live, authenticated sessions, persistent production supervision, external application networking, long-recording and multi-worker capacity, and the TLS/QUIC edge are not implemented.
 
 ## Context
 
@@ -290,7 +290,7 @@ enum ConnectorState { NotSet, Disabled, Connecting, Offline, SignInRequired, Ret
 
 The server URL is set in Settings during organization onboarding. A configured but unreachable server remains `TeamConfigured` and unavailable; it does not silently become Solo. Its observable connector state may be `Offline` and then `Retrying` when retry backoff arms. Imported recordings stay queued or blocked and preserve their intended server route. Live dictation may use the local fallback while the connector is unavailable. `Ready` means a compatible, healthy service is reachable and its auth projection does not require sign-in; advertised capabilities may all be false. Batch and live routing additionally require the matching advertised capability.
 
-The implemented Phase 3 connector covers configured-origin validation, bounded health checks, capability and auth-required state projection, fail-closed retries, and settings-generation cancellation. The Phase 5 candidate extends it for an explicitly approved loopback development origin with durable batch create/upload/commit/status/result/cancel and reconnect drain. It does not stream live audio, authenticate a user, supervise a persistent service, or expose an application listener.
+The implemented Phase 3 connector covers configured-origin validation, bounded health checks, capability and auth-required state projection, fail-closed retries, and settings-generation cancellation. The gated Phase 5 path extends it for an explicitly approved loopback development origin with durable batch create/upload/commit/status/result/cancel and reconnect drain. It does not stream live audio, authenticate a user, supervise a persistent production service, or expose an application listener.
 
 ### Client connector state machine (team profile)
 
@@ -328,12 +328,14 @@ On `Connected` loss, live dictation may switch to local fallback with a visible 
   model/runtime lock, licensed WER fixture, and transient clean-head GB10 gate
   harness; exact executable candidate
   `309a2d427707e3483b2649f13940bd48dfaee836` passed the one-time gate
-- [ ] Cohere batch production pool: durable job queue, warm/multiple workers,
-  measured capacity, cancellation, supervision, and observability
+- [x] Durable Phase 5 batch service: restart-safe job/chunk/result state,
+  cancellation, bounded single-worker dispatch, retention, and recovery
+- [ ] Cohere production pool: authenticated ownership, warm/multiple workers,
+  measured capacity, persistent supervision, and production observability
 - [x] Development HTTP batch transport: approved loopback origin,
   create/upload/commit/status/result/cancel, durable reconnect drain, bounded
-  retry, immutable result verification, and native History projection; focused
-  evidence exists and the complete Phase 5 gate is pending
+  retry, immutable result verification, and native History projection; exact
+  PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the complete Phase 5 gate
 - [ ] Production client transport: authenticated external HTTP batch plus WSS
   live path and managed deployment profile
 - [ ] Local-fallback logic: auto-switch on server unreachability

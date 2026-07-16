@@ -24,7 +24,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { type RecordingJobView } from "@/lib/app-types";
+import type { RecordingJobView } from "@/lib/recording-job";
 
 export function QueuePanel({
   legacyDiscardAllowed,

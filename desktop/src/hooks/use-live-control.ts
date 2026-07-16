@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView } from "@/lib/app-types";
+import type { LiveCaptureMode, LiveInputDeviceView, LiveSessionView } from "@/lib/live-session";
 import {
   clearLiveHotkey,
   clearLivePasteHotkey,

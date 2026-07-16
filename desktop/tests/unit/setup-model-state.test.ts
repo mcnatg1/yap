@@ -4,7 +4,7 @@ import {
   deriveSetupStateFromFallbackModel,
   type FallbackModelStatus,
   type FallbackModelView,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
 import {
   fallbackStatusText,
   projectFallbackModelState,

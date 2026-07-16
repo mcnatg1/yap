@@ -1,6 +1,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
-import { emitLiveOverlayLevel, LiveOverlay } from "@/components/live/live-overlay";
+import { LiveOverlay } from "@/components/live/live-overlay";
+import { emitLiveOverlayLevel } from "@/components/live/live-waveform";
 import {
   listenLiveLevel,
   listenLiveOverlaySession,
@@ -9,7 +10,7 @@ import {
   startLiveOverlaySession,
   stopLiveOverlaySession,
 } from "@/live";
-import type { LiveOverlayView } from "@/lib/app-types";
+import type { LiveOverlayView } from "@/lib/live-session";
 
 const liveStatuses = ["idle", "armed", "listening", "speaking", "settling", "blocked", "saving"] as const;
 const liveCaptureModes = ["pushToTalk", "toggle"] as const;

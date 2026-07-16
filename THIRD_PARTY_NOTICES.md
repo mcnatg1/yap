@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-## FreeFlow
+## FreeFlow (zachlatta/freeflow)
 
 Portions of the live dictation overlay and audio level normalization are adapted
 from FreeFlow:

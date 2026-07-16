@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import { audioExts, extension, type RecordingJobView } from "@/lib/app-types";
+import { audioExts, extension } from "@/lib/media-file";
+import type { RecordingJobView } from "@/lib/recording-job";
 
 export const legacyRecordingQueueKey = "yap.recordingQueue.v1";
 export const maxStoredQueueJobs = 200;
@@ -8,20 +9,6 @@ export const maxStoredQueueJobs = 200;
 export type LegacyQueueJob = {
   id: number;
   path: string;
-};
-
-export type CompletedRemoteTranscript = {
-  createdAtMs: number;
-  name: string;
-  outputPath: string;
-  sessionId: string;
-  sourcePath: string;
-  warning?: string | null;
-};
-
-export type CompletedRemoteTranscriptCatalog = {
-  maintenanceWarnings: string[];
-  sessions: CompletedRemoteTranscript[];
 };
 
 type LegacyQueueStorage = Pick<Storage, "getItem">;
@@ -75,11 +62,6 @@ export function discardLegacyRecordingQueue(
 export async function recordingJobsSnapshot() {
   if (!isTauri()) return [];
   return invoke<RecordingJobView[]>("recording_jobs_snapshot");
-}
-
-export async function completedRemoteTranscripts() {
-  if (!isTauri()) return { maintenanceWarnings: [], sessions: [] };
-  return invoke<CompletedRemoteTranscriptCatalog>("recording_jobs_completed_transcripts");
 }
 
 export async function pickRecordingImports() {

@@ -4,6 +4,7 @@ use super::state::{LiveCaptureMode, LiveOverlayVisibility, LiveSessionView};
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Shift+Space";
 pub const DEFAULT_PASTE_HOTKEY: &str = "Ctrl+Shift+Alt+V";
+const MAX_LIVE_SETTINGS_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +30,7 @@ impl Default for LiveSettings {
 
 pub fn load() -> LiveSettings {
     let path = settings_path();
-    std::fs::read_to_string(path)
+    crate::bounded_file::read_text(&path, MAX_LIVE_SETTINGS_BYTES)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()

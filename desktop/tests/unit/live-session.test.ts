@@ -4,7 +4,7 @@ import {
   liveRouteLabel,
   liveStatusLabel,
   type LiveSessionView,
-} from "@/lib/app-types";
+} from "@/lib/live-session";
 
 describe("live session projection", () => {
   it("labels all routes", () => {

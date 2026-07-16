@@ -1,6 +1,18 @@
 # Yap & Voice OS — System Architecture
 
-**Status:** Living document (2026-07-14)
+**Status:** Living long-term Voice OS frame of reference; implementation-status
+snapshot last reconciled 2026-07-16
+
+> **Scope notice (2026-07-15):** This document remains the first-class readable
+> frame for the eventual Voice OS architecture. It intentionally combines the
+> full-system target, sequencing rationale, and reconciled decisions. Use
+> [current architecture](architecture/CURRENT-ARCHITECTURE.md),
+> [current status](CURRENT-STATUS.md), and the
+> [roadmap](roadmap/ROADMAP.md) for what executes now and what is actively
+> scheduled. Substantive changes to this long-term frame require explicit owner
+> review; checkpoint cleanup may repair classification and links but must not
+> silently redefine the target.
+
 **Authority:** Decisions are normative according to status in [ADR 0001–0023](adr/README.md). This doc is the readable synthesis of the full Voice OS flowchart + reconciled Yap decisions.
 
 For implementation truth rather than decision intent, use the living [ADR implementation status audit](ADR-IMPLEMENTATION-STATUS.md). An accepted ADR or a documented flowchart node is not proof that its code exists.
@@ -53,7 +65,7 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | Primary input | File imports + explicit live mic + global dictation hotkey; paste-last is optional and imports remain a queue shell | Same client inputs plus future connected server routes |
 | Live language | **English only** | Multilingual live router (future ADR) |
 | Batch language | Server Cohere **14 langs** (manual + LID gate later) | Same |
-| STT runtime | **Nemotron INT8 sherpa fallback** + Phase 5 loopback batch candidate; WSS/authenticated production transport deferred | Same client shell; heavier pools move server-side |
+| STT runtime | **Nemotron INT8 sherpa fallback** + gated Phase 5 loopback batch path; WSS/authenticated production transport deferred | Same client shell; heavier pools move server-side |
 | Polish | Development-only Ollama call today; bundled `llama-server` is deferred | Scribe + agents through a governed client/server LLM boundary |
 | Speakers | Plain dictation; optional anonymous meeting labels later | Revisioned diarization + purpose-authorized server identity + OKF |
 | Knowledge | Transcripts history (solo) / `yap-knowledge` Google OKF + compiler (team) | Permission-safe OKF graph/vector views + glossary agents + Q&A |
@@ -73,7 +85,7 @@ For implementation truth rather than decision intent, use the living [ADR implem
 | Knowledge base | Future Google OKF Markdown with local SQLite retrieval | Future `yap-knowledge` Git + deterministic compiler + Postgres permissions/relationships + pgvector baseline; optional Neo4j challenger (Phase 9, ADR 0017/0022) |
 | Network | None required for live fallback; server required for official recordings | LAN/VPN to the GB-class server node; future HTTP/3 secure edge with HTTP/2 or HTTP/1.1 fallback |
 
-The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, local Nemotron fallback, durable imported-job ownership, and connector health/capability/retry state are implemented. The Phase 5 candidate adds strict admission and extraction of already-canonical mono PCM16/16 kHz WAV input, durable loopback HTTP batch upload/drain, cancellation, verified result publication, and History projection with focused evidence; its one-time complete gate is pending. General media decoding/resampling, Opus, WSS/live, authentication, persistent service deployment, and external application networking remain deferred. Server unavailability queues or blocks larger recordings instead of silently producing official-looking transcripts from the fallback.
+The **client shell** (`yap-desktop`) is identical in both profiles. Mic capture, track-aware preparation, explicit gaps, bounded sink fan-out, streaming recording, hotkey, overlay UI, local Nemotron fallback, durable imported-job ownership, and connector health/capability/retry state are implemented. The merged Phase 5 path adds strict admission and extraction of already-canonical mono PCM16/16 kHz WAV input, durable loopback HTTP batch upload/drain, cancellation, verified result publication, and History projection; its one-time complete local/native/server/GB10 gate and hosted exact-head checks passed before merge. General media decoding/resampling, Opus, WSS/live, authentication, persistent service deployment, and external application networking remain deferred. Server unavailability queues or blocks larger recordings instead of silently producing official-looking transcripts from the fallback.
 
 The on-prem GB-class server node is **org-owned hardware on an org-controlled LAN** — not a public cloud service. The current profile is DGX Spark GB10; a future GB300-class node should be a capacity/profile change, not a product architecture change. This is consistent with the "no cloud STT" principle for regulated/clinical orgs.
 
@@ -171,7 +183,7 @@ Imported and official recording jobs never run through local Nemotron. When the 
 Thin client shell + GB-class server node. The client connector owns validated
 health/capability/retry state and, in the Phase 5 development profile, durable
 batch create/upload/commit/status/result/cancel through an explicitly approved
-loopback origin. That candidate connects the Phase 4 router/pool and isolated
+loopback origin. That gated path connects the Phase 4 router/pool and isolated
 Cohere worker without exposing an application port: Windows reaches server
 loopback only through a manually selected SSH forward. WSS/live, application
 authentication, persistent supervision, and the managed enterprise edge remain
@@ -270,7 +282,7 @@ flowchart TB
     subgraph L2Batch["L2 batch — server path · Yap recording quality"]
         Drop["File drop / queue"]
         LID["DEFERRED SpeechBrain LID gate · Phase 6"]
-        COH["GB-class Cohere worker\nPhase 5 loopback batch candidate"]
+        COH["GB-class Cohere worker\ngated Phase 5 loopback batch path"]
         Save["Verified server result → .txt/history"]
         ScribeB["Dev Ollama today<br/>target governed Scribe deferred"]
     end
@@ -574,7 +586,7 @@ Scoped profiles, mutex groups, and state rules: **[ADR 0006](adr/0006-silero-age
 
 ## Runtime orchestration (summary)
 
-**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust boundary enforces the local Nemotron lifecycle and projects connector health/capabilities/retries. The Phase 5 candidate also owns durable loopback batch upload/server-processing transitions and verified result publication. LLM scheduling, Silero, and WSS/live server transport are not wired:
+**Target state-machine limits** — full decision in [ADR 0006](adr/0006-silero-agents-state-machine.md). The implemented Rust boundary enforces the local Nemotron lifecycle and projects connector health/capabilities/retries. The gated Phase 5 path also owns durable loopback batch upload/server-processing transitions and verified result publication. LLM scheduling, Silero, and WSS/live server transport are not wired:
 
 | Rule | Limit |
 |------|--------|
@@ -609,7 +621,7 @@ These rules prevent the repeated UI and runtime churn we have been seeing. They 
 | Settings and controls | Ship usable dictation and paste-last defaults. Enter an explicit "Change shortcut" mode that records one physical primary-key chord, normalizes only that final chord, supports Cancel and Reset, and preserves the previous registration on failure. | Do not require users to type chord strings, accept bare printable/OS-reserved chords, capture outside deliberate recording mode, or log/store raw key events. |
 | Docs and code | Update the ADR/spec/product surface in the same phase as the code. | Do not ship behavior that contradicts the client/server split: live local fallback is allowed; official long recordings queue for server. |
 | Speaker privacy | Persist anonymous timelines and user labels; keep local embeddings transient. | Do not turn contact import, transcript renaming, or meeting attendance into passive voice enrollment. |
-| Server staging | Keep the default Phase 3 health-only profile separate from the Phase 5 loopback batch profile. Advertise batch/status only after private storage, the immutable lock, verified models, router, and pool initialize. Keep the worker transient, pinned, non-root, and networkless. | Do not advertise live capability, expose a worker/model/application port, or mistake one isolated worker and focused batch candidate for a persistent authenticated multi-user service or capacity benchmark. |
+| Server staging | Keep the default Phase 3 health-only profile separate from the Phase 5 loopback batch profile. Advertise batch/status only after private storage, the immutable lock, verified models, router, and pool initialize. Keep the worker transient, pinned, non-root, and networkless. | Do not advertise live capability, expose a worker/model/application port, or mistake one isolated worker and gated batch path for a persistent authenticated multi-user service or capacity benchmark. |
 
 ---
 
@@ -671,7 +683,7 @@ Yap (Tauri)  [yap-desktop]
 
 ### Target team / server profile
 
-The hardened host bootstrap, machine-readable HTTP/live contracts, bounded loopback service, desktop connector/state machine, durable SQLite imported-job ledger, and Phase 5 development batch path exist. The candidate validates and extracts immutable PCM from already-canonical WAV input, drains resumable jobs through the bounded router and isolated Cohere worker, and publishes verified server results. Its complete gate is pending. General media conversion, WSS/live, authentication, persistent supervision, multi-worker capacity, databases, secure transport edge, and the `yap-knowledge` repository below are deferred.
+The hardened host bootstrap, machine-readable HTTP/live contracts, bounded loopback service, desktop connector/state machine, durable SQLite imported-job ledger, and Phase 5 development batch path exist. The gated path validates and extracts immutable PCM from already-canonical WAV input, drains resumable jobs through the bounded router and isolated Cohere worker, and publishes verified server results. Its one-time complete local/native/server/GB10 gate and hosted exact-head checks passed before merge. General media conversion, WSS/live, authentication, persistent supervision, multi-worker capacity, databases, secure transport edge, and the `yap-knowledge` repository below are deferred.
 
 ```
 yap-desktop (Tauri) — thin client shell
@@ -748,8 +760,8 @@ timeline
 | **2** | Implemented baseline; installer lifecycle verified | Local Nemotron INT8 fallback, explicit install/remove/disable, warmup, stable errors, and tests exist. Windows native WDIO, stock NSIS packaging contracts, and release-artifact contracts exist; implementation head `a721121315c7a4bf5510212196141f17e9b237bd` passed the stock lifecycle on a disposable Windows runner. Real-model/native release CI and measured latency/accuracy gates remain. |
 | **3** | Verified implementation | Contracts, loopback capability-health, connector/retry state, and the durable Rust ledger remain implemented. Exact candidate `c3999b7b685dd668165d54b64d1af61e41adad05` passed the one-time local/native/server/GB10 gate; tunneled health projected `Ready`, refusal projected `Retrying`, and teardown was clean. Implementation head `a721121315c7a4bf5510212196141f17e9b237bd` then passed hosted CI and the disposable-Windows installer lifecycle. This still does not imply same-process native UI transition, persistent service, upload/WSS/auth/ASR, or inference. |
 | **4** | Merged and verified | Executable candidate `309a2d427707e3483b2649f13940bd48dfaee836` passed the one-time local/native/server/GB10 matrix. Its transient isolated ARM64 worker ran the locked Cohere revision on NVIDIA GB10 in CUDA/BF16 at WER `0.0`; immutable evidence confirmed matching before/after listener, firewall-policy, and service-unit observations plus complete container/worker teardown. Hosted closure passed before final PR head `43f9c43f37e1893dbfe1565d3636fca1e4e3fedf` became reachable from merged main `7d967a5b9f1021fd995af77a421ebaa13d8f9925`. This proves the isolated reference slice, not authenticated/persistent production service or capacity. |
-| **5** | Candidate implemented; focused evidence green; complete gate pending | Already-canonical mono PCM16/16 kHz WAV files are strictly validated and extracted into an immutable Yap-owned spool, durably created/uploaded/committed/resumed/cancelled through the approved loopback origin, processed through the bounded router and isolated Cohere worker, and published to History only after native result verification. Focused Rust, frontend, Python 3.12, API, and contract checks pass. The private review is complete and retained outside the repository; the one-time checked-head local/native/server/GB10 gate has not completed. General media conversion, WSS/live, authentication, persistent service, external networking, and measured multi-worker capacity remain later gates. |
-| **Checkpoint A** | Queued; do not start before Phase 5 merges | This is the first post-Phase-5 task. Run it on a separate `refactor/phase1-5-architecture-checkpoint` branch with parallel read-only review lenses and primary-agent-coordinated edits. Keep it out of the Phase 5 PR, preserve verified behavior, keep private security evidence private, and do not begin Phase 6 product work during the checkpoint. |
+| **5** | Merged and verified | Already-canonical mono PCM16/16 kHz WAV files are strictly validated and extracted into an immutable Yap-owned spool, durably created/uploaded/committed/resumed/cancelled through the approved loopback origin, processed through the bounded router and isolated Cohere worker, and published to History only after native result verification. Exact PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the one-time local/native/server/GB10 gate and hosted checks, then merged as `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`. Private review evidence remains outside the repository. General media conversion, WSS/live, authentication, persistent service, external networking, and measured multi-worker capacity remain later gates. |
+| **Checkpoint A** | Active; local gate green | The executable implementation and documentation reconciliation are complete on `refactor/phase1-5-architecture-checkpoint`. Exact implementation candidate `6d55816b0406a2365376d7b2d9a7da2afecf9118` passed the one-time complete local/native/server/GB10 gate. Hosted exact-head closure, final review, and merge remain; private security evidence stays outside Git, and no Phase 6 product work is allowed during the checkpoint. |
 | **6** | Planned, not optional | Preprocessing remains required: VAD/chunking, LID, alignment, timestamps, manifests, retries. |
 | **7** | Planned | Auth/identity design exists but requires the corrected Yap API token audience, `(tid, oid)` key, purpose-grant records, and a server entrypoint. |
 | **8** | Capture prerequisites implemented; diarization deferred | ADR 0020 and the source-aware design are canonical. Track/timeline/recording prerequisites are implemented; the anonymous speaker model, real benchmark, result production, and server reconciliation are not. |
@@ -766,7 +778,7 @@ Solo/local fallback and team/server mode share concepts, but the server path is 
 
 **Capture persistence rule:** current `live-s-...` sessions use one canonical recording contract (`PreparedFrame`, atomic `RevisionTransition`, and exact `Gap`) and are complete only after immutable sidecar/commit publication. Partial artifacts are recoverable/deletable. Pre-release timestamp-era recordings remain untouched and unindexed; no migration adapter or alternate fixture path is planned.
 
-**Deferred after the Phase 5 batch candidate:** WSS/live ASR, auth-derived
+**Deferred after the gated Phase 5 batch path:** WSS/live ASR, auth-derived
 server ownership, persistent model services, warm/multi-worker capacity
 benchmarks, and production/external application deployment; the HTTP/3 secure
 edge and transport benchmark; system loopback; Opus transport;
@@ -776,14 +788,13 @@ CI.
 
 **Future (unnumbered):** multilingual live routing; Windows system-loopback capture; and user-managed Yap contacts or permissioned OS contact/roster suggestions. Contacts may provide names, aliases, and meeting context for manual labels, but contain no voiceprints. Automatic cross-session naming waits for a separately enrolled, purpose-authorized server profile; guest voice evidence stays session-only and is recomputed from retained audio when authorized. Any encrypted local reusable voice profile requires its own privacy review and ADR.
 
-**Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](superpowers/specs/2026-07-10-source-aware-diarization-design.md) · [Testing](specs/testing-strategy.md).
+**Build specs:** [Client state machine](specs/client-state-machine.md) · [Model download UX](specs/model-download-ux.md) · [Local audio preprocessing](specs/local-audio-preprocessing-stack.md) · [Local live fallback](specs/local-live-fallback-sidecar.md) · [Local LLM sidecar](specs/local-llm-sidecar.md) · [Live dictation client](specs/live-dictation-client-ux.md) · [Server tier MVP](specs/server-tier-mvp.md) · [Source-aware diarization](specs/source-aware-diarization.md) · [Testing](specs/testing-strategy.md).
 
-**Next execution order:** finish the private Phase 5 review, freeze one checked
-candidate, run the complete local/native/server/GB10 gate exactly once, and
-merge only after the checked PR head is green. Then run Checkpoint A on its
-separate branch before Phase 6. WSS/live ASR, authentication, diarization, and
-the HTTP/3 edge remain gated by their canonical phases. ADR 0021 does not
-authorize UDP exposure from the loopback application boundary.
+**Next execution order:** finish Checkpoint A hosted exact-head closure, final
+review, and merge on its separate branch. Then begin Phase 6 on a new branch.
+WSS/live ASR, authentication, diarization, and the HTTP/3 edge remain gated by
+their canonical phases. ADR 0021 does not authorize UDP exposure from the
+loopback application boundary.
 
 ---
 
@@ -800,7 +811,7 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 | **5** Remote STT | Long-recording upload + server STT routing | Recording queue UX; remote/local policy |
 | **6** Preprocessing | VAD/chunks, LID, forced alignment, word timestamps, manifests | Preprocessing spec; aligner/LID decisions |
 | **7** Identity/access | Entra sign-in, Yap API token validation, purpose grants, tenant-scoped identity DB | [ADR 0016](adr/0016-auth-identity-bridge.md); enrollment UX |
-| **8** Meeting evidence | Anonymous local labels, timestamped result revisions, benchmark gates, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) |
+| **8** Meeting evidence | Anonymous local labels, timestamped result revisions, benchmark gates, server reconciliation | [ADR 0020](adr/0020-meeting-capture-diarization-authority.md); [source-aware design](specs/source-aware-diarization.md) |
 | **9** Knowledge/agents | Google OKF profile, deterministic compiler, Postgres/pgvector relationship/vector baseline, optional Neo4j challenger, RAG, MCP | ADR 0022 conformance/isolation/generation and challenger-promotion gates; permission compile SLA |
 | **10** Enterprise/release | Zscaler/corp access, HTTP/3 secure-edge benchmark/promotion, packaging, repo split | ADR 0021 transport evidence; CI/CD migration; cross-repo link update |
 
@@ -840,8 +851,8 @@ Each phase ships **code + doc/product sync** together, so positioning never lags
 - [x] Crash-safe streaming recording, immutable capture sidecar/commit, and recover/delete lifecycle
 - [x] Rust-owned durable reconnect ledger
 - [x] Loopback HTTP batch upload, cancellation-first reconnect drain, server
-  processing, and verified native result publication (Phase 5 candidate; full
-  gate pending)
+  processing, and verified native result publication (Phase 5 merged; one-time
+  complete gate and hosted exact-head checks passed)
 - [ ] Authenticated WSS/live transport and production application edge
 
 **Meeting evidence and diarization (Phase 8)**
@@ -895,7 +906,7 @@ Current implementation ownership and completeness for all decisions: [ADR implem
 | [Local LLM sidecar](specs/local-llm-sidecar.md) | polish/Scribe |
 | [Live dictation client](specs/live-dictation-client-ux.md) | 1–2 |
 | [Server tier MVP](specs/server-tier-mvp.md) | 3–4 |
-| [Source-aware diarization design](superpowers/specs/2026-07-10-source-aware-diarization-design.md) | Foundation slices in 1/3/5; anonymous evidence in 8 |
+| [Source-aware diarization design](specs/source-aware-diarization.md) | Foundation slices in 1/3/5; anonymous evidence in 8 |
 | [Testing strategy](specs/testing-strategy.md) | all |
 
 ## Related documents

@@ -1,14 +1,14 @@
 # Spec: Server Tier MVP
 
-**Status:** Canonical Phase 3 boundary, isolated Phase 4 Cohere reference pool, and Phase 5 loopback durable batch candidate implemented with focused evidence; the complete Phase 5 gate, WSS/live, auth, and persistent service deployment remain pending
+**Status:** Canonical Phase 3 boundary, isolated Phase 4 Cohere reference pool, and gated Phase 5 loopback durable batch path implemented; WSS/live, authentication, and persistent production deployment remain pending
 **Scope:** Stand up the first server path while keeping this repo as the MVP monorepo.
 
 The server tier introduces `yap-server` on an org-owned GB-class server node.
 The desktop remains the product surface. Phase 3 implements the wire contract
 and capability-health boundary. Phase 4 implements one transient, server-internal
 Cohere batch path through a bounded router/pool and isolated GPU worker. The
-Phase 5 candidate connects imported desktop jobs to that worker through the
-durable loopback batch contract without creating a production network service.
+Phase 5 connects imported desktop jobs to that worker through the durable
+loopback batch contract without creating a production network service.
 
 ## Repo Layout
 
@@ -91,7 +91,7 @@ router. Safe multi-worker capacity, live streaming, auth-derived owner identity,
 service supervision, production observability, and the application network edge
 remain later gates.
 
-## Phase 5 Loopback Batch Candidate
+## Phase 5 Loopback Batch Baseline
 
 - Native Rust admits only an already-canonical mono PCM16/16 kHz RIFF/WAVE,
   extracts it into an immutable PCM spool under exact container/physical-size
@@ -119,10 +119,10 @@ private node's normally operating local filesystem. Backup/restore,
 replication, disaster recovery, and a power-loss durability SLA remain later
 persistent-service work.
 
-Focused Rust, frontend, Python 3.12, API, and contract checks are development
-evidence only. The one-time complete Phase 5 checked-head gate remains pending,
-so this section is not a release, production-capacity, or enterprise-networking
-claim.
+Exact PR head `4771d9be60562fa009ccecbcd3c7111b699883a5` passed the
+one-time complete Phase 5 checked-head gate. That evidence proves the loopback
+development vertical slice; it is not a production-capacity, authenticated,
+or enterprise-networking claim.
 
 ## Non-goals
 

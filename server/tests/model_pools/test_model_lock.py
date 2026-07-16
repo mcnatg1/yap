@@ -161,6 +161,14 @@ class ModelPoolLockTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_model_pool_lock(lock_path)
 
+    def test_rejects_an_oversized_model_lock_before_json_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "lock.json"
+            lock_path.write_bytes(b" " * (2 * 1024 * 1024 + 1))
+
+            with self.assertRaisesRegex(ValueError, "oversized"):
+                load_model_pool_lock(lock_path)
+
 
 if __name__ == "__main__":
     unittest.main()

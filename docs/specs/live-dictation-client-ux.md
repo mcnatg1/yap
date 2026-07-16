@@ -4,7 +4,11 @@
 **Implements:** [ADR 0006](../adr/0006-silero-agents-state-machine.md) (orchestrator/pre-warm), [ADR 0013](../adr/0013-global-hotkey-injection.md) (hotkeys/safe delivery), [ADR 0019](../adr/0019-local-streaming-model-selection.md) (Nemotron local live fallback)
 **Scope:** Define the **English-only client live path** as an implemented local baseline plus explicitly separate follow-on server/audio features.
 
-> **2026-07-05 scope amendment:** The next live UI PR may introduce a top-positioned `live-overlay` surface, configurable capture hotkey, mic device settings, and typed live session state before cross-app injection. That bridge is specified in [Live Speaking Overlay And Controls](../superpowers/specs/2026-07-05-live-speaking-overlay-and-controls.md). Injection remains governed by [ADR 0013](../adr/0013-global-hotkey-injection.md).
+> **Historical 2026-07-05 amendment:** The top-positioned `live-overlay`,
+> configurable capture hotkey, mic device settings, and typed live state landed
+> and were later converged into one tray-owned island with safe clipboard-only
+> delivery. The original design is [archived](../archive/historical-designs/2026-07-05-live-speaking-overlay-and-controls.md);
+> [ADR 0013](../adr/0013-global-hotkey-injection.md) governs current behavior.
 
 > **2026-07-08 implemented local-fallback baseline:** The local live-transcription path uses one local model: Nemotron 3.5 ASR Streaming 0.6B INT8 through in-process `sherpa-onnx`. It keeps native punctuation, uses 1120 ms chunks until smaller chunks profile under real-time, and saves local live WAV/TXT output into Home history. Rust Silero ONNX, `vad_segments` chunk manifests, Opus/server WSS, Scribe, and diarization remain follow-on work.
 

@@ -5,7 +5,7 @@ import {
   PolishSaveBusyError,
   PolishSaveCancelledError,
 } from "@/hooks/use-transcript-file-actions";
-import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import { createInitialPipelineState, type RecordingJobView } from "@/lib/recording-job";
 import {
   createPolishOperationOwner,
   createPolishSaveRequest,

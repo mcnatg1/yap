@@ -1,12 +1,16 @@
 mod app;
+mod atomic_text;
 pub mod audio;
 mod authorization;
+mod bounded_file;
 mod commands;
 mod file_actions;
 mod install_identity;
 pub mod jobs;
 pub mod live;
+pub(crate) mod media_protocol;
 mod paths;
+pub(crate) mod recording_access;
 pub mod runtime;
 mod runtime_policy;
 pub mod server_connector;

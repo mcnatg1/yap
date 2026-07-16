@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { projectAppModalState } from "@/components/panels/app-sheets";
 import {
   isHistoryBodySearchPending,
   projectHistorySearchDisplay,
-} from "@/components/panels/history-panel";
+} from "@/components/history/history-search";
 import { isDevelopmentPolishAvailable } from "@/lib/product-features";
 import { createPolishOperationOwner, isPolishDraftCurrent } from "@/polish";
 
@@ -46,12 +45,6 @@ describe("product surface contracts", () => {
       outputPaths: ["one.txt"],
       query: "x",
     })).toBe(false);
-  });
-
-  it("gives Settings and Help one mutually exclusive modal owner", () => {
-    expect(projectAppModalState("settings")).toEqual({ detailsOpen: true, helpOpen: false });
-    expect(projectAppModalState("help")).toEqual({ detailsOpen: false, helpOpen: true });
-    expect(projectAppModalState(null)).toEqual({ detailsOpen: false, helpOpen: false });
   });
 
   it("keeps the direct Ollama Polish path behind an explicit development-only seam", () => {

@@ -8,7 +8,7 @@ import { useServerConnection } from "@/hooks/use-server-connection";
 import {
   isFallbackModelBusy,
   type FallbackModelView,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
 import {
   projectFallbackModelState,
   type FallbackModelStateOverrides,

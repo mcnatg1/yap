@@ -25,6 +25,7 @@ describe("Phase 5 native gate support", () => {
     };
     const historyEntry = {
       name: "fixture.wav",
+      origin: "remote",
       outputPath: "C:\\Yap\\remote-jobs\\job-0123456789abcdef01234567\\result-1\\transcript.txt",
       sessionId: "s-0123456789abcdef01234567",
       sourcePath: "\\\\?\\c:\\fixture.wav",
@@ -53,6 +54,10 @@ describe("Phase 5 native gate support", () => {
     expect(matchCompletedRemoteTranscript(
       createdJob,
       { maintenanceWarnings: [], sessions: [{ ...historyEntry, sourcePath: "C:\\other.wav" }] },
+    )).toBeUndefined();
+    expect(matchCompletedRemoteTranscript(
+      createdJob,
+      { maintenanceWarnings: [], sessions: [{ ...historyEntry, origin: "live" }] },
     )).toBeUndefined();
   });
 

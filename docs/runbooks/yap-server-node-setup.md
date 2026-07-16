@@ -1,6 +1,6 @@
 # Yap Server Node Setup Runbook
 
-Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 3 provides health reachability and durable queued-job ownership. Phase 4 adds one transient, server-internal Cohere batch reference worker. The Phase 5 candidate now sends imported recordings through the durable loopback batch contract; its one-time complete gate is still pending.
+Yap's team profile treats an NVIDIA GB-class server node as a private server tier, not a public service. The desktop stays thin: local Nemotron INT8 is the live/offline fallback. Phase 3 provides health reachability and durable queued-job ownership. Phase 4 adds one transient, server-internal Cohere batch reference worker. The gated Phase 5 path sends imported recordings through the durable loopback batch contract. It remains a development profile, not a public or persistent production service.
 
 The first supported node profile is DGX Spark GB10. A later GB300-class node should keep the same server contract and change only host-specific config: NIC names, CIDRs, GPU/runtime sizing, and deployment capacity.
 
@@ -149,9 +149,9 @@ change is authorized.
 
 ## Phase 5 Loopback Batch Development
 
-The Phase 5 batch candidate connects Yap's create/upload/commit/status/result
-contract to the isolated Cohere worker. It is a development profile, not an
-enterprise deployment:
+The merged Phase 5 batch baseline connects Yap's
+create/upload/commit/status/result contract to the isolated Cohere worker. It
+is a development profile, not an enterprise deployment:
 
 - the application service still binds only to server loopback;
 - Windows reaches it only through an explicitly started SSH local forward;

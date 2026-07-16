@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +15,7 @@ from yap_server.pools.batch_asr import (
 )
 from yap_server.pools.model_lock import (
     load_model_pool_lock,
+    sha256_file,
     verify_fixture,
     verify_model_artifacts,
 )
@@ -98,6 +98,8 @@ def run_gate(
         lock=lock,
         run_as_uid=getuid(),
         run_as_gid=getgid(),
+        checked_head=checked_head,
+        storage_namespace="phase4-gate",
     )
     router = WorkloadRouter(max_pending=4, max_pending_per_owner=2)
     request = WorkloadRequest("phase4-asr-gate", "phase4-gate", "batch")
@@ -138,7 +140,7 @@ def run_gate(
             f"fixture WER {measured_wer:.4f} exceeds the {max_wer:.4f} gate"
         )
 
-    result_digest = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    result_digest = sha256_file(result_path)
     evidence: dict[str, object] = {
         "schemaVersion": 1,
         "phase": 4,

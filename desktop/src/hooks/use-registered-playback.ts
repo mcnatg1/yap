@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
 
-import type { TranscriptHistoryEntry } from "@/history";
-import type { RecordingJobView } from "@/lib/app-types";
+import type { TranscriptHistoryEntry } from "@/history-model";
+import type { RecordingJobView } from "@/lib/recording-job";
 import {
   currentPlaybackPaths,
   mergeHistoryPlaybackAdmissions,
-  reconcilePlaybackAdmissionLifecycle,
-  releaseRecordingPlaybackPaths,
   restoreHistoryPlaybackAdmission,
   trimHistoryPlaybackAdmissions,
   type HistoryPlaybackAdmissions,
-} from "@/lib/playback-registry";
+} from "@/lib/history-playback";
+import {
+  reconcilePlaybackAdmissionLifecycle,
+  releaseRecordingPlaybackPaths,
+} from "@/lib/playback-admission";
 
 export function useRegisteredPlayback(
   queue: RecordingJobView[],

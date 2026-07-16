@@ -1,4 +1,4 @@
-import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history";
+import { maxTranscriptHistoryEntries, type TranscriptHistoryEntry } from "@/history-model";
 import { boundTextForCache, rememberText } from "@/lib/text-cache";
 
 export type PreviewTextEntry = {

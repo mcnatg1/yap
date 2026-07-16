@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "sources": [
     {
-      "id": "freeflow",
+      "id": "freeflow-zachlatta",
       "repository": "https://github.com/zachlatta/freeflow",
       "revision": {
         "status": "reviewed",
@@ -30,7 +30,23 @@
       "files": [
         {
           "path": "desktop/src/components/live/live-overlay.tsx",
-          "sha256": "00ccd10ef85685377271dc8885bf2f5b2c92119eb12eab155fdb192cdcb6dcb1"
+          "sha256": "d7215f4cb4aa0b3c28dda5c9ddfd7053aa8c5e83cad94f40468d4435a559f856"
+        },
+        {
+          "path": "desktop/src/components/live/live-overlay-views.tsx",
+          "sha256": "6d87e1e161de5b75b69513a6d423aa4559340f82f33b1bbe77cbef9c09f781a7"
+        },
+        {
+          "path": "desktop/src/components/live/live-waveform.tsx",
+          "sha256": "ac6b27dfdf2f2fad42c7715cea9daf47728d720c5f99d5b21ee2eb07d49d4ba2"
+        },
+        {
+          "path": "desktop/src/components/live/use-live-overlay-presentation.ts",
+          "sha256": "51bc18728fb6c0ec08742973d0f6045ac19157c0092d2caf39c6e2019e3d774d"
+        },
+        {
+          "path": "desktop/src/components/live/use-prefers-reduced-motion.ts",
+          "sha256": "2a4642e03c91fde270ce5344550c82bab1096cc72acc3843fccddb2974b0839d"
         },
         {
           "path": "desktop/src-tauri/src/audio/preprocess.rs",

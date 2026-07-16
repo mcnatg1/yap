@@ -21,7 +21,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import type { RailAction } from "@/lib/app-types";
+import type { RailAction } from "@/lib/workspace";
 import { developmentPolishAvailable } from "@/lib/product-features";
 
 const allMainNav: { action: RailAction; icon: ElementType; label: string }[] = [

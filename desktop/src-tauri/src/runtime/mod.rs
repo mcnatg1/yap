@@ -1,4 +1,4 @@
-mod orchestrator;
+mod desktop_lifecycle;
 pub mod state;
 
-pub use orchestrator::{RuntimeError, RuntimeOrchestrator, RuntimeOrchestratorState};
+pub(crate) use desktop_lifecycle::DesktopLifecycle;

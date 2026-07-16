@@ -20,26 +20,6 @@ pub enum ServerConnectorState {
     Disabled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeState {
-    Idle,
-    FallbackReady,
-    FallbackRunning,
-    ServerQueued,
-    ServerUploading,
-    LiveReady,
-    LiveActive,
-    BackgroundEnriching,
-    DegradedBackground,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JobRoute {
-    LocalFallback,
-    ServerBatch,
-    ServerLive,
-}
-
 #[cfg(test)]
 mod tests {
     use super::ServerConnectorState;

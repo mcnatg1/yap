@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { parsePlaywrightPort } from "./scripts/playwright-port.mjs";
 
-const testPort = 4174;
+const testPort = parsePlaywrightPort(process.env.YAP_PLAYWRIGHT_PORT);
 const testUrl = `http://127.0.0.1:${testPort}`;
 
 export default defineConfig({

@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
-import { transcriptPathIdentity } from "@/history";
-import type { RecordingJobView } from "@/lib/app-types";
+import { transcriptPathIdentity } from "@/history-model";
+import type { RecordingJobView } from "@/lib/recording-job";
 import type { PolishSaveRequest } from "@/polish";
 
 type TranscriptTextLoader = (path: string) => Promise<string>;

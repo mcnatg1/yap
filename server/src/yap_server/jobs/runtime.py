@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 from ipaddress import ip_address
 import os
 from pathlib import Path
@@ -13,12 +14,12 @@ from typing import Mapping, Protocol
 
 from yap_server.jobs.service import RecordingJobService
 from yap_server.pools.batch_asr import (
-    BatchAsrJob,
     BatchAsrPool,
     ContainerBatchAsrWorker,
-    PoolBackpressure,
     inspect_worker_image,
+    reconcile_owned_containers,
 )
+from yap_server.pools.batch_contract import BatchAsrJob, PoolBackpressure
 from yap_server.pools.model_lock import load_model_pool_lock, verify_model_artifacts
 from yap_server.workload_router import (
     RouterBackpressure,
@@ -33,6 +34,8 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class BatchPool(Protocol):
     def submit(self, job: BatchAsrJob) -> Future[dict[str, object]]: ...
+
+    def cancel(self, job_id: str) -> bool: ...
 
 
 class RoutedBatchProcessor:
@@ -72,14 +75,64 @@ class RoutedBatchProcessor:
                 raise RuntimeError("batch router dispatch identity is inconsistent")
             return self._pool.submit(job)
 
+    def cancel(self, job_id: str) -> bool:
+        return self._pool.cancel(job_id)
+
 
 @dataclass(slots=True)
 class BatchRuntime:
     service: RecordingJobService
     pool: BatchAsrPool
+    storage_lease: StorageRuntimeLease
 
     def close(self) -> None:
-        self.pool.shutdown()
+        try:
+            self.pool.shutdown()
+        finally:
+            self.storage_lease.close()
+
+
+class StorageRuntimeLease:
+    """Exclusive process lease for one private server storage namespace."""
+
+    def __init__(self, storage_dir: Path) -> None:
+        import fcntl
+
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(storage_dir / ".yap-runtime.lock", flags, 0o600)
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+            ):
+                raise ValueError("private server runtime lock is unsafe")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise ValueError(
+                    "private server storage is already owned by another runtime"
+                ) from error
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor: int | None = descriptor
+
+    def close(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        self._descriptor = None
+        try:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def build_batch_runtime(
@@ -110,6 +163,9 @@ def build_batch_runtime(
     ).resolve(strict=True)
     model_dir = _required_existing_directory(source, "YAP_PHASE5_MODEL_DIR")
     storage_dir = _private_storage_directory(source, "YAP_PHASE5_STORAGE_DIR")
+    storage_namespace = "storage-" + hashlib.sha256(
+        os.fsencode(storage_dir)
+    ).hexdigest()[:24]
     timeout_seconds = _positive_float(
         source.get("YAP_PHASE5_WORKER_TIMEOUT_SECONDS", "1800"),
         "YAP_PHASE5_WORKER_TIMEOUT_SECONDS",
@@ -121,33 +177,53 @@ def build_batch_runtime(
         source,
         docker_binary=docker_binary,
     )
-    worker = ContainerBatchAsrWorker(
-        image=worker_image,
-        model_dir=model_dir,
-        lock=lock,
-        run_as_uid=run_as_uid,
-        run_as_gid=run_as_gid,
-        docker_binary=docker_binary,
-        timeout_seconds=timeout_seconds,
-    )
-    pool = BatchAsrPool(worker, max_workers=1, max_queued=2)
-    router = WorkloadRouter(
-        max_pending=3,
-        max_pending_per_owner=3,
-        max_consecutive_live=8,
-    )
-    processor = RoutedBatchProcessor(
-        router=router,
-        pool=pool,
-        owner_key="development-loopback",
-    )
-    service = RecordingJobService(
-        storage_dir,
-        processor=processor,
-        supported_languages=lock.supported_languages,
-        now=_utc_now,
-    )
-    return BatchRuntime(service=service, pool=pool)
+    checked_head = source["YAP_PHASE5_CHECKED_HEAD"].strip()
+    storage_lease = StorageRuntimeLease(storage_dir)
+    pool: BatchAsrPool | None = None
+    try:
+        reconcile_owned_containers(
+            docker_binary,
+            storage_namespace=storage_namespace,
+        )
+        worker = ContainerBatchAsrWorker(
+            image=worker_image,
+            model_dir=model_dir,
+            lock=lock,
+            run_as_uid=run_as_uid,
+            run_as_gid=run_as_gid,
+            checked_head=checked_head,
+            storage_namespace=storage_namespace,
+            docker_binary=docker_binary,
+            timeout_seconds=timeout_seconds,
+        )
+        pool = BatchAsrPool(worker, max_workers=1, max_queued=2)
+        router = WorkloadRouter(
+            max_pending=3,
+            max_pending_per_owner=3,
+            max_consecutive_live=8,
+        )
+        processor = RoutedBatchProcessor(
+            router=router,
+            pool=pool,
+            owner_key="development-loopback",
+        )
+        service = RecordingJobService(
+            storage_dir,
+            processor=processor,
+            supported_languages=lock.supported_languages,
+            now=_utc_now,
+            startup_worker_cleanup_verified=True,
+        )
+        return BatchRuntime(
+            service=service,
+            pool=pool,
+            storage_lease=storage_lease,
+        )
+    except BaseException:
+        if pool is not None:
+            pool.shutdown()
+        storage_lease.close()
+        raise
 
 
 def ensure_development_batch_bind(host: str) -> None:

@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { isRecordingCancellable, type RecordingJobView } from "@/lib/app-types";
+import { isRecordingCancellable, type RecordingJobView } from "@/lib/recording-job";
 import {
   cancelRecordingJob,
   pickRecordingImports,

@@ -3,7 +3,7 @@
 **Date:** 2026-06-30
 **Status:** Accepted runtime/VAD principles; active routing is amended by ADR 0014, ADR 0019, and ADR 0020
 **Builds on:** [ADR 0004](0004-background-diarization-okf-agents.md), [ADR 0005](0005-llama-server-agents.md)
-**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and [ADR 0019](0019-local-streaming-model-selection.md) — heavy model residency moves to the **server-side workload router** in the team profile. The client-side `RuntimeOrchestrator` becomes a **server-connector state machine** (Disconnected → Connecting → Connected → LiveStreaming / BatchUploading) plus the local Nemotron fallback selected by ADR 0019. Silero VAD remains client-side in both profiles (local chunk endpointing, `vad_segments`). The old local `moonshine XOR cohere` state machine is historical context.
+**Amended by:** [ADR 0014](0014-server-tier-compute-topology.md) and [ADR 0019](0019-local-streaming-model-selection.md) — heavy model residency moves to the **server-side workload router** in the team profile. The current client does not keep an umbrella `RuntimeOrchestrator`: connector generations/state live in `server_connector`, durable batch transitions in `jobs`, and local live lifecycle in `live`, with shared projection enums under `runtime`. This split is the accepted "or equivalent" implementation of the orchestration responsibility. Silero VAD remains future client-side Phase 6 work. The old local `moonshine XOR cohere` state machine is historical context.
 **Amended by:** [ADR 0020](0020-meeting-capture-diarization-authority.md) - VAD remains useful for endpointing and advisory segment hints, but it is not authoritative for meeting reprocessing. Speaker work runs through an independent bounded sink and may re-evaluate activity from retained audio.
 
 ## Context
@@ -190,6 +190,6 @@ Frontend asks orchestrator before starting Live, fallback, queue, or Polish — 
 
 ## References
 
-- [VOICE-OS-ARCHITECTURE.md](../VOICE-OS-ARCHITECTURE.md)
+- [Current architecture](../architecture/CURRENT-ARCHITECTURE.md)
 - [ADR 0004](0004-background-diarization-okf-agents.md) — chunk manifest, worker subprocess
 - [ADR 0005](0005-llama-server-agents.md) — llama-server Scribe

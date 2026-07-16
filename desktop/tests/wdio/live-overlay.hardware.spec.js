@@ -1,10 +1,12 @@
 import {
   assertOwnedSavedSession,
   assertRecordingRootEmpty,
-  classifyNativeReadiness,
+} from "./task-8b-artifacts.js";
+import {
   registerTask8bLifecycleListeners,
   waitForTask8bSavedEvent,
-} from "./task-8b-helpers.js";
+} from "./task-8b-lifecycle.js";
+import { classifyNativeReadiness } from "./task-8b-readiness.js";
 
 const lifecycleAssertions = [
   "overlay-context start and stop without main-window UI interaction",

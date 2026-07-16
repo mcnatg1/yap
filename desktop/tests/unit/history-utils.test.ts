@@ -5,7 +5,7 @@ import {
   canDeleteTranscriptHistoryEntry,
   historyEntryPlaybackPath,
   savedSessionToTranscriptHistoryEntry,
-} from "@/history";
+} from "@/native-history";
 
 describe("history job projection", () => {
   it("projects partial live saves with their warning", () => {

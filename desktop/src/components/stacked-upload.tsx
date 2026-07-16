@@ -30,7 +30,7 @@ import {
   queuedServerMessage,
   type RecordingJobStatus,
   type RecordingJobView,
-} from "@/lib/app-types";
+} from "@/lib/recording-job";
 import { cn } from "@/lib/utils";
 
 type Props = {

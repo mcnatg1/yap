@@ -48,24 +48,31 @@ impl StreamMessage {
 pub struct LiveStreamEngine {
     recognizer: OnlineRecognizer,
     stream: OnlineStream,
+    _model_guard: crate::stt::nemotron::ModelLoadGuard,
     last_text: String,
 }
 
 impl LiveStreamEngine {
     pub fn new() -> Result<Self, SttError> {
-        let paths = crate::stt::nemotron::local_fallback_start_paths()?;
-        let started = Instant::now();
-        let recognizer = OnlineRecognizer::create(&recognizer_config(&paths))
-            .ok_or(SttError::SidecarUnreachable)?;
+        let mut native_load_elapsed = None;
+        let loaded = crate::stt::nemotron::load_local_fallback(|paths| {
+            let started = Instant::now();
+            let recognizer = OnlineRecognizer::create(&recognizer_config(paths))
+                .ok_or(SttError::SidecarUnreachable)?;
+            native_load_elapsed = Some(started.elapsed());
+            Ok(recognizer)
+        })?;
+        let (recognizer, model_guard) = loaded.into_parts();
         crate::stt::log_stt_timed(
             "nemotron.load",
-            started.elapsed(),
+            native_load_elapsed.unwrap_or_default(),
             crate::stt::nemotron::MODEL_LABEL,
         );
         let stream = recognizer.create_stream();
         Ok(Self {
             recognizer,
             stream,
+            _model_guard: model_guard,
             last_text: String::new(),
         })
     }

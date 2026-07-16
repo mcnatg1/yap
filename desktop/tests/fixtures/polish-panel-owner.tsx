@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { PolishPanel } from "@/components/panels/polish-panel";
-import { createInitialPipelineState, type RecordingJobView } from "@/lib/app-types";
+import { createInitialPipelineState, type RecordingJobView } from "@/lib/recording-job";
 
 const item: RecordingJobView = {
   id: "job-meeting",
@@ -29,7 +29,6 @@ function PolishOwnerFixture() {
       <output aria-label="Save calls">{saveCalls}</output>
       <PolishPanel
         item={item}
-        onLoadText={async () => "Original transcript"}
         onPolished={(_outputPath, text) => setPolishedText(text)}
         onSave={async () => {
           setSaveCalls((count) => count + 1);

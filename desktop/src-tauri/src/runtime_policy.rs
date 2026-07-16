@@ -7,7 +7,7 @@ pub(crate) fn current_setup_status() -> SetupStatus {
         stt::nemotron::FallbackModelStatus::Ready | stt::nemotron::FallbackModelStatus::Disabled
     );
     let (setup_state, engine_ready, engine_status) =
-        compose_engine_status(stt::nemotron::local_fallback_start_paths().map(|_| ()));
+        compose_engine_status(stt::nemotron::local_fallback_readiness());
     SetupStatus {
         model: stt::nemotron::MODEL_LABEL.into(),
         root: stt::nemotron::root_dir().display().to_string(),
@@ -70,17 +70,6 @@ impl SetupStatus {
     pub(crate) fn runtime_setup_state(&self) -> runtime::state::SetupState {
         self.setup_state
     }
-}
-
-pub(crate) fn runtime_error_to_stt(error: runtime::RuntimeError) -> stt::dispatch::SttCommandError {
-    let stt_error = match error {
-        runtime::RuntimeError::FallbackDisabled => stt::error::SttError::FallbackDisabled,
-        runtime::RuntimeError::RuntimeBusy => stt::error::SttError::Busy,
-        runtime::RuntimeError::ServerUnavailable => stt::error::SttError::ServerUnavailable,
-        runtime::RuntimeError::SetupUnavailable => stt::error::SttError::SidecarUnreachable,
-        runtime::RuntimeError::SetupRequired => stt::error::SttError::ModelMissing,
-    };
-    stt_error.into()
 }
 
 #[cfg(test)]
@@ -149,22 +138,6 @@ mod tests {
                 false,
                 stt::error::SttError::ModelCorrupt.user_message().into()
             )
-        );
-    }
-
-    #[test]
-    fn runtime_error_mapping_keeps_server_and_binary_errors_distinct() {
-        assert_eq!(
-            runtime_error_to_stt(runtime::RuntimeError::ServerUnavailable).code,
-            stt::error::SttError::ServerUnavailable.code()
-        );
-        assert_eq!(
-            runtime_error_to_stt(runtime::RuntimeError::SetupUnavailable).code,
-            stt::error::SttError::SidecarUnreachable.code()
-        );
-        assert_eq!(
-            runtime_error_to_stt(runtime::RuntimeError::SetupRequired).code,
-            stt::error::SttError::ModelMissing.code()
         );
     }
 }

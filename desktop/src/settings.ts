@@ -5,7 +5,7 @@ import type {
   FallbackModelView,
   LocalComputeTargetView,
   ServerConnectionState,
-} from "@/lib/app-types";
+} from "@/lib/setup-model";
 
 export {
   saveServerSettings,
