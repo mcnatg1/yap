@@ -3,16 +3,19 @@ use std::path::{Path, PathBuf};
 use reqwest::Url;
 
 mod error;
+mod persisted_file;
 mod persistence;
 mod platform;
 
 pub use error::ConfigError;
+use persisted_file::{read_persisted_bytes, read_persisted_text};
 use persistence::{
     acquire_settings_access_lock, acquire_settings_lock, write_atomically_locked_with_hooks,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u16 = 1;
 const ORIGIN_APPROVAL_SCHEMA_VERSION: u16 = 1;
+const MAX_SERVER_URL_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,6 +43,9 @@ impl Default for ServerSettings {
 }
 
 pub fn validate_base_url(raw: &str, allow_insecure_private: bool) -> Result<String, ConfigError> {
+    if raw.len() > MAX_SERVER_URL_BYTES {
+        return Err(ConfigError::Invalid("Server URL is too long."));
+    }
     let url =
         Url::parse(raw.trim()).map_err(|_| ConfigError::Invalid("Enter a valid server URL."))?;
     if !url.username().is_empty() || url.password().is_some() {
@@ -143,12 +149,11 @@ fn load_origin_approval_from_path(
         Err(error) => return Err(ConfigError::AccessIo(error)),
     }
     let _lock = acquire_settings_access_lock(path)?;
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(ConfigError::AccessIo(error)),
+    let bytes = match read_persisted_bytes(path).map_err(ConfigError::AccessIo)? {
+        Some(bytes) => bytes,
+        None => return Ok(None),
     };
-    let approval: ServerOriginApproval = serde_json::from_str(&text)?;
+    let approval: ServerOriginApproval = serde_json::from_slice(&bytes)?;
     if approval.schema_version != ORIGIN_APPROVAL_SCHEMA_VERSION {
         return Err(ConfigError::Invalid(
             "Server origin approval uses an unsupported schema.",
@@ -186,15 +191,15 @@ pub(crate) fn load_from_path(
     path: &Path,
     allow_insecure_private: bool,
 ) -> Result<ServerSettings, ConfigError> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if !metadata.is_file() => {
-            return load_from_path_under_lock(path, allow_insecure_private);
-        }
-        Ok(_) => {}
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match std::fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(ServerSettings::default()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !path.parent().is_some_and(Path::is_dir) {
-                return Ok(ServerSettings::default());
-            }
+            return Ok(ServerSettings::default());
         }
         Err(error) => return Err(ConfigError::AccessIo(error)),
     }
@@ -206,12 +211,9 @@ fn load_from_path_under_lock(
     path: &Path,
     allow_insecure_private: bool,
 ) -> Result<ServerSettings, ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ServerSettings::default());
-        }
-        Err(error) => return Err(ConfigError::AccessIo(error)),
+    let text = match read_persisted_text(path).map_err(ConfigError::AccessIo)? {
+        Some(text) => text,
+        None => return Ok(ServerSettings::default()),
     };
     decode_persisted_settings(&text, allow_insecure_private)
 }
@@ -277,10 +279,9 @@ fn decode_persisted_settings(
 }
 
 fn ensure_existing_schema_compatible(path: &Path) -> Result<(), ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(ConfigError::AccessIo(error)),
+    let text = match read_persisted_text(path).map_err(ConfigError::AccessIo)? {
+        Some(text) => text,
+        None => return Ok(()),
     };
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
         ensure_schema_compatible(&value)?;

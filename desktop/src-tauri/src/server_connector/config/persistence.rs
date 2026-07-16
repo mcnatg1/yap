@@ -1,11 +1,14 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::error::ConfigError;
+use super::persisted_file::{
+    configuration_too_large, read_persisted_file, PersistedFile, MAX_PERSISTED_CONFIG_BYTES,
+};
 use super::platform::{
-    atomic_replace_same_directory, file_identity, open_settings_lock, sync_parent_directory,
-    FileIdentity, SettingsFileLock,
+    atomic_replace_same_directory, open_settings_lock, sync_parent_directory, FileIdentity,
+    SettingsFileLock,
 };
 
 static NEXT_SETTINGS_ARTIFACT: AtomicU64 = AtomicU64::new(0);
@@ -44,6 +47,10 @@ where
     BeforePublish: FnOnce(&Path, &Path) -> std::io::Result<()>,
     AfterPublish: FnOnce(&Path) -> std::io::Result<()>,
 {
+    if contents.len() > MAX_PERSISTED_CONFIG_BYTES {
+        return Err(ConfigError::SaveIo(configuration_too_large()));
+    }
+
     let legacy_partial = path.with_extension("json.part");
     match std::fs::remove_file(&legacy_partial) {
         Ok(()) => {}
@@ -129,17 +136,10 @@ pub(super) enum DestinationSnapshot {
 }
 
 pub(super) fn snapshot_destination(path: &Path) -> std::io::Result<DestinationSnapshot> {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DestinationSnapshot::Missing);
-        }
-        Err(error) => return Err(error),
-    };
-    let identity = file_identity(&file)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(DestinationSnapshot::Present { identity, bytes })
+    Ok(match read_persisted_file(path)? {
+        Some(PersistedFile { identity, bytes }) => DestinationSnapshot::Present { identity, bytes },
+        None => DestinationSnapshot::Missing,
+    })
 }
 
 fn destination_is_proven_unchanged(

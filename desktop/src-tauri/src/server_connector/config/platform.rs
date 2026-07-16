@@ -52,18 +52,131 @@ pub(super) fn file_identity(_file: &std::fs::File) -> std::io::Result<Option<Fil
     Ok(None)
 }
 
+fn storage_entry_must_be_regular() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "server settings storage entry must be a regular file",
+    )
+}
+
+#[cfg(windows)]
+pub(super) const fn windows_persisted_file_open_flags() -> u32 {
+    0x0020_0000
+}
+
+#[cfg(windows)]
+pub(super) const fn windows_file_attributes_are_regular(attributes: u32) -> bool {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0
+}
+
+#[cfg(windows)]
+pub(super) fn open_persisted_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(windows_persisted_file_open_flags())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || !windows_file_attributes_are_regular(metadata.file_attributes()) {
+        return Err(storage_entry_must_be_regular());
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+pub(super) fn open_persisted_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(storage_entry_must_be_regular());
+        }
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(storage_entry_must_be_regular());
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(super) fn open_persisted_file(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure persisted configuration open is unsupported on this platform",
+    ))
+}
+
 pub(super) struct SettingsFileLock {
     file: std::fs::File,
 }
 
-pub(super) fn open_settings_lock(path: &Path) -> std::io::Result<SettingsFileLock> {
-    let lock_path = path.with_extension("json.lock");
+#[cfg(windows)]
+pub(super) const fn windows_settings_lock_open_flags() -> u32 {
+    windows_persisted_file_open_flags()
+}
+
+#[cfg(windows)]
+fn open_settings_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(lock_path)?;
+        .custom_flags(windows_settings_lock_open_flags())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || !windows_file_attributes_are_regular(metadata.file_attributes()) {
+        return Err(storage_entry_must_be_regular());
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_settings_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(storage_entry_must_be_regular());
+        }
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(storage_entry_must_be_regular());
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn open_settings_lock_file(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure server settings lock is unsupported on this platform",
+    ))
+}
+
+pub(super) fn open_settings_lock(path: &Path) -> std::io::Result<SettingsFileLock> {
+    let lock_path = path.with_extension("json.lock");
+    let file = open_settings_lock_file(&lock_path)?;
     lock_file_exclusive(&file)?;
     Ok(SettingsFileLock { file })
 }

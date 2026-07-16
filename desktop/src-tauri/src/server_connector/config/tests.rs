@@ -15,6 +15,22 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+#[cfg(unix)]
+fn create_file_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(source, destination)
+}
+
+fn test_symlink_is_unavailable(error: &std::io::Error) -> bool {
+    cfg!(windows)
+        && (error.kind() == std::io::ErrorKind::PermissionDenied
+            || error.raw_os_error() == Some(1314))
+}
+
 fn partial_files(dir: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(dir)
         .unwrap()
@@ -90,6 +106,7 @@ fn wait_for_child(mut child: std::process::Child, timeout: Duration) -> std::pro
     }
 }
 
+mod bounds;
 mod locking;
 mod platform;
 mod policy;

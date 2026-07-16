@@ -78,6 +78,31 @@ fn missing_load_waits_for_an_in_progress_first_save() {
 }
 
 #[test]
+fn settings_lock_link_is_rejected_without_opening_its_target() {
+    let dir = temp_dir("settings-lock-link");
+    let path = dir.join("server-settings.json");
+    let lock_path = path.with_extension("json.lock");
+    let outside = dir.join("outside-lock");
+    std::fs::write(&outside, b"outside lock").unwrap();
+    if let Err(error) = create_file_symlink(&outside, &lock_path) {
+        if test_symlink_is_unavailable(&error) {
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+        panic!("could not create test symlink: {error}");
+    }
+
+    let error = match acquire_settings_lock(&path) {
+        Ok(_) => panic!("settings lock followed a link"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("regular file"), "{error}");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside lock");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn indeterminate_error_never_claims_missing_recovery_was_preserved() {
     let error = ConfigError::PublicationStateIndeterminate {
         source: std::io::Error::other("replacement and recovery failed"),
