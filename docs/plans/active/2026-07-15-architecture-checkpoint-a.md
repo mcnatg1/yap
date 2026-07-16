@@ -85,12 +85,12 @@ The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.
 
 ## Remaining slices
 
-- [ ] Reconcile only the dated implementation-status passages in the restored
+- [x] Reconcile only the dated implementation-status passages in the restored
       Voice OS frame after explicit owner review; do not silently revise its
       long-term target, diagrams, sequencing, or decisions.
-- [ ] Commit the public-safe local-gate evidence without changing executable
+- [x] Commit the public-safe local-gate evidence without changing executable
       behavior.
-- [ ] Open a focused PR; require hosted checks on the checked head, or disclose
+- [x] Open a focused PR; require hosted checks on the checked head, or disclose
       unavailable hosted checks with equivalent local evidence.
 - [ ] Run the stock NSIS lifecycle on the hosted disposable-Windows boundary.
 - [ ] Merge only after review and green exact-head evidence.
@@ -116,9 +116,15 @@ explicit gate decision. Documentation-only evidence correction must still be
 reviewed and must not silently change the checked SHA claim.
 
 The complete integrated local/native/server/GB10 run passed once on
-`6d55816b0406a2365376d7b2d9a7da2afecf9118`. Hosted CI, CodeQL, and the
-disposable-Windows stock NSIS lifecycle run against the final documentation-only
-PR head; they do not relabel that head as the locally gated implementation.
+`6d55816b0406a2365376d7b2d9a7da2afecf9118`. Hosted closure later exposed only
+test-harness defects: an accidental `pytest` dependency in three server tests and
+incomplete URL substring matching in three provenance-test mock branches. The
+owner approved those focused corrections on 2026-07-16. They change no product
+code, runtime dependency, contract, or build artifact, so the explicit gate
+decision is to retain `6d55816` as the locally gated implementation and not rerun
+the integrated/GB10 matrix. The exact hosted server discovery shape and affected
+release-provenance contract must pass locally; hosted CI, CodeQL, and the
+disposable-Windows stock NSIS lifecycle must pass against the final PR head.
 
 ## Prohibited scope
 

@@ -8,6 +8,13 @@ import {
 } from "../assert-third-party-provenance.mjs";
 import { readRepoFile, runNodeScript } from "./workflow-access.mjs";
 
+function isGitHubApiUrl(value) {
+  const url = new URL(String(value));
+  return url.protocol === "https:"
+    && url.hostname === "api.github.com"
+    && url.port === "";
+}
+
 test("provenance gate requires exact scoped review evidence and current local hashes", async () => {
   const manifest = JSON.parse(await readRepoFile("THIRD_PARTY_PROVENANCE.json"));
   const tauriConfig = JSON.parse(await readRepoFile("desktop/src-tauri/tauri.conf.json"));
@@ -74,7 +81,7 @@ test("provenance gate requires exact scoped review evidence and current local ha
   const requested = [];
   const fetchImpl = async (url) => {
     requested.push(String(url));
-    if (String(url).includes("api.github.com")) {
+    if (isGitHubApiUrl(url)) {
       return new Response(JSON.stringify({ sha: fixtureSource.revision.value }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -114,7 +121,7 @@ test("provenance gate requires exact scoped review evidence and current local ha
   );
   await assert.rejects(
     verifyReviewedSourceUpstream(fixtureSource, {
-      fetchImpl: async (url) => String(url).includes("api.github.com")
+      fetchImpl: async (url) => isGitHubApiUrl(url)
         ? new Response(JSON.stringify({ sha: "b".repeat(40) }), { status: 200 })
         : new Response(licenseBytes, { status: 200 }),
       timeoutMs: 1_000,
@@ -123,7 +130,7 @@ test("provenance gate requires exact scoped review evidence and current local ha
   );
   await assert.rejects(
     verifyReviewedSourceUpstream(fixtureSource, {
-      fetchImpl: async (url) => String(url).includes("api.github.com")
+      fetchImpl: async (url) => isGitHubApiUrl(url)
         ? new Response(JSON.stringify({ sha: fixtureSource.revision.value }), { status: 200 })
         : new Response("wrong license", { status: 200 }),
       timeoutMs: 1_000,

@@ -165,8 +165,10 @@ Comparison with pre-move blob `f881a96926c10805f69536986a856d3b65803d73`
 found the same 894-line target body. The only three body-line differences repair
 obsolete `superpowers/specs` links to the canonical source-aware specification;
 the target architecture, diagrams, sequencing, and decisions were not revised.
-Its dated implementation-status passages remain marked subordinate to current
-status/architecture pending explicit owner review.
+After explicit owner approval on 2026-07-16, only its dated Phase 5 and
+Checkpoint A status passages were reconciled to the already-recorded merge and
+gate evidence. The long-term target, diagrams, sequencing, deferred capabilities,
+and decisions remain unchanged.
 
 ## One-time checkpoint gate
 
@@ -244,9 +246,18 @@ The final PR must run hosted CI and CodeQL plus the stock NSIS lifecycle on a
 disposable Windows runner. Those hosted checks, final review, and merge remain
 pending.
 
-Evidence/status commits after the implementation candidate are documentation
-only and must identify `6d55816b0406a2365376d7b2d9a7da2afecf9118` as the
-locally gated implementation. Any executable change after that SHA invalidates
-the candidate and requires an explicit new gate decision. ADR scores remain
-unchanged because the checkpoint hardens and reorganizes Phase 1–5 behavior; it
-does not supply any still-missing later product or enterprise capability.
+The locally gated implementation remains
+`6d55816b0406a2365376d7b2d9a7da2afecf9118`. On 2026-07-16, hosted closure
+identified two test-harness-only defects after that SHA: three artifact-safety
+tests accidentally depended on uninstalled `pytest`, and three provenance-test
+mock branches used incomplete URL substring matching. The owner approved the
+focused corrections. They change no production client/server code, runtime
+dependency, contract, build artifact, or private evidence.
+
+**Gate decision:** retain the completed integrated/GB10 gate at `6d55816`; do
+not rerun it for test-harness-only closure. The exact Python 3.12 hosted discovery
+shape passed locally with 183 tests and one intentional skip, and the affected
+release-provenance contract passed. Hosted CI, CodeQL, and disposable-Windows
+NSIS must still pass against the final exact PR head. ADR scores remain unchanged
+because the checkpoint hardens and reorganizes Phase 1–5 behavior; it does not
+supply any still-missing later product or enterprise capability.
