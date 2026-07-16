@@ -16,6 +16,9 @@ certification, production authorization, or substitute for enterprise review.
 - Private files use owner-controlled locations and atomic publication. Reads
   and mutations reject unexpected file types, links/reparse points, path escape,
   replacement identity, size/extent mismatch, and invalid hash/schema lineage.
+- Shared Rust and Python readers cap persisted-file bytes and bind reads to an
+  opened regular-file descriptor; install identity and server artifacts apply
+  their additional schema, exact-extent, and hash contracts.
 - Destructive recording/result operations use explicit intent, quarantine, and
   revalidation. Recovery preserves ambiguous evidence rather than guessing.
 - Renderer playback and transcript actions require native admission/authorization;
@@ -26,7 +29,9 @@ certification, production authorization, or substitute for enterprise review.
 - Audio callback work is preallocated/non-blocking and queues/resources are
   bounded. Loss and worker failures become explicit state instead of fabricated
   successful audio.
-- Native background work has explicit lifecycle ownership and shutdown paths.
+- Session and periodic native work has explicit cancellation/join ownership.
+  Shortcut and native-import dispatchers are fixed process-lifetime workers
+  with bounded queues, not per-event thread creation.
 - The server reference worker runs non-root, without network, with read-only and
   bounded mounts/resources, dropped privileges/capabilities, immutable
   image/model identity, bounded output, and unconditional cleanup.
@@ -41,7 +46,8 @@ certification, production authorization, or substitute for enterprise review.
   application-controlled alias failover.
 - Desktop configuration validates/approves origins and binds in-flight work to
   a configuration generation. Stale-origin responses cannot mutate current
-  job state.
+  job state. One settings-save lease spans confirmation, durable publication,
+  origin approval, generation invalidation, and applied-state projection.
 - Persisted connector settings and origin approval use a 64 KiB admission
   bound, no-follow regular-file opens (including Windows reparse rejection),
   and no-follow lock files. Server URL input is limited to 2,048 bytes before
@@ -62,7 +68,11 @@ certification, production authorization, or substitute for enterprise review.
 - One native tray/island owner controls window bounds and the visible hit region;
   no duplicate invisible window catches clicks.
 - Shortcut enrollment is deliberate and bounded so ordinary typing is not
-  captured as configuration.
+  captured as configuration. Runtime events/actions use fixed-capacity queues.
+- Native drops have one fixed worker and one-batch backlog; a single picker
+  lease prevents stacking blocking OS dialogs.
+- Reduced-motion preference is honored on the renderer's first state as well as
+  subsequent OS preference changes.
 - User-visible errors use stable state/codes and avoid private audio/transcript
   content. Private diagnostic and scan material stays outside Git/PR/hosted logs.
 

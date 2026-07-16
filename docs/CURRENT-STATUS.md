@@ -23,7 +23,7 @@ another document disagrees.
 | Phase 3: server boundary | Merged and gated | Machine contracts, loopback health/capabilities, connector state/retry, durable desktop job ledger, canonical app-data migration, stock NSIS, and disposable-Windows lifecycle proof exist. |
 | Phase 4: private ASR node | Merged and gated | A bounded router/pool and transient isolated Cohere worker ran on GB10 using the pinned Python 3.12 / NVIDIA PyTorch 26.06 stack. This is reference-worker proof, not a production service. |
 | Phase 5: remote STT | Merged and gated | Canonical WAV admission, immutable desktop spool, durable create/upload/commit/status/result/cancel, isolated private batch inference, verified native result publication, reconnect recovery, and History projection execute through the loopback development contract. |
-| Checkpoint A | Active | Phase 1–5 ownership, correctness, security, decomposition, dependency direction, provenance, efficiency, and documentation are being reconciled. No Phase 6 functionality is allowed. |
+| Checkpoint A | Active; final gate pending | The implementation/focused review and canonical documentation reconciliation are complete, including bounded persisted-file and work-admission repairs. The one-time full gate has not run. No Phase 6 functionality is allowed. |
 | Phases 6–10 | Planned | Follow the accepted order in the [roadmap](roadmap/ROADMAP.md). Enterprise infrastructure remains an explicit IT/security handoff. |
 
 ## What executes now
@@ -50,6 +50,9 @@ another document disagrees.
   worker, and publishes an immutable result.
 - Native code verifies result identity, authority, hashes, paths, sizes, and
   transcript bytes before History can present completion.
+- Native shortcut and OS-drop work use fixed workers with bounded queues;
+  interactive file selection and server-settings publication each admit one
+  end-to-end owner rather than accumulating blocking work.
 
 The complete owner and trust-boundary map is
 [Phase 1–5 ownership](architecture/boundaries/PHASE-1-5-OWNERSHIP.md).
@@ -81,9 +84,8 @@ and [verification record](evidence/architecture-checkpoint-a/VERIFICATION.md).
 
 ## Active next steps
 
-1. Review the final diff for ownership, accessibility, failure observability,
-   persisted compatibility, and dependency direction.
-2. Freeze one exact checkpoint head.
-3. Run the complete applicable checkpoint matrix exactly once.
-4. Open a focused PR; merge only that checked, green head.
+1. Freeze one exact checkpoint head.
+2. Run the complete applicable checkpoint matrix exactly once.
+3. Record immutable gate evidence without changing executable behavior.
+4. Open a focused PR; merge only the reviewed, green head.
 5. Begin Phase 6 only after Checkpoint A is merged.

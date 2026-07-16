@@ -1,6 +1,7 @@
 # Architecture Checkpoint A Implementation Plan
 
-**Status:** In progress after the merged Phase 5 baseline.
+**Status:** Implementation and documentation reconciliation complete; the final
+exact-head gate remains pending after the merged Phase 5 baseline.
 
 **Branch:** `refactor/phase1-5-architecture-checkpoint`
 
@@ -60,10 +61,18 @@ removed rather than moved.
 - [x] Exact attributed FreeFlow derivative set and pinned upstream/license closure.
 - [x] Persisted connector configuration bounds and platform no-follow storage/
       lock handling with focused failure-path verification.
+- [x] Bounded install identity, explicit server pool-contract dependency
+      direction, and synchronous first-render reduced-motion preference.
+- [x] Descriptor-bound server artifact validation plus shared bounded Rust and
+      Python persisted-file readers.
+- [x] Fixed-capacity shortcut/native-import dispatchers and exclusive admission
+      for file-picker and server-settings workflows.
 - [x] Findings register, ordered review slices, file-size inspection, and retained
       cohesion justifications.
 - [x] Documentation classification, moved-reference repair, and current-state/
       ADR reconciliation.
+- [x] Final focused diff review for correctness, security, accessibility,
+      dependency direction, persisted compatibility, observability, and YAGNI.
 
 The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.md),
 [ownership](../../architecture/boundaries/PHASE-1-5-OWNERSHIP.md), and
@@ -71,8 +80,6 @@ The evidence is in [findings](../../evidence/architecture-checkpoint-a/FINDINGS.
 
 ## Remaining slices
 
-- [ ] Run a final focused diff review for correctness, security, accessibility,
-      dependency direction, persisted compatibility, observability, and YAGNI.
 - [ ] Freeze one exact head.
 - [ ] Run the complete applicable local/native/server/GB10 checkpoint matrix
       exactly once and record immutable evidence.

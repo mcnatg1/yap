@@ -12,6 +12,8 @@ immutable evidence belong in phase/checkpoint evidence records.
   remote-origin cleanup, background lifecycle, playback source leases, model
   load integrity, legacy app-data migration, artifact publication, and release
   evidence dependencies.
+- Bounded persisted configuration, install identity, desktop/server artifact
+  reads, shortcut/drop work queues, and interactive picker/settings admission.
 - Decomposed mixed desktop, server, test, and release-contract surfaces around
   explicit domain owners without adding Phase 6 behavior.
 - Reconciled direct FreeFlow adaptations with the exact pinned MIT upstream and

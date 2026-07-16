@@ -89,6 +89,55 @@ That focused matrix covers the unchanged schema/default behavior plus:
 Rust formatting and `git diff --check` passed after the responsibility and test
 files were decomposed below the checkpoint's 350-line threshold.
 
+The final implementation-review slices from `4211f55` through `6e25cb7`
+recorded focused evidence for every changed boundary:
+
+- install-identity link/size/validation tests passed after the read was capped;
+- the server dependency-direction AST contract passed, and the combined
+  job/model-lock suite passed 58 tests with 1 platform skip and 12 HTTP
+  subtests;
+- reduced-motion initial-state coverage passed 2/2 with `tsc --noEmit` clean;
+- server artifact descriptor/extent/hash tests passed 3/3, followed by the
+  focused job suite (54 passed, 1 platform skip, 12 HTTP subtests);
+- native bounded-file consumers passed their focused remote-result, live
+  settings, STT settings, model catalog, playback registry, transcript,
+  recording, and Phase 4 contract suites;
+- Python model-lock/artifact tests passed 7/7 after adopting the shared bounded
+  reader; and
+- Rust formatting and `git diff --check` remained clean after each slice.
+
+The final native concurrency/admission checks were:
+
+```powershell
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml shortcut
+# PASS: 16/16
+
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml `
+  live::actions::tests::completion
+# PASS: 8/8
+
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml `
+  jobs::commands::tests
+# PASS: 26/26
+
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml `
+  server_connector
+# PASS: 74/74
+```
+
+The queue/thread review confirmed that production work queues are bounded. The
+remaining standard-library unbounded channels are one-response completion or
+one-stop lifecycle signals, not work backlogs. Fixed media, shortcut, import,
+capture, recording, ASR, and server workers are admitted by explicit
+capacity/lifecycle owners. Blocking command work is admitted by a semaphore,
+an exclusive operation lease, or the single owned drain loop.
+
+The final raw-read review found no unbounded production artifact read. Direct
+read calls remaining in product code are `max + 1`/exact-length descriptor
+reads, streaming hash/copy loops, bounded request-body reads, or directory
+iteration; unrestricted convenience reads occur only in tests. The production
+TODO/FIXME/HACK and dead/unused suppression scan was clean.
+
 Documentation-only work used focused link/reference, classification, Markdown
 diff, and stale-claim checks. It did not trigger unrelated product suites.
 
@@ -97,6 +146,8 @@ Recorded documentation checks on the reorganized tree:
 ```text
 relative Markdown links: BROKEN_COUNT=0
 relative Markdown heading anchors: BROKEN_ANCHOR_COUNT=0
+tracked-file inventory partition: 829/829
+hand-written >=250-line inventory coverage: 139/139
 legacy working-note path references: 0
 current Phase 5 candidate/pending and queued-checkpoint claims: 0
 current-authority delivered-capability future-tense drift: 0

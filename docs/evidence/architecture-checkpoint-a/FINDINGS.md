@@ -7,12 +7,13 @@
 `b6677631b2cc8283f0f6466622f2dfa7cfdb38f6`.
 
 **Implementation review anchors:** `64539a0` (`refactor(release): decompose
-evidence ownership`) and `d4e482a` (`fix(connector): bound persisted
-configuration`). Documentation commits between those anchors do not change the
-reviewed product behavior.
+evidence ownership`) through `6e25cb7` (`fix(boundaries): serialize interactive
+admission`). The ordered slices below identify every intervening product and
+documentation boundary.
 
-**Checkpoint state:** implementation review and focused verification are in
-progress. The one-time complete checkpoint gate has not run.
+**Checkpoint state:** implementation review, focused verification, and
+documentation reconciliation are complete. The one-time complete checkpoint
+gate remains pending and has not run.
 
 ## Review method
 
@@ -48,6 +49,17 @@ modes not captured by line count alone:
 These are review lenses, not claims of certification against ISO, NIST, CISA,
 or any other quality or security standard.
 
+The added-lens conclusions are:
+
+| Lens | Checkpoint conclusion |
+| --- | --- |
+| Persisted compatibility | No schema or wire version was changed by the checkpoint. Existing SQLite migrations remain transactional; legacy migration and persisted JSON readers preserve the prior entry/source when new admission fails. |
+| Dependency and deterministic evidence | Release-contract imports and server pool contracts now point one way and have executable guards. Toolchain, dependency, cache, container, model, and fixture identities remain locked; the one-time integrated reproducibility proof is still final-gate work. |
+| Failure observability | New overload/admission failures use stable user-safe errors, while logs and public evidence exclude audio, transcript, scan, host, and exploit details. |
+| Accessibility and local control | Native window geometry remains authoritative; keyboard/chord enrollment is deliberate; reduced motion is honored on first render and subsequent preference changes. |
+| Adversarial lifecycle drills | Focused restart, cancellation, partial-publication, identity replacement, queue overload, and resource-bound tests passed on their changed owners. Integrated restart/cancel/resource/teardown proof remains in the final matrix. |
+| Complexity movement | Every hand-written file at or above 250 lines was inspected. The 466-line shortcut owner was split by registration versus execution, shared bounded I/O retained domain-specific policy, and no replacement `utils`/`common`/`manager` catch-all was introduced. |
+
 ## Consolidated target architecture
 
 The smallest coherent Phase 1–5 architecture is:
@@ -82,8 +94,10 @@ Rules enforced by the reviewed implementation:
    operation. A response from stale configuration cannot become current truth.
 5. Path admission, identity revalidation, bounded reads, and atomic publication
    stay adjacent to the artifact boundary they protect.
-6. Runtime resources have one start/stop owner and background tasks have an
-   explicit join/cancellation path.
+6. Session and periodic runtime resources have one start/stop owner and an
+   explicit join/cancellation path. Process-lifetime shortcut and native-import
+   dispatchers use fixed workers and bounded queues instead of per-event thread
+   creation.
 7. One tray-owned native island owns live-window geometry and hit regions. The
    WebView projects its state and does not create a second window authority.
 8. The server remains loopback-only for the Phase 5 development path. Identity,
@@ -112,6 +126,15 @@ or exploit detail.
 | Release evidence import cycle | The stable release facade, CLI adapter, contract policy, Git fixture, and process access now form a one-way dependency graph. Direct CLI execution no longer stalls on top-level await. | `64539a0`; 33/33 focused release-contract tests |
 | Upstream provenance identity | The reviewed source is identified as `zachlatta/freeflow`; every current attributed local derivative is hashed and tied to the pinned MIT upstream. | `64539a0`; reviewed-upstream provenance contract |
 | Persisted connector configuration | Settings, origin approval, publication snapshots, and lock files now use a shared 64 KiB bound and platform no-follow regular-file opens. URL admission rejects inputs above 2,048 bytes before parsing. Oversized or linked existing state fails closed without replacement or recovery-artifact leakage. | `d4e482a`; 39/39 focused connector-configuration tests |
+| Persisted install identity | The desktop install namespace is read through a bounded no-follow regular-file handle; oversized, linked, or invalid identity state fails closed. | `4211f55`; focused install-identity tests |
+| Server dependency direction | Job lifecycle code imports stable pool contracts instead of the concrete pool implementation; an AST contract prevents the dependency from reversing again. | `8809aae`; `server/tests/jobs/test_dependency_direction.py` and focused job tests |
+| Reduced-motion startup | The renderer reads the OS motion preference synchronously for initial state, so a reduced-motion user cannot receive one layout animation before the passive subscription runs. | `678f76e`; 2/2 reduced-motion unit tests and TypeScript check |
+| Server artifact identity and extent | Server artifact reads bind an opened regular-file descriptor to the declared identity, exact length, and SHA while copying. WAV publication is exclusive and atomic; post-validation growth or replacement cannot become accepted input. | `9042cdb`; artifact and job lifecycle suites |
+| Bounded native file reads | Shared Rust bounded-file I/O applies no-follow opens, platform identity checks, exact-length validation, strict UTF-8, and `max + 1` reads to model markers, settings, playback registries, transcripts, recordings, chunks, and results. | `22b53ca`, `ba15b43`; focused native artifact/settings/model/recording tests |
+| Bounded server file reads | Shared Python bounded-file I/O caps model-lock and job-artifact reads and preserves the hardened descriptor identity checks at the server boundary. | `a0caa500`; model-lock/artifact and combined job suites |
+| Shortcut work admission | Shortcut events/actions use fixed-capacity queues and two fixed workers. Release events apply bounded backpressure, interaction completion has no cyclic queue dependency, and paste-last work no longer creates one thread per invocation. | `0836888`; 16 shortcut/state tests and 8 completion/injection tests |
+| Native import work admission | OS drop batches use one fixed worker, a one-batch backlog, and the existing 200-path product bound. File-picker selection has one active owner; overload returns a stable error instead of accumulating blocked workers or dialogs. | `73bc3ee`, `6e25cb7`; 26 job-command tests and 2 admission tests |
+| Server settings publication | One owner-scoped lease now spans normalization, origin confirmation, durable publication, lease revocation, and applied-state projection, preventing concurrent approval/save races. | `6e25cb7`; 74/74 connector tests |
 
 No known correctness or security finding from the checkpoint reviews remains
 accepted without either a resolution or an explicit later-phase handoff below.
@@ -131,6 +154,9 @@ register and invalidates checkpoint closure until resolved.
 | Connector configuration, core policy, desktop adapter, health client, state, and batch protocol | `server_connector/config/*`, `core.rs`, `desktop.rs`, `client.rs`, `state.rs`, and `batch/*` | Bounded/no-follow persisted-file I/O, atomic publication, validation, transport, and applied state have separate owners below stable policy/state interfaces. |
 | Fallback model download, operation, progress, artifact integrity, and Nemotron lifecycle | `stt/model/*`, `stt/fallback_model/*`, and `stt/nemotron/*` | Download orchestration no longer owns model-specific lifecycle or integrity policy. |
 | Release artifact contract, process execution, workflow policy, Git fixture, and cache policy | `release-artifact/*` and `release-contract/*` | The former large mixed contract and replacement `context.mjs` catch-all were decomposed around real owners. |
+| Native file-reading policy | `bounded_file.rs` plus connector-specific `config/persisted_file.rs` | General app-data reads share one descriptor-bound implementation; connector configuration retains its stricter publication identity owner without duplicating arbitrary read helpers. |
+| Shortcut registration and execution | `live/shortcut_runtime.rs` and `live/shortcut_runtime/dispatcher.rs` | OS registration/startup projection is separate from bounded event/action execution; the former 466-line mixed module is now two cohesive owners below 350 production lines. |
+| Native drop and picker work | `jobs/commands/native_import_dispatcher.rs` plus the existing job mutation owner | A fixed dispatcher owns drop backlog while a lease owns interactive selection; both feed the same serialized durable job mutation path. |
 
 The branch also removes speculative runtime orchestration state (`a1459b1`)
 instead of preserving a production-looking Phase 6 placeholder.
@@ -164,7 +190,10 @@ diff:
 | 6 | `64539a0^..64539a0` | Release-evidence dependency repair and exact third-party provenance reconciliation. |
 | 7 | `1139f48^..b0f7fd4` | Canonical status/architecture, inventory, plan/spec archival, and link repair. |
 | 8 | `d4e482a^..d4e482a` | Persisted connector configuration bounds, no-follow storage/lock handling, and focused failure-path tests. |
-| 9 | subsequent evidence-only commits | Final review reconciliation and exact-head gate evidence; no new product behavior. |
+| 9 | `4211f55^..8809aae` | Bounded install identity and server pool-contract dependency direction. |
+| 10 | `678f76e^..a0caa500` | First-render accessibility, descriptor-bound server artifacts, and shared bounded Rust/Python file-reading owners. |
+| 11 | `0836888^..6e25cb7` | Fixed-capacity shortcut/import work and exclusive interactive command admission. |
+| 12 | subsequent evidence-only commits | Final documentation reconciliation and exact-head gate evidence; no new product behavior. |
 
 Each span starts after the previous slice's reviewed endpoint. Reviewers can use
 `git diff <span>` or walk the commits inside a slice when a behavior-preserving

@@ -35,13 +35,16 @@ missed or stale events instead of being promoted into a second durable owner.
 The live surface is one renderer hosted in the native `live-overlay` window.
 View variants, waveform, reduced-motion behavior, and presentation timing live
 under `components/live/`; native code owns window identity, bounds, placement,
-visible region, and lifecycle.
+visible region, and lifecycle. The renderer reads the OS reduced-motion
+preference synchronously for its initial state before subscribing to changes.
 
 ### Tauri/native boundary
 
 `desktop/src-tauri/src/app.rs` composes startup/shutdown, the tray, windows, and
 owned background tasks. `commands/*` and `jobs/commands/*` authorize and adapt
-WebView requests; domain owners below them perform transitions.
+WebView requests; domain owners below them perform transitions. Blocking
+interactive workflows acquire their owner lease before opening a native picker
+or awaiting server-origin confirmation.
 
 Major native owners are:
 
@@ -61,7 +64,9 @@ files under Tauri's canonical app-data directory. On Windows this is
 `%APPDATA%\com.mcnatg1.yap`. Recognized legacy entries from
 `%LOCALAPPDATA%\Yap` migrate through a serialized, non-following,
 conflict-aware, hash-verified process. An unsafe conflict stops startup and
-leaves source data recoverable.
+leaves source data recoverable. Persisted file consumers use bounded,
+no-follow regular-file reads with opened-handle identity/extent checks; the
+install namespace and connector configuration fail closed on unsafe state.
 
 ### Local live fallback
 
@@ -72,9 +77,10 @@ Nemotron recognizer, and atomically finalizes recoverable audio/transcript
 artifacts. A failed worker cannot manufacture a complete capture.
 
 Shortcut enrollment is a deliberate native interaction. One runtime owner
-normalizes physical input, dispatches actions, and records registration/startup
-failures. Window and UI callers request transitions; they do not implement a
-second shortcut state machine.
+normalizes physical input, dispatches through 16-event and 4-action queues on
+two fixed process-lifetime workers, and records registration/startup failures.
+Window and UI callers request transitions; they do not implement a second
+shortcut state machine or create per-event threads.
 
 ### Imported Phase 5 job
 
@@ -93,7 +99,8 @@ The external source is immutable from Yap's perspective and is never deleted
 by cancel, retry, or retention. Cancellation is a durable outbox action. A
 retry creates a new server binding while preserving the source. Configuration
 generation and origin bind all in-flight work so stale responses cannot become
-current truth.
+current truth. OS drops enter one fixed worker with a one-batch backlog and a
+200-path admission bound; one lease spans each blocking native picker.
 
 ## Private server
 
@@ -102,7 +109,9 @@ current truth.
 store, upload, completion, artifact, and runtime owners. The service supports
 idempotent create, exact chunk replay, manifest-bound commit, status, immutable
 result, cancellation, restart recovery, bounded retention, and safe private
-artifact cleanup.
+artifact cleanup. Uploaded chunks are reopened as bounded regular files and
+must still match their declared exact extent and SHA before exclusive atomic
+WAV publication.
 
 `workload_router/*` and `pools/*` own bounded admission and the isolated GPU
 worker. The custom worker image uses the digest-pinned NVIDIA PyTorch 26.06
@@ -121,7 +130,8 @@ Phase 5 runtime actually initializes. Live streaming remains false and
 | Desktop SQLite job ledger | Transactional migration and replay preserve one job identity and accepted remote progress. |
 | Recording commit/sidecar/transcript | Only hash-valid, atomically published lineage becomes complete History truth. |
 | Prepared spool/chunks | Only verified Yap-owned paths are cleaned; external sources are preserved. |
-| Connector configuration | Bounded no-follow regular-file admission precedes schema validation; atomic publication creates a new generation and old responses are stale. |
+| Install identity | Bounded no-follow regular-file admission rejects linked, oversized, or invalid namespace state. |
+| Connector configuration | Bounded no-follow regular-file admission precedes schema validation; one save lease spans confirmation, publication, approval, generation change, and applied-state projection. |
 | Server job/chunk/result state | Idempotency survives process restart; interrupted processing becomes explicit retryable terminal state. |
 | Deletion intent/quarantine | Destructive work revalidates identity and resumes without following replacement paths. |
 

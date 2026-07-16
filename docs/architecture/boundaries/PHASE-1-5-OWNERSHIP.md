@@ -33,15 +33,18 @@ owner's state but may not recreate its transition logic.
   `runtime/desktop_lifecycle.rs` and domain resource modules.
 - **Persisted state:** none owned by startup; it opens validated app-data state.
 - **Transient state:** tray, windows, connector poller, job drain, live runtime,
-  playback registry, and shutdown authorization.
+  playback registry, fixed shortcut/import dispatchers, and shutdown
+  authorization.
 - **Trust boundary:** Tauri navigation and window creation; legacy app-data
   migration before normal startup.
 - **Dependencies/events:** command registry, tray, migration, connector, job,
   live, and model resources; emits typed native events through those owners.
 - **Failure/recovery:** unsafe migration stops startup with a private diagnostic
   path and user-safe error; owned background-task shutdown errors are logged.
-- **Cancellation:** app exit cancels/joins owned background work before process
-  termination.
+- **Cancellation:** app exit cancels/joins `DesktopLifecycle` periodic/async and
+  session-owned work before process termination. The two shortcut workers and
+  one native-import worker are fixed process-lifetime dispatchers whose bounded
+  channels close with the process; they are not spawned per event.
 - **Duplicate owner:** none. Feature resources own their state; `app.rs` owns
   only composition and process lifecycle.
 
@@ -56,7 +59,9 @@ owner's state but may not recreate its transition logic.
 - **Dependencies/events:** authorization, path admission, job/live/settings
   resources; results are typed views or stable errors.
 - **Failure/recovery:** validation fails before mutation; owner errors are
-  projected without leaking private content.
+  projected without leaking private content. Commands acquire a semaphore or
+  owner lease before blocking file selection, settings confirmation, model
+  operation, transcript action, or hotkey enrollment.
 - **Cancellation:** delegated to the job/live/model owner; command futures are
   not treated as authority after an owner rejects them.
 - **Duplicate owner:** none.
@@ -75,7 +80,9 @@ owner's state but may not recreate its transition logic.
 - **Dependencies/events:** native live-state events ->
   `native-surface-sync.ts` -> view modules.
 - **Failure/recovery:** native surface updates fail visibly/log safely; the
-  renderer cannot expand an invisible click-catching region independently.
+  renderer cannot expand an invisible click-catching region independently. The
+  OS reduced-motion preference is read for initial render before its change
+  subscription is installed.
 - **Cancellation:** stop/quit actions flow through `live/actions`, not component
   teardown.
 - **Duplicate owner:** none. React owns presentation only.
@@ -103,19 +110,23 @@ owner's state but may not recreate its transition logic.
 ### 5. Imported-recording lifecycle
 
 - **Entry point:** native picker/drop admission through
-  `jobs/commands/imports.rs` and `media_protocol/*`.
+  `jobs/commands/imports.rs`, `jobs/commands/native_import_dispatcher.rs`, and
+  `media_protocol/*`.
 - **Authoritative owner:** `jobs/ledger/*` for job state and `jobs/drain/*` for
   remote lifecycle scheduling.
 - **Persisted state:** SQLite job rows plus immutable Yap-owned preparation,
   manifest, chunk, and result artifacts under app data.
-- **Transient state:** active preparation/upload/poll attempt and scheduler
-  wakeups.
+- **Transient state:** one fixed native-import worker with a one-batch backlog,
+  one active picker lease, active preparation/upload/poll attempt, and scheduler
+  wakeups. A batch is rejected above 200 paths before it enters the worker.
 - **Trust boundary:** untrusted external file, OS drop/picker, path identity,
   WAV/container bounds, and server responses.
 - **Dependencies/events:** media admission -> remote preparation -> ledger ->
   drain -> connector; emits recording-job snapshot changes.
 - **Failure/recovery:** restart reconstructs work from ledger; source is never
-  deleted; partial owned artifacts are validated or safely cleaned.
+  deleted; partial owned artifacts are validated or safely cleaned. Queue or
+  picker overload returns stable `IMPORT_BUSY` instead of accumulating threads
+  or native dialogs.
 - **Cancellation:** durable cancellation intent drains before new upload work;
   retry clears the old remote binding while preserving the source.
 - **Duplicate owner:** none. React queue is a projection.
@@ -138,7 +149,9 @@ owner's state but may not recreate its transition logic.
   partials for recovery.
 - **Cancellation:** stop has one finisher path with bounded drain; quit uses the
   same lifecycle owner.
-- **Duplicate owner:** none. Shortcut/UI callers request transitions.
+- **Duplicate owner:** none. Shortcut/UI callers request transitions. Shortcut
+  input/action execution uses two fixed process-lifetime workers with capacities
+  16 and 4; it does not create one thread per invocation.
 
 ### 7. Audio preprocessing and immutable spool
 
@@ -191,6 +204,9 @@ owner's state but may not recreate its transition logic.
 - **Failure/recovery:** stale generation responses are discarded; typed offline
   reasons schedule bounded retry. Oversized, linked/reparse, or future-schema
   configuration fails without replacing the existing entry.
+- **Publication serialization:** one settings-save lease spans normalization,
+  origin confirmation, durable settings/approval publication, generation
+  invalidation, and applied-state projection.
 - **Cancellation:** reconfiguration cancels the old in-flight generation;
   shutdown joins polling.
 - **Duplicate owner:** none; frontend hook projects snapshots.
@@ -211,7 +227,9 @@ owner's state but may not recreate its transition logic.
   router/pool -> completion; status/result responses are bounded projections.
 - **Failure/recovery:** startup converts interrupted processing into an explicit
   retryable terminal state, reconciles atomic results, and never invents
-  success; create/upload/commit are idempotent.
+  success; create/upload/commit are idempotent. Chunk assembly reopens each
+  regular file through a bounded descriptor and verifies its declared exact
+  length and SHA before exclusive atomic WAV publication.
 - **Cancellation:** idempotent cancellation wins tested commit/result races and
   purges private audio at the safe boundary.
 - **Duplicate owner:** none. HTTP handlers and workers do not write job state
@@ -241,12 +259,14 @@ owner's state but may not recreate its transition logic.
 
 - **Entry point:** app background startup and server pool/runtime invocation.
 - **Authoritative owner:** desktop lifecycle resources for native tasks;
-  `server/pools/container_runtime.py` and `batch_asr_worker.py` for the transient
-  reference worker.
+  fixed shortcut/native-import dispatchers for process-lifetime event work; and
+  `server/pools/container_runtime.py` plus `batch_asr_worker.py` for the
+  transient reference worker.
 - **Persisted state:** no process handle is durable; durable job/cancellation
   state drives restart behavior.
 - **Transient state:** task handles, child/container identity, timeouts, and
-  cleanup guards.
+  cleanup guards. Shortcut/import worker counts and queue capacities are fixed;
+  they end with the desktop process rather than being dynamically multiplied.
 - **Trust boundary:** subprocess environment, image/revision identity, resource
   ceilings, filesystem mounts, and termination.
 - **Dependencies/events:** job pool invokes runtime; lifecycle errors become
@@ -260,7 +280,8 @@ owner's state but may not recreate its transition logic.
 ### 13. Filesystem admission and path authorization
 
 - **Entry point:** `media_protocol/*`, `recording_access/*`, `file_actions/*`,
-  `audio/recording/*`, `jobs/remote/*`, and server `jobs/artifacts.py`.
+  `audio/recording/*`, `jobs/remote/*`, shared native `bounded_file.rs`, shared
+  server `bounded_file.py`, and server `jobs/artifacts.py`.
 - **Authoritative owner:** the module that mints/adopts each artifact identity;
   `recording_access/registry/*` owns renderer playback admission.
 - **Persisted state:** admitted source identities where restart requires them;
@@ -272,7 +293,10 @@ owner's state but may not recreate its transition logic.
 - **Dependencies/events:** path policy and admission precede I/O; catalog/history
   expose only validated paths.
 - **Failure/recovery:** mismatched identity fails closed; quarantine/recovery
-  retains evidence without following attacker-controlled paths.
+  retains evidence without following attacker-controlled paths. General
+  persisted-file readers cap bytes at `maximum + 1`, require regular no-follow
+  opens, and compare opened/path identity where the platform exposes it;
+  artifact-specific owners add exact length/hash checks.
 - **Cancellation:** removes only verified owned artifacts.
 - **Duplicate owner:** none; generic string paths are not authority.
 
@@ -311,7 +335,8 @@ owner's state but may not recreate its transition logic.
   config fails visibly without applying a partial generation or overwriting the
   prior entry.
 - **Cancellation:** a new generation retires old in-flight connector work.
-- **Duplicate owner:** renderer draft is not applied state.
+- **Duplicate owner:** renderer draft is not applied state. One native save lease
+  serializes the complete confirmation/publication/application sequence.
 
 ### 16. Health, capability, and readiness projection
 
