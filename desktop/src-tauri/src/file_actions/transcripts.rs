@@ -139,10 +139,8 @@ pub(super) fn read_text_file_at_from_dir(
     let path = std::path::PathBuf::from(path);
     let mut file = owned_live_transcript_file_from_dir(&path, "read", owned_dir)?;
     reject_oversized_transcript_file(&file)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(|err| format!("Failed to read transcript: {err}"))?;
-    Ok(text)
+    crate::bounded_file::read_to_string(&mut file, MAX_TRANSCRIPT_READ_BYTES as usize)
+        .map_err(|err| format!("Failed to read transcript: {err}"))
 }
 
 pub(super) fn read_text_preview_at(path: String, max_chars: usize) -> Result<String, String> {

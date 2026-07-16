@@ -3,7 +3,7 @@ use super::{
     spool::prepare_spool_root,
 };
 use crate::server_connector::batch::CaptureChunkReference;
-use std::{fs, io::Read, path::Path};
+use std::{fs, path::Path};
 
 pub(in crate::jobs) fn read_prepared_chunk(
     artifact_path: &Path,
@@ -54,8 +54,7 @@ pub(in crate::jobs) fn read_prepared_chunk(
     {
         return Err("opened prepared chunk differs from its immutable declaration".into());
     }
-    let mut body = Vec::with_capacity(expected_length);
-    file.read_to_end(&mut body)
+    let body = crate::bounded_file::read_to_end(&mut file, expected_length)
         .map_err(|error| format!("failed to read prepared chunk: {error}"))?;
     if body.len() != expected_length || sha256_bytes(&body) != reference.content_identity.sha256 {
         return Err("prepared chunk differs from its immutable content identity".into());

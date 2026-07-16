@@ -185,10 +185,8 @@ pub(crate) fn read_and_hash_regular_artifact(
 pub(super) fn read_open_file(file: &mut File) -> Result<String, String> {
     file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("Failed to read recording artifact: {error}"))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(|error| format!("Failed to read recording artifact: {error}"))?;
-    Ok(text)
+    crate::bounded_file::read_to_string(file, MAX_RECORDING_TEXT_ARTIFACT_BYTES)
+        .map_err(|error| format!("Failed to read recording artifact: {error}"))
 }
 
 #[cfg(unix)]

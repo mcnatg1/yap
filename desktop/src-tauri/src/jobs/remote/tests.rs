@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{Cursor, Write},
+    io::Write,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -10,19 +10,10 @@ use crate::{
 };
 
 use super::{
-    prepare_imported_pcm_wav, publish_remote_result, read_bounded_to_end, read_prepared_chunk,
+    prepare_imported_pcm_wav, publish_remote_result, read_prepared_chunk,
     read_published_remote_transcript, reset_unattached_spool, validate_pcm_data_bytes,
     validate_published_result_contract,
 };
-
-#[test]
-fn result_reader_never_buffers_past_its_declared_limit() {
-    let mut source = Cursor::new(vec![0_u8; 9]);
-
-    let error = read_bounded_to_end(&mut source, 8).unwrap_err();
-
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-}
 
 #[test]
 fn client_intake_matches_the_server_four_hour_pcm_ceiling() {

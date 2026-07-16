@@ -2,6 +2,7 @@ mod app;
 mod atomic_text;
 pub mod audio;
 mod authorization;
+mod bounded_file;
 mod commands;
 mod file_actions;
 mod install_identity;

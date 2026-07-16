@@ -35,7 +35,7 @@ pub(super) fn classify_artifact(path: &Path, artifact: &Artifact) -> ArtifactIns
 
 pub(super) fn marker_state(path: &Path, artifact: &Artifact) -> MarkerState {
     let marker = path.with_extension("verified");
-    let Ok(contents) = std::fs::read_to_string(&marker) else {
+    let Ok(contents) = crate::bounded_file::read_text(&marker, 256) else {
         return MarkerState::Missing;
     };
     let Ok(metadata) = std::fs::metadata(path) else {

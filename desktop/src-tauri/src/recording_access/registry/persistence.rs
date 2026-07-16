@@ -10,6 +10,8 @@ use super::{
     RecordingPlaybackRegistry, MAX_RECORDING_JOB_PLAYBACK_PATHS, NATIVE_SELECTION_REGISTRY_VERSION,
 };
 
+const MAX_PLAYBACK_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
+
 #[cfg(test)]
 pub(crate) fn register_playback_path_at(
     path: String,
@@ -113,7 +115,7 @@ pub(super) fn read_registered_playback_paths_with_limit(
     registry_path: &std::path::Path,
     limit: usize,
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    let text = match std::fs::read_to_string(registry_path) {
+    let text = match crate::bounded_file::read_text(registry_path, MAX_PLAYBACK_REGISTRY_BYTES) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("Failed to read playback registry: {error}")),

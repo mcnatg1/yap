@@ -56,7 +56,7 @@ fn compute_target_path() -> std::path::PathBuf {
 }
 
 pub fn saved_compute_target() -> LocalComputeTarget {
-    std::fs::read_to_string(compute_target_path())
+    crate::bounded_file::read_text(&compute_target_path(), 64)
         .ok()
         .and_then(|value| parse_compute_target(&value))
         .unwrap_or(LocalComputeTarget::Auto)

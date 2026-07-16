@@ -40,6 +40,7 @@ const MAX_TIMELINE_CONTROL_EVENTS: usize = 1_024;
 const MAX_JOURNAL_BYTES: u64 = 512 * 1024;
 const MAX_JOURNAL_RECORD_BYTES: u64 = 8 * 1024;
 const MAX_JOURNAL_TERMINAL_BYTES: u64 = 256;
+const MAX_RECORDING_TEXT_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 
 static DELETE_QUARANTINE_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
