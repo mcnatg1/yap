@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["io-util", "macros", "process", "sync", "ti
 tauri-plugin-global-shortcut = "2"
 cpal = "0.16"
 # mp3 only for now; m4a needs a separate AAC patent decision.
-symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3"] }
 # Canonical WAV writing. Zero transitive dependencies.
 hound = "3.5"
 sherpa-onnx = "1.13.4"
